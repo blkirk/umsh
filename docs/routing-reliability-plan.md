@@ -764,12 +764,14 @@ demodulated" and "right next to the sender." The radio runner publishes
 the spreading factor it configured. A radio that reports none is graded
 as SF10, which reproduces the old absolute band.
 
-**Radio drivers, findings only.** On the SX126x and LR1110, lora-phy
-reports `RssiPkt`, which is total in-band power, signal plus noise, and
-discards `SignalRssiPkt`. Near the floor that overstates the signal by
-`10·log10(1 + 10^(−SNR/10))` dB. Both the SX126x and SX127x paths round SNR
-to whole dB, so the quarter-dB the chips measure never reaches UMSH. Fixing
-both is a lora-rs change and comes before P1.
+**Radio drivers.** lora-phy's `PacketStatus` carries the packet SNR in
+the quarter-dB steps every supported chip measures, and UMSH ingests it
+at that resolution, so scores, contention and Trace Signal entries are
+no longer quantized to whole dB. On the SX126x and LR1110 it also
+carries `SignalRssiPkt` beside `RssiPkt`. UMSH still reports `RssiPkt`,
+which is total in-band power, signal plus noise; near the floor that
+overstates the signal by `10·log10(1 + 10^(−SNR/10))` dB. Whether
+`RxInfo.rssi` moves to the signal-only estimate is open.
 
 umshctl's harvest step no longer reads a peer with no MAC route as a reason
 to forget its cached one, so a route inside the 30 s `failed_route`
@@ -817,10 +819,9 @@ Peer Repeaters entry already uses quarter-dB (±32 dB) for the same
 quantity. Change the Trace Signal entry to match. This is a wire break for
 the option's value. The option is non-critical, but since 2026-10-09 the MAC
 attaches it to every traced send and scores routes from it, so it is now
-load-bearing. Deferred: the radio drivers deliver whole-dB SNR today (see
-[What landed](#what-landed-on-2026-10-09)), so finer units on the wire would
-carry no extra information until lora-rs passes through what the chip
-measures.
+load-bearing. The radio drivers now deliver quarter-dB SNR (see
+[What landed](#what-landed-on-2026-10-09)), so the finer unit carries
+real information.
 
 ### P2. Received Route report on acknowledgments and responses
 

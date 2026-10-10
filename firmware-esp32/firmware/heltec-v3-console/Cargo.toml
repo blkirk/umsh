@@ -44,6 +44,6 @@ esp-radio = { version = "1.0.0-beta.2", features = ["esp32s3", "ble", "unstable"
 esp-println = { version = "0.18", features = ["esp32s3"] }
 # 0.8 to match umsh-radio-loraphy's frame Vec type.
 heapless = { version = "0.8", default-features = false }
-# Resolves to ../../lora-rs via the workspace [patch].
+# Resolves to the darconeous/lora-rs fork via the workspace [patch].
 lora-phy = { version = "3.0.2-alpha", default-features = false }
 embedded-hal-bus = { version = "0.3", default-features = false, features = ["async"] }

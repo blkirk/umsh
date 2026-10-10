@@ -47,8 +47,8 @@ use heapless::Vec;
 use lora_phy::{
     LoRa, RxMode,
     mod_params::{
-        Bandwidth, CodingRate, DutyCycleParams, ModulationParams, PacketParams, RadioError,
-        SpreadingFactor,
+        Bandwidth, CodingRate, DutyCycleParams, ModulationParams, PacketParams, PacketStatus,
+        RadioError, SpreadingFactor,
     },
     mod_traits::{IrqState, RadioKind},
 };
@@ -213,6 +213,21 @@ fn copy_frame(frame: RxFrame, buf: &mut [u8]) -> RxInfo {
     frame.info
 }
 
+/// Package a frame the radio received over the air with its packet status.
+fn air_rx_frame(payload: &[u8], status: PacketStatus) -> RxFrame {
+    let mut data: Vec<u8, MAX_PAYLOAD> = Vec::new();
+    let _ = data.extend_from_slice(payload);
+    let info = RxInfo {
+        len: payload.len(),
+        rssi: status.rssi,
+        snr: Snr::from_quarter_db_steps(status.snr_quarter_db),
+        lqi: None,
+        origin: RxOrigin::Air,
+        buffered: None,
+    };
+    RxFrame { data, info }
+}
+
 // ─── Runner ──────────────────────────────────────────────────────────────────
 
 /// Maximum consecutive TX requests refused with [`TxError::CadTimeout`] while
@@ -335,17 +350,8 @@ where
                             if let Ok((len, status)) =
                                 lora.get_rx_result(&rx_pkt, &mut rx_buf).await
                             {
-                                let mut data: Vec<u8, MAX_PAYLOAD> = Vec::new();
-                                let _ = data.extend_from_slice(&rx_buf[..len as usize]);
-                                let info = RxInfo {
-                                    len: len as usize,
-                                    rssi: status.rssi,
-                                    snr: Snr::from_decibels(status.snr as i8),
-                                    lqi: None,
-                                    origin: RxOrigin::Air,
-                                    buffered: None,
-                                };
-                                if ch.rx.try_send(RxFrame { data, info }).is_ok() {
+                                let frame = air_rx_frame(&rx_buf[..len as usize], status);
+                                if ch.rx.try_send(frame).is_ok() {
                                     ch.rx_waker.wake();
                                 }
                             }
@@ -825,17 +831,8 @@ where
                                 if let Ok((len, status)) =
                                     lora.get_rx_result(&rx_pkt, &mut rx_buf).await
                                 {
-                                    let mut data: Vec<u8, MAX_PAYLOAD> = Vec::new();
-                                    let _ = data.extend_from_slice(&rx_buf[..len as usize]);
-                                    let info = RxInfo {
-                                        len: len as usize,
-                                        rssi: status.rssi,
-                                        snr: Snr::from_decibels(status.snr as i8),
-                                        lqi: None,
-                                        origin: RxOrigin::Air,
-                                        buffered: None,
-                                    };
-                                    if ch.rx.try_send(RxFrame { data, info }).is_ok() {
+                                    let frame = air_rx_frame(&rx_buf[..len as usize], status);
+                                    if ch.rx.try_send(frame).is_ok() {
                                         ch.rx_waker.wake();
                                     }
                                 }

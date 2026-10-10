@@ -239,7 +239,7 @@ struct MessageDetailsSheet: View {
                     if let snr = reception.snrCentibels {
                         LabeledContent(
                             "Signal-to-noise",
-                            value: String(format: "%.1f dB", Double(snr) / 100)
+                            value: String(format: "%.1f dB", Double(snr) / 10)
                         )
                     }
                     if let lqi = reception.lqi {

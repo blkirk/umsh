@@ -181,7 +181,7 @@ esp-wifi-sys-esp32s3 = { version = "=0.3.0", optional = true }
 # Holds the RF front end on across a hardware-entropy read.
 esp-phy = { version = "0.3", features = ["esp32s3"], optional = true }
 esp-rtos = { version = "0.4", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc"] }
-# Resolves to ../../lora-rs via the workspace [patch].
+# Resolves to the darconeous/lora-rs fork via the workspace [patch].
 lora-phy = { version = "3.0.2-alpha", default-features = false }
 # Device-identity generation and the device node's CSPRNG: ChaCha20
 # seeded from the RF-gated hardware TRNG at boot.

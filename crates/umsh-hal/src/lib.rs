@@ -76,9 +76,9 @@ impl Snr {
 
 impl core::fmt::Display for Snr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let db = self.as_decibels();
-        let cdb = self.0 % 10;
-        write!(f, "{}.{:01}dB", db, cdb)
+        let sign = if self.0 < 0 { "-" } else { "" };
+        let magnitude = self.0.unsigned_abs();
+        write!(f, "{sign}{}.{}dB", magnitude / 10, magnitude % 10)
     }
 }
 
@@ -456,5 +456,18 @@ mod tests {
         assert_eq!(Snr::from_decibels(-7).as_quarter_db_steps(), -28);
         // 0.3 dB sits between the first and second step and rounds up.
         assert_eq!(Snr::from_centibels(3).as_quarter_db_steps(), 1);
+    }
+
+    #[test]
+    fn display_keeps_the_sign_off_the_fraction() {
+        extern crate std;
+        use std::format;
+
+        assert_eq!(format!("{}", Snr::from_centibels(25)), "2.5dB");
+        assert_eq!(format!("{}", Snr::from_centibels(0)), "0.0dB");
+        assert_eq!(format!("{}", Snr::from_centibels(-5)), "-0.5dB");
+        assert_eq!(format!("{}", Snr::from_centibels(-15)), "-1.5dB");
+        assert_eq!(format!("{}", Snr::from_centibels(-100)), "-10.0dB");
+        assert_eq!(format!("{}", Snr::from_centibels(i16::MIN)), "-3276.8dB");
     }
 }
