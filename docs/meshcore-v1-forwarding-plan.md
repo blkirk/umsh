@@ -2,61 +2,68 @@
 
 Add an optional, autonomous MeshCore v1 forwarder to the ordinary UMSH
 firmware. It shares the radio, device identity, forwarding master switch,
-regional policy, and duty ceiling with the UMSH node, but it implements
-MeshCore's forwarding state machine independently and exposes its own ULCP
-configuration.
+regional policy, channel-access machinery, and duty ceiling with the UMSH
+node. It implements MeshCore's forwarding decisions and wire mutations
+independently and exposes its own ULCP enable.
 
 This document is a plan, not a protocol specification. None of the proposed
 ULCP identifiers or behavior is implemented yet.
 
 ## Compatibility baseline
 
-The implementation target is the MeshCore `repeater-v1.17.1` release, commit
+The reference for MeshCore wire behavior is the `repeater-v1.17.1` release,
+commit
 [`d92964352441e53b93e8667b802e04f6e072b39e`](https://github.com/meshcore-dev/MeshCore/tree/d92964352441e53b93e8667b802e04f6e072b39e),
 released [August 14, 2026](https://blog.meshcore.io/2026/08/14/release-1-17-1).
-The same commit is tagged for the companion and room server, so every
-conformance fixture must name both the commit and the `repeater-v1.17.1`
-behavior being modeled. MeshCore is MIT-licensed; copied or substantially
-ported source must retain its copyright and license notice.
+The same commit is tagged for the companion and room server. Interoperability
+vectors name the commit they were derived from. MeshCore is MIT-licensed;
+copied or substantially ported source must retain its copyright and license
+notice.
 
-“Exact” in this plan means that, for the same valid MeshCore v1 frame,
-identity, forwarding configuration, receive metadata, clock, random words,
-and channel-busy results, UMSH makes the same drop/forward decision, produces
-the same wire frame, and reaches the same scheduled transmit attempts in the
-same order as the baseline repeater. It also means preserving the baseline's
-bounded tables, queue selection, and drop behavior.
+The goal is interoperability, not replication. A MeshCore node must not be
+able to tell, from the frames it receives, that a forwarder is not a MeshCore
+repeater. This splits the behavior into two classes:
 
-It does not mean reproducing C++ out-of-bounds reads on malformed input. The
-Rust parser must reject truncated or structurally invalid frames safely.
-Nor can two stacks sharing one half-duplex radio promise the same wall-clock
-transmit instant as an otherwise-idle standalone repeater. A UMSH transmit is
-real channel occupancy. The MeshCore state machine must observe it as busy and
-run the same CAD-failure backoff and forced-transmit rule it would use for any
-other sustained activity.
+- **Wire behavior must match.** Parsing and rejection rules, duplicate
+  identity, path mutation, direct-route matching, payload-specific forwarding
+  decisions, ACK replacement, TRACE mutation, transport-code derivation and
+  matching, and the flood limits determine what other nodes receive and how
+  their own tables and routes behave. These follow the baseline.
+- **Local policy uses UMSH machinery.** Airtime estimation, channel access,
+  busy handling, duty limiting, randomness, and table and queue capacities are
+  invisible to other nodes beyond their statistical effect. Where UMSH already
+  has a mechanism, the forwarder uses it rather than porting MeshCore's.
 
-The baseline must remain pinned until a deliberate compatibility review moves
-it. Following MeshCore `main` would make timing and routing behavior change
-without a UMSH release decision.
+MeshCore's randomized retransmit window is kept in shape, because it decides
+how a UMSH forwarder contends with neighboring MeshCore repeaters, but it is
+computed with UMSH's airtime estimate and RNG. Nothing is reproduced for
+fidelity's sake: no out-of-bounds reads on malformed input, no MeshCore
+busy-retry schedule, no chip-specific airtime rounding.
+
+The forwarder must be low-impact on the UMSH MAC. It is a separate radio
+client with its own engine; it must not require changes to UMSH's contention,
+queueing, or forwarding logic, and shared code is touched only where the
+change is independently correct for UMSH.
+
+The baseline moves only by deliberate review. Following MeshCore `main`
+would let routing behavior change without a UMSH release decision.
 
 Primary source references:
 
 - [packet constants and route/type encoding](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/Packet.h)
 - [packet parsing and duplicate hash input](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/Packet.cpp)
 - [payload-specific routing behavior](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/Mesh.cpp)
-- [receive delay, queues, busy retry, and airtime budget](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/Dispatcher.cpp)
 - [repeater defaults, region filter, loop detection, and delays](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/examples/simple_repeater/MyMesh.cpp)
+- [reserved identity prefixes](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/examples/simple_repeater/main.cpp)
 - [flood-limit policy](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/RoutingPolicy.h)
-- [duplicate-table sizes and replacement](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/SimpleMeshTables.h)
 - [region-name and transport-code derivation](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/RegionMap.cpp)
   and [transport key calculation](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/TransportKeyStore.cpp)
-- [radio activity, CAD, preamble, and packet scoring](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/radiolib/RadioLibWrappers.cpp)
-- [32-packet pool and queue selection](https://github.com/meshcore-dev/MeshCore/blob/repeater-v1.17.1/src/helpers/StaticPoolPacketManager.cpp)
 
 ## Goals
 
-- Forward MeshCore v1 traffic as the pinned MeshCore repeater does, including
-  parsing, duplicate suppression, path mutation, payload-specific behavior,
-  priority, randomized delay, CAD retry, and airtime budgeting.
+- Forward MeshCore v1 traffic interoperably: parsing, duplicate suppression,
+  path mutation, payload-specific behavior, region scoping, and flood limits
+  as the baseline repeater applies them.
 - Keep `PROP_MAC_REPEATER_ENABLED` as the device-wide autonomous-forwarding
   master. Clearing it disables both UMSH forwarding and MeshCore forwarding.
   MeshCore additionally has its own opt-in enable, which defaults to false.
@@ -64,25 +71,41 @@ Primary source references:
   identity. Never create or persist a second identity.
 - Use the strings in `PROP_MAC_REPEATER_REGIONS` as the common regional
   policy, deriving UMSH and MeshCore codes independently.
+- Apply `PROP_MAC_REPEATER_MIN_RSSI` and `PROP_MAC_REPEATER_MIN_SNR` to flood
+  forwarding in both protocols.
+- Reuse UMSH's airtime calculation, CAD gate, busy backoff rule, duty
+  ledger, and RNG.
+- Use the device identity only through its public key. The forwarder
+  performs no private-key operation of any kind.
 - Work in ordinary shared-medium and `PROP_MAC_BACKHAUL` infrastructure modes
   without a mode exclusion, mode-specific toggle, or MeshCore-aware bridge.
-- Keep all MeshCore owner, ACL, contact, channel, advertisement scheduling,
-  discovery, clock, telemetry, command, serial/BLE management, and firmware
-  update mechanisms out of scope.
+- Ship only on boards where a repeater role makes sense, selected per board
+  manifest. A board that leaves it out carries no forwarder code and no
+  `CAP_MESHCORE_FORWARDER`.
+- Leave the UMSH MAC's behavior and code structure unchanged.
 
 ## Non-goals
 
+- Event-for-event or timing-exact replication of a MeshCore repeater.
+- MeshCore's internal airtime budget, receive-delay scoring, busy-detection
+  state machine, or forced-transmit rule. UMSH equivalents replace them.
 - Acting as a MeshCore companion, room server, owner-managed repeater, or
   MeshCore application endpoint.
-- Exposing MeshCore management commands through ULCP.
+- MeshCore owner, ACL, contact, channel, advertisement scheduling, discovery,
+  clock, telemetry, command, serial/BLE management, and firmware update
+  mechanisms, and exposing any MeshCore management command through ULCP.
 - Originating MeshCore advertisements, discovery responses, telemetry,
   messages, or region-management replies.
+- Recognizing or consuming MeshCore requests addressed to the device. An
+  ANON_REQ is forwarded like any other flood; see the research findings.
+- Exposing MeshCore's tunables (delay factors, flood limits, loop
+  detection) through ULCP in the first release. The baseline defaults are
+  constants until a deployment needs otherwise.
 - Sharing UMSH peer or channel tables with MeshCore. Only the device identity
   and regional forwarding policy are shared.
-- Applying UMSH-only forwarding controls such as
-  `PROP_MAC_REPEATER_DEFAULT_REGION`, `PROP_MAC_REPEATER_MIN_RSSI`, or
-  `PROP_MAC_REPEATER_MIN_SNR` to MeshCore packets. Doing so would not match a
-  MeshCore repeater.
+- Applying `PROP_MAC_REPEATER_DEFAULT_REGION` to MeshCore packets. It
+  inserts a UMSH region code, and the forwarder never inserts or rewrites
+  MeshCore transport codes.
 - Translating UMSH packets to MeshCore or MeshCore packets to UMSH.
 
 ## Research findings
@@ -91,20 +114,22 @@ Primary source references:
 
 Both protocols already use the same private LoRa physical layer in the
 shipping firmware. MeshCore v1 has version bits `00`; current UMSH has version
-bits `11`. Every received raw frame can therefore be fanned to both engines,
-which reject the other protocol before doing forwarding work. No heuristic or
-radio-mode switch is needed.
+bits `11`, checked first in `PacketHeader::parse`, and the baseline parser
+rejects any version other than `00`. Every received raw frame can therefore
+be fanned to both engines, which reject the other protocol before doing
+forwarding work. No heuristic or radio-mode switch is needed.
 
 The current MeshCore-US PHY is 910.525 MHz, SF7, 62.5 kHz, CR 4/5, explicit
 header, CRC, normal IQ, and the private sync word. Those settings can be
-shared. MeshCore v1.17.1 derives a 32-symbol preamble at SF7–SF8 and a
-16-symbol preamble at SF9–SF12. The existing fixed SF7 MeshCore-compatible
-radio profile now transmits 32 symbols. Its hardware-tested RX settings remain
-unchanged at 8 symbols on SX126x and 16 on LR1110. Forwarding integration must
-derive the TX value from the active spreading factor rather than assuming the
-fixed profile; changing RX acquisition settings is not part of this plan.
+shared. MeshCore v1.17.1 transmits a 32-symbol preamble at SF7–SF8 and a
+16-symbol preamble at SF9–SF12. The fixed SF7 MeshCore-compatible profile
+already transmits 32 symbols, and the vetted profile catalog uses 32 at every
+spreading factor. A transmit preamble at least as long as MeshCore's is
+interoperable, because receivers detect after a shorter minimum, so no
+per-request preamble override is needed. RX acquisition settings are not
+part of this plan.
 
-### Exact forwarding is payload-aware
+### Forwarding is payload-aware
 
 MeshCore does not blindly rebroadcast every syntactically valid v1 frame.
 The baseline behavior includes:
@@ -115,75 +140,111 @@ The baseline behavior includes:
   one-, two-, or three-byte public-key prefix;
 - removing the matching first entry from an ordinary direct route;
 - appending this device's public-key prefix to a flood path;
-- consuming a direct ACK and constructing a replacement ACK on the remaining
-  path while preserving its complete payload, including the multipart-ACK
-  special case;
+- forwarding a direct ACK on the remaining path with no retransmit delay.
+  The baseline builds a fresh ACK packet, but the result is byte-identical
+  to the received frame with the first path entry removed, except that a
+  TRANSPORT_DIRECT ACK comes out as plain DIRECT with its transport codes
+  dropped. A direct multipart ACK is re-emitted the same way as an ordinary
+  ACK, after a delay of 300 ms times one more than its remaining count;
 - appending quarter-dB SNR to a direct TRACE and using its special path
-  interpretation and priority;
-- accepting only zero-hop direct CONTROL packets whose high flag bit is set,
-  without forwarding them;
+  interpretation;
+- never forwarding a direct CONTROL packet whose high flag bit is set, at
+  any hop count. Direct CONTROL packets without that bit follow the
+  ordinary direct rule, and flooded CONTROL packets are not forwarded;
 - not flood-forwarding RAW_CUSTOM, MULTIPART, unknown, or reserved payload
   types; and
-- forwarding an ADVERT only after verifying its Ed25519 signature, and never
-  forwarding the device's own advertisement.
+- forwarding an ADVERT only after verifying its Ed25519 signature. The
+  baseline also skips its own advertisement, which is vacuous here: the
+  forwarder never advertises, and a forged advertisement carrying its key
+  fails the signature check anyway.
 
 Consequently, an opaque packet copier would not be compatible.
 
-### A small cryptographic boundary is necessary
+### The only cryptography is signature verification
 
 Ordinary forwarded messages remain opaque: the forwarder has no MeshCore
-contacts or channel secrets and does not decrypt their payloads. Two baseline
-decisions nevertheless require cryptography:
+contacts or channel secrets and does not decrypt their payloads. One
+baseline decision requires cryptography: ADVERT signature verification is a
+condition of forwarding. A forwarder that skipped it would repeat forged
+advertisements that every MeshCore repeater drops, which is both a visible
+divergence and a flood-amplification vector. UMSH's crypto crate already
+provides Ed25519 verification; only the bridge code links it today, so it
+is new flash on the boards that include the forwarder, and none on the
+boards that do not.
 
-1. ADVERT signature verification is a condition of forwarding.
-2. A valid ANON_REQ addressed to this device is decrypted and marked
-   do-not-retransmit. This prevents an owner/login request for the repeater
-   from being flooded onward. The bare forwarder must perform only the
-   destination validation needed to consume such a request, then discard it
-   without answering or creating MeshCore management state.
+The baseline repeater also decrypts an ANON_REQ whose one-byte destination
+hash matches its own and whose MAC verifies under the X25519 shared secret,
+consuming it instead of forwarding it. The forwarder does not reproduce
+this, and forwards every well-formed ANON_REQ like any other flood. The
+reasoning:
 
-Dropping every ANON_REQ with the same one-byte destination hash is not an
-acceptable shortcut because it would drop collisions that the MeshCore
-repeater forwards after authentication fails. Existing Ed25519, Curve25519,
-SHA-256, and AES building blocks may be reusable, but their byte conventions
-must first pass MeshCore-generated vectors. This is compatibility processing,
-not a MeshCore management facility.
+- Nobody can address a request to the forwarder. MeshCore companions learn
+  repeaters from their advertisements, and the forwarder never advertises.
+  Direct traces reveal only hash prefixes, not a key.
+- A request for another node that happens to share the hash prefix fails
+  authentication at a MeshCore repeater and is forwarded. The forwarder
+  forwards it too. The two behave identically in the only case that occurs.
+- A request genuinely encrypted to the forwarder's key is the one
+  divergence, and it is already detectable: a MeshCore repeater answers it,
+  and the forwarder never will. Consuming the request would buy no
+  interoperability.
+- Consumption would need X25519 agreement, HMAC-SHA256, and AES-128 ECB.
+  UMSH has only AES-256, so this would add a cipher to the crypto stack and
+  the only private-key operation in the whole feature.
 
 With an empty MeshCore contact and channel database, ordinary addressed REQ,
-RESPONSE, TXT, and group payloads cannot be recognized as local. That is the
-intended bare-forwarder model: it matches a repeater with no configured
-MeshCore clients or channels, while ANON_REQ remains the protocol's initial
-request path.
+RESPONSE, TXT, and group payloads cannot be recognized as local either. The
+bare-forwarder model is therefore uniform: nothing is ever local, and every
+forwarding decision depends only on public data in the frame.
 
-### Wire and resource behavior to preserve
+### Identity reuse is safe within this scope
 
-- Maximum radio frame: 255 bytes. Parsed payload storage is bounded to 184
-  bytes and the encoded path to 64 bytes.
+The device's single Ed25519 key serves both protocols, but only its public
+half is ever used on the MeshCore side: for direct-route matching and flood
+path entries. The forwarder never signs, agrees,
+encrypts, or decrypts in its MeshCore role, so no key material derived from
+the UMSH identity exists in MeshCore form. Any future MeshCore origination,
+such as advertisements or login replies, would be the first such use and
+needs its own cross-protocol analysis before it is considered.
+
+### Reserved identity prefixes
+
+The MeshCore repeater regenerates a new key while `pub_key[0]` is `0x00` or
+`0xFF` and refuses to import a private key whose public key starts that
+way, calling those reserved identity hashes. Nothing in the baseline receive
+path treats such a hash specially; the rule is a constraint on which
+identities may run a repeater. UMSH identities are not constrained this
+way, so roughly 2 in 256 devices have a reserved prefix.
+Because the forwarder never creates a second identity, such a device cannot
+run the MeshCore forwarder: the device refuses to enable it, and clients
+explain why in the UI. Replacing the device identity is the only remedy.
+
+### Wire and resource behavior
+
+These rules must match the baseline:
+
+- Maximum radio frame: 255 bytes. Payloads longer than 184 bytes and encoded
+  paths longer than 64 bytes are rejected.
 - The path header's upper two bits select one-, two-, or three-byte hashes;
   mode 3 is rejected. Its lower six bits are the entry count.
 - Duplicate identity is the first eight bytes of
   `SHA256(payload_type || payload)`. TRACE instead hashes
-  `payload_type || path_len_le16 || payload`: on the pinned little-endian
-  targets, `path_len_le16` is the encoded one-byte path header followed by a
-  zero byte because the baseline stores it in a `uint16_t` and hashes both
-  in-memory bytes.
-- The repeater keeps one cyclic table of 160 eight-byte packet hashes. ACKs
-  use the same hash as other payloads; the earlier separate four-byte ACK ring
-  is not part of v1.17.1.
-- The simple repeater has a shared 32-packet pool covering delayed receive,
-  queued transmit, and the packet currently being processed. Exhaustion and
-  full queues drop the new work.
-- At most one due delayed inbound packet is processed per dispatcher pass.
-  The next due outbound packet is the lowest numeric priority, with insertion
-  order breaking ties.
-- Ordinary direct traffic has priority 0. Flood priority is the path count
-  after appending this repeater. Direct TRACE has priority 5.
-- There is no TTL beyond path capacity, the three configured flood limits,
-  duplicate suppression, region filtering, and optional loop detection.
+  `payload_type || path_len_le16 || payload`, where `path_len_le16` is the
+  encoded one-byte path header followed by a zero byte, because the baseline
+  hashes both in-memory bytes of a `uint16_t`. ACKs use the same identity as
+  other payloads.
+- There is no TTL beyond path capacity, the three flood limits, duplicate
+  suppression, region filtering, and optional loop detection.
 
-The implementation should model these limits explicitly rather than replace
-them with unbounded host collections in tests and different firmware limits
-in production.
+These are local choices:
+
+- Duplicate memory is a bounded cyclic table of eight-byte hashes. The
+  baseline holds 160, which is a sensible default at 1,280 bytes.
+- Delayed transmits wait in a bounded queue sized to the firmware's memory
+  budget. Exhaustion drops the new work.
+- Queue order follows MeshCore's simple priority because it costs nothing:
+  ordinary direct traffic first, direct TRACE at priority 5, and floods by
+  path count after appending this device, with insertion order breaking ties.
 
 ### Regions are shared as strings, not codes
 
@@ -212,148 +273,224 @@ forwarder deliberately has no such keystore, so a `$` item contributes no
 MeshCore transport key; it must never be transformed into `#$name`. This does
 not change how the same stored string participates in UMSH region policy.
 
-An empty region list retains UMSH's unrestricted behavior. For MeshCore it
-allows unscoped FLOOD packets through the wildcard policy, but a scoped
-TRANSPORT_FLOOD has no configured transport key to match and is dropped.
-The forwarder never inserts, removes, or rewrites transport codes.
+The forwarder never inserts, removes, or rewrites transport codes under any
+policy.
 
-### Timing behavior to preserve
+### Region policy
 
-All airtime inputs must use the active LoRa configuration and MeshCore's
-derived transmit preamble: 32 symbols at SF7–SF8 and 16 symbols at SF9–SF12.
-The fixed SF7 radio profile now transmits 32 symbols, but the generic airtime
-helper still assumes eight and the request path cannot yet derive 32/16 from
-an arbitrary active SF. Neither is an exact substitute for the per-frame
-calculation required by the forwarder.
+MeshCore's own configuration has two postures toward floods. Its wildcard
+region, which stands for unscoped FLOOD packets, forwards by default and can
+be set to deny. A scoped TRANSPORT_FLOOD is forwarded only when its first
+transport code matches a configured region that allows floods; an unmatched
+code is always dropped, because a repeater without the key cannot tell which
+region the packet belongs to. The forwarder exposes this choice, plus one
+posture MeshCore cannot take, as `PROP_MESHCORE_REGION_POLICY`:
 
-This airtime defect already affects UMSH independently of MeshCore
-forwarding. Both current airtime helpers use a rounded 12-symbol preamble term
-derived from an eight-symbol preamble. On the fixed SF7 profile they therefore
-under-price every 32-symbol-preamble transmission by approximately 24 symbol
-times in the shared duty ledger and scheduler hint. Correct the shared
-calculation as prerequisite radio-accounting work, with an explicit preamble
-argument, rather than hiding the fix inside the MeshCore engine.
+| Value | Name | Unscoped FLOOD | Scoped, matching | Scoped, unmatched |
+|---:|---|---|---|---|
+| 0 | Open (default) | forwarded | forwarded | dropped |
+| 1 | Scoped only | dropped | forwarded | dropped |
+| 2 | Ignore | forwarded | forwarded | forwarded |
 
-Baseline repeater defaults are:
+Open is the baseline repeater's default and what a MeshCore operator expects
+of a repeater with a region list. Scoped only is the baseline with its
+wildcard denied. Ignore is not a posture a MeshCore repeater can configure,
+because a repeater forwards a scoped flood only when it holds that region's
+key. On the air, though, its output is indistinguishable from a repeater
+configured for every region, private ones included: the frame goes out with
+the same transport codes and one more path entry. The effect is on scope,
+not on detectability. A region-scoped message crosses one hop beyond its
+region; downstream MeshCore repeaters without the key drop it, while
+companions within earshot of the forwarder hear it. The mode exists for
+operators who do not maintain a MeshCore region list and accept that.
 
-| Setting | Default | Required behavior |
-|---|---:|---|
-| Receive-delay base | 0.0 | Disabled; process a received flood immediately |
-| Flood TX delay factor | 0.5 | `t = trunc(airtime(path_bytes + payload_len + 2) * factor)`, then uniform integer delay `0..5t` inclusive |
-| Direct TX delay factor | 0.3 | Same calculation; the tagged source is authoritative even where older documentation says 0.2 |
-| Hardware CAD | Off | Do not run a new hardware CAD scan before TX by default |
-| Busy retry | — | Randomly choose 120, 240, or 360 ms after an in-progress receive, configured interference, enabled CAD, or local-radio occupancy reports busy |
-| Forced transmit | 4 s | After continuous busy duration exceeds 4, attempt without CAD |
-| Airtime factor | 1.0 | One-hour bucket with a 50% maximum budget |
-| Overall flood maximum | 64 | Applies to every flood |
-| Unscoped flood maximum | 64 | Additional limit for unscoped FLOOD packets |
-| Advertisement flood maximum | 8 | Additional limit for ADVERT packets |
-| Loop detection | Off | Optional thresholds below |
-| Extra ACKs | 0 | Do not create redundant multipart ACKs |
-| Interference threshold | 0 | RSSI activity check disabled |
-| AGC reset interval | 0 | Periodic reset disabled |
+The policy governs floods only. Direct and transport-direct traffic is
+forwarded on its route regardless of transport codes, as in the baseline.
+With an empty region list, Open forwards only unscoped floods and Scoped
+only forwards no floods at all. UMSH's own forwarder has no equivalent
+switch: untagged UMSH packets are always forwarded and an empty list imposes
+no check on tagged ones, which sits between Ignore and Open. The property is
+MeshCore-specific because the MeshCore side is where the baseline offers the
+choice.
 
-When a nonzero receive-delay base is configured, compute the packet score
-exactly from SNR threshold and frame length. SF7 through SF12 thresholds are
-−7.5, −10, −12.5, −15, −17.5, and −20 dB. Below threshold the score is zero;
-otherwise it is
-`clamp(((snr - threshold) / 10) * (1 - frame_len / 256), 0, 1)`.
-The delay is
-`trunc((base^(0.85 - score) - 1) * received_frame_airtime)`, processed
-immediately below 50 ms and capped at 32 seconds.
-
-Loop detection counts occurrences of this device's selected hash in the
-received flood path. Maximum prior occurrences for hash sizes one/two/three
-are 4/2/1 in minimal mode, 2/1/1 in moderate mode, and 1/1/1 in strict mode.
-
-MeshCore's random helper consumes a 32-bit word and uses modulo reduction.
-UMSH policy requires a cryptographic RNG, so the forwarder should consume
-ChaCha20 output seeded through the existing hardware-entropy path but retain
-MeshCore's `word % span` mapping. A test-injected random-word source makes
-event-for-event comparison possible without requiring two independently
-seeded devices to produce the same random sequence.
+### Flood limits and loop detection
 
 The three flood limits are cumulative: reject a flood when its received path
-count is greater than or equal to any limit applicable to that packet.
+count is greater than or equal to any limit applicable to that packet. The
+baseline defaults are 64 for every flood, 64 for unscoped FLOOD packets, and
+8 for ADVERT packets. The forwarder applies these as constants.
 
-The baseline's internal airtime budget is separate from UMSH's
-`PROP_PHY_DUTY_LIMIT`. Preserve the MeshCore one-hour bucket for MeshCore
-transmits only, then apply the existing shared UMSH duty ledger as an outer
-ceiling across all radio clients. Existing UMSH policy sheds a transmit that
-the shared duty ledger refuses rather than waiting for the budget to refill;
-MeshCore must follow that outer policy too. A duty refusal is not channel
-activity, must not advance the four-second CAD-busy timer, and can never be
-bypassed by the forced-transmit path. This policy constraint is not a reason
-to silently delete MeshCore's own inner budget behavior.
+The baseline's optional loop detection counts occurrences of this device's
+hash in the received flood path and rejects the flood when the count reaches
+a threshold. For hash sizes one/two/three the thresholds are 4/2/1 in
+minimal mode, 2/1/1 in moderate mode, and 1/1/1 in strict mode, so strict
+mode rejects any flood that already carries this device once. It is off by
+default, and the forwarder does not implement it. If a deployment needs it,
+it arrives together with its ULCP tunable.
+
+### Link-quality gates apply to both protocols
+
+`PROP_MAC_REPEATER_MIN_RSSI` and `PROP_MAC_REPEATER_MIN_SNR` gate MeshCore
+flood forwarding, FLOOD and TRANSPORT_FLOOD alike, under the same rules the
+UMSH forwarder follows:
+
+- They apply only to frames received over the radio. Backhaul and
+  local-transmit deliveries carry no measurement and pass.
+- Direct (source-routed) frames are exempt, because they are forwarded on
+  the strength of the route rather than the link.
+- MeshCore frames carry no packet-imposed minimum, so only the device
+  thresholds apply.
+- A copy rejected by a link-quality gate is not recorded in the duplicate
+  table, as in the UMSH forwarder, so a stronger copy of the same packet can
+  still be forwarded. Every other MeshCore drop records the duplicate on
+  receipt, as the baseline does.
+
+A MeshCore repeater has no such gates. They are an operator's local choice
+about which receptions are worth repeating and do not affect
+interoperability: to its neighbors, a gated forwarder looks like a repeater
+with a shorter reach.
+
+### Timing and channel access
+
+The retransmit delay keeps MeshCore's shape:
+`t = trunc(airtime(path_bytes + payload_len + 2) * factor)`, then a uniform
+random delay in `0..=5t` milliseconds. The default factor is 0.5 for floods
+and 0.3 for direct traffic; the tagged source is authoritative where older
+documentation says 0.2. The `+ 2` counts the header and path-length bytes and
+excludes transport codes, as the baseline does. `airtime` is UMSH's estimate
+for the active modulation, and the random value comes from UMSH's
+cryptographic RNG. The factors are compile-time constants, 500 and 300
+thousandths, applied in integer arithmetic.
+
+UMSH already has a preamble-aware airtime helper,
+`lora_airtime_ms_with_preamble`, which the session uses for
+`PROP_PHY_T_FRAME`. The duty ledger and the radio runner's frame-time
+estimate still call the older helper, whose fixed 12-symbol preamble term
+under-prices every 32-symbol transmission by about 24 symbol times. That
+is a UMSH accounting defect independent of this feature; the fix is to
+point those two callers at the existing helper. The forwarder's retransmit
+delay takes its airtime from the duty ledger's `airtime_ms`, so it inherits
+whichever estimate the ledger uses.
+
+Forwarded MeshCore frames use `CadPolicy::Gate`, the same channel-access rule
+the UMSH MAC applies to its own non-ACK transmits. MeshCore's default of
+skipping CAD is a local choice; gating only reduces collisions and does not
+affect interoperability.
+
+The radio mux already serializes clients: a MeshCore request waits in its
+virtual queue while another client owns the radio, then transmits. The radio
+runner refuses a transmit that arrives during a reception with
+`TxError::CadTimeout`, the CAD gate reports a busy channel the same way, and
+so does the duty gate. The MeshCore client handles every `CadTimeout` with
+the rule the UMSH MAC already uses: back off by a uniform random delay in
+`T_frame/40..=T_frame/4`, retry, and abandon the frame after the MAC's
+attempt limit. MeshCore's own schedule of 120, 240, or 360 ms with a forced
+transmit after four seconds is local policy and is not reproduced; the
+forced transmit in particular is what tears down receptions in progress.
+No mux contract change is needed. The backoff arithmetic is a few lines
+inline in the coordinator today; if it is lifted into a shared helper so
+both clients call the same code, that is a refactor with no behavior
+change for UMSH.
+
+The runner's receive gate currently allows three refusals per reception
+before transmitting over it, a count shared by every client. A third client
+makes exhausting it during a long reception more likely. Replacing the strike
+count with a modulation-derived deadline is independently correct for UMSH
+and is tracked as separate radio-runner work; this plan does not depend on it.
+
+### Duty limiting
+
+The MeshCore forwarder has no internal airtime budget. Its transmits go
+through the existing shared duty ledger, so `PROP_PHY_DUTY_LIMIT` bounds UMSH
+and MeshCore airtime together. A transmit the ledger refuses is shed, as for
+every other client, rather than waiting for the budget to refill. The
+refusal reaches the client as `CadTimeout` and consumes backoff attempts
+like any other busy verdict, exactly as it does for the UMSH MAC, so no
+special case is needed.
+
+### SNR for TRACE
+
+A direct TRACE carries `(int8_t)(snr * 4)`, the received SNR in quarter-dB
+steps. UMSH's `Snr` type stores integer centibels, which is sufficient: a
+quarter-dB value converted to centibels and rounded is off by at most 0.05 dB,
+well inside the 0.125 dB needed to round back to the same quarter, provided
+both conversions round to nearest. The constraint is upstream of `Snr`:
+lora-phy currently rounds packet SNR to whole decibels before the runner sees
+it. The planned quarter-dB SNR change to UMSH removes that loss, and TRACE
+forwarding depends on it.
 
 ## Proposed ULCP surface
 
-Reserve a new `CAP_MESHCORE_FORWARDER` capability, tentatively capability 51,
-requiring `CAP_REPEATER`. Allocate the following persisted device-domain
-properties tentatively from 4872 onward. The numbers are proposals until the
-ULCP index and normative specification are updated during implementation.
+These are ULCP protocol additions. Reserve a new `CAP_MESHCORE_FORWARDER`
+capability requiring `CAP_REPEATER`, and allocate two device-domain
+properties in the extended device and transport range. All take the next
+free numbers in the ULCP index when the normative specification is updated
+during implementation; the capability numbers through the fifties and the
+properties through the 4890s are already assigned.
 
 | Property | Type | Default | Purpose |
 |---|---|---:|---|
 | `PROP_MESHCORE_FORWARDING_ENABLED` | BOOL | false | MeshCore-specific opt-in |
-| `PROP_MESHCORE_RX_DELAY_BASE` | UINT16, thousandths | 0 | MeshCore `rxdelay` base, 0.000–20.000 |
-| `PROP_MESHCORE_FLOOD_TX_DELAY_FACTOR` | UINT16, thousandths | 500 | MeshCore flood `txdelay`, 0.000–2.000 |
-| `PROP_MESHCORE_DIRECT_TX_DELAY_FACTOR` | UINT16, thousandths | 300 | MeshCore direct `direct.txdelay`, 0.000–2.000 |
-| `PROP_MESHCORE_FLOOD_MAX` | UINT8 | 64 | Overall received flood path limit, 0–64 |
-| `PROP_MESHCORE_UNSCOPED_FLOOD_MAX` | UINT8 | 64 | Additional unscoped-flood path limit, 0–64 |
-| `PROP_MESHCORE_ADVERT_FLOOD_MAX` | UINT8 | 8 | Additional advertisement path limit, 0–64 |
-| `PROP_MESHCORE_LOOP_DETECT` | UINT8 enum | 0 | Off, minimal, moderate, or strict |
-| `PROP_MESHCORE_AIRTIME_FACTOR` | UINT16, thousandths | 1000 | MeshCore airtime factor, 0.000–9.000 |
-| `PROP_MESHCORE_CAD_ENABLED` | BOOL | false | Run MeshCore's optional hardware CAD scan before TX |
+| `PROP_MESHCORE_REGION_POLICY` | UINT8 enum | 0 | Flood region posture: 0 open, 1 scoped only, 2 ignore |
 
-Conversion from thousandths to binary32 and every subsequent expression must
-be checked against the C++ baseline. Golden tests must cover all shipped
-defaults and representative non-defaults. If exact conversion cannot be made
-portable across the supported embedded targets, store the three factor
-properties as canonical IEEE-754 binary32 bits instead; do not quietly use a
-different numeric model.
+`PROP_MESHCORE_REGION_POLICY` selects how transport codes gate flood
+forwarding, as defined under Region policy above. Values outside 0–2 fail
+with `STATUS_INVALID_ARGUMENT`. It reads and writes whether or not MeshCore
+forwarding is enabled, like the other repeater settings.
+
+MeshCore's repeater tunables (the two retransmit delay factors, the three
+flood limits, and the loop-detection mode) are deliberately not exposed.
+The forwarder runs the baseline defaults as constants. Each tunable would
+cost a describe-table row, web-debugger name, mobile binding, CLI verb, and
+saved-schema row, for a knob no deployment has asked to turn. If one does,
+adding a property later is one row each; nothing in this design closes the
+door.
+
+Setting `PROP_MESHCORE_FORWARDING_ENABLED` to true fails with
+`STATUS_INVALID_STATE` when the first byte of the live `PROP_DEV_KEY` is
+`0x00` or `0xFF`. Clients can apply the same test to `PROP_DEV_KEY` and
+explain why the option is unavailable before the user tries it.
 
 The effective gates are:
 
 ~~~text
 UMSH forwarding     = PHY enabled AND MAC_REPEATER_ENABLED
 MeshCore forwarding = PHY enabled AND MAC_REPEATER_ENABLED
-                      AND MESHCORE_FORWARDING_ENABLED AND identity ready
+                      AND MESHCORE_FORWARDING_ENABLED
+                      AND running identity prefix not reserved
 ~~~
 
-The existing `NODE_ACTIVE` check stops UMSH beacon and advertisement
-origination when the running key no longer matches live `PROP_DEV_KEY`; it
-does not disable UMSH repeater forwarding, whose enable is currently applied
-unconditionally. Preserve that behavior unless a separate, deliberate UMSH
-policy change is approved.
+The forwarder holds a copy of the identity's 32-byte public key and nothing
+else of the identity. Like the UMSH device node's identity handle, it is
+captured at bring-up, so a replaced identity takes effect for both
+forwarders at the next boot. Until then both keep forwarding under the
+running identity, and neither originates anything under it. An identity
+change leaves both forwarding enables as they are.
 
-For MeshCore, `identity ready` means that the running forwarder's
-public/private identity matches live `PROP_DEV_KEY`. This new engine must fail
-closed because its identity is load-bearing for direct-route matching,
-own-advertisement suppression, and ANON_REQ self-consumption. A live identity
-replacement disables MeshCore forwarding until reboot activates the newly
-stored private key, without changing current UMSH forwarding behavior.
+The last term of the MeshCore gate covers the one case the set-time refusal
+cannot: MeshCore forwarding is enabled and the identity is then replaced with
+a key whose prefix is reserved. The enable keeps its value, but after the
+reboot the forwarder does not run, and clients explain why from
+`PROP_DEV_KEY` exactly as they do before an enable is attempted.
 
-Clearing `PROP_MAC_REPEATER_ENABLED` must have the same effect as MeshCore's
-`disable_fwd`, not tear down and recreate the engine. This matters because the
-baseline still performs parsing and some duplicate bookkeeping while
-forwarding is disabled. Clearing the MeshCore-specific enable may stop its
-task completely and clear volatile state; this distinction must be specified
-and tested.
+One change to existing ULCP behavior accompanies the additions. The
+descriptions of `PROP_MAC_REPEATER_MIN_RSSI` and `PROP_MAC_REPEATER_MIN_SNR`
+say they apply to flood forwarding; they must state that this includes
+MeshCore floods.
+
+Whenever the MeshCore gate is false, the forwarder stops and discards its
+volatile state. Restarting with an empty duplicate table can at most repeat a
+forward of a frame heard just before the gate closed, which other nodes'
+duplicate suppression absorbs.
 
 No new MeshCore region property is needed. `PROP_MAC_REPEATER_REGIONS` is the
-single shared source of region strings. The existing default-region and link
-quality gates remain UMSH-only.
+single shared source of region strings. The default-region setting remains
+UMSH-only.
 
-All ten proposed properties are saved. `SAVED_SCHEMA` currently has 31 rows
-and uses one `u32` as its duplicate-detection bitmask, enforced by a
-compile-time assertion. Consequently, even two new saved properties break
-the build, and the complete surface exceeds the representation substantially.
-The implementation must expand that tracking representation before extending
-the schema; packing unrelated MeshCore settings into one opaque property
-merely to avoid this limit would be the wrong interface tradeoff. Snapshot
-encode, decode, reset, clear, restore ordering, and older-snapshot
-compatibility all need tests.
+Both properties are saved. `SAVED_SCHEMA` holds about forty rows against a
+64-bit duplicate-detection mask, so the rows fit without touching the
+snapshot machinery. Snapshot encode, decode, reset, clear, restore ordering,
+and older-snapshot compatibility all need tests.
 
 ## Architecture
 
@@ -362,18 +499,35 @@ Create a new `no_std` library crate, tentatively
 
 - safe MeshCore v1 parser and serializer;
 - packet and path mutation;
-- payload-specific decision state machine;
-- duplicate/ACK rings and the fixed 32-packet pool;
+- payload-specific decision logic;
+- the duplicate table and bounded delay queue;
 - region-key and transport-code calculation;
-- receive, retransmit, CAD-retry, priority, and airtime-budget scheduling;
-- injected clock, RNG-word source, identity operations, and radio adapter;
-  and
-- counters useful for tests and eventual diagnostics, without defining new
-  management behavior.
+- retransmit-delay scheduling;
+- injected clock, RNG, airtime estimate, device public key, and radio
+  adapter, so the engine is testable on the host; and
+- counters useful for tests and diagnostics, without defining new management
+  behavior.
 
-Keep firmware wiring in the shared nRF52840 firmware and the ESP32 workspace,
-not in the protocol engine. Add a third virtual radio client after the ULCP
-session and UMSH device node:
+The client task that drives the engine belongs in `umsh-ulcp-runtime`
+beside the device node, where the other mux clients live, so both firmware
+workspaces share one implementation. Each firmware that includes it adds one
+static `Channels` bundle to its mux client list and spawns the task; nothing
+else is per-board.
+
+Inclusion is a firmware feature chosen per board manifest, not a property of
+the shared image source. A tracker worn on a belt is not a repeater site,
+and the classic-ESP32 Heltec V2 has no room to spare, so neither carries the
+forwarder; boards that are plausibly left in place as infrastructure, such
+as the SenseCAP Solar P1 and the Heltec V3, do. The exact list is a release
+decision. A board without the feature links no engine, no third client, and
+no Ed25519 verification, and it omits `CAP_MESHCORE_FORWARDER`, so a host
+learns the difference the ordinary way. The ESP32 manifests keep a shared
+feature table in step through `scripts/check_esp32_manifests.py`; a
+per-board feature needs that check to allow the difference. The client wraps its virtual bundle in the same
+`DutyGatedRadio` decorator the device node uses, which supplies the shared
+duty ledger and the `CadTimeout` busy verdict for free, and takes its
+airtime estimate from the ledger's `airtime_ms`. Add it as a third virtual
+radio client after the ULCP session and UMSH device node:
 
 ~~~text
 ULCP session (client A) ─┐
@@ -381,43 +535,24 @@ UMSH device node (B) ────┼── radio mux ── shared duty gate ─
 MeshCore forwarder (C) ──┘
 ~~~
 
-Every air reception and successful local transmission is already fanned to
-the medium clients. The MeshCore client must ignore `RxOrigin::LocalTx` after
-using it for duplicate awareness, so it never recursively forwards its own
-emission. As with the UMSH client, exact handling should be driven by frame
-identity rather than by assuming all local transmissions belong to itself.
-
-The current mux leaves a second client's TX request queued while another
-client owns the radio. That is not MeshCore busy-channel behavior. Extend the
-mux/radio contract so a due MeshCore request can observe local-radio occupancy
-as a busy result immediately. Receiving a preamble or packet is always busy;
-an additional hardware CAD scan occurs only when
-`PROP_MESHCORE_CAD_ENABLED` is true, matching v1.17.1's default-off setting.
-The MeshCore scheduler then chooses 120, 240, or 360 ms and, after more than
-four seconds of continuous busy results, issues a forced request. Preserve
-fair arbitration for simultaneous clear-channel requests, but do not let
-fairness replace either protocol's own contention state machine.
+The mux fans every air reception to the medium clients and every successful
+local transmission to every client except its sender, so client C never
+receives its own emissions. The local transmissions it does see come from
+the other clients. UMSH frames fail the version check. A raw MeshCore frame
+sent by the ULCP host in shared-medium mode is already on the air from this
+radio, so client C records it in its duplicate table and does not forward
+it, just as a MeshCore repeater ignores repeats of a frame it has heard.
 
 The device-domain snapshot already carries `dev_key`, the forwarding master,
 and both the derived UMSH region codes and original region strings. Extend it
-with MeshCore configuration and publish it to both engines. The present
+with the MeshCore enable and region policy, and with the link-quality
+thresholds if it does not already carry them, and publish it to both
+engines. It never carries
+private key material. The present
 `DEV_SYNC` is a single-consumer `Signal`; do not add a second consumer to it.
 Either fan the snapshot out inside the existing sync task or replace the
-transport with an explicit latest-value broadcast/watch primitive.
-
-The radio request path must support MeshCore's SF-derived 32/16-symbol TX
-preamble without changing the bytes or timing of unrelated UMSH profiles or
-the existing per-radio RX settings. The fixed SF7 TX baseline is already
-aligned at 32 symbols, but a per-request
-packet-parameter override is still preferable to repeatedly mutating global
-radio state. The airtime APIs should gain an exact per-frame calculation
-accepting the selected preamble length, header mode, CRC, spreading factor,
-bandwidth, and coding rate. Both MeshCore delay calculations and its internal
-duty bucket need the same result the radio configuration produces.
-
-Any shared PHY-profile catalog must likewise derive or store the TX preamble
-per row: 32 for SF7–SF8 and 16 for SF9–SF12. A single MeshCore preamble
-constant cannot correctly describe a table spanning those spreading factors.
+transport with an explicit latest-value broadcast/watch primitive, as the
+same module already does for `ADVERT_POLICY`.
 
 ## Infrastructure-mode behavior
 
@@ -435,151 +570,191 @@ is a medium client, so the existing mux topology supplies the behavior:
   before the frame reaches that segment's air.
 
 Thus the infrastructure carries MeshCore frames without understanding them,
-which is the same layer boundary it uses for UMSH. The bridge currently does
-not preserve radio SNR in a backhaul transmit. This is harmless with the
-MeshCore v1.17.1 default receive-delay base of zero. If a nonzero receive delay
-is exposed, define and test backhaul scoring explicitly—preferably by
-preserving the received link metadata end to end—rather than manufacturing a
-radio measurement. This is the only identified non-default tuning issue for
-transparent infrastructure operation.
+which is the same layer boundary it uses for UMSH. Each bridged device
+appends its own hash to a flood path, so a bridge crossing counts as two hops
+in MeshCore paths, which is accurate for the two transmissions involved.
+
+A frame delivered over the backhaul carries no radio measurement. This
+matters only for a direct TRACE whose next hop is the far device, which must
+append some SNR value for the bridge link; see the decisions below.
 
 ## Implementation increments
 
-### 1. Freeze an executable conformance oracle
+### 1. Independent radio accounting
 
-- Vendor no production C++ code yet. Instead, build a host-only fixture tool
-  from the exact tagged MeshCore sources under their MIT notice.
-- Budget this as substantial work: the tagged implementation is
-  Arduino-oriented, so the host fixture needs narrow stubs for the Arduino,
-  RadioLib, clock, RNG, and persistence surfaces used by the forwarding path.
-- Make clock values, received SNR/RSSI, channel-busy answers, and RNG words
-  deterministic inputs.
-- Record output wire frames, scheduled deadlines, priorities, table changes,
-  budget changes, and drops.
-- Commit compact golden vectors plus the source commit and generation command.
-  Cover every route and payload type, all path hash sizes, malformed lengths,
-  duplicates, pool exhaustion, region matches, loop modes, timing boundaries,
-  CAD retries, the four-second force boundary, and 32-bit millisecond wrap.
+Neither item gates the increments below; both are UMSH work in their own
+right and can land before, alongside, or after the engine.
 
-Gate: the oracle reproduces selected frames observed between two unmodified
-  MeshCore `repeater-v1.17.1` instances.
+- Switch the duty ledger and the radio runner's frame-time estimate to the
+  existing preamble-aware airtime helper. Until then the forwarder's
+  retransmit window is a constant 24 symbol times short, which changes
+  nothing about interoperability.
+- Confirm that quarter-dB packet SNR reaches `RxInfo` through the UMSH SNR
+  change already in progress, with round-to-nearest conversions in both
+  directions. Direct TRACE forwarding is the one MeshCore behavior that
+  depends on it; until it lands, traces through the forwarder report
+  whole-decibel SNR.
 
-### 2. Implement the pure forwarding engine
+Gate: airtime tests at 32- and 16-symbol preambles across the shipping
+spreading factors, and an SNR round-trip test over the full quarter-dB range.
 
-- Add the safe parser/serializer, fixed resource model, duplicate tables,
-  region derivation, and payload-specific routing.
-- Add ADVERT verification and the minimal ANON_REQ self-consumption path.
-- Keep all management callbacks absent or no-op and assert that no code path
-  originates a management response or scheduled advertisement.
-- Implement timing with injected clock, RNG words, and exact airtime inputs.
+### 2. Interoperability vectors
 
-Gate: Rust results match every oracle vector event for event. Property-based
-tests feed arbitrary byte strings to the parser and assert bounded, panic-free
-behavior.
+- Derive wire-level vectors from the tagged sources: duplicate hashes
+  including TRACE, transport keys and codes including the `0000`/`ffff`
+  mapping, flood path append for each hash size, direct-route strip, the
+  replacement ACK and multipart-ACK case, TRACE SNR append, and ADVERT
+  signature acceptance and rejection.
+- Every derivation involved is plain SHA-256, HMAC-SHA256, byte shuffling,
+  or Ed25519, so the vectors can be generated with any standard library
+  from the tagged sources' definitions, or taken from captured traffic. No
+  compiled MeshCore oracle is needed.
+- Commit the vectors with the source commit and generation command.
 
-### 3. Add ULCP state without activating firmware forwarding
+Gate: vectors cover every route type, payload type, and path hash size, plus
+malformed lengths and reserved path modes.
 
-- Allocate the capability and final property identifiers in the ULCP index.
+### 3. Implement the pure forwarding engine
+
+- Add the safe parser and serializer, duplicate table, bounded queue, region
+  derivation and the three region policies, flood limits, and
+  payload-specific routing.
+- Add ADVERT verification.
+- Keep all management callbacks absent and assert that no code path
+  originates a management response or advertisement, and that the engine's
+  only identity input is a public key.
+- Implement the retransmit delay with injected clock, RNG, and airtime.
+
+Gate: the engine reproduces every interoperability vector. Property-based
+tests feed arbitrary byte strings to the parser and assert bounded,
+panic-free behavior.
+
+### 4. Add ULCP state without activating firmware forwarding
+
+- Allocate the capability and property identifiers in the ULCP index.
 - Add get/set validation, persistence, reset/clear behavior, admin reachability
-  policy, describe tables, web-debugger names, mobile bindings, and CLI access
-  following existing device-domain properties.
-- Expand saved-state duplicate tracking beyond 32 schema entries.
+  policy, describe-table rows, web-debugger names, mobile bindings, and CLI
+  access for both properties, following existing device-domain properties.
+- Refuse the MeshCore enable for a reserved-prefix identity, and add a terse
+  explanation of the unavailable option in the app, CLI, and web debugger.
+- Extend the link-quality threshold descriptions to MeshCore floods.
 - Extend `DevDomainSnapshot` and solve its single-consumer publication path.
-- Define master-gate semantics in `ulcp-device.md`; keep the implementation
-  plan itself out of the normative mdBook once the feature ships.
+- Define the gates and the reserved-prefix rule in `ulcp-device.md`; keep the
+  implementation plan itself out of the normative mdBook once the feature
+  ships.
 
 Gate: ULCP device tests cover defaults, invalid values, save/restore from new
-and old snapshots, factory reset, master/subfeature gating, and identity
-replacement, including MeshCore's fail-closed result without silently changing
-UMSH repeater forwarding.
+and old snapshots, factory reset, master/subfeature gating, the
+reserved-prefix refusal, and identity replacement leaving both enables
+unchanged, including replacement with a reserved-prefix key while MeshCore
+forwarding is enabled.
 
-### 4. Integrate the third radio client and contention contract
+### 5. Integrate the third radio client
 
-- Add client C and its task to every shipping nRF52840 firmware and the ESP32
-  workspace.
-- Extend radio arbitration so due MeshCore work receives immediate busy
-  feedback rather than hidden queueing.
-- Generalize the already-aligned SF7 TX preamble into MeshCore's SF-derived
-  32/16-symbol TX selection and add exact per-length airtime calculation
-  without changing RX acquisition or unrelated UMSH packet parameters.
-- Put MeshCore's internal budget inside the existing combined duty gate.
+- Add the client task to `umsh-ulcp-runtime` behind a firmware feature, and
+  its bundle and spawn to the board manifests that enable it in both
+  workspaces.
+- Route its transmits through the existing mux, CAD gate, and duty-gated
+  radio with no change to their contracts, applying the MAC's backoff rule
+  to every `CadTimeout`.
 - Ensure both protocol parsers receive air, local-transmit, and backhaul
   frames and reject the other protocol version.
 
-Gate: deterministic mux tests cover simultaneous UMSH/MeshCore sends, fair
-clear-channel arbitration, MeshCore busy retry/force behavior, combined duty,
-full virtual queues, and no self-forwarding.
+Gate: engine and mux tests cover the link-quality gates on measured MeshCore
+floods, their exemption for direct and unmeasured frames, a gate-rejected
+copy followed by a forwarded stronger copy, simultaneous UMSH and MeshCore
+sends, busy backoff and abandonment under the MAC's rule, duty refusals
+shedding, full virtual queues, and no self-forwarding. Existing UMSH MAC
+tests pass unmodified.
 
-### 5. Prove ordinary and infrastructure operation on hardware
+### 6. Prove interoperability on hardware
 
-- On an otherwise-idle UMSH device, compare received-to-retransmit timing,
-  wire bytes, and routing decisions against an unmodified MeshCore v1.17.1
-  repeater across flood, scoped flood, direct, ACK, TRACE, and ADVERT cases.
-- Run contention tests while the UMSH node is transmitting and confirm the
-  MeshCore scheduler observes busy and follows its retry sequence.
+- Place a UMSH forwarder between unmodified MeshCore v1.17.1 companions with
+  no other repeater in range. Confirm that messages flow in both directions,
+  that advertisements propagate, that companions learn and use direct routes
+  through the forwarder, and that traces through it complete.
+- Repeat with an unmodified MeshCore repeater alongside, confirming that
+  duplicates terminate and that neither repeater systematically starves the
+  other.
+- Confirm scoped floods with matching and nonmatching regions, an empty
+  region set, case-sensitive MeshCore versus case-insensitive UMSH region
+  strings, and one-, two-, and three-byte path hashes. Repeat the matching,
+  nonmatching, and unscoped cases under each of the three region policies
+  and confirm the table under Region policy.
+- Run contention tests while the UMSH node is transmitting and confirm that
+  MeshCore frames wait, retry, and drop as specified, without disturbing UMSH
+  delivery.
 - Run two UMSH bridge participants in backhaul mode. Confirm a MeshCore frame
   heard on one RF segment crosses the existing infrastructure, is accepted by
   the far MeshCore forwarder, and reaches the other RF segment only after
   MeshCore policy. Confirm duplicates terminate.
 - Clear `PROP_MAC_REPEATER_ENABLED` and prove that neither protocol forwards;
   restore it and prove that only individually enabled protocols resume.
-- Verify case-sensitive MeshCore versus case-insensitive UMSH region vectors,
-  an empty region set, nonmatching scoped floods, and one-/two-/three-byte
-  identity path hashes.
-- Record release firmware flash/static-RAM and stack-headroom deltas for every
-  board. Treat the classic-ESP32 Heltec V2 as the explicit worst-case gate:
-  the packet pool, hash table, crypto, and third task must fit its existing
-  margins, as well as every other shipping target.
+- Set a minimum RSSI and SNR between two MeshCore companions' signal levels
+  and confirm that only the stronger companion's floods are forwarded.
+- Replace the device identity, reboot, and confirm that both forwarders run
+  under the new key; repeat with a reserved-prefix key and confirm that only
+  UMSH forwarding resumes.
+- Record release firmware flash/static-RAM and stack-headroom deltas for
+  every board that includes the forwarder, and confirm that boards without
+  it are unchanged.
 
-Gate: all conformance cases pass against the pinned release, bridge operation
-requires no MeshCore-specific configuration, and ordinary UMSH forwarding and
-ULCP behavior regressions remain green.
+Gate: MeshCore companions interoperate through the forwarder in every case
+above, bridge operation requires no MeshCore-specific configuration, and
+ordinary UMSH forwarding and ULCP behavior regressions remain green.
 
 ## Acceptance criteria
 
 The feature is ready only when all of the following are true:
 
-- The exact upstream commit and compatibility contract are visible in code,
-  tests, and release notes.
-- The default is off; both the master forwarding switch and MeshCore switch
-  must be on before MeshCore forwarding occurs.
+- The upstream commit the wire behavior follows is named in code, vectors,
+  and release notes.
+- The default is off; the radio, the master forwarding switch, and the
+  MeshCore switch must all be on before MeshCore forwarding occurs.
+- The MeshCore switch cannot be turned on while the identity has a reserved
+  MeshCore prefix, MeshCore forwarding never runs under such an identity, and
+  clients explain why.
+- A replaced identity takes effect for both forwarders at the next boot, with
+  both enables unchanged.
+- The link-quality thresholds gate measured flood forwarding in both
+  protocols.
+- The forwarder performs no private-key operation; its only identity input
+  is the public key.
 - No second identity, MeshCore ACL, contact/channel store, management service,
-  scheduled advert, or management reply exists.
-- Every supported payload and route class matches oracle decisions and wire
-  mutation, including negative and malformed cases.
-- Delay, priority, random mapping, CAD retry, forced transmit, queue/pool
-  behavior, duplicate replacement, loop detection, and internal airtime
-  budget match the baseline under deterministic inputs.
+  scheduled advertisement, or management reply exists.
+- Every route and payload class matches the interoperability vectors,
+  including negative and malformed cases.
 - MeshCore region codes derive from the existing region strings and do not
   reuse UMSH's derived two-byte codes; `$` private-region names produce no
   MeshCore key without a keystore.
+- MeshCore transmits use UMSH's CAD gate, busy backoff rule, airtime
+  estimate, RNG, and shared duty ledger, and the UMSH MAC is unchanged.
+- The only ULCP additions are the enable and the region policy; every
+  MeshCore tunable is a constant at its baseline default.
+- Each region policy forwards and drops exactly as its row in the Region
+  policy table says, for unscoped, matching, and unmatched floods.
 - `PROP_MAC_BACKHAUL` neither disables nor special-cases the forwarder, and a
   two-segment bridge hardware test passes.
-- UMSH and MeshCore airtime together remain bounded by the shared duty ledger.
-- Firmware size and RAM remain inside every board's established release
-  margin.
+- Firmware size and RAM remain inside the established release margin of
+  every board that includes the forwarder, and boards without it are
+  unchanged.
 
 ## Risks and decisions to resolve before implementation
 
-1. **ANON_REQ compatibility:** confirm with captured v1.17.1 traffic that the
-   repository's Ed25519-to-shared-secret and MAC/decrypt primitives reproduce
-   MeshCore exactly. If not, add a narrowly licensed compatibility primitive;
-   do not omit the self-request rule.
-2. **Numeric tuning representation:** prove the proposed thousandths encoding
-   reproduces binary32 scheduling at all accepted values or switch the ULCP
-   representation before allocating identifiers.
-3. **Backhaul metadata with nonzero `rxdelay`:** either preserve SNR across the
-   infrastructure or specify a deterministic non-radio score. The default-zero
-   configuration already works without this extension.
-4. **Radio occupancy API:** select an interface that reports another local
-   client's in-flight TX as busy without coupling the pure MeshCore engine to
-   the firmware mux.
-5. **Identity private-key format:** verify that the stored UMSH seed/key form
-   produces precisely the MeshCore public identity and shared-secret behavior
-   without retaining an extra expanded private-key copy.
-6. **Upstream quirks:** golden vectors, not prose recollection, decide behavior.
-   Preserve observable valid-frame quirks such as hashing only payload type and
-   payload for ordinary packets, hashing the two-byte in-memory `path_len` for
-   TRACE, comparing only transport code zero, and excluding transport-code
-   bytes from retransmit-delay airtime. Fix only memory-unsafe malformed-input
-   behavior.
+1. **TRACE SNR across the backhaul:** a direct TRACE forwarded from a
+   backhaul delivery has no measured SNR for the bridge link. The
+   recommendation is to append the maximum value, `127` (+31.75 dB), so trace
+   tools show the bridge as an excellent link, rather than `0` dB, which reads
+   as a marginal one. Preserving SNR end to end would not help, because the
+   bridge link is not a radio link.
+2. **Receive-gate strikes:** until the runner's receive gate uses a deadline,
+   three refusals during one reception let the next transmit, from any
+   client, tear it down. A third client makes that more likely. The deadline
+   work is tracked separately and is not a prerequisite.
+3. **Upstream quirks:** match quirks that shape valid frames on the wire, such
+   as hashing only payload type and payload for ordinary packets, hashing the
+   two-byte in-memory `path_len` for TRACE, comparing only the first
+   transport code, and excluding transport codes from retransmit-delay
+   airtime. Do not carry forward behavior that is a bug, such as unsafe
+   handling of malformed input or forcing a transmit over a reception in
+   progress.
