@@ -16,8 +16,9 @@ use umsh_hal::{Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, Tx
 use crate::{
     AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
     DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_TX,
-    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES,
-    MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict, ReplayWindow,
+    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS,
+    MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict,
+    ReplayWindow,
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
     peers::{ChannelTable, PeerCryptoMap, PeerId, PeerRegistry, RouteOffer},
@@ -1828,8 +1829,9 @@ impl<
             return None;
         }
         let receipt = slot.next_receipt();
-        slot.try_insert_pending_ack(receipt, PendingAck::repeat_only(peer, resend))
-            .ok()?;
+        let pending =
+            PendingAck::repeat_only(peer, resend).with_max_retries(MAX_ACK_FORWARD_RETRIES);
+        slot.try_insert_pending_ack(receipt, pending).ok()?;
         Some(receipt)
     }
 
@@ -2433,7 +2435,7 @@ impl<
                 if let crate::AckState::AwaitingForward {
                     confirm_deadline_ms,
                 } = pending.state
-                    && pending.retries < MAX_FORWARD_RETRIES
+                    && pending.retries < pending.max_retries
                 {
                     earliest = Some(
                         earliest.map_or(confirm_deadline_ms, |e: u64| e.min(confirm_deadline_ms)),
@@ -3569,7 +3571,7 @@ impl<
                         confirm_deadline_ms,
                     } = pending.state
                     {
-                        if now_ms >= confirm_deadline_ms && pending.retries < MAX_FORWARD_RETRIES {
+                        if now_ms >= confirm_deadline_ms && pending.retries < pending.max_retries {
                             pending.retries = pending.retries.saturating_add(1);
                             let backoff_cap_ms = t_frame_ms;
                             let backoff_ms = if backoff_cap_ms == 0 {
@@ -6145,8 +6147,8 @@ impl<
         let direct_ack_deadline_ms = sent_ms.saturating_add(self.direct_ack_timeout_ms());
         let forwarded_ack_deadline_ms = sent_ms
             .saturating_add(self.forwarded_ack_timeout_ms(Self::allowed_forward_count(frame)));
-        let repeat_only_deadline_ms = sent_ms.saturating_add(self.repeat_confirm_timeout_ms());
         let confirm_timeout_ms = self.forward_confirm_timeout_ms();
+        let retry_period_ms = self.forward_retry_period_ms();
         let confirm_key = Self::confirmation_key(frame);
 
         let post_tx_listen = {
@@ -6170,7 +6172,13 @@ impl<
             // scheduled with.
             if pending.ack_deadline_ms == 0 {
                 pending.ack_deadline_ms = match (pending.completion, needs_forward_confirmation) {
-                    (CompletionSignal::RepeatOnly, _) => repeat_only_deadline_ms,
+                    (CompletionSignal::RepeatOnly, _) => {
+                        sent_ms.saturating_add(Self::repeat_confirm_timeout_ms(
+                            confirm_timeout_ms,
+                            retry_period_ms,
+                            pending.max_retries,
+                        ))
+                    }
                     (CompletionSignal::Ack, true) => forwarded_ack_deadline_ms,
                     (CompletionSignal::Ack, false) => direct_ack_deadline_ms,
                 };
@@ -6338,7 +6346,12 @@ impl<
             .forward_confirm_timeout_ms()
             .saturating_sub(t_frame_ms)
             .max(t_frame_ms);
-        self.repeat_confirm_timeout_ms().saturating_add(
+        Self::repeat_confirm_timeout_ms(
+            self.forward_confirm_timeout_ms(),
+            self.forward_retry_period_ms(),
+            MAX_FORWARD_RETRIES,
+        )
+        .saturating_add(
             per_hop_ms
                 .saturating_mul(2)
                 .saturating_mul(u64::from(forwards.max(1))),
@@ -6371,15 +6384,23 @@ impl<
     /// How long a send waits to overhear its own packet carried onward before
     /// the attempt is over.
     ///
-    /// This spans the full retry ladder: every confirmation window plus the
-    /// backoff that separates them. A send with no ACK to wait for ends here;
-    /// an ACK-requested send allows a further frame time for the ack to
-    /// return.
-    fn repeat_confirm_timeout_ms(&self) -> u64 {
-        let per_retry_ms = u64::from(self.forward_retry_backoff_cap_ms())
-            .saturating_add(self.forward_confirm_timeout_ms());
-        self.forward_confirm_timeout_ms()
-            .saturating_add(per_retry_ms.saturating_mul(u64::from(MAX_FORWARD_RETRIES)))
+    /// This spans the send's whole retry ladder: every confirmation window
+    /// plus the backoff that separates them. A send with no ACK to wait for
+    /// ends here; an ACK-requested send allows a further frame time for the
+    /// ack to return.
+    fn repeat_confirm_timeout_ms(
+        confirm_timeout_ms: u64,
+        retry_period_ms: u64,
+        retries: u8,
+    ) -> u64 {
+        confirm_timeout_ms.saturating_add(retry_period_ms.saturating_mul(u64::from(retries)))
+    }
+
+    /// One rung of the retry ladder: the worst-case backoff before a retry
+    /// plus the confirmation window after it.
+    fn forward_retry_period_ms(&self) -> u64 {
+        u64::from(self.forward_retry_backoff_cap_ms())
+            .saturating_add(self.forward_confirm_timeout_ms())
     }
 
     fn pending_ack_mut(

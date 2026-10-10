@@ -7,8 +7,8 @@ use umsh_core::{
 use umsh_hal::Snr;
 
 use crate::{
-    CapacityError, LocalIdentityId, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS,
-    cache::DupCacheKey,
+    CapacityError, LocalIdentityId, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN,
+    MAX_SOURCE_ROUTE_HINTS, cache::DupCacheKey,
 };
 
 /// Opaque tracking token for delivery or local transmission completion.
@@ -370,7 +370,10 @@ pub enum CompletionSignal {
 /// - **`ack_deadline_ms`**—absolute deadline for the final ACK. Expiry means failure and
 ///   the entry is removed.
 /// - **`retries`**—the number of retransmissions already attempted; capped at
-///   [`MAX_FORWARD_RETRIES`](crate::MAX_FORWARD_RETRIES).
+///   `max_retries`.
+/// - **`max_retries`**—the retransmission budget,
+///   [`MAX_FORWARD_RETRIES`](crate::MAX_FORWARD_RETRIES) unless narrowed with
+///   [`PendingAck::with_max_retries`].
 /// - **`state`**—current position in the [`AckState`] lifecycle (forwarding confirmation
 ///   wait or final-ACK wait).
 ///
@@ -395,6 +398,8 @@ pub struct PendingAck<const FRAME: usize = MAX_RESEND_FRAME_LEN> {
     pub ack_deadline_ms: u64,
     /// Number of retries already attempted.
     pub retries: u8,
+    /// Retransmissions this send may make before it gives up.
+    pub max_retries: u8,
     /// Current state in the ACK lifecycle.
     pub state: AckState,
     /// Which observation completes this send.
@@ -418,6 +423,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             sent_ms: 0,
             ack_deadline_ms: 0,
             retries: 0,
+            max_retries: MAX_FORWARD_RETRIES,
             state: AckState::Queued {
                 needs_forward_confirmation: false,
             },
@@ -436,6 +442,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             sent_ms: 0,
             ack_deadline_ms: 0,
             retries: 0,
+            max_retries: MAX_FORWARD_RETRIES,
             state: AckState::Queued {
                 needs_forward_confirmation: true,
             },
@@ -455,6 +462,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             sent_ms: 0,
             ack_deadline_ms: 0,
             retries: 0,
+            max_retries: MAX_FORWARD_RETRIES,
             state: AckState::Queued {
                 needs_forward_confirmation: true,
             },
@@ -462,6 +470,13 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             confirm_key: None,
             cached_route_revision: 0,
         }
+    }
+
+    /// Narrow the retransmission budget below
+    /// [`MAX_FORWARD_RETRIES`](crate::MAX_FORWARD_RETRIES).
+    pub fn with_max_retries(mut self, max_retries: u8) -> Self {
+        self.max_retries = max_retries.min(MAX_FORWARD_RETRIES);
+        self
     }
 
     /// Whether a transport ACK is expected for this entry.

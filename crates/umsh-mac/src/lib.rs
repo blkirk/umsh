@@ -190,6 +190,14 @@ pub(crate) const MAX_SOURCE_ROUTE_HINTS: usize = 15;
 pub(crate) const MAX_RESEND_FRAME_LEN: usize = 256;
 pub(crate) const DEFAULT_DUP_CACHE_SIZE: usize = 64;
 pub(crate) const MAX_FORWARD_RETRIES: u8 = 3;
+/// Retries a routed MAC ack gets when no repeat of it is overheard.
+///
+/// One retry recovers an ack the repeater missed: the repeater has no
+/// duplicate entry for it and carries the retry. If the repeater did carry
+/// the first copy and only the overhearing failed, every byte-identical
+/// retry lands inside its ack duplicate-cache lifetime and is suppressed, so
+/// further retries cannot be confirmed and only spend airtime.
+pub(crate) const MAX_ACK_FORWARD_RETRIES: u8 = 1;
 
 /// CAD attempts a frame gets before it is dropped, from
 /// [Channel Access § Backoff Procedure][spec]: one initial attempt and

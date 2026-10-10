@@ -2328,6 +2328,72 @@ fn routed_mac_ack_retries_until_its_repeat_is_heard() {
     );
 }
 
+/// A routed ack gets one retry, not the full ladder. A repeater that carried
+/// the first copy suppresses every identical one inside its ack
+/// duplicate-cache lifetime, so a retry past the first cannot be confirmed.
+#[test]
+fn routed_mac_ack_retries_once_then_goes_quiet() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let peer_key = test_pubkey(0xAB);
+    let peer_id = mac.add_peer(peer_key).unwrap();
+    mac.peer_registry_mut().update_route(
+        peer_id,
+        CachedRoute::Source(heapless::Vec::from_slice(&[RouterHint([0x01, 0x02])]).unwrap()),
+    );
+
+    mac.queue_mac_ack_for_peer(local_id, peer_id, [0xA5; 8], false)
+        .unwrap();
+    block_on(mac.transmit_next(&mut |_, _| {})).unwrap();
+    assert_eq!(mac.radio().transmitted.len(), 1);
+    let receipt = sole_tracked_receipt(&mac, local_id);
+
+    let t_frame = u64::from(mac.radio_mut().t_frame_ms());
+    let confirm_deadline_ms = |mac: &TestMac| match mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .map(|pending| pending.state)
+    {
+        Some(AckState::AwaitingForward {
+            confirm_deadline_ms,
+        }) => confirm_deadline_ms,
+        other => panic!("expected AwaitingForward, got {other:?}"),
+    };
+
+    // The one retry.
+    let deadline_ms = confirm_deadline_ms(&mac);
+    mac.clock()
+        .advance_ms(deadline_ms.saturating_sub(mac.clock().now_ms()));
+    mac.service_pending_ack_timeouts(|_, _| {}).unwrap();
+    mac.clock().advance_ms(t_frame + 1);
+    block_on(mac.transmit_next(&mut |_, _| {})).unwrap();
+    assert_eq!(mac.radio().transmitted.len(), 2);
+
+    // Its confirmation window lapses too: nothing further is queued, and
+    // the entry ends with the window rather than outliving it.
+    let deadline_ms = confirm_deadline_ms(&mac);
+    mac.clock()
+        .advance_ms(deadline_ms.saturating_sub(mac.clock().now_ms()));
+    mac.service_pending_ack_timeouts(|_, _| {}).unwrap();
+    assert!(mac.tx_queue_mut().pop_next().is_none(), "no second retry");
+    let terminal_ms = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .map_or(0, |pending| pending.ack_deadline_ms);
+    mac.clock()
+        .advance_ms(terminal_ms.saturating_sub(mac.clock().now_ms()));
+    mac.service_pending_ack_timeouts(|_, _| {}).unwrap();
+    assert!(
+        mac.identity(local_id)
+            .unwrap()
+            .pending_ack(&receipt)
+            .is_none()
+    );
+    assert_eq!(mac.radio().transmitted.len(), 2);
+}
+
 /// The ack an untracked path would drop: with no identity to track it,
 /// a routed ack still goes out fire-and-forget.
 #[test]
