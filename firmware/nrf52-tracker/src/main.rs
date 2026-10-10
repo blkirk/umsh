@@ -3574,6 +3574,7 @@ mod firmware {
             TX_PREAMBLE_SYMBOLS,
             umsh_radio_loraphy::RxStrategy::Continuous,
             Some(&STATS),
+            umsh_bsp_nrf52840::EmbassyClock,
             temperature,
         )
         .await;

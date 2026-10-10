@@ -1522,6 +1522,7 @@ async fn radio_task(lora: board_radio::Radio) {
         TX_PREAMBLE_SYMBOLS,
         RxStrategy::Continuous,
         Some(&STATS),
+        umsh_hal::EmbassyClock,
     )
     .await;
 }

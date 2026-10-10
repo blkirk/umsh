@@ -4,7 +4,10 @@ use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embedded_hal_async::{
@@ -17,13 +20,17 @@ use lora_phy::{
     mod_traits::InterfaceVariant,
     sx126x::{Config, Sx126x, Sx1262, TcxoCtrlVoltage},
 };
-use umsh_radio_loraphy::{Channels, DeviceControl, DeviceSettings, RxStrategy, device_runner};
+use umsh_hal::{CadPolicy, Clock};
+use umsh_radio_loraphy::{
+    Channels, DeviceControl, DeviceSettings, RxStrategy, TxError, TxRequest, device_runner,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Mode {
     #[default]
     Standby,
     Receiving,
+    Transmitting,
     Sleeping,
 }
 
@@ -32,6 +39,9 @@ struct Chip {
     mode: Mode,
     commands: Vec<Vec<u8>>,
     sleep_failures: usize,
+    /// IRQ flags latched for the next `GetIrqStatus`; DIO1 is high while
+    /// any are set.
+    irq_flags: u16,
 }
 
 struct Bus(Rc<RefCell<Chip>>);
@@ -52,8 +62,10 @@ impl SpiDevice for Bus {
             }
             chip.commands.push(command.to_vec());
             match opcode {
+                0x02 => chip.irq_flags = 0,
                 0x80 => chip.mode = Mode::Standby,
                 0x82 => chip.mode = Mode::Receiving,
+                0x83 => chip.mode = Mode::Transmitting,
                 0x84 => {
                     assert_eq!(chip.mode, Mode::Standby, "SetSleep requires standby");
                     if chip.sleep_failures != 0 {
@@ -65,11 +77,18 @@ impl SpiDevice for Bus {
                 _ => (),
             }
         }
-        for operation in operations {
+        let irq_status = matches!(operations.first(), Some(Operation::Write([0x12])));
+        for (index, operation) in operations.iter_mut().enumerate() {
             match operation {
                 Operation::Read(bytes)
                 | Operation::Transfer(bytes, _)
-                | Operation::TransferInPlace(bytes) => bytes.fill(0),
+                | Operation::TransferInPlace(bytes) => {
+                    bytes.fill(0);
+                    // GetIrqStatus: opcode, status byte, then the flags.
+                    if irq_status && index == 2 {
+                        bytes.copy_from_slice(&chip.irq_flags.to_be_bytes());
+                    }
+                }
                 _ => (),
             }
         }
@@ -92,7 +111,14 @@ impl InterfaceVariant for Pins {
         Ok(())
     }
     async fn await_irq(&mut self) -> Result<(), RadioError> {
-        core::future::pending().await
+        core::future::poll_fn(|_| {
+            if self.0.borrow().irq_flags != 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
     async fn enable_rf_switch_rx(&mut self) -> Result<(), RadioError> {
         Ok(())
@@ -108,6 +134,14 @@ impl InterfaceVariant for Pins {
 struct Delay;
 impl DelayNs for Delay {
     async fn delay_ns(&mut self, _: u32) {}
+}
+
+#[derive(Clone, Default)]
+struct TestClock(Rc<Cell<u64>>);
+impl Clock for TestClock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
 }
 
 fn poll<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -164,7 +198,8 @@ fn disabled_radio_sleeps_without_polling_and_reenable_restores_rx() {
         8,
         32,
         RxStrategy::Continuous,
-        None
+        None,
+        TestClock::default(),
     ));
     // A bare boot must sleep too, before the first configuration arrives.
     assert!(poll(runner.as_mut()).is_pending());
@@ -222,7 +257,8 @@ fn sleep_recovery_is_bounded_and_retries_on_the_next_configuration() {
         8,
         32,
         RxStrategy::Continuous,
-        None
+        None,
+        TestClock::default(),
     ));
     assert!(poll(runner.as_mut()).is_pending());
     assert_eq!(chip.borrow().mode, Mode::Standby);
@@ -251,4 +287,66 @@ fn sleep_recovery_is_bounded_and_retries_on_the_next_configuration() {
         poll(core::pin::pin!(control.wait_shutdown())),
         Poll::Ready(())
     );
+}
+
+fn tx_request() -> TxRequest {
+    TxRequest {
+        data: heapless::Vec::from_slice(&[1, 2, 3]).unwrap(),
+        power_dbm: None,
+        cad: CadPolicy::Skip,
+    }
+}
+
+/// A detected preamble holds off transmits for one maximum-length frame
+/// time, however often they are retried, and no longer.
+#[test]
+fn preamble_refuses_transmits_until_a_max_frame_could_have_ended() {
+    const PREAMBLE_DETECTED: u16 = 0x0004;
+    // SF10/500 kHz/CR 4/5 with a 32-symbol preamble and a 255-byte
+    // payload is on the air for 623.104 ms.
+    const WINDOW_MS: u64 = 624;
+
+    let chip = Rc::new(RefCell::new(Chip::default()));
+    let (lora, channel, control) = fixture(chip.clone());
+    let clock = TestClock::default();
+    let mut runner = core::pin::pin!(device_runner(
+        lora,
+        channel,
+        control,
+        8,
+        32,
+        RxStrategy::Continuous,
+        None,
+        clock.clone(),
+    ));
+    control.apply(settings(true));
+    assert!(poll(runner.as_mut()).is_pending());
+    assert_eq!(chip.borrow().mode, Mode::Receiving);
+
+    clock.0.set(1_000);
+    chip.borrow_mut().irq_flags = PREAMBLE_DETECTED;
+    assert!(poll(runner.as_mut()).is_pending());
+    assert_eq!(chip.borrow().irq_flags, 0, "the runner clears the IRQ");
+
+    // Five refusals, more than any fixed retry budget would allow.
+    for now in [1_000, 1_050, 1_200, 1_400, 1_000 + WINDOW_MS - 1] {
+        clock.0.set(now);
+        assert!(channel.tx.try_send(tx_request()).is_ok());
+        assert!(poll(runner.as_mut()).is_pending());
+        assert!(
+            matches!(
+                poll(core::pin::pin!(channel.tx_done.wait())),
+                Poll::Ready(Err(TxError::CadTimeout))
+            ),
+            "refused at {now}"
+        );
+        assert_eq!(chip.borrow().mode, Mode::Receiving, "RX kept at {now}");
+    }
+
+    // The preamble never became a frame: once one could no longer be on
+    // the air, the stale detection stops blocking.
+    clock.0.set(1_000 + WINDOW_MS);
+    assert!(channel.tx.try_send(tx_request()).is_ok());
+    assert!(poll(runner.as_mut()).is_pending());
+    assert_eq!(chip.borrow().mode, Mode::Transmitting);
 }

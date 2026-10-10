@@ -96,6 +96,7 @@ fn lr1110_temperature_is_fresh_restores_rx_and_never_wakes_disabled_radio() {
         32,
         RxStrategy::Continuous,
         None,
+        StoppedClock,
         Lr1110Temperature,
     ));
     assert!(poll(runner.as_mut()).is_pending());
@@ -158,6 +159,7 @@ fn lr1110_canceled_temperature_reply_is_not_reused() {
         32,
         RxStrategy::Continuous,
         None,
+        StoppedClock,
         Lr1110Temperature,
     ));
     control.apply(settings(true));
@@ -198,6 +200,13 @@ impl InterfaceVariant for Pins {
 struct Delay;
 impl DelayNs for Delay {
     async fn delay_ns(&mut self, _: u32) {}
+}
+/// No test here raises a preamble IRQ, so the receive-busy gate never arms.
+struct StoppedClock;
+impl umsh_hal::Clock for StoppedClock {
+    fn now_ms(&self) -> u64 {
+        0
+    }
 }
 fn poll<F: Future>(f: Pin<&mut F>) -> Poll<F::Output> {
     f.poll(&mut Context::from_waker(Waker::noop()))
@@ -251,7 +260,8 @@ fn lr1110_reaches_rx_after_boot_settings_arrive() {
         16,
         32,
         RxStrategy::Continuous,
-        None
+        None,
+        StoppedClock,
     ));
     assert!(poll(runner.as_mut()).is_pending());
     control.apply(settings(true));
@@ -270,7 +280,8 @@ fn lr1110_disable_reenable_and_shutdown_use_cold_sleep() {
         16,
         32,
         RxStrategy::Continuous,
-        None
+        None,
+        StoppedClock,
     ));
     assert!(poll(runner.as_mut()).is_pending());
     assert_eq!(chip.borrow().mode, Mode::Sleeping);
@@ -319,7 +330,8 @@ fn lr1110_can_start_a_transmission_after_reenable() {
         16,
         32,
         RxStrategy::Continuous,
-        None
+        None,
+        StoppedClock,
     ));
     control.apply(settings(true));
     assert!(poll(runner.as_mut()).is_pending());

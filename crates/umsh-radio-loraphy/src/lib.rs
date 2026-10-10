@@ -12,10 +12,11 @@
 //! 1. **[`runner`]**—an Embassy task that owns the `lora_phy::LoRa` instance.
 //!    It loops between continuous RX and TX: when a TX request arrives on the
 //!    TX channel it exits RX, transmits, signals the result, then re-enters RX.
-//!    A request that arrives while a frame is being received is refused with
-//!    [`TxError::CadTimeout`] (up to [`RX_GATE_MAX_STRIKES`] times) instead of
-//!    tearing down the reception—the channel is busy either way, and the MAC
-//!    already backs off and retries on that error.
+//!    A request that arrives while a frame may still be arriving—within
+//!    [`rx_busy_window_ms`] of the last preamble IRQ—is refused with
+//!    [`TxError::CadTimeout`] instead of tearing down the reception: the
+//!    channel is busy either way, and the MAC already backs off and retries
+//!    on that error.
 //!
 //! 2. **[`LoraphyRadio`]**—a lightweight handle used by the MAC coordinator.
 //!    It borrows `&'static Channels` for `transmit()` (sends request, awaits
@@ -29,7 +30,7 @@
 //! use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 //!
 //! static RADIO_CH: Channels<ThreadModeRawMutex, 4, 2> = Channels::new();
-//! // Spawn runner(lora, &RADIO_CH, mdltn, rx_pkt, tx_pkt, power_dbm).
+//! // Spawn runner(lora, &RADIO_CH, mdltn, rx_pkt, tx_pkt, power_dbm, stats, clock).
 //! // Pass LoraphyRadio::new(&RADIO_CH, t_frame_ms) to the MAC.
 //! ```
 
@@ -53,7 +54,7 @@ use lora_phy::{
     mod_traits::{IrqState, RadioKind},
 };
 pub use umsh_hal::{CadPolicy, TxError};
-use umsh_hal::{RxInfo, RxOrigin, Snr, TxOptions};
+use umsh_hal::{Clock, RxInfo, RxOrigin, Snr, TxOptions};
 /// The vetted PHY profiles, re-exported so a board crate that depends
 /// only on this one can name a profile without a manifest entry.
 pub use umsh_ulcp::profiles;
@@ -230,25 +231,87 @@ fn air_rx_frame(payload: &[u8], status: PacketStatus) -> RxFrame {
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
 
-/// Maximum consecutive TX requests refused with [`TxError::CadTimeout`] while
-/// a reception appears to be in progress (preamble seen, frame not finished).
+/// Preamble length, in symbols, assumed for a sender when sizing
+/// [`rx_busy_window_ms`]: the longest any current profile transmits
+/// (MeshCore's 32 at SF7–SF8; it sends 16 at SF9–SF12). A device runner
+/// whose own TX preamble is longer assumes that instead.
+pub const RX_BUSY_PREAMBLE_SYMBOLS: u16 = 32;
+
+/// How long a detected preamble keeps the channel busy, in milliseconds.
 ///
-/// Refusing without touching the radio keeps the in-flight frame receivable—
-/// tearing down RX for the CAD gate would lose it, and the gate would report
-/// busy anyway. The chip raises no IRQ when a detected preamble turns out to
-/// be noise, so the flag can go stale; after this many refusals the next
-/// request falls through to the radio's own CAD, which either confirms the
-/// channel is busy or clears the way (the TX path re-prepares RX afterwards,
-/// resetting the gate).
-pub const RX_GATE_MAX_STRIKES: u8 = 3;
+/// The on-air time of a maximum-length frame measured from the start of
+/// its preamble: `sender_preamble` symbols (at least
+/// [`RX_BUSY_PREAMBLE_SYMBOLS`]), sync word, header, and a
+/// [`MAX_PAYLOAD`]-byte payload at the receiver's spreading factor,
+/// bandwidth, and coding rate. The chip raises its preamble IRQ somewhere
+/// inside the preamble (or, for a valid header, later still), so any frame
+/// that IRQ belongs to has ended by the time this window has elapsed from
+/// it.
+///
+/// Explicit header and CRC are assumed, as the runners configure them;
+/// both only lengthen a frame, so the bound also covers a sender without
+/// them. Low-data-rate optimization is assumed for every symbol longer
+/// than 16 ms, a superset of each supported chip's own rule. The coding
+/// rate is the receiver's: an explicit header would let a sender pick a
+/// slower one, but every profile fixes it.
+pub fn rx_busy_window_ms(mdltn: &ModulationParams, sender_preamble: u16) -> u32 {
+    umsh_ulcp::airtime::lora_airtime_ms_with_preamble(
+        sf_value(mdltn.spreading_factor) as u8,
+        bw_value_hz(mdltn.bandwidth),
+        mdltn.coding_rate.denom() as u8,
+        MAX_PAYLOAD,
+        sender_preamble.max(RX_BUSY_PREAMBLE_SYMBOLS),
+    )
+}
+
+/// The receive-busy gate: whether a TX request must be refused because a
+/// frame may still be arriving.
+///
+/// A preamble IRQ arms a deadline one [`rx_busy_window_ms`] out, and TX
+/// requests are refused with [`TxError::CadTimeout`] until it passes.
+/// Refusing without touching the radio keeps the in-flight frame
+/// receivable—tearing down RX for the CAD gate would lose it, and the
+/// gate would report busy anyway. The runners start a fresh gate each
+/// time they re-prepare RX (after a completed frame, a CRC failure, an
+/// error, or a TX), which disarms it.
+///
+/// The chip raises no IRQ when a detected preamble turns out to be noise,
+/// so an armed gate can go stale. Once the deadline passes, no frame that
+/// preamble could have started is still on the air, and the next request
+/// falls through to the radio's own CAD.
+#[derive(Clone, Copy, Debug)]
+struct RxBusyGate {
+    window_ms: u32,
+    busy_until_ms: Option<u64>,
+}
+
+impl RxBusyGate {
+    const fn new(window_ms: u32) -> Self {
+        Self {
+            window_ms,
+            busy_until_ms: None,
+        }
+    }
+
+    /// Note a preamble IRQ at `now_ms`. Every IRQ re-arms from its own
+    /// time: each is fresh evidence of a frame on the air, and a real frame
+    /// that follows a noise detection must not inherit the earlier deadline.
+    fn arm(&mut self, now_ms: u64) {
+        self.busy_until_ms = Some(now_ms.saturating_add(u64::from(self.window_ms)));
+    }
+
+    /// Whether a frame may still be arriving at `now_ms`.
+    fn is_busy(&self, now_ms: u64) -> bool {
+        self.busy_until_ms.is_some_and(|until| now_ms < until)
+    }
+}
 
 /// Execute one transmit request: CAD gate (listen-before-talk) per the
 /// request's [`CadPolicy`], then transmit.
 ///
 /// `CadPolicy::RetryFor` is intentionally handled as a single gate, like
-/// `Gate`: the runner has no time source, and the MAC coordinator already
-/// owns retry pacing by backing off on [`TxError::CadTimeout`] and
-/// re-queueing the frame.
+/// `Gate`: the MAC coordinator already owns retry pacing by backing off on
+/// [`TxError::CadTimeout`] and re-queueing the frame.
 ///
 /// NOT cancel-safe (`cad`, `prepare_for_tx`, and `tx` must all run to
 /// completion)—call outside any `select` branch, like the TX arm it
@@ -291,6 +354,8 @@ where
 /// Wrap this in a `#[embassy_executor::task]` in the binary crate so the
 /// concrete monomorphisation is visible to the linker.
 ///
+/// `clock` times the receive-busy gate (see [`rx_busy_window_ms`]).
+///
 /// # Cancellation safety
 ///
 /// `wait_for_irq` is the only `await` point that may be cancelled (it just
@@ -302,7 +367,8 @@ where
 /// helper internally calls `complete_rx`/`process_irq_event`, so it is
 /// **not** safe inside a `select` either; we hand-roll the IRQ loop here
 /// to keep cancellation pinned to `wait_for_irq`.
-pub async fn runner<RK, DLY, M, const RX: usize, const TX: usize>(
+#[allow(clippy::too_many_arguments)]
+pub async fn runner<RK, DLY, M, C, const RX: usize, const TX: usize>(
     mut lora: LoRa<RK, DLY>,
     ch: &'static Channels<M, RX, TX>,
     mdltn: ModulationParams,
@@ -310,13 +376,16 @@ pub async fn runner<RK, DLY, M, const RX: usize, const TX: usize>(
     mut tx_pkt: PacketParams,
     power_dbm: i32,
     stats: Option<&'static StatsLedger>,
+    clock: C,
 ) -> !
 where
     RK: RadioKind,
     DLY: embedded_hal_async::delay::DelayNs,
     M: RawMutex,
+    C: Clock,
 {
     let mut rx_buf = [0u8; MAX_PAYLOAD];
+    let rx_busy_window = rx_busy_window_ms(&mdltn, tx_pkt.preamble_length);
 
     'outer: loop {
         if lora
@@ -333,8 +402,7 @@ where
         // Inner loop: stay in continuous RX, handling partial-packet IRQs
         // (PreambleReceived) without re-preparing. Break back to the outer
         // loop to re-prepare RX after a completed frame, an error, or a TX.
-        let mut rx_in_progress = false;
-        let mut rx_gate_strikes: u8 = 0;
+        let mut rx_gate = RxBusyGate::new(rx_busy_window);
         loop {
             match select(lora.wait_for_irq(), ch.tx.receive()).await {
                 Either::First(Ok(())) => {
@@ -358,7 +426,7 @@ where
                             continue 'outer; // re-prepare RX for the next frame
                         }
                         Ok(Some(IrqState::PreambleReceived)) => {
-                            rx_in_progress = true; // gate TX until the frame resolves
+                            rx_gate.arm(clock.now_ms()); // gate TX until the frame resolves
                             continue;
                         }
                         Ok(_) => continue, // no-op IRQ: stay in RX
@@ -389,8 +457,7 @@ where
                     // RX for the CAD gate (which would lose the frame and
                     // report busy anyway). The MAC treats this like any other
                     // busy verdict and retries after backoff.
-                    if rx_in_progress && rx_gate_strikes < RX_GATE_MAX_STRIKES {
-                        rx_gate_strikes += 1;
+                    if rx_gate.is_busy(clock.now_ms()) {
                         ch.tx_done.signal(Err(TxError::CadTimeout));
                         continue;
                     }
@@ -655,12 +722,14 @@ pub fn coding_rate_from_denom(cr: u8) -> Option<CodingRate> {
 ///
 /// `rx_strategy` picks how the radio listens between frames; the
 /// duty-cycle windows are recomputed from each new set of modulation
-/// settings (see [`duty_cycle_rx_mode`]).
+/// settings (see [`duty_cycle_rx_mode`]). `clock` times the receive-busy
+/// gate, which is likewise resized for each set (see [`rx_busy_window_ms`]).
 ///
 /// Cancellation-safety analysis is identical to [`runner`]: only
 /// `wait_for_irq` and the two channel/signal waits are cancelled by the
 /// select; IRQ processing and TX always run to completion.
-pub async fn device_runner<RK, DLY, M, const RX: usize, const TX: usize>(
+#[allow(clippy::too_many_arguments)]
+pub async fn device_runner<RK, DLY, M, C, const RX: usize, const TX: usize>(
     lora: LoRa<RK, DLY>,
     ch: &'static Channels<M, RX, TX>,
     ctl: &'static DeviceControl<M>,
@@ -668,11 +737,13 @@ pub async fn device_runner<RK, DLY, M, const RX: usize, const TX: usize>(
     tx_preamble: u16,
     rx_strategy: RxStrategy,
     stats: Option<&'static StatsLedger>,
+    clock: C,
 ) -> !
 where
     RK: RadioKind,
     DLY: embedded_hal_async::delay::DelayNs,
     M: RawMutex,
+    C: Clock,
 {
     device_runner_with_temperature(
         lora,
@@ -682,6 +753,7 @@ where
         tx_preamble,
         rx_strategy,
         stats,
+        clock,
         NoTemperature,
     )
     .await
@@ -689,7 +761,7 @@ where
 
 /// [`device_runner`] with a temperature hook executed by the same bus owner.
 #[allow(clippy::too_many_arguments)]
-pub async fn device_runner_with_temperature<RK, DLY, M, T, const RX: usize, const TX: usize>(
+pub async fn device_runner_with_temperature<RK, DLY, M, C, T, const RX: usize, const TX: usize>(
     mut lora: LoRa<RK, DLY>,
     ch: &'static Channels<M, RX, TX>,
     ctl: &'static DeviceControl<M>,
@@ -697,12 +769,14 @@ pub async fn device_runner_with_temperature<RK, DLY, M, T, const RX: usize, cons
     tx_preamble: u16,
     rx_strategy: RxStrategy,
     stats: Option<&'static StatsLedger>,
+    clock: C,
     mut temperature: T,
 ) -> !
 where
     RK: RadioKind,
     DLY: embedded_hal_async::delay::DelayNs,
     M: RawMutex,
+    C: Clock,
     T: TemperatureSensor<RK>,
 {
     use embassy_futures::select::{Either4, select4};
@@ -790,6 +864,7 @@ where
         };
         ch.spreading_factor
             .store(sf_value(active.sf) as u8, Ordering::Relaxed);
+        let rx_busy_window = rx_busy_window_ms(&mdltn, tx_preamble);
 
         let rx_mode = match rx_strategy {
             RxStrategy::Continuous => RxMode::Continuous,
@@ -809,8 +884,7 @@ where
                 continue;
             }
 
-            let mut rx_in_progress = false;
-            let mut rx_gate_strikes: u8 = 0;
+            let mut rx_gate = RxBusyGate::new(rx_busy_window);
             loop {
                 match select4(
                     lora.wait_for_irq(),
@@ -839,7 +913,7 @@ where
                                 continue 'rx;
                             }
                             Ok(Some(IrqState::PreambleReceived)) => {
-                                rx_in_progress = true; // gate TX until the frame resolves
+                                rx_gate.arm(clock.now_ms()); // gate TX until the frame resolves
                                 continue;
                             }
                             Ok(_) => continue,
@@ -857,8 +931,7 @@ where
                     Either4::Second(tx_req) => {
                         // Same RX gate as `runner`: don't tear down an
                         // in-flight reception for the CAD gate.
-                        if rx_in_progress && rx_gate_strikes < RX_GATE_MAX_STRIKES {
-                            rx_gate_strikes += 1;
+                        if rx_gate.is_busy(clock.now_ms()) {
                             ch.tx_done.signal(Err(TxError::CadTimeout));
                             continue;
                         }
@@ -891,7 +964,7 @@ where
                     Either4::Fourth(Either::Second(id)) => {
                         // Do not interrupt a packet whose preamble arrived.
                         // Report unavailable rather than holding up the get.
-                        if rx_in_progress || !T::SUPPORTED {
+                        if rx_gate.is_busy(clock.now_ms()) || !T::SUPPORTED {
                             ctl.temperature_resp.signal((id, None));
                             continue;
                         }
@@ -1128,6 +1201,95 @@ mod tests {
             duty_cycle_rx_mode(SpreadingFactor::_7, Bandwidth::_125KHz, 16, 32),
             RxMode::Continuous
         ));
+    }
+
+    fn modulation(sf: SpreadingFactor, bw: Bandwidth, cr: CodingRate) -> ModulationParams {
+        ModulationParams {
+            spreading_factor: sf,
+            bandwidth: bw,
+            coding_rate: cr,
+            low_data_rate_optimize: 0,
+            frequency_in_hz: 910_525_000,
+        }
+    }
+
+    /// The MeshCore-compatible SF7/62.5 kHz/CR 4/5 profile: 32 + 4.25
+    /// preamble symbols plus 378 for header and a 255-byte payload, at
+    /// 2.048 ms each, is 848.384 ms.
+    #[test]
+    fn rx_busy_window_is_a_max_frame_with_a_long_preamble() {
+        let m = modulation(SpreadingFactor::_7, Bandwidth::_62KHz, CodingRate::_4_5);
+        assert_eq!(rx_busy_window_ms(&m, 32), 849);
+        // A shorter own TX preamble says nothing about the sender's.
+        assert_eq!(rx_busy_window_ms(&m, 8), 849);
+        // A longer one is honored: 64 + 4.25 + 378 symbols is 913.92 ms.
+        assert_eq!(rx_busy_window_ms(&m, 64), 914);
+    }
+
+    #[test]
+    fn rx_busy_window_follows_the_modulation() {
+        let base = rx_busy_window_ms(
+            &modulation(SpreadingFactor::_7, Bandwidth::_62KHz, CodingRate::_4_5),
+            32,
+        );
+        let wider = rx_busy_window_ms(
+            &modulation(SpreadingFactor::_7, Bandwidth::_125KHz, CodingRate::_4_5),
+            32,
+        );
+        let stronger_code = rx_busy_window_ms(
+            &modulation(SpreadingFactor::_7, Bandwidth::_62KHz, CodingRate::_4_8),
+            32,
+        );
+        assert!(wider < base);
+        assert!(stronger_code > base);
+        // SF12/125 kHz runs with low-data-rate optimization: 32 + 4.25
+        // preamble symbols plus 263 more at 32.768 ms each is 9,805.824 ms.
+        let slow = rx_busy_window_ms(
+            &modulation(SpreadingFactor::_12, Bandwidth::_125KHz, CodingRate::_4_5),
+            32,
+        );
+        assert_eq!(slow, 9_806);
+    }
+
+    #[test]
+    fn rx_busy_gate_starts_idle() {
+        let gate = RxBusyGate::new(849);
+        assert!(!gate.is_busy(0));
+        assert!(!gate.is_busy(10_000));
+    }
+
+    #[test]
+    fn rx_busy_gate_refuses_until_the_deadline() {
+        let mut gate = RxBusyGate::new(849);
+        gate.arm(1_000);
+        // However many requests arrive, the frame keeps the channel.
+        for now in [1_000, 1_020, 1_200, 1_500, 1_848] {
+            assert!(gate.is_busy(now), "busy at {now}");
+        }
+        // No frame that preamble began can still be on the air.
+        assert!(!gate.is_busy(1_849));
+        assert!(!gate.is_busy(5_000));
+    }
+
+    #[test]
+    fn rx_busy_gate_rearms_from_the_latest_preamble() {
+        let mut gate = RxBusyGate::new(849);
+        gate.arm(1_000);
+        // A real frame arriving after a noise detection gets its own
+        // full window.
+        gate.arm(1_700);
+        assert!(gate.is_busy(2_548));
+        assert!(!gate.is_busy(2_549));
+        // Past an expired deadline, a new preamble re-arms the gate.
+        gate.arm(9_000);
+        assert!(gate.is_busy(9_000));
+    }
+
+    #[test]
+    fn rx_busy_gate_saturates_at_the_end_of_time() {
+        let mut gate = RxBusyGate::new(849);
+        gate.arm(u64::MAX - 1);
+        assert!(gate.is_busy(u64::MAX - 1));
     }
 
     /// The slowest vetted modulation must not overflow the chip's
