@@ -2401,10 +2401,15 @@ mod tests {
                 .display,
             "4111 mV, 87%, charging"
         );
-        // Malformed: reserved bit, bad length, unknown charge code.
+        // Charge state alone: external power present, not charging.
+        assert_eq!(
+            decode_property(prop::BATTERY, &[0b100, 3]).unwrap().display,
+            "voltage unsupported, level unsupported, not charging"
+        );
+        // Malformed: reserved bit, bad length, unassigned charge code.
         assert!(decode_property(prop::BATTERY, &[0b1000, 1]).is_none());
         assert!(decode_property(prop::BATTERY, &[0b001, 0x74]).is_none());
-        assert!(decode_property(prop::BATTERY, &[0b100, 3]).is_none());
+        assert!(decode_property(prop::BATTERY, &[0b100, 4]).is_none());
         // Battery is read-only: no typed editor.
         assert!(
             decode_property(prop::BATTERY, &[0b100, 2])
