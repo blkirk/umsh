@@ -618,11 +618,14 @@ pub async fn connect(target: Target, trace: bool) -> Result<Session> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub id: String,
-    pub name: Option<String>,
+    pub name: String,
     pub rssi: Option<i16>,
 }
 
 /// Scan for ULCP radios advertising the GATT service.
+///
+/// A radio that advertises no name is bonded to someone else and not in
+/// pairing mode, so it cannot be attached to and is left out.
 #[cfg(feature = "ble-radio")]
 pub async fn scan(timeout: Duration) -> Result<Vec<Found>> {
     let results = umsh::ulcp::BleFrameLink::scan(timeout)
@@ -630,10 +633,13 @@ pub async fn scan(timeout: Duration) -> Result<Vec<Found>> {
         .context("scanning for BLE radios")?;
     let mut found: Vec<Found> = results
         .into_iter()
-        .map(|result| Found {
-            id: result.id,
-            name: result.name,
-            rssi: result.rssi,
+        .filter_map(|result| {
+            let name = result.name.filter(|name| !name.is_empty())?;
+            Some(Found {
+                id: result.id,
+                name,
+                rssi: result.rssi,
+            })
         })
         .collect();
     sort_found(&mut found);
@@ -652,16 +658,7 @@ pub async fn scan(_timeout: Duration) -> Result<Vec<Found>> {
 /// and would reorder the list under the user's fingers between one
 /// listing and the next.
 pub fn sort_found(found: &mut [Found]) {
-    found.sort_by(|left, right| {
-        let key = |entry: &Found| {
-            (
-                entry.name.is_none(),
-                entry.name.clone().unwrap_or_default(),
-                entry.id.clone(),
-            )
-        };
-        key(left).cmp(&key(right))
-    });
+    found.sort_by(|left, right| (&left.name, &left.id).cmp(&(&right.name, &right.id)));
 }
 
 /// Fold a later scan's results into an earlier one, keeping order stable
@@ -670,7 +667,7 @@ pub fn merge_found(into: &mut Vec<Found>, more: Vec<Found>) {
     for entry in more {
         match into.iter_mut().find(|existing| existing.id == entry.id) {
             Some(existing) => {
-                existing.name = entry.name.or_else(|| existing.name.take());
+                existing.name = entry.name;
                 existing.rssi = entry.rssi.or(existing.rssi);
             }
             None => into.push(entry),
@@ -687,7 +684,7 @@ pub fn render_found(found: &[Found]) {
     }
     let width = found.len().to_string().len();
     for (index, entry) in found.iter().enumerate() {
-        let name = entry.name.as_deref().unwrap_or("(no name)");
+        let name = &entry.name;
         match entry.rssi {
             Some(rssi) => println!(
                 "{:>width$}) {name}  {}  rssi {rssi} dBm",
@@ -703,7 +700,7 @@ impl From<&Found> for Target {
     fn from(found: &Found) -> Self {
         Target::Ble {
             selector: found.id.clone(),
-            name: found.name.clone(),
+            name: Some(found.name.clone()),
         }
     }
 }
@@ -846,20 +843,14 @@ impl DefaultDevice {
             .iter()
             .find(|entry| entry.id == self.selector)
             .or_else(|| {
-                found.iter().find(|entry| {
-                    entry
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| Some(name) == self.name.as_deref())
-                })
+                found
+                    .iter()
+                    .find(|entry| Some(entry.name.as_str()) == self.name.as_deref())
             })
             .or_else(|| {
-                found.iter().find(|entry| {
-                    entry
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.contains(&self.selector))
-                })
+                found
+                    .iter()
+                    .find(|entry| entry.name.contains(&self.selector))
             })
     }
 }
@@ -969,10 +960,10 @@ pub fn routes_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn found(id: &str, name: Option<&str>, rssi: Option<i16>) -> Found {
+    fn found(id: &str, name: &str, rssi: Option<i16>) -> Found {
         Found {
             id: id.to_string(),
-            name: name.map(str::to_string),
+            name: name.to_string(),
             rssi,
         }
     }
@@ -1034,9 +1025,9 @@ mod tests {
     #[test]
     fn scan_results_sort_by_name_never_by_signal() {
         let mut list = vec![
-            found("id-c", Some("T-Echo"), Some(-30)),
-            found("id-a", Some("Solar"), Some(-90)),
-            found("id-b", None, Some(-40)),
+            found("id-c", "T-Echo", Some(-30)),
+            found("id-a", "Solar", Some(-90)),
+            found("id-b", "Wio", Some(-40)),
         ];
         sort_found(&mut list);
         assert_eq!(
@@ -1055,22 +1046,18 @@ mod tests {
 
     #[test]
     fn merging_a_second_scan_keeps_one_entry_per_radio() {
-        let mut list = vec![found("id-a", None, None)];
-        merge_found(&mut list, vec![found("id-a", Some("T-Echo"), Some(-55))]);
+        let mut list = vec![found("id-a", "T-Echo", None)];
+        merge_found(&mut list, vec![found("id-a", "renamed", Some(-55))]);
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].name.as_deref(), Some("T-Echo"));
+        assert_eq!(list[0].name, "renamed");
         assert_eq!(list[0].rssi, Some(-55));
     }
 
     #[test]
     fn a_single_radio_needs_no_chooser() {
-        let target = choose(
-            vec![found("id-a", Some("T-Echo"), None)],
-            false,
-            Discovery::Auto,
-        )
-        .unwrap()
-        .unwrap();
+        let target = choose(vec![found("id-a", "T-Echo", None)], false, Discovery::Auto)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             target,
             Target::Ble {
@@ -1084,22 +1071,14 @@ mod tests {
     fn asking_explicitly_asks_even_about_a_single_radio() {
         // Without a terminal there is nobody to answer, which is the
         // observable half of "it asked" in a test.
-        let error = choose(
-            vec![found("id-a", Some("T-Echo"), None)],
-            false,
-            Discovery::Ask,
-        )
-        .unwrap_err();
+        let error = choose(vec![found("id-a", "T-Echo", None)], false, Discovery::Ask).unwrap_err();
         assert!(error.to_string().contains("terminal"), "{error}");
     }
 
     #[test]
     fn several_radios_fail_loudly_without_a_terminal() {
         let error = choose(
-            vec![
-                found("id-a", Some("T-Echo"), None),
-                found("id-b", Some("Solar"), None),
-            ],
+            vec![found("id-a", "T-Echo", None), found("id-b", "Solar", None)],
             false,
             Discovery::Auto,
         )
@@ -1162,8 +1141,8 @@ mod tests {
             name: Some("UMSH T-Echo".into()),
         };
         let list = vec![
-            found("id-z", Some("UMSH T-Echo"), None),
-            found("id-a", Some("renamed"), None),
+            found("id-z", "UMSH T-Echo", None),
+            found("id-a", "renamed", None),
         ];
         // The id wins even when the name matches another radio.
         assert_eq!(saved.find_in(&list).unwrap().id, "id-a");

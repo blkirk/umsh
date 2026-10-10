@@ -6,7 +6,7 @@
 //! function of the tool's state, which is what makes it testable without
 //! a radio or a Wireshark.
 
-use crate::connection::{DefaultDevice, Found};
+use crate::connection::Found;
 
 /// The interface name. Wireshark writes this into its `recent` file and
 /// into the preference keys for the configuration dialog, so it is
@@ -20,6 +20,18 @@ pub const DLT_LORATAP: u32 = 270;
 
 /// The `{call=}` of the reloadable radio selector.
 pub const CALL_RADIO: &str = "--radio";
+
+/// Whether `--extcap-reload-option` names the radio selector.
+///
+/// Wireshark strips the leading `--` from a call before passing it back,
+/// so the selector arrives as `radio`. The full spelling is accepted too,
+/// for a person running the phase by hand.
+pub fn is_radio_call(call: Option<&str>) -> bool {
+    let Some(call) = call else {
+        return false;
+    };
+    call.strip_prefix("--").unwrap_or(call) == CALL_RADIO.trim_start_matches('-')
+}
 
 /// Strip the delimiters of the extcap grammar out of a value.
 ///
@@ -38,23 +50,15 @@ fn sanitize(value: &str) -> String {
 
 /// The reply to `--extcap-interfaces`.
 ///
-/// A saved default device is named here purely so the interface is
-/// recognizable in Wireshark's list. It is read from the preferences
-/// file, never from the radio: Wireshark runs this on every startup and
-/// every refresh of the interface list, so it must not touch hardware.
-pub fn interfaces(default: Option<&DefaultDevice>) -> String {
-    let mut out = format!(
-        "extcap {{version={}}}{{display=UMSH radio}}\n",
+/// The display names no radio. Wireshark fetches it once at startup and
+/// shows it for the life of the session, while the radio actually used
+/// is whatever the capture options pick.
+pub fn interfaces() -> String {
+    format!(
+        "extcap {{version={}}}{{display=UMSH radio}}\n\
+         interface {{value={INTERFACE}}}{{display=UMSH radio}}\n",
         env!("CARGO_PKG_VERSION"),
-    );
-    let display = match default.and_then(|device| device.name.as_deref()) {
-        Some(name) => format!("UMSH radio ({})", sanitize(name)),
-        None => "UMSH radio".to_string(),
-    };
-    out.push_str(&format!(
-        "interface {{value={INTERFACE}}}{{display={display}}}\n"
-    ));
-    out
+    )
 }
 
 /// The reply to `--extcap-dlts`.
@@ -134,7 +138,6 @@ fn radio_value_auto() -> String {
 pub fn radio_values(found: &[Found]) -> String {
     let mut out = radio_value_auto();
     for entry in found {
-        let name = entry.name.as_deref().unwrap_or("(no name)");
         let rssi = match entry.rssi {
             Some(rssi) => format!("  ({rssi} dBm)"),
             None => String::new(),
@@ -142,7 +145,7 @@ pub fn radio_values(found: &[Found]) -> String {
         out.push_str(&format!(
             "value {{arg=0}}{{value={}}}{{display={}{}}}\n",
             sanitize(&entry.id),
-            sanitize(name),
+            sanitize(&entry.name),
             rssi,
         ));
     }
@@ -153,25 +156,17 @@ pub fn radio_values(found: &[Found]) -> String {
 mod tests {
     use super::*;
 
-    fn found(id: &str, name: Option<&str>, rssi: Option<i16>) -> Found {
+    fn found(id: &str, name: &str, rssi: Option<i16>) -> Found {
         Found {
             id: id.to_string(),
-            name: name.map(str::to_string),
+            name: name.to_string(),
             rssi,
         }
     }
 
     #[test]
-    fn interfaces_names_the_saved_default() {
-        let plain = interfaces(None);
-        assert!(plain.contains("interface {value=umsh}{display=UMSH radio}"));
-
-        let device = DefaultDevice {
-            selector: "ABC-123".to_string(),
-            name: Some("T-Echo".to_string()),
-        };
-        let named = interfaces(Some(&device));
-        assert!(named.contains("{display=UMSH radio (T-Echo)}"), "{named}");
+    fn the_interface_names_no_radio() {
+        assert!(interfaces().contains("interface {value=umsh}{display=UMSH radio}\n"));
     }
 
     /// Wireshark cannot tell us which DLT the user picked, so offering a
@@ -225,23 +220,32 @@ mod tests {
     }
 
     #[test]
+    fn the_radio_call_matches_with_or_without_dashes() {
+        assert!(is_radio_call(Some("radio")));
+        assert!(is_radio_call(Some("--radio")));
+        assert!(!is_radio_call(Some("serial-port")));
+        assert!(!is_radio_call(Some("radios")));
+        assert!(!is_radio_call(None));
+    }
+
+    #[test]
     fn radio_values_render_name_and_rssi() {
         let text = radio_values(&[
-            found("id-1", Some("T-Echo"), Some(-52)),
-            found("id-2", None, None),
+            found("id-1", "T-Echo", Some(-52)),
+            found("id-2", "Solar", None),
         ]);
         assert!(
             text.contains("{value=id-1}{display=T-Echo  (-52 dBm)}"),
             "{text}"
         );
-        assert!(text.contains("{value=id-2}{display=(no name)}"), "{text}");
+        assert!(text.contains("{value=id-2}{display=Solar}"), "{text}");
     }
 
     /// A device names itself over the air, so the name is untrusted
     /// input to a brace-delimited grammar.
     #[test]
     fn a_hostile_device_name_cannot_forge_lines() {
-        let text = radio_values(&[found("id", Some("evil}\ninterface {value=fake"), None)]);
+        let text = radio_values(&[found("id", "evil}\ninterface {value=fake", None)]);
         assert_eq!(
             text.lines().count(),
             2,

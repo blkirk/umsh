@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use crate::command::capture::CaptureArgs;
 use crate::command::capture::pcap::{CaptureLayers, PcapEncapsulation, PcapWriter};
@@ -30,7 +30,7 @@ use crate::{App, output};
 ///
 /// Longer than a plain `discover`, because the user pressed a button and
 /// is watching a dropdown rather than waiting on a capture.
-const RELOAD_SCAN: Duration = Duration::from_secs(3);
+const RELOAD_SCAN: Duration = Duration::from_secs(5);
 
 /// Whether Wireshark, rather than a person, is running this process.
 ///
@@ -89,11 +89,13 @@ pub struct ExtcapArgs {
     serial_port: Option<String>,
     #[arg(long, default_value_t = 115_200, value_name = "N")]
     baud: u32,
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, default_missing_value = "true",
+          default_value = "false", value_parser = boolflag, action = ArgAction::Set)]
     umsh_only: bool,
     #[arg(long, default_value_t = 10, value_name = "SECS")]
     idle_probe_secs: u64,
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, default_missing_value = "true",
+          default_value = "false", value_parser = boolflag, action = ArgAction::Set)]
     no_reconnect: bool,
     #[arg(long, value_name = "KHZ")]
     freq_khz: Option<String>,
@@ -105,6 +107,19 @@ pub struct ExtcapArgs {
     cr: Option<String>,
     #[arg(long, value_name = "N")]
     sync_word: Option<String>,
+}
+
+/// Parse a `type=boolflag` argument.
+///
+/// A capture passes a set flag bare, but a reload passes every setting as
+/// a key and a value, and a flag's value is the empty string. Refusing
+/// that value would fail the reload before it scans.
+fn boolflag(text: &str) -> Result<bool, String> {
+    match text {
+        "" | "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("expected true or false, not {other:?}")),
+    }
 }
 
 /// Parse an RF override that the dialog leaves empty when unset.
@@ -161,10 +176,7 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
     if args.extcap_interfaces {
-        print!(
-            "{}",
-            protocol::interfaces(Prefs::load().default_device.as_ref())
-        );
+        print!("{}", protocol::interfaces());
         return Ok(());
     }
     if args.capture {
@@ -185,7 +197,7 @@ fn expect_interface(args: &ExtcapArgs) -> Result<()> {
 /// Re-populate the radio dropdown from a fresh scan.
 async fn reload(args: &ExtcapArgs) -> Result<()> {
     expect_interface(args)?;
-    if args.extcap_reload_option.as_deref() != Some(protocol::CALL_RADIO) {
+    if !protocol::is_radio_call(args.extcap_reload_option.as_deref()) {
         // Wireshark only reloads options we marked reloadable, but an
         // empty list is a better answer than a failed dialog.
         return Ok(());
@@ -445,6 +457,48 @@ mod tests {
             capture.fifo.as_deref(),
             Some(std::path::Path::new("/tmp/x"))
         );
+    }
+
+    /// Wireshark sends the reloaded call with its `--` stripped.
+    #[test]
+    fn a_reload_parses_as_wireshark_sends_it() {
+        let reload = parse(&[
+            "--extcap-config",
+            "--extcap-interface",
+            "umsh",
+            "--extcap-reload-option",
+            "radio",
+        ]);
+        assert!(protocol::is_radio_call(
+            reload.extcap_reload_option.as_deref()
+        ));
+    }
+
+    /// A reload appends every setting as a key and a value, and a
+    /// boolflag's value is empty; a capture passes a set flag bare.
+    #[test]
+    fn boolflags_take_an_optional_value() {
+        let reload = parse(&[
+            "--extcap-config",
+            "--extcap-interface",
+            "umsh",
+            "--extcap-reload-option",
+            "radio",
+            "--umsh-only",
+            "",
+            "--baud",
+            "115200",
+            "--no-reconnect",
+            "false",
+        ]);
+        assert!(reload.umsh_only);
+        assert!(!reload.no_reconnect);
+        assert_eq!(reload.baud, 115_200);
+
+        let capture = parse(&["--capture", "--umsh-only", "--extcap-interface=umsh"]);
+        assert!(capture.umsh_only);
+        assert!(!capture.no_reconnect);
+        assert_eq!(capture.extcap_interface.as_deref(), Some("umsh"));
     }
 
     /// `--extcap-interface` and `--extcap-interfaces` differ by one

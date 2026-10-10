@@ -497,7 +497,11 @@ final class CoreBluetoothRadioConnection: UlcpRadioSession, RadioConnection, Ulc
         // first heard with only whatever `CBPeripheral.name` gives us and
         // picks up its advertised name a moment later. Sorting on either moves
         // rows under the user's finger on a busy bench.
+        //
+        // A radio with no name is bonded elsewhere and not in pairing mode,
+        // so it cannot be attached to and is not listed.
         return discovered.values
+            .filter { $0.name != nil }
             .sorted { lhs, rhs in
                 let lhsRemembered = lhs.peripheral.identifier == remembered
                 let rhsRemembered = rhs.peripheral.identifier == remembered
