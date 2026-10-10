@@ -62,6 +62,9 @@ struct TranscriptScrollMetrics: Equatable {
     let viewportHeight: CGFloat
     let contentHeight: CGFloat
     let offsetFromContentTop: CGFloat
+    /// The room the composer takes at the bottom, which grows with the draft.
+    /// It changes no size the scroll view anchors on, so it is watched here.
+    let bottomInset: CGFloat
 }
 
 /// Which row to put back under the reader after the window grows above them.

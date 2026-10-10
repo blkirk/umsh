@@ -298,14 +298,23 @@ struct ConversationThreadView: View {
                             viewportHeight: geometry.containerSize.height.rounded(),
                             contentHeight: geometry.contentSize.height.rounded(),
                             offsetFromContentTop: (geometry.contentOffset.y
-                                + geometry.contentInsets.top).rounded()
+                                + geometry.contentInsets.top).rounded(),
+                            bottomInset: geometry.contentInsets.bottom.rounded()
                         )
-                    } action: { _, metrics in
+                    } action: { previous, metrics in
                         scroll.distanceFromBottom = metrics.distanceFromBottom
                         updateFollowState(
                             distanceFromBottom: metrics.distanceFromBottom,
                             userDriven: scroll.userIsScrolling
                         )
+                        // The composer growing with its draft changes only the
+                        // inset, not the container, so the bottom anchor above
+                        // does not move the transcript. Following the live edge
+                        // is what keeps the newest message clear of the composer.
+                        if metrics.bottomInset != previous.bottomInset,
+                           scroll.followsLatestMessage, !scroll.userIsScrolling {
+                            scheduleScrollToBottom(proxy, animated: false)
+                        }
                         respondToScroll(metrics, proxy: proxy)
                     }
                     .onScrollPhaseChange { _, phase in
@@ -627,7 +636,7 @@ struct ConversationThreadView: View {
         .padding(.horizontal, 12)
         // Room below the controls for the bar to fade out in.
         .padding(.bottom, 22)
-        .fadingBar(edge: .top)
+        .fadingBar(edge: .top, fadeLength: 22)
     }
 
     private func edit(_ message: ChatMessageSummary, newBody: String) async {
@@ -1289,30 +1298,39 @@ struct FadingBar: ViewModifier {
     /// The screen edge the bar is anchored to. The fade runs from there
     /// toward the transcript.
     let edge: VerticalEdge
+    /// How far the fade reaches, in points. Fixed rather than a fraction of
+    /// the bar: the composer grows with its draft, and a proportional fade
+    /// grows with it until it reaches the text and the messages show through.
+    let fadeLength: CGFloat
 
     func body(content: Content) -> some View {
         content.background {
             Rectangle()
                 .fill(.bar)
                 .mask {
-                    LinearGradient(
-                        stops: [
-                            .init(color: .black, location: 0),
-                            .init(color: .black, location: 0.72),
-                            .init(color: .clear, location: 1)
-                        ],
-                        startPoint: edge == .top ? .top : .bottom,
-                        endPoint: edge == .top ? .bottom : .top
-                    )
+                    VStack(spacing: 0) {
+                        if edge == .bottom { fade }
+                        Rectangle()
+                        if edge == .top { fade }
+                    }
                 }
                 .ignoresSafeArea(edges: edge == .top ? .top : .bottom)
         }
     }
+
+    private var fade: some View {
+        LinearGradient(
+            colors: [.black, .clear],
+            startPoint: edge == .top ? .top : .bottom,
+            endPoint: edge == .top ? .bottom : .top
+        )
+        .frame(height: fadeLength)
+    }
 }
 
 extension View {
-    func fadingBar(edge: VerticalEdge) -> some View {
-        modifier(FadingBar(edge: edge))
+    func fadingBar(edge: VerticalEdge, fadeLength: CGFloat) -> some View {
+        modifier(FadingBar(edge: edge, fadeLength: fadeLength))
     }
 }
 

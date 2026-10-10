@@ -61,7 +61,7 @@ struct MessageComposer: View {
         // home indicator rather than leaving a bare strip where the tab bar
         // used to be, and fading upward so the messages passing under it are
         // not cut off at a line.
-        .fadingBar(edge: .bottom)
+        .fadingBar(edge: .bottom, fadeLength: 28)
     }
 
     private var field: some View {
