@@ -771,10 +771,12 @@ discards `SignalRssiPkt`. Near the floor that overstates the signal by
 to whole dB, so the quarter-dB the chips measure never reaches UMSH. Fixing
 both is a lora-rs change and comes before P1.
 
+umshctl's harvest step no longer reads a peer with no MAC route as a reason
+to forget its cached one, so a route inside the 30 s `failed_route`
+hold-off survives into the next invocation.
+
 Still open: the simulator, and with it every constant above; M5's slack
-table, M7, M8, M9, M10, and M11; multicast duplicates; and an interaction
-between the 30 s `failed_route` hold-off and umshctl's harvest step, which
-drops a peer whose MAC route is momentarily absent.
+table, M7, M8, M9, M10, and M11; and multicast duplicates.
 
 ## Protocol changes
 

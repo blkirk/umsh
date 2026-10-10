@@ -181,14 +181,26 @@ impl RouteCache {
     pub async fn harvest(&mut self, handle: &crate::mesh::CtlHandle<'_>) {
         let mut peers = Vec::new();
         handle.for_each_peer(&mut |peer| peers.push(peer)).await;
+        let mut held = Vec::with_capacity(peers.len());
         for peer in peers {
-            match handle.peer_route(&peer).await {
-                Some(route) => self.record(&peer, route),
-                // A peer whose route the MAC dropped has had it
-                // invalidated; keeping ours would put it straight back.
-                None => {
-                    self.remove(&peer);
-                }
+            held.push((peer, handle.peer_route(&peer).await));
+        }
+        self.absorb(held);
+    }
+
+    /// Take in what the MAC held for each peer.
+    ///
+    /// A peer with no route leaves the cache alone. The MAC reports none
+    /// both for a peer it never learned a path to and for one whose route
+    /// just missed an acknowledgment and is held off while it
+    /// rediscovers—and a missed acknowledgment is as often a collision as
+    /// a broken path. Were the path broken, the next invocation spends
+    /// one exchange on it before the MAC's retry finds another, which
+    /// then replaces it here. Forgetting is left to the user.
+    fn absorb(&mut self, held: impl IntoIterator<Item = (PublicKey, Option<CachedRoute>)>) {
+        for (peer, route) in held {
+            if let Some(route) = route {
+                self.record(&peer, route);
             }
         }
     }
@@ -522,6 +534,30 @@ mod tests {
         cache.record(&key(12), CachedRoute::flood(4, &[]).unwrap());
         assert!(cache.get(&key(12)).unwrap().learned_at > before);
         assert!(cache.dirty);
+    }
+
+    /// A route the MAC failed is held off, not disproved, and a peer the
+    /// MAC never learned a route to says nothing about one somebody else
+    /// learned. Neither may cost the cache a route: not here, and not
+    /// through a forget that the merge would apply to another
+    /// invocation's file.
+    #[test]
+    fn a_peer_the_mac_holds_no_route_for_keeps_its_cached_route() {
+        let source = CachedRoute::source(&[RouterHint([0xA1, 0xB2])]).unwrap();
+        let mut cache = cache_of(&[(key(24), record(source.clone(), Duration::from_secs(600)))]);
+        let before = cache.get(&key(24)).unwrap().learned_at;
+
+        cache.absorb([(key(24), None), (key(25), None)]);
+        let kept = cache.get(&key(24)).unwrap();
+        assert_eq!(kept.route, source);
+        assert_eq!(kept.learned_at, before);
+        assert!(cache.get(&key(25)).is_none());
+        assert!(cache.forgotten.is_empty(), "nobody asked to forget");
+        assert!(!cache.dirty, "nothing changed, so nothing is written");
+
+        // A route the MAC does hold is still taken in.
+        cache.absorb([(key(25), Some(CachedRoute::Direct))]);
+        assert_eq!(cache.get(&key(25)).unwrap().route, CachedRoute::Direct);
     }
 
     #[test]
