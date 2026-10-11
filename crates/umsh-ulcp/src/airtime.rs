@@ -7,10 +7,10 @@
 /// Conservative LoRa on-air time estimate in milliseconds.
 ///
 /// Standard LoRa airtime formula with explicit header, CRC on, and
-/// auto-LDRO; the preamble of 8 + 4.25 symbols is approximated as 12.
-/// Numeric twin of `umsh_radio_loraphy::airtime_ms` (which takes
-/// `lora-modulation` enums), generalized over the coding-rate
-/// denominator (`5` for CR 4/5 through `8` for CR 4/8).
+/// auto-LDRO; the preamble of 8 + 4.25 symbols is approximated as 12,
+/// which under-prices a longer transmit preamble. Device-side airtime
+/// uses [`lora_airtime_ms_with_preamble`]. The coding rate is given by
+/// its denominator (`5` for CR 4/5 through `8` for CR 4/8).
 ///
 /// Out-of-range inputs are clamped rather than rejected: this is an
 /// estimate for scheduling and duty accounting, not a validator.

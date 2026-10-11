@@ -92,3 +92,19 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
         &mut *ptr
     }
 }
+
+#[cfg(feature = "meshcore-forwarder")]
+pub fn meshcore_storage(
+    public_key: [u8; 32],
+    seed: [u8; 32],
+) -> &'static mut umsh_ulcp_runtime::meshcore::MeshCoreStorage {
+    // A duplicate table, frame copies, and a generator: plain data,
+    // touched only by the forwarder's task.
+    unsafe {
+        let ptr = storage::<umsh_ulcp_runtime::meshcore::MeshCoreStorage>();
+        ptr.write(umsh_ulcp_runtime::meshcore::MeshCoreStorage::new(
+            public_key, seed,
+        ));
+        &mut *ptr
+    }
+}

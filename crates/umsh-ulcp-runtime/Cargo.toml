@@ -78,6 +78,9 @@ device-node = [
     "dep:rand",
     "reseed",
 ]
+# The MeshCore forwarder: a third mux client that forwards MeshCore v1
+# traffic beside the device node, under the same duty ledger and CAD gate.
+meshcore-forwarder = ["device-node", "dep:umsh-meshcore-forwarder"]
 # A ChaCha20 generator that folds in seeds offered after it was built, so
 # entropy a board harvests during a long uptime reaches what is running.
 reseed = ["dep:rand_core", "dep:rand_chacha", "dep:umsh-crypto", "dep:zeroize"]
@@ -112,6 +115,7 @@ umsh-mac = { path = "../umsh-mac", default-features = false, features = ["softwa
 umsh-node = { path = "../umsh-node", default-features = false, features = ["alloc", "software-crypto"], optional = true }
 umsh-node-mgmt = { path = "../umsh-node-mgmt", default-features = false, optional = true }
 umsh-gnss = { path = "../umsh-gnss", default-features = false, features = ["pump"], optional = true }
+umsh-meshcore-forwarder = { path = "../umsh-meshcore-forwarder", optional = true }
 umsh-sync = { path = "../umsh-sync", default-features = false, optional = true }
 rand = { workspace = true, optional = true }
 rand_core = { workspace = true, optional = true }

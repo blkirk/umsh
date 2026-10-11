@@ -113,6 +113,10 @@ Id   | Mnemonic                                                                 
 4838 | [`PROP_STAT_FORWARDED`](ulcp-radio.md#prop-stat-forwarded)                            | Get, Set                   | `CAP_STATS`, `CAP_REPEATER`
 4839 | [`PROP_STAT_FORWARD_DROPPED`](ulcp-radio.md#prop-stat-forward-dropped)                | Get, Set                   | `CAP_STATS`, `CAP_REPEATER`
 4840 | [`PROP_STAT_FORWARD_CANCELLED`](ulcp-radio.md#prop-stat-forward-cancelled)            | Get, Set                   | `CAP_STATS`, `CAP_REPEATER`
+4841 | [`PROP_STAT_MESHCORE_SEEN`](ulcp-radio.md#prop-stat-meshcore-seen)                    | Get, Set                   | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
+4842 | [`PROP_STAT_MESHCORE_FORWARDED_ROUTED`](ulcp-radio.md#prop-stat-meshcore-forwarded-routed) | Get, Set              | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
+4843 | [`PROP_STAT_MESHCORE_FORWARDED_FLOOD`](ulcp-radio.md#prop-stat-meshcore-forwarded-flood) | Get, Set                | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
+4844 | [`PROP_STAT_MESHCORE_DECLINED`](ulcp-radio.md#prop-stat-meshcore-declined)            | Get, Set                   | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
 4864 | [`PROP_BLE_PAIRING_PIN`](ulcp-ble.md#prop-ble-pairing-pin)                            | Set                        | BLE transport
 4865 | [`PROP_DEV_ADMINS`](app-node-management.md#prop-dev-admins)                           | Get, Set, Insert, Remove   | `CAP_ADMIN`
 4866 | [`PROP_TIME`](ulcp-device.md#prop-time)                                               | Get, Set, Is               | `CAP_TIME`
@@ -168,6 +172,9 @@ Id   | Mnemonic                                                                 
 4958 | [`PROP_BATTERY_GAUGE_TELEMETRY`](ulcp-device.md#prop-battery-gauge-telemetry) | Get, Is | Optional with `CAP_BATTERY`; live counters, temperatures, and estimates
 4960 | [`PROP_I2C_BUSES`](ulcp-i2c.md#prop-i2c-buses) | Get, Is | `CAP_I2C`
 4961 | [`PROP_I2C_DEVICES`](ulcp-i2c.md#prop-i2c-devices) | Get, Is | `CAP_I2C`
+4976 | [`PROP_MESHCORE_FORWARDING_ENABLED`](ulcp-device.md#prop-meshcore-forwarding-enabled) | Get, Set | `CAP_MESHCORE_FORWARDER`
+4977 | [`PROP_MESHCORE_REGION_POLICY`](ulcp-device.md#prop-meshcore-region-policy) | Get, Set | `CAP_MESHCORE_FORWARDER`
+4978 | [`PROP_MESHCORE_REGIONS`](ulcp-device.md#prop-meshcore-regions) | Get, Set, Insert, Remove | `CAP_MESHCORE_FORWARDER`
 
 ## Capabilities
 
@@ -208,6 +215,7 @@ Code | Name                      | Defined in
 59   | `CAP_DISPLAY_MOTION_WAKE` | [Device Services](ulcp-device.md#display-motion-wake)
 60   | `CAP_I2C`                 | [I2C Bus Access](ulcp-i2c.md#capabilities)
 61   | `CAP_TEMPERATURE` | [Device Domain](ulcp-device.md#capabilities)
+62   | `CAP_MESHCORE_FORWARDER`  | [Device Domain](ulcp-device.md#capabilities)
 515  | `CAP_PHY_LORA`            | [Radio Control](ulcp-radio.md#capabilities)
 
 ## Status Codes
@@ -252,6 +260,7 @@ Filter types | 0 `FILTER_DEST_HINT`, 1 `FILTER_CHANNEL_ID`, 2 `FILTER_PKT_TYPE` 
 Charge states | 0 discharging, 1 charging, 2 charged, 3 not charging | [`PROP_BATTERY`](ulcp-device.md#prop-battery)
 Alert states | 0 `ALERT_NONE`, 1 `ALERT_LOCATE` | [`PROP_ALERT`](ulcp-device.md#prop-alert)
 Fix quality | 0 none, 1 two-dimensional, 2 three-dimensional | [`PROP_GNSS_FIX`](ulcp-device.md#prop-gnss-fix)
+MeshCore region policies | 0 open, 1 scoped only, 2 ignore | [`PROP_MESHCORE_REGION_POLICY`](ulcp-device.md#prop-meshcore-region-policy)
 Transmit flags | bit 0 `TX_FLAG_NOCCA`, bit 1 `TX_FLAG_NODUTY` | [`STR_PHY_RAW`](ulcp-transport.md#str-radio-raw)
 Receive flags | bit 0 `RX_FLAG_BUFFERED`, bit 1 `RX_FLAG_ACKED`, bit 2 `RX_FLAG_SELF_TX` | [Extended Recv Metadata](ulcp-transport.md#buffered-metadata)
 Session reset reasons | 0 attached, 1 `CMD_RST`, 2 `CMD_RESTORE` | [`CMD_SESSION_RESET`](ulcp-core.md#cmd-session-reset)

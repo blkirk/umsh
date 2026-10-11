@@ -421,6 +421,79 @@ pub struct RepeaterPolicy {
     pub min_snr: Option<i8>,
 }
 
+/// How MeshCore transport codes gate flood forwarding
+/// (`PROP_MESHCORE_REGION_POLICY`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeshCoreRegionPolicy {
+    /// Unscoped floods, and scoped floods for a configured region.
+    #[default]
+    Open,
+    /// Only scoped floods for a configured region.
+    ScopedOnly,
+    /// Every flood, whatever its scope.
+    Ignore,
+}
+
+impl MeshCoreRegionPolicy {
+    /// The policy a wire value names, or `None` for an unassigned one.
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            ids::meshcore_region_policy::OPEN => Some(Self::Open),
+            ids::meshcore_region_policy::SCOPED_ONLY => Some(Self::ScopedOnly),
+            ids::meshcore_region_policy::IGNORE => Some(Self::Ignore),
+            _ => None,
+        }
+    }
+
+    /// The wire value.
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Open => ids::meshcore_region_policy::OPEN,
+            Self::ScopedOnly => ids::meshcore_region_policy::SCOPED_ONLY,
+            Self::Ignore => ids::meshcore_region_policy::IGNORE,
+        }
+    }
+
+    /// The name the CLI reads and prints.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::ScopedOnly => "scoped",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
+impl core::str::FromStr for MeshCoreRegionPolicy {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, ()> {
+        [Self::Open, Self::ScopedOnly, Self::Ignore]
+            .into_iter()
+            .find(|policy| policy.name().eq_ignore_ascii_case(name))
+            .ok_or(())
+    }
+}
+
+/// A `CAP_MESHCORE_FORWARDER` device's MeshCore settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshCoreForwarding {
+    /// `PROP_MESHCORE_FORWARDING_ENABLED`. Independent of
+    /// [`RepeaterPolicy::enabled`].
+    pub enabled: bool,
+    /// `PROP_MESHCORE_REGION_POLICY`.
+    pub region_policy: MeshCoreRegionPolicy,
+    /// `PROP_MESHCORE_REGIONS`: MeshCore region names, without the `#`
+    /// their keys derive under.
+    pub regions: Vec<String>,
+}
+
+/// Whether a device identity whose public key is `dev_key` can forward
+/// MeshCore traffic. MeshCore reserves keys beginning `0x00` and `0xFF`.
+pub fn meshcore_identity_allowed(dev_key: &[u8; 32]) -> bool {
+    ids::meshcore_identity_allowed(dev_key[0])
+}
+
 /// The wall clock of a `CAP_TIME` device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceTime {
@@ -1836,6 +1909,91 @@ where
         let authoritative = self.set_prop(prop::MAC_REPEATER_MIN_SNR, value).await?;
         decode_opt_i8(&authoritative)
             .ok_or(UlcpError::Protocol("malformed PROP_MAC_REPEATER_MIN_SNR"))
+    }
+
+    /// Read the device's MeshCore forwarding settings.
+    ///
+    /// `Ok(None)` means the device does not advertise
+    /// `CAP_MESHCORE_FORWARDER`.
+    pub async fn meshcore_forwarding(&mut self) -> Result<Option<MeshCoreForwarding>, UlcpError> {
+        const KEYS: [u32; 3] = [
+            prop::MESHCORE_FORWARDING_ENABLED,
+            prop::MESHCORE_REGION_POLICY,
+            prop::MESHCORE_REGIONS,
+        ];
+        let Some(answers) = self.read_gated(cap::MESHCORE_FORWARDER, &KEYS).await? else {
+            return Ok(None);
+        };
+        let [enabled, region_policy, regions] = required_answers(answers)?;
+        Ok(Some(MeshCoreForwarding {
+            enabled: decode_bool(&enabled, "PROP_MESHCORE_FORWARDING_ENABLED")?,
+            region_policy: decode_meshcore_region_policy(&region_policy)?,
+            regions: decode_meshcore_regions(&regions)?,
+        }))
+    }
+
+    /// Set the MeshCore regions whose scoped floods the device forwards
+    /// (`PROP_MESHCORE_REGIONS`). A leading `#` on a name is dropped: the
+    /// device supplies it.
+    ///
+    /// Returns the list the device actually stored.
+    pub async fn set_meshcore_regions(
+        &mut self,
+        regions: &[String],
+    ) -> Result<Vec<String>, UlcpError> {
+        let mut value = Vec::new();
+        for region in regions {
+            let name = meshcore_region_name(region)?;
+            let mut item = vec![0u8; name.len() + 4];
+            let len = items::encode_prefixed_item(name.as_bytes(), &mut item)
+                .map_err(|_| UlcpError::Protocol("region item encode"))?;
+            value.extend_from_slice(&item[..len]);
+        }
+        let authoritative = self.set_prop(prop::MESHCORE_REGIONS, &value).await?;
+        decode_meshcore_regions(&authoritative)
+    }
+
+    /// Add one MeshCore region. A region already present fails with
+    /// `STATUS_ALREADY`.
+    pub async fn add_meshcore_region(&mut self, region: &str) -> Result<(), UlcpError> {
+        let name = meshcore_region_name(region)?;
+        self.insert_prop_item(prop::MESHCORE_REGIONS, name.as_bytes())
+            .await
+            .map(|_| ())
+    }
+
+    /// Remove one MeshCore region, matched exactly, case included.
+    pub async fn remove_meshcore_region(&mut self, region: &str) -> Result<(), UlcpError> {
+        let name = meshcore_region_name(region)?;
+        self.remove_prop_item(prop::MESHCORE_REGIONS, name.as_bytes())
+            .await
+            .map(|_| ())
+    }
+
+    /// Set whether MeshCore traffic is forwarded too
+    /// (`PROP_MESHCORE_FORWARDING_ENABLED`). Enabling fails with
+    /// `STATUS_INVALID_STATE` under an identity
+    /// [`meshcore_identity_allowed`] refuses.
+    pub async fn set_meshcore_forwarding_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<bool, UlcpError> {
+        let authoritative = self
+            .set_prop(prop::MESHCORE_FORWARDING_ENABLED, &[enabled as u8])
+            .await?;
+        decode_bool(&authoritative, "PROP_MESHCORE_FORWARDING_ENABLED")
+    }
+
+    /// Set how MeshCore transport codes gate flood forwarding
+    /// (`PROP_MESHCORE_REGION_POLICY`).
+    pub async fn set_meshcore_region_policy(
+        &mut self,
+        policy: MeshCoreRegionPolicy,
+    ) -> Result<MeshCoreRegionPolicy, UlcpError> {
+        let authoritative = self
+            .set_prop(prop::MESHCORE_REGION_POLICY, &[policy.as_u8()])
+            .await?;
+        decode_meshcore_region_policy(&authoritative)
     }
 
     /// Read the device's wall clock and time zone (`PROP_TIME`,
@@ -3867,6 +4025,43 @@ fn check_region(region: &str) -> Result<(), UlcpError> {
     }
 }
 
+/// Decode `PROP_MESHCORE_REGIONS`: length-prefixed UTF-8 MeshCore region
+/// names, without their `#`.
+pub fn decode_meshcore_regions(value: &[u8]) -> Result<Vec<String>, UlcpError> {
+    let mut regions = Vec::new();
+    for item in items::prefixed_items(value) {
+        let text = item
+            .ok()
+            .and_then(|item| core::str::from_utf8(item).ok())
+            .ok_or(UlcpError::Protocol("malformed PROP_MESHCORE_REGIONS"))?;
+        regions.push(text.to_owned());
+    }
+    Ok(regions)
+}
+
+/// A MeshCore region name as `PROP_MESHCORE_REGIONS` stores it: `input`
+/// without a leading `#`, refused where the device is bound to refuse it
+/// (ulcp-device.md § `PROP_MESHCORE_REGIONS`).
+pub fn meshcore_region_name(input: &str) -> Result<&str, UlcpError> {
+    let name = input.strip_prefix('#').unwrap_or(input);
+    if name.starts_with('$') {
+        return Err(UlcpError::Protocol(
+            "private MeshCore regions ($) are not supported",
+        ));
+    }
+    if name.starts_with('#') {
+        return Err(UlcpError::Protocol(
+            "a MeshCore region name takes at most one leading #",
+        ));
+    }
+    if !(1..=items::MESHCORE_REGION_NAME_MAX_LEN).contains(&name.len()) {
+        return Err(UlcpError::Protocol(
+            "a MeshCore region name is 1 to 30 octets of UTF-8",
+        ));
+    }
+    Ok(name)
+}
+
 /// Decode a single optional region code. Empty means unset.
 pub fn decode_region_code(value: &[u8]) -> Result<Option<RegionCode>, UlcpError> {
     match value {
@@ -3932,6 +4127,15 @@ fn decode_bool(value: &[u8], what: &'static str) -> Result<bool, UlcpError> {
         [1] => Ok(true),
         _ => Err(UlcpError::Protocol(what)),
     }
+}
+
+/// Decode a `PROP_MESHCORE_REGION_POLICY` value.
+fn decode_meshcore_region_policy(value: &[u8]) -> Result<MeshCoreRegionPolicy, UlcpError> {
+    match value {
+        [value] => MeshCoreRegionPolicy::from_u8(*value),
+        _ => None,
+    }
+    .ok_or(UlcpError::Protocol("malformed PROP_MESHCORE_REGION_POLICY"))
 }
 
 /// Decode a `UINT32_LE` announcement interval in seconds.
@@ -4290,6 +4494,39 @@ mod tests {
     use tokio::io::DuplexStream;
     use umsh_ulcp::PropPayload;
     use umsh_ulcp::meta::RX_FLAG_BUFFERED;
+
+    #[test]
+    fn meshcore_region_policies_round_trip() {
+        for value in 0..=u8::MAX {
+            match MeshCoreRegionPolicy::from_u8(value) {
+                Some(policy) => {
+                    assert_eq!(policy.as_u8(), value);
+                    assert_eq!(policy.name().parse(), Ok(policy));
+                }
+                None => assert!(value > 2),
+            }
+        }
+        assert_eq!("Scoped".parse(), Ok(MeshCoreRegionPolicy::ScopedOnly));
+        assert!(decode_meshcore_region_policy(&[3]).is_err());
+        assert!(decode_meshcore_region_policy(&[]).is_err());
+        assert!(!meshcore_identity_allowed(&[0xFF; 32]));
+        assert!(meshcore_identity_allowed(&[0x01; 32]));
+    }
+
+    #[test]
+    fn meshcore_region_names_drop_their_hash() {
+        assert_eq!(meshcore_region_name("#us-ca").unwrap(), "us-ca");
+        assert_eq!(meshcore_region_name("US-CA").unwrap(), "US-CA");
+        for bad in ["", "#", "##us-ca", "$ops", "#$ops", &"x".repeat(31)] {
+            assert!(meshcore_region_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(meshcore_region_name(&format!("#{}", "x".repeat(30))).is_ok());
+        assert_eq!(
+            decode_meshcore_regions(&[2, b'a', b'b', 1, b'C']).unwrap(),
+            ["ab", "C"]
+        );
+        assert!(decode_meshcore_regions(&[2, 0xFF, 0xFE]).is_err());
+    }
 
     fn test_config() -> UlcpDeviceConfig {
         let mut config = UlcpDeviceConfig::new(906_875, 250_000, 11, 5);

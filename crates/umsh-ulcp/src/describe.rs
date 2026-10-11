@@ -105,6 +105,10 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::STAT_FORWARDED => "PROP_STAT_FORWARDED",
         prop::STAT_FORWARD_DROPPED => "PROP_STAT_FORWARD_DROPPED",
         prop::STAT_FORWARD_CANCELLED => "PROP_STAT_FORWARD_CANCELLED",
+        prop::STAT_MESHCORE_SEEN => "PROP_STAT_MESHCORE_SEEN",
+        prop::STAT_MESHCORE_FORWARDED_ROUTED => "PROP_STAT_MESHCORE_FORWARDED_ROUTED",
+        prop::STAT_MESHCORE_FORWARDED_FLOOD => "PROP_STAT_MESHCORE_FORWARDED_FLOOD",
+        prop::STAT_MESHCORE_DECLINED => "PROP_STAT_MESHCORE_DECLINED",
         prop::BLE_PAIRING_PIN => "PROP_BLE_PAIRING_PIN",
         prop::DEV_ADMINS => "PROP_DEV_ADMINS",
         prop::TIME => "PROP_TIME",
@@ -142,6 +146,9 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::WIFI_AP_CONFIG => "PROP_WIFI_AP_CONFIG",
         prop::WIFI_AP_STATE => "PROP_WIFI_AP_STATE",
         prop::WIFI_AP_CLIENTS => "PROP_WIFI_AP_CLIENTS",
+        prop::MESHCORE_FORWARDING_ENABLED => "PROP_MESHCORE_FORWARDING_ENABLED",
+        prop::MESHCORE_REGION_POLICY => "PROP_MESHCORE_REGION_POLICY",
+        prop::MESHCORE_REGIONS => "PROP_MESHCORE_REGIONS",
         _ => return None,
     })
 }
@@ -238,6 +245,10 @@ pub const PROPERTIES: &[u32] = &[
     prop::STAT_FORWARDED,
     prop::STAT_FORWARD_DROPPED,
     prop::STAT_FORWARD_CANCELLED,
+    prop::STAT_MESHCORE_SEEN,
+    prop::STAT_MESHCORE_FORWARDED_ROUTED,
+    prop::STAT_MESHCORE_FORWARDED_FLOOD,
+    prop::STAT_MESHCORE_DECLINED,
     prop::BLE_PAIRING_PIN,
     prop::DEV_ADMINS,
     prop::TIME,
@@ -277,6 +288,9 @@ pub const PROPERTIES: &[u32] = &[
     prop::BRIDGE_LINK,
     prop::I2C_BUSES,
     prop::I2C_DEVICES,
+    prop::MESHCORE_FORWARDING_ENABLED,
+    prop::MESHCORE_REGION_POLICY,
+    prop::MESHCORE_REGIONS,
 ];
 
 /// How a property's octets are meant to be read.
@@ -393,7 +407,11 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         | prop::STAT_RX_ACCEPTED
         | prop::STAT_FORWARDED
         | prop::STAT_FORWARD_DROPPED
-        | prop::STAT_FORWARD_CANCELLED => U32,
+        | prop::STAT_FORWARD_CANCELLED
+        | prop::STAT_MESHCORE_SEEN
+        | prop::STAT_MESHCORE_FORWARDED_ROUTED
+        | prop::STAT_MESHCORE_FORWARDED_FLOOD
+        | prop::STAT_MESHCORE_DECLINED => U32,
         prop::BLE_PAIRING_PIN => U32,
         prop::TIME => U32,
         prop::TZ_OFFSET => I16,
@@ -426,6 +444,10 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         | prop::WIFI_AP_CONFIG
         | prop::WIFI_AP_STATE
         | prop::WIFI_AP_CLIENTS => Bytes,
+        prop::MESHCORE_FORWARDING_ENABLED => Bool,
+        prop::MESHCORE_REGION_POLICY => U8,
+        // UTF-8 MeshCore region names, one per item.
+        prop::MESHCORE_REGIONS => Text,
         _ => return None,
     })
 }
@@ -466,6 +488,7 @@ pub const fn capability_name(code: u32) -> Option<&'static str> {
         cap::WIFI_AP => "WIFI_AP",
         cap::BRIDGE_CLIENT => "BRIDGE_CLIENT",
         cap::I2C => "I2C",
+        cap::MESHCORE_FORWARDER => "MESHCORE_FORWARDER",
         _ => return None,
     })
 }
@@ -793,7 +816,11 @@ mod tests {
         // One past the last allocated code: an unassigned capability has
         // no name to give, whatever a device claims by advertising it.
         assert_eq!(capability_name(cap::TEMPERATURE), Some("TEMPERATURE"));
-        assert_eq!(capability_name(cap::TEMPERATURE + 1), None);
+        assert_eq!(
+            capability_name(cap::MESHCORE_FORWARDER),
+            Some("MESHCORE_FORWARDER")
+        );
+        assert_eq!(capability_name(cap::MESHCORE_FORWARDER + 1), None);
     }
 
     #[test]

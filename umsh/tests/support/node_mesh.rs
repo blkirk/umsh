@@ -128,6 +128,7 @@ impl DeviceSide {
             reboot: true,
             stats: None,
             mac_node: true,
+            meshcore_forwarder: false,
             wifi: None,
             ip: None,
             bridge_client: false,

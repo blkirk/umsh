@@ -85,6 +85,22 @@ async fn node_admin_task(node_handle: DeviceNode, input: &'static SessionInput, 
     umsh_ulcp_runtime::admin_responder::responder_loop(node_handle, input, nonce).await
 }
 
+#[cfg(feature = "meshcore-forwarder")]
+#[embassy_executor::task]
+async fn meshcore_forwarder_task(public_key: [u8; 32], seed: [u8; 32], t_frame_ms: u32) {
+    static STORAGE: static_cell::StaticCell<umsh_ulcp_runtime::meshcore::MeshCoreStorage> =
+        static_cell::StaticCell::new();
+    umsh_ulcp_runtime::meshcore::forwarder_loop(
+        STORAGE.init_with(|| umsh_ulcp_runtime::meshcore::MeshCoreStorage::new(public_key, seed)),
+        public_key,
+        t_frame_ms,
+        &crate::firmware::DUTY_LEDGER,
+        Some(&crate::firmware::STATS),
+        hooks().note_external_load,
+    )
+    .await
+}
+
 // ─── Bring-up ────────────────────────────────────────────────────────────────
 
 /// This board's UX couplings.
@@ -152,6 +168,15 @@ pub async fn bring_up(
         node_identity_blob_task(
             parts.node.clone(),
             SoftwareIdentity::from_secret_bytes(identity_secret),
+        )
+        .unwrap(),
+    );
+    #[cfg(feature = "meshcore-forwarder")]
+    spawner.spawn(
+        meshcore_forwarder_task(
+            parts.node_key,
+            umsh_ulcp_runtime::meshcore::derive_seed(&node_seed),
+            t_frame_ms,
         )
         .unwrap(),
     );

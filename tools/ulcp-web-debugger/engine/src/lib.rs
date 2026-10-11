@@ -89,6 +89,7 @@ pub fn web_sim_config() -> umsh_ulcp_simdev::SessionConfig {
         // device to front a segment.
         stats: None,
         mac_node: false,
+        meshcore_forwarder: false,
         // A station and a dual-stack, for the same reason as the clock
         // and the receiver: the simulator answers the whole property
         // surface, joins its own canned networks, and hands back an
@@ -244,6 +245,12 @@ const CR_CHOICES: &[PropertyChoice] = &[
 ];
 
 const ALERT_CHOICES: &[PropertyChoice] = &[choice("0", "ALERT_NONE"), choice("1", "ALERT_LOCATE")];
+
+const MESHCORE_REGION_POLICY_CHOICES: &[PropertyChoice] = &[
+    choice("0", "Open"),
+    choice("1", "Scoped only"),
+    choice("2", "Ignore"),
+];
 
 const fn choice(value: &'static str, label: &'static str) -> PropertyChoice {
     PropertyChoice { value, label }
@@ -885,6 +892,26 @@ const PROPERTY_SPECS: &[PropertySpec] = &[
         Some(umsh_ulcp::ids::cap::HOST_RX_QUEUE),
     ),
     spec(
+        prop::MESHCORE_FORWARDING_ENABLED,
+        "Repeater",
+        "Forward MeshCore traffic too; unavailable under a key beginning 00 or FF",
+        true,
+        true,
+        "boolean",
+        None,
+        Some(umsh_ulcp::ids::cap::MESHCORE_FORWARDER),
+    ),
+    spec(
+        prop::MESHCORE_REGION_POLICY,
+        "Repeater",
+        "Which MeshCore floods to forward by region scope",
+        true,
+        true,
+        "choice",
+        None,
+        Some(umsh_ulcp::ids::cap::MESHCORE_FORWARDER),
+    ),
+    spec(
         prop::BLE_PAIRING_PIN,
         "Bluetooth",
         "Pairing PIN (write-only)",
@@ -924,6 +951,7 @@ const fn spec(
             prop::PHY_LORA_SF => SF_CHOICES,
             prop::PHY_LORA_CR => CR_CHOICES,
             prop::ALERT => ALERT_CHOICES,
+            prop::MESHCORE_REGION_POLICY => MESHCORE_REGION_POLICY_CHOICES,
             _ => &[],
         },
     }
@@ -1670,10 +1698,18 @@ fn decode_property(key: u32, value: &[u8]) -> Option<DecodedValue> {
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
         | prop::GNSS_TIME_TRUST
+        | prop::MESHCORE_FORWARDING_ENABLED
             if value.len() == 1 && value[0] <= 1 =>
         {
             ("boolean", (value[0] != 0).to_string())
         }
+        prop::MESHCORE_REGION_POLICY if value.len() == 1 => (
+            "enum",
+            MESHCORE_REGION_POLICY_CHOICES
+                .get(usize::from(value[0]))?
+                .label
+                .to_string(),
+        ),
         // The state worth being able to see at a glance: a device that
         // does not know what time it is, and must therefore show no clock.
         prop::TIME if value.is_empty() => ("time", "not set".into()),
@@ -1869,10 +1905,12 @@ fn editable_property_text(key: u32, value: &[u8]) -> Option<String> {
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
         | prop::GNSS_TIME_TRUST
+        | prop::MESHCORE_FORWARDING_ENABLED
             if value.len() == 1 && value[0] <= 1 =>
         {
             Some((value[0] != 0).to_string())
         }
+        prop::MESHCORE_REGION_POLICY if value.len() == 1 => Some(value[0].to_string()),
         // An unset clock has no text to edit; typing one is how it is set,
         // and an empty write is how it goes back to unset.
         prop::TIME if value.len() == 4 => {
@@ -1910,7 +1948,8 @@ fn encode_property_text(key: u32, value: &str) -> Result<Vec<u8>, String> {
         | prop::HOST_AUTO_ACK
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
-        | prop::GNSS_TIME_TRUST => {
+        | prop::GNSS_TIME_TRUST
+        | prop::MESHCORE_FORWARDING_ENABLED => {
             let parsed = match value.to_ascii_lowercase().as_str() {
                 "true" | "1" | "on" | "yes" => 1,
                 "false" | "0" | "off" | "no" => 0,
@@ -1942,6 +1981,10 @@ fn encode_property_text(key: u32, value: &str) -> Result<Vec<u8>, String> {
         )?
         .to_le_bytes()
         .to_vec()),
+        prop::MESHCORE_REGION_POLICY => Ok(vec![parse_integer::<u8>(
+            value,
+            "0 open, 1 scoped only, or 2 ignore",
+        )?]),
         prop::PHY_TX_POWER => Ok(vec![
             parse_integer::<i8>(value, "an 8-bit signed integer")? as u8
         ]),

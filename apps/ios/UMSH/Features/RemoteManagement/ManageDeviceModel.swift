@@ -300,6 +300,7 @@ final class ManageDeviceModel {
             supportsLora: decoded.supportsLora,
             supportsDutyCycleLimit: decoded.supportsDutyCycleLimit,
             supportsRepeater: decoded.supportsRepeater,
+            supportsMeshcoreForwarder: decoded.supportsMeshcoreForwarder,
             supportsIdent: decoded.supportsIdent,
             supportsDeviceIdentity: decoded.supportsDeviceIdentity,
             supportsGnss: decoded.supportsGnss,

@@ -174,7 +174,7 @@ mod tests {
     fn interleaved_session_and_node_tx_share_one_budget() {
         let ledger = ledger();
         // Fixture modulation (906.875 MHz profile): SF9/BW250k/CR5.
-        ledger.set_phy(9, 250_000, 5);
+        ledger.set_phy(9, 250_000, 5, 32);
         ledger.set_limit(655); // ≈1%: 36 s per hour.
         let now = Rc::new(Cell::new(0u64));
         let mut node = DutyGatedRadio::new(
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn failed_transmit_records_nothing() {
         let ledger = ledger();
-        ledger.set_phy(9, 250_000, 5);
+        ledger.set_phy(9, 250_000, 5, 32);
         ledger.set_limit(655);
         let now = Rc::new(Cell::new(0u64));
         let mut node = DutyGatedRadio::new(
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(ledger.usage(0), 0);
 
         block_on(node.transmit(&[0u8; 48], TxOptions::default())).unwrap();
-        let expected = umsh_ulcp::airtime::lora_airtime_ms(9, 250_000, 5, 48);
+        let expected = umsh_ulcp::airtime::lora_airtime_ms_with_preamble(9, 250_000, 5, 48, 32);
         // One recorded frame: usage reflects exactly its priced airtime
         // (rounded up to 5 ms units and rescaled).
         assert_eq!(

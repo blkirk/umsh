@@ -4258,6 +4258,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "umsh-meshcore-forwarder"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "serde_json",
+ "umsh-core",
+ "umsh-crypto",
+ "umsh-hal",
+]
+
+[[package]]
 name = "umsh-mobile-core"
 version = "0.1.0"
 dependencies = [
@@ -4441,6 +4452,7 @@ dependencies = [
  "umsh-hal",
  "umsh-journal-store",
  "umsh-mac",
+ "umsh-meshcore-forwarder",
  "umsh-node",
  "umsh-node-mgmt",
  "umsh-radio-loraphy",

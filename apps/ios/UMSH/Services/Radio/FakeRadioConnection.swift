@@ -1399,6 +1399,10 @@ struct FakeManagedDevice: Sendable {
             id.statForwarded: UInt32(1_733).littleEndianData,
             id.statForwardDropped: UInt32(82).littleEndianData,
             id.statForwardCancelled: UInt32(14).littleEndianData,
+            id.statMeshcoreSeen: UInt32(120).littleEndianData,
+            id.statMeshcoreForwardedRouted: UInt32(7).littleEndianData,
+            id.statMeshcoreForwardedFlood: UInt32(31).littleEndianData,
+            id.statMeshcoreDeclined: UInt32(9).littleEndianData,
             id.uptime: UInt32(172_800).littleEndianData,
             id.identRole: Data([1]),
             id.identMobile: Data([0]),
@@ -1446,6 +1450,10 @@ struct FakeManagedDevice: Sendable {
             id.repeaterDefaultRegion: Data(),
             id.repeaterMinRssi: Int16(-115).littleEndianData,
             id.repeaterMinSnr: Data(),
+            // MeshCore forwarding off, under the open region policy.
+            id.meshcoreForwardingEnabled: Data([0]),
+            id.meshcoreRegionPolicy: Data([0]),
+            id.meshcoreRegions: Data(),
             id.devPeers: Self.peerKey,
             id.devAdmins: Self.phoneKey + Self.otherAdminKey,
             // A scan every device can run, whether or not it can join
@@ -1664,7 +1672,7 @@ struct FakeManagedDevice: Sendable {
     /// by answering `PROP_BLE_BOND_COUNT` rather than by listing a code.
     private static let capabilities = Data([
         0x10, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x3D, 0x31, 0x32,
-        0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x3A, 0x83, 0x04,
+        0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x3A, 0x3E, 0x83, 0x04,
     ])
 
     /// The same tracker with a receiver and no station: it lists Wi-Fi
@@ -1672,7 +1680,7 @@ struct FakeManagedDevice: Sendable {
     /// is the shape a device that scans to place itself really has.
     private static let scanOnlyCapabilities = Data([
         0x10, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x3D, 0x31, 0x32,
-        0x33, 0x34, 0x35, 0x83, 0x04,
+        0x33, 0x34, 0x35, 0x3E, 0x83, 0x04,
     ])
 }
 

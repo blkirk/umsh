@@ -83,6 +83,11 @@ static GENERATORS: &[(&[u8], &ReseedSlot)] = &[
     (b"ble-privacy-rng reseed", &BLE_PRIVACY_RESEED),
     #[cfg(feature = "bridge-client")]
     (b"bridge-tls reseed", &BRIDGE_RESEED),
+    #[cfg(feature = "meshcore-forwarder")]
+    (
+        b"meshcore-rng reseed",
+        &umsh_ulcp_runtime::meshcore::MESHCORE_RESEED,
+    ),
 ];
 
 fn now_s() -> u32 {

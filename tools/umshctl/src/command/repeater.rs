@@ -9,10 +9,15 @@
 use anyhow::{Result, bail};
 
 use umsh::core::RegionCode;
+use umsh::ulcp::{MeshCoreRegionPolicy, UlcpError, meshcore_identity_allowed};
+use umsh::ulcp_wire::Status;
 use umsh::ulcp_wire::ids::prop;
 
 use super::persist;
-use super::values::{MinRssiArg, MinSnrArg, OptRegionArg, RegionArg, RegionListArg};
+use super::values::{
+    MeshCoreRegionArg, MeshCoreRegionListArg, MinRssiArg, MinSnrArg, OptRegionArg, RegionArg,
+    RegionListArg,
+};
 use crate::App;
 use crate::output::{subfield, warn};
 
@@ -45,7 +50,61 @@ pub enum RepeaterOp {
         #[arg(value_name = "DB|none", allow_hyphen_values = true)]
         db: MinSnrArg,
     },
+    /// Forward MeshCore traffic too.
+    Meshcore {
+        #[command(subcommand)]
+        op: MeshCoreOp,
+    },
 }
+
+#[derive(Debug, clap::Subcommand)]
+pub enum MeshCoreOp {
+    /// Forward MeshCore traffic.
+    On,
+    /// Stop forwarding MeshCore traffic.
+    Off,
+    /// Which MeshCore floods to forward by region scope.
+    Policy {
+        #[arg(value_name = "open|scoped|ignore", value_parser = parse_policy)]
+        policy: MeshCoreRegionPolicy,
+    },
+    /// The MeshCore regions whose scoped floods are forwarded.
+    Regions {
+        #[command(subcommand)]
+        op: Option<MeshCoreRegionOp>,
+    },
+}
+
+/// MeshCore region names are case-sensitive and written without their
+/// `#`, which the device supplies; a typed `#` is dropped.
+#[derive(Debug, clap::Subcommand)]
+pub enum MeshCoreRegionOp {
+    /// List the MeshCore regions.
+    List,
+    /// Add one MeshCore region.
+    Add {
+        #[arg(value_name = "NAME")]
+        name: MeshCoreRegionArg,
+    },
+    /// Remove one MeshCore region.
+    Remove {
+        #[arg(value_name = "NAME")]
+        name: MeshCoreRegionArg,
+    },
+    /// Replace the whole list; `none` clears it.
+    Set {
+        #[arg(value_name = "NAME[,...]|none")]
+        list: MeshCoreRegionListArg,
+    },
+}
+
+fn parse_policy(name: &str) -> Result<MeshCoreRegionPolicy, String> {
+    name.parse()
+        .map_err(|()| "expected open, scoped, or ignore".to_string())
+}
+
+/// Shown wherever MeshCore forwarding is unavailable under the identity.
+const RESERVED_IDENTITY: &str = "MeshCore reserves identity keys beginning 00 or FF";
 
 /// A region is written as a short code, a name, or a literal
 /// `0x1234`; the device stores the string and derives the 2-octet code
@@ -93,6 +152,25 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
             match policy.min_snr {
                 Some(db) => subfield("min snr", format!("{db} dB")),
                 None => subfield("min snr", "any"),
+            }
+            if let Some(meshcore) = device.meshcore_forwarding().await? {
+                subfield(
+                    "meshcore",
+                    format!(
+                        "{}, policy {}",
+                        if meshcore.enabled { "on" } else { "off" },
+                        meshcore.region_policy.name()
+                    ),
+                );
+                subfield(
+                    "meshcore regions",
+                    format_meshcore_regions(&meshcore.regions),
+                );
+                if meshcore.enabled && !identity_allowed(device).await? {
+                    warn(format!(
+                        "MeshCore forwarding is inactive: {RESERVED_IDENTITY}"
+                    ));
+                }
             }
             if policy.enabled
                 && policy.default_region.is_some_and(|code| {
@@ -152,8 +230,70 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
             Some(db) => println!("repeater min snr {db} dB"),
             None => println!("repeater min snr any"),
         },
+        RepeaterOp::Meshcore { op } => match op {
+            MeshCoreOp::On => match device.set_meshcore_forwarding_enabled(true).await {
+                Ok(_) => println!("repeater meshcore on"),
+                Err(UlcpError::Status(Status::INVALID_STATE))
+                    if !identity_allowed(device).await? =>
+                {
+                    bail!("{RESERVED_IDENTITY}");
+                }
+                Err(error) => return Err(error.into()),
+            },
+            MeshCoreOp::Off => {
+                device.set_meshcore_forwarding_enabled(false).await?;
+                println!("repeater meshcore off");
+            }
+            MeshCoreOp::Policy { policy } => {
+                let stored = device.set_meshcore_region_policy(policy).await?;
+                println!("repeater meshcore policy {}", stored.name());
+            }
+            MeshCoreOp::Regions { op } => match op.unwrap_or(MeshCoreRegionOp::List) {
+                MeshCoreRegionOp::List => {
+                    let Some(meshcore) = device.meshcore_forwarding().await? else {
+                        bail!("device does not advertise CAP_MESHCORE_FORWARDER");
+                    };
+                    println!(
+                        "repeater meshcore regions {}",
+                        format_meshcore_regions(&meshcore.regions)
+                    );
+                    return Ok(());
+                }
+                MeshCoreRegionOp::Add { name } => {
+                    device.add_meshcore_region(&name.0).await?;
+                    println!("repeater meshcore region added: {}", name.0);
+                }
+                MeshCoreRegionOp::Remove { name } => {
+                    device.remove_meshcore_region(&name.0).await?;
+                    println!("repeater meshcore region removed: {}", name.0);
+                }
+                MeshCoreRegionOp::Set { list } => {
+                    let stored = device.set_meshcore_regions(&list.0).await?;
+                    println!(
+                        "repeater meshcore regions {}",
+                        format_meshcore_regions(&stored)
+                    );
+                    if stored.len() < list.0.len() {
+                        warn(format!(
+                            "the device kept {} of {} regions (repeats collapse)",
+                            stored.len(),
+                            list.0.len()
+                        ));
+                    }
+                }
+            },
+        },
     }
     persist(device, no_save).await
+}
+
+/// Whether the device identity's key is one MeshCore lets a repeater
+/// run under.
+async fn identity_allowed(
+    device: &mut umsh::ulcp::UlcpDevice<crate::connection::SessionLink>,
+) -> Result<bool> {
+    let key = device.get_prop(prop::DEV_KEY).await?;
+    Ok(<[u8; 32]>::try_from(key.as_slice()).map_or(true, |key| meshcore_identity_allowed(&key)))
 }
 
 async fn set_enabled(
@@ -207,6 +347,14 @@ pub fn format_region(region: &str) -> String {
 
 /// Render a region list for display, naming the empty list as what it
 /// means rather than printing nothing.
+/// MeshCore region names as stored, without their `#`.
+pub fn format_meshcore_regions(regions: &[String]) -> String {
+    match regions.is_empty() {
+        true => "none".to_string(),
+        false => regions.join(", "),
+    }
+}
+
 pub fn format_regions(regions: &[String]) -> String {
     if regions.is_empty() {
         return "any (no regional restriction)".to_string();

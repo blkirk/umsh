@@ -547,6 +547,10 @@ struct RemoteStatisticsScreen: View {
             id.statForwarded,
             id.statForwardDropped,
             id.statForwardCancelled,
+            id.statMeshcoreSeen,
+            id.statMeshcoreForwardedRouted,
+            id.statMeshcoreForwardedFlood,
+            id.statMeshcoreDeclined,
         ]
     }
 
@@ -558,6 +562,13 @@ struct RemoteStatisticsScreen: View {
         stats.statForwarded != nil
             || stats.statForwardDropped != nil
             || stats.statForwardCancelled != nil
+    }
+
+    private var hasMeshCore: Bool {
+        stats.statMeshcoreSeen != nil
+            || stats.statMeshcoreForwardedRouted != nil
+            || stats.statMeshcoreForwardedFlood != nil
+            || stats.statMeshcoreDeclined != nil
     }
 
     var body: some View {
@@ -604,6 +615,23 @@ struct RemoteStatisticsScreen: View {
                     }
                     if let value = stats.statForwardCancelled {
                         RemoteValueRow("Cancelled", value: value.formatted())
+                    }
+                }
+            }
+
+            if hasMeshCore {
+                Section("MeshCore") {
+                    if let value = stats.statMeshcoreSeen {
+                        RemoteValueRow("Seen", value: value.formatted())
+                    }
+                    if let value = stats.statMeshcoreForwardedRouted {
+                        RemoteValueRow("Forwarded Routed", value: value.formatted())
+                    }
+                    if let value = stats.statMeshcoreForwardedFlood {
+                        RemoteValueRow("Forwarded Flood", value: value.formatted())
+                    }
+                    if let value = stats.statMeshcoreDeclined {
+                        RemoteValueRow("Declined", value: value.formatted())
                     }
                 }
             }

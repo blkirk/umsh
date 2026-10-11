@@ -524,6 +524,61 @@ mod tests {
         let lines = (topic("repeater").unwrap().render)(&on, &ctx);
         assert_eq!(value(&lines, "floor").as_deref(), Some("-110 dBm/any"));
         assert_eq!(value(&lines, "tags").as_deref(), Some("untagged"));
+        // No MeshCore line from a device without the forwarder.
+        assert_eq!(value(&lines, "meshcore"), None);
+    }
+
+    /// MeshCore forwarding runs without the UMSH repeater, so its state
+    /// shows while the UMSH side is off, and the shared floor with it.
+    #[test]
+    fn meshcore_forwarding_shows_while_the_umsh_repeater_is_off() {
+        let ctx = context(&[cap::REPEATER, cap::MESHCORE_FORWARDER]);
+        let set = props_of(&[
+            (prop::MAC_REPEATER_ENABLED, &[0]),
+            (prop::MAC_REPEATER_MIN_RSSI, &(-110i16).to_le_bytes()),
+            (prop::MESHCORE_FORWARDING_ENABLED, &[1]),
+            (prop::MESHCORE_REGION_POLICY, &[0]),
+            (prop::MESHCORE_REGIONS, &[]),
+            (prop::DEV_KEY, &[0x42; 32]),
+        ]);
+        let lines = (topic("repeater").unwrap().render)(&set, &ctx);
+        assert_eq!(value(&lines, "forwarding").as_deref(), Some("off"));
+        assert_eq!(value(&lines, "regions"), None);
+        assert_eq!(value(&lines, "floor").as_deref(), Some("-110 dBm/any"));
+        assert_eq!(
+            value(&lines, "meshcore").as_deref(),
+            Some("on, policy open")
+        );
+        assert_eq!(value(&lines, "meshcore regions").as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn meshcore_forwarding_names_a_reserved_identity() {
+        let ctx = context(&[cap::REPEATER, cap::MESHCORE_FORWARDER]);
+        let with = |enabled: u8, key: [u8; 32]| {
+            props_of(&[
+                (prop::MAC_REPEATER_ENABLED, &[1]),
+                (prop::MESHCORE_FORWARDING_ENABLED, &[enabled]),
+                (prop::MESHCORE_REGION_POLICY, &[1]),
+                (prop::MESHCORE_REGIONS, &[5, b'u', b's', b'-', b'c', b'a']),
+                (prop::DEV_KEY, &key),
+            ])
+        };
+        let render = topic("repeater").unwrap().render;
+        let line = |set| value(&render(&set, &ctx), "meshcore");
+        assert_eq!(line(with(0, [0x42; 32])).as_deref(), Some("off"));
+        assert_eq!(
+            line(with(1, [0x42; 32])).as_deref(),
+            Some("on, policy scoped")
+        );
+        assert_eq!(
+            value(&render(&with(1, [0x42; 32]), &ctx), "meshcore regions").as_deref(),
+            Some("us-ca")
+        );
+        assert_eq!(
+            line(with(1, [0xFF; 32])).as_deref(),
+            Some("inactive (identity key begins 00 or FF)")
+        );
     }
 
     #[test]

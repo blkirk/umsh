@@ -227,6 +227,7 @@ async fn main(spawner: Spawner) {
         SpreadingFactor::_7,
         Bandwidth::_62KHz,
         umsh_radio_loraphy::MAX_PAYLOAD,
+        umsh_radio_loraphy::profiles::DEFAULT.tx_preamble_symbols,
     );
     spawner.spawn(radio_task(lora, mdltn, rx_pkt, tx_pkt).unwrap());
 

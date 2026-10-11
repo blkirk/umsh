@@ -3,7 +3,7 @@ import Foundation
 @main
 struct MobileCoreSmokeTest {
     static func main() throws {
-        precondition(mobileApiVersion() == 47)
+        precondition(mobileApiVersion() == 50)
         precondition(ulcpMaxDevPeers() == 8)
 
         let hint = try renderNodeHint(bytes: Data([0xA1, 0xB2, 0x03]))
@@ -163,6 +163,7 @@ struct MobileCoreSmokeTest {
                         minRssiDbm: -115,
                         minSnrDb: -7
                     ),
+                    meshcore: nil,
                     tzOffsetMin: nil,
                     gnss: nil,
                     advert: nil

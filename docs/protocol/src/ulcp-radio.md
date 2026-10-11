@@ -48,6 +48,10 @@ Id   | Mnemonic              | Commands | Description
 4838 | `PROP_STAT_FORWARDED` | Get, Set | Packets this device chose to forward
 4839 | `PROP_STAT_FORWARD_DROPPED` | Get, Set | Forwarding candidates rejected by policy
 4840 | `PROP_STAT_FORWARD_CANCELLED` | Get, Set | Queued forwards cancelled after an acknowledgement
+4841 | `PROP_STAT_MESHCORE_SEEN` | Get, Set | MeshCore packets received
+4842 | `PROP_STAT_MESHCORE_FORWARDED_ROUTED` | Get, Set | MeshCore packets forwarded along their source route
+4843 | `PROP_STAT_MESHCORE_FORWARDED_FLOOD` | Get, Set | MeshCore packets flooded
+4844 | `PROP_STAT_MESHCORE_DECLINED` | Get, Set | MeshCore packets neither forwarded nor duplicates
 
 ### PROP 32: `PROP_PHY_ENABLED` {#prop-phy-enabled}
 
@@ -312,3 +316,31 @@ and packets received while forwarding is disabled are also excluded. Requires
 
 Queued forwards cancelled because the destination's acknowledgement was
 overheard before transmission. Requires `CAP_STATS` and `CAP_REPEATER`.
+
+### PROP 4841: `PROP_STAT_MESHCORE_SEEN` {#prop-stat-meshcore-seen}
+
+MeshCore packets received while [MeshCore
+forwarding](ulcp-device.md#meshcore-forwarding) is running. Every one is also
+counted in exactly one of `PROP_STAT_MESHCORE_FORWARDED_ROUTED`,
+`PROP_STAT_MESHCORE_FORWARDED_FLOOD`, or `PROP_STAT_MESHCORE_DECLINED`, or is a
+duplicate. Copies of this device's own transmissions are not received packets.
+Requires `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
+
+### PROP 4842: `PROP_STAT_MESHCORE_FORWARDED_ROUTED` {#prop-stat-meshcore-forwarded-routed}
+
+MeshCore packets this device chose to forward along their source route. The
+counter records the forwarding decision; successful physical transmissions are
+counted by `PROP_STAT_TX_PACKETS`. Requires `CAP_STATS` and
+`CAP_MESHCORE_FORWARDER`.
+
+### PROP 4843: `PROP_STAT_MESHCORE_FORWARDED_FLOOD` {#prop-stat-meshcore-forwarded-flood}
+
+MeshCore packets this device chose to flood, counted at the decision as above.
+Requires `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
+
+### PROP 4844: `PROP_STAT_MESHCORE_DECLINED` {#prop-stat-meshcore-declined}
+
+MeshCore packets this device neither forwarded nor recognized as duplicates:
+declined by MeshCore's own forwarding rules or by the region policy, below
+the configured signal thresholds, malformed, or dropped for want of queue
+space. Requires `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.

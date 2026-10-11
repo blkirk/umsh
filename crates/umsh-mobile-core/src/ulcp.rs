@@ -15,8 +15,8 @@ use umsh_ulcp::{
     host::{PropertyNotification, PropertyNotificationError, TidAllocator},
     ids::{
         INTERFACE_TYPE, MAX_ANNOUNCE_FLOOD_HOPS, MAX_AUTO_ANNOUNCE_INTERVAL_S,
-        MIN_AUTO_ANNOUNCE_INTERVAL_S, PROTOCOL_MAJOR_VERSION, PROTOCOL_MINOR_VERSION, cap, prop,
-        saved,
+        MIN_AUTO_ANNOUNCE_INTERVAL_S, PROTOCOL_MAJOR_VERSION, PROTOCOL_MINOR_VERSION, cap,
+        meshcore_identity_allowed, meshcore_region_policy, prop, saved,
     },
     ip,
     items::{self, Filter},
@@ -110,6 +110,58 @@ pub struct UlcpRepeaterSettingsRecord {
     pub min_rssi_dbm: Option<i16>,
     /// `PROP_MAC_REPEATER_MIN_SNR` in whole dB. `None` accepts any.
     pub min_snr_db: Option<i8>,
+}
+
+/// Whether the device also forwards MeshCore v1 traffic, and under what
+/// regional rule.
+///
+/// Kept apart from [`UlcpRepeaterSettingsRecord`] because it rides on a
+/// capability of its own (`CAP_MESHCORE_FORWARDER`) and runs independently
+/// of `PROP_MAC_REPEATER_ENABLED`. Read and written as a set, `enabled`
+/// last.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct UlcpMeshCoreSettingsRecord {
+    /// `PROP_MESHCORE_FORWARDING_ENABLED`. The device refuses to set it
+    /// while its identity key starts with a prefix MeshCore reserves—see
+    /// [`ulcp_meshcore_identity_allowed`].
+    pub enabled: bool,
+    /// `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+    pub region_policy: u8,
+    /// `PROP_MESHCORE_REGIONS`: MeshCore region names, case-sensitive and
+    /// without the `#` the device supplies.
+    pub regions: Vec<String>,
+}
+
+/// A MeshCore region name as typed, in the form `PROP_MESHCORE_REGIONS`
+/// stores it: without a leading `#`, and `None` for a name the device
+/// would refuse.
+///
+/// Case is kept, since MeshCore derives region keys case-sensitively.
+#[uniffi::export]
+pub fn ulcp_meshcore_region_name(input: String) -> Option<String> {
+    let name = input.trim();
+    let name = name.strip_prefix('#').unwrap_or(name);
+    valid_meshcore_region_name(name).then(|| name.to_owned())
+}
+
+/// Whether `name` is a `PROP_MESHCORE_REGIONS` item a device accepts: 1 to
+/// 30 octets, not beginning with the `#` the device supplies or the `$` of
+/// a private region.
+fn valid_meshcore_region_name(name: &str) -> bool {
+    (1..=items::MESHCORE_REGION_NAME_MAX_LEN).contains(&name.len()) && !name.starts_with(['#', '$'])
+}
+
+/// Whether a device identity key may forward MeshCore traffic.
+///
+/// MeshCore reserves the 0x00 and 0xFF first-octet prefixes, and a device
+/// whose `PROP_DEV_KEY` starts with either refuses to enable forwarding.
+/// Anything that is not a 32-octet key is not a reason to say no here.
+#[uniffi::export]
+pub fn ulcp_meshcore_identity_allowed(dev_key: Vec<u8>) -> bool {
+    match dev_key.as_slice() {
+        [first, ..] if dev_key.len() == items::PUBLIC_KEY_LEN => meshcore_identity_allowed(*first),
+        _ => true,
+    }
 }
 
 /// The device's positioning policy: whether the receiver runs, and what
@@ -285,6 +337,9 @@ pub struct UlcpSyncRecord {
     pub battery: Option<UlcpBatteryRecord>,
     /// The device can forward for the mesh on its own (`CAP_REPEATER`).
     pub supports_repeater: bool,
+    /// The device can also forward MeshCore v1 traffic
+    /// (`CAP_MESHCORE_FORWARDER`).
+    pub supports_meshcore_forwarder: bool,
     /// The device serves and configures its own advertised node identity
     /// (`CAP_IDENT`).
     pub supports_ident: bool,
@@ -330,6 +385,9 @@ pub struct UlcpSyncRecord {
     /// Present when `supports_repeater` and the device reported the whole
     /// policy.
     pub repeater: Option<UlcpRepeaterSettingsRecord>,
+    /// Present when `supports_meshcore_forwarder` and the device reported
+    /// both settings.
+    pub meshcore: Option<UlcpMeshCoreSettingsRecord>,
     /// `PROP_DEV_PEERS`: the peer public keys stored on the device
     /// identity, read back losslessly. Present when
     /// `supports_device_identity` and the device reported the list.
@@ -457,6 +515,9 @@ pub struct UlcpDeviceConfigRecord {
     /// The flood-forwarding policy. Present exactly when the device
     /// advertises `CAP_REPEATER`.
     pub repeater: Option<UlcpRepeaterSettingsRecord>,
+    /// MeshCore forwarding. Present exactly when the device advertises
+    /// `CAP_MESHCORE_FORWARDER`.
+    pub meshcore: Option<UlcpMeshCoreSettingsRecord>,
     /// `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
     /// device advertises `CAP_TIME`.
     ///
@@ -3908,6 +3969,13 @@ pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, Mob
             prop::MAC_REPEATER_MIN_SNR,
         ]);
     }
+    if has(cap::MESHCORE_FORWARDER) {
+        properties.extend([
+            prop::MESHCORE_FORWARDING_ENABLED,
+            prop::MESHCORE_REGION_POLICY,
+            prop::MESHCORE_REGIONS,
+        ]);
+    }
     if has(cap::IDENT) {
         properties.extend([
             prop::IDENT_ROLE,
@@ -4107,6 +4175,31 @@ pub fn inspect_ulcp_sync(
         })
     })();
 
+    // A set, read whole for the same reason.
+    let meshcore_forwarder = has(cap::MESHCORE_FORWARDER);
+    let meshcore_enabled = expected.read(
+        meshcore_forwarder,
+        prop::MESHCORE_FORWARDING_ENABLED,
+        decode_bool,
+    );
+    let meshcore_region_policy = expected.read(
+        meshcore_forwarder,
+        prop::MESHCORE_REGION_POLICY,
+        decode_meshcore_region_policy,
+    );
+    let meshcore_regions = expected.read(
+        meshcore_forwarder,
+        prop::MESHCORE_REGIONS,
+        decode_region_list,
+    );
+    let meshcore = (|| {
+        Some(UlcpMeshCoreSettingsRecord {
+            enabled: meshcore_enabled?,
+            region_policy: meshcore_region_policy?,
+            regions: meshcore_regions?,
+        })
+    })();
+
     // An empty PROP_IDENT_ROLE is the device saying it derives its own
     // role, which is the same `None` a device without CAP_IDENT reports.
     let ident = has(cap::IDENT);
@@ -4188,6 +4281,7 @@ pub fn inspect_ulcp_sync(
         supports_battery: has(cap::BATTERY),
         battery,
         supports_repeater: has(cap::REPEATER),
+        supports_meshcore_forwarder: meshcore_forwarder,
         supports_ident: has(cap::IDENT),
         supports_device_identity: has(cap::DEV_IDENTITY),
         supports_time: has(cap::TIME),
@@ -4213,6 +4307,7 @@ pub fn inspect_ulcp_sync(
         host_peer_count,
         auto_ack,
         repeater,
+        meshcore,
         dev_peer_keys,
         dev_admin_keys,
         dev_channel_ids,
@@ -4316,6 +4411,10 @@ pub struct UlcpManagedPropertyIds {
     pub stat_forwarded: u32,
     pub stat_forward_dropped: u32,
     pub stat_forward_cancelled: u32,
+    pub stat_meshcore_seen: u32,
+    pub stat_meshcore_forwarded_routed: u32,
+    pub stat_meshcore_forwarded_flood: u32,
+    pub stat_meshcore_declined: u32,
     pub ident_role: u32,
     pub ident_mobile: u32,
     pub ident_location: u32,
@@ -4364,6 +4463,9 @@ pub struct UlcpManagedPropertyIds {
     pub repeater_default_region: u32,
     pub repeater_min_rssi: u32,
     pub repeater_min_snr: u32,
+    pub meshcore_forwarding_enabled: u32,
+    pub meshcore_region_policy: u32,
+    pub meshcore_regions: u32,
     pub dev_peers: u32,
     pub dev_admins: u32,
 }
@@ -4410,6 +4512,10 @@ pub fn ulcp_managed_property_ids() -> UlcpManagedPropertyIds {
         stat_forwarded: prop::STAT_FORWARDED,
         stat_forward_dropped: prop::STAT_FORWARD_DROPPED,
         stat_forward_cancelled: prop::STAT_FORWARD_CANCELLED,
+        stat_meshcore_seen: prop::STAT_MESHCORE_SEEN,
+        stat_meshcore_forwarded_routed: prop::STAT_MESHCORE_FORWARDED_ROUTED,
+        stat_meshcore_forwarded_flood: prop::STAT_MESHCORE_FORWARDED_FLOOD,
+        stat_meshcore_declined: prop::STAT_MESHCORE_DECLINED,
         ident_role: prop::IDENT_ROLE,
         ident_mobile: prop::IDENT_MOBILE,
         ident_location: prop::IDENT_LOCATION,
@@ -4458,6 +4564,9 @@ pub fn ulcp_managed_property_ids() -> UlcpManagedPropertyIds {
         repeater_default_region: prop::MAC_REPEATER_DEFAULT_REGION,
         repeater_min_rssi: prop::MAC_REPEATER_MIN_RSSI,
         repeater_min_snr: prop::MAC_REPEATER_MIN_SNR,
+        meshcore_forwarding_enabled: prop::MESHCORE_FORWARDING_ENABLED,
+        meshcore_region_policy: prop::MESHCORE_REGION_POLICY,
+        meshcore_regions: prop::MESHCORE_REGIONS,
         dev_peers: prop::DEV_PEERS,
         dev_admins: prop::DEV_ADMINS,
     }
@@ -4544,6 +4653,15 @@ pub fn ulcp_category_properties(
                     prop::STAT_FORWARDED,
                     prop::STAT_FORWARD_DROPPED,
                     prop::STAT_FORWARD_CANCELLED,
+                ],
+            );
+            when(
+                has(cap::STATS) && has(cap::MESHCORE_FORWARDER),
+                &[
+                    prop::STAT_MESHCORE_SEEN,
+                    prop::STAT_MESHCORE_FORWARDED_ROUTED,
+                    prop::STAT_MESHCORE_FORWARDED_FLOOD,
+                    prop::STAT_MESHCORE_DECLINED,
                 ],
             );
         }
@@ -4665,16 +4783,29 @@ pub fn ulcp_category_properties(
                 prop::MAC_REPEATER_ENABLED,
             ],
         ),
-        UlcpManageCategory::Repeater => when(
-            has(cap::REPEATER),
-            &[
-                prop::MAC_REPEATER_ENABLED,
-                prop::MAC_REPEATER_REGIONS,
-                prop::MAC_REPEATER_DEFAULT_REGION,
-                prop::MAC_REPEATER_MIN_RSSI,
-                prop::MAC_REPEATER_MIN_SNR,
-            ],
-        ),
+        UlcpManageCategory::Repeater => {
+            when(
+                has(cap::REPEATER),
+                &[
+                    prop::MAC_REPEATER_ENABLED,
+                    prop::MAC_REPEATER_REGIONS,
+                    prop::MAC_REPEATER_DEFAULT_REGION,
+                    prop::MAC_REPEATER_MIN_RSSI,
+                    prop::MAC_REPEATER_MIN_SNR,
+                ],
+            );
+            // The identity key decides whether MeshCore forwarding can be
+            // turned on at all, so the screen needs it alongside.
+            when(
+                has(cap::MESHCORE_FORWARDER),
+                &[
+                    prop::MESHCORE_FORWARDING_ENABLED,
+                    prop::MESHCORE_REGION_POLICY,
+                    prop::MESHCORE_REGIONS,
+                    prop::DEV_KEY,
+                ],
+            );
+        }
         UlcpManageCategory::PeerNodes => {
             when(has(cap::DEV_IDENTITY), &[prop::DEV_PEERS]);
             when(has(cap::ADMIN), &[prop::DEV_ADMINS]);
@@ -4706,6 +4837,7 @@ pub struct UlcpDeviceCardRecord {
     pub supports_lora: bool,
     pub supports_duty_cycle_limit: bool,
     pub supports_repeater: bool,
+    pub supports_meshcore_forwarder: bool,
     pub supports_ident: bool,
     pub supports_device_identity: bool,
     pub supports_gnss: bool,
@@ -4763,6 +4895,7 @@ pub fn inspect_ulcp_device_card(
         supports_lora: has(cap::PHY_LORA),
         supports_duty_cycle_limit: has(cap::PHY_DUTY_LIMIT),
         supports_repeater: has(cap::REPEATER),
+        supports_meshcore_forwarder: has(cap::MESHCORE_FORWARDER),
         supports_ident: has(cap::IDENT),
         supports_device_identity: has(cap::DEV_IDENTITY),
         supports_gnss: has(cap::GNSS),
@@ -4968,6 +5101,10 @@ pub struct UlcpDevicePropertiesRecord {
     pub stat_forwarded: Option<u32>,
     pub stat_forward_dropped: Option<u32>,
     pub stat_forward_cancelled: Option<u32>,
+    pub stat_meshcore_seen: Option<u32>,
+    pub stat_meshcore_forwarded_routed: Option<u32>,
+    pub stat_meshcore_forwarded_flood: Option<u32>,
+    pub stat_meshcore_declined: Option<u32>,
     pub device_name: Option<String>,
     /// `None` is the device deriving its own role, which reads the same
     /// as never having been told.
@@ -5058,6 +5195,11 @@ pub struct UlcpDevicePropertiesRecord {
     pub repeater_default_region: Option<Vec<u8>>,
     pub repeater_min_rssi_dbm: Option<i16>,
     pub repeater_min_snr_db: Option<i8>,
+    pub meshcore_forwarding_enabled: Option<bool>,
+    /// `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+    pub meshcore_region_policy: Option<u8>,
+    /// `PROP_MESHCORE_REGIONS`, without the `#` the device supplies.
+    pub meshcore_regions: Option<Vec<String>>,
     pub dev_peer_keys: Option<Vec<Vec<u8>>>,
     pub dev_admin_keys: Option<Vec<Vec<u8>>>,
 }
@@ -5196,6 +5338,18 @@ pub fn inspect_ulcp_properties(
         stat_forwarded: optional_value(at, prop::STAT_FORWARDED, decode_u32),
         stat_forward_dropped: optional_value(at, prop::STAT_FORWARD_DROPPED, decode_u32),
         stat_forward_cancelled: optional_value(at, prop::STAT_FORWARD_CANCELLED, decode_u32),
+        stat_meshcore_seen: optional_value(at, prop::STAT_MESHCORE_SEEN, decode_u32),
+        stat_meshcore_forwarded_routed: optional_value(
+            at,
+            prop::STAT_MESHCORE_FORWARDED_ROUTED,
+            decode_u32,
+        ),
+        stat_meshcore_forwarded_flood: optional_value(
+            at,
+            prop::STAT_MESHCORE_FORWARDED_FLOOD,
+            decode_u32,
+        ),
+        stat_meshcore_declined: optional_value(at, prop::STAT_MESHCORE_DECLINED, decode_u32),
         device_name: optional_value(at, prop::DEV_NAME, decode_device_name).flatten(),
         ident_role: optional_value(at, prop::IDENT_ROLE, |value| {
             decode_optional(value, decode_u8)
@@ -5287,6 +5441,17 @@ pub fn inspect_ulcp_properties(
             decode_optional(value, decode_i8)
         })
         .flatten(),
+        meshcore_forwarding_enabled: optional_value(
+            at,
+            prop::MESHCORE_FORWARDING_ENABLED,
+            decode_bool,
+        ),
+        meshcore_region_policy: optional_value(
+            at,
+            prop::MESHCORE_REGION_POLICY,
+            decode_meshcore_region_policy,
+        ),
+        meshcore_regions: optional_value(at, prop::MESHCORE_REGIONS, decode_region_list),
         dev_peer_keys: optional_value(
             at,
             prop::DEV_PEERS,
@@ -5386,7 +5551,11 @@ pub fn ulcp_dirty_writes(
             | prop::STAT_RX_ACCEPTED
             | prop::STAT_FORWARDED
             | prop::STAT_FORWARD_DROPPED
-            | prop::STAT_FORWARD_CANCELLED => 0u32.to_le_bytes().to_vec(),
+            | prop::STAT_FORWARD_CANCELLED
+            | prop::STAT_MESHCORE_SEEN
+            | prop::STAT_MESHCORE_FORWARDED_ROUTED
+            | prop::STAT_MESHCORE_FORWARDED_FLOOD
+            | prop::STAT_MESHCORE_DECLINED => 0u32.to_le_bytes().to_vec(),
             prop::DEV_NAME => desired
                 .device_name
                 .clone()
@@ -5520,6 +5689,15 @@ pub fn ulcp_dirty_writes(
                 .repeater_min_snr_db
                 .map(|snr| vec![snr as u8])
                 .unwrap_or_default(),
+            prop::MESHCORE_FORWARDING_ENABLED => {
+                vec![desired.meshcore_forwarding_enabled.ok_or_else(missing)? as u8]
+            }
+            prop::MESHCORE_REGION_POLICY => vec![validate_meshcore_region_policy(
+                desired.meshcore_region_policy.ok_or_else(missing)?,
+            )?],
+            prop::MESHCORE_REGIONS => encode_meshcore_region_list(
+                desired.meshcore_regions.as_deref().ok_or_else(missing)?,
+            )?,
             // Everything else is either read-only or edited as a table,
             // one entry at a time.
             _ => return Err(MobileError::InvalidUlcpFrame),
@@ -5548,14 +5726,17 @@ pub fn ulcp_dirty_writes(
         values.push((prop::PHY_ENABLED, vec![ends_enabled as u8]));
     }
 
-    // A newly enabled client sees its endpoint and pin first. Disabling stays
-    // first, so an operator can stop a connection before changing its settings.
-    if let Some(index) = values
-        .iter()
-        .position(|(key, value)| *key == prop::BRIDGE_ENABLED && value == &[1])
-    {
-        let enable = values.remove(index);
-        values.push(enable);
+    // A newly enabled client sees its endpoint and pin first, and newly
+    // enabled MeshCore forwarding its region settings. Disabling stays first,
+    // so an operator can stop either before changing its settings.
+    for enable_key in [prop::BRIDGE_ENABLED, prop::MESHCORE_FORWARDING_ENABLED] {
+        if let Some(index) = values
+            .iter()
+            .position(|(key, value)| *key == enable_key && value == &[1])
+        {
+            let enable = values.remove(index);
+            values.push(enable);
+        }
     }
     Ok(values
         .into_iter()
@@ -5567,7 +5748,7 @@ pub fn ulcp_dirty_writes(
 /// or part of a forwarding policy leaves the device running a configuration
 /// nobody asked for, so one unreadable member withdraws the whole group.
 /// These are the same groupings the reduction reports as a unit.
-const WHOLE_WRITE_GROUPS: [&[u32]; 4] = [
+const WHOLE_WRITE_GROUPS: [&[u32]; 5] = [
     &[prop::PHY_LORA_BW, prop::PHY_LORA_SF, prop::PHY_LORA_CR],
     &[
         prop::MAC_REPEATER_ENABLED,
@@ -5575,6 +5756,13 @@ const WHOLE_WRITE_GROUPS: [&[u32]; 4] = [
         prop::MAC_REPEATER_DEFAULT_REGION,
         prop::MAC_REPEATER_MIN_RSSI,
         prop::MAC_REPEATER_MIN_SNR,
+    ],
+    // A group of its own rather than part of the policy above: a device
+    // whose MeshCore half will not read can still forward its own traffic.
+    &[
+        prop::MESHCORE_FORWARDING_ENABLED,
+        prop::MESHCORE_REGION_POLICY,
+        prop::MESHCORE_REGIONS,
     ],
     &[
         prop::GNSS_ENABLED,
@@ -5685,6 +5873,9 @@ fn validate_capability_dependencies(capabilities: &[u32]) -> Result<(), MobileEr
         // A device with no identity of its own has nothing to forward for
         // and nothing to advertise.
         || has(cap::REPEATER) && !has(cap::DEV_IDENTITY)
+        // MeshCore traffic is forwarded by the same repeater, under its
+        // region list and thresholds.
+        || has(cap::MESHCORE_FORWARDER) && !has(cap::REPEATER)
         || has(cap::IDENT) && !has(cap::DEV_IDENTITY)
         // An administrator is authorized against the device identity and
         // reaches the device domain, so there is nothing to manage without
@@ -5760,6 +5951,21 @@ fn decode_precision(value: &[u8]) -> Result<u8, MobileError> {
         .ok_or(MobileError::InvalidUlcpFrame)
 }
 
+/// A `PROP_MESHCORE_REGION_POLICY` value, which is only ever one of the
+/// three the spec names.
+fn decode_meshcore_region_policy(value: &[u8]) -> Result<u8, MobileError> {
+    decode_u8(value).and_then(validate_meshcore_region_policy)
+}
+
+fn validate_meshcore_region_policy(policy: u8) -> Result<u8, MobileError> {
+    match policy {
+        meshcore_region_policy::OPEN
+        | meshcore_region_policy::SCOPED_ONLY
+        | meshcore_region_policy::IGNORE => Ok(policy),
+        _ => Err(MobileError::InvalidUlcpFrame),
+    }
+}
+
 fn decode_i16(value: &[u8]) -> Result<i16, MobileError> {
     value
         .try_into()
@@ -5802,6 +6008,22 @@ fn encode_region_list(regions: &[String]) -> Result<Vec<u8>, MobileError> {
     let mut value = Vec::new();
     for region in regions {
         if !(1..=items::REGION_STRING_MAX_LEN).contains(&region.len()) {
+            return Err(MobileError::InvalidUlcpFrame);
+        }
+        let mut item = vec![0u8; region.len() + 4];
+        let len = items::encode_prefixed_item(region.as_bytes(), &mut item)
+            .map_err(|_| MobileError::InvalidUlcpFrame)?;
+        value.extend_from_slice(&item[..len]);
+    }
+    Ok(value)
+}
+
+/// Pack MeshCore region names into a `PROP_MESHCORE_REGIONS` value,
+/// refusing here any name the device would refuse.
+fn encode_meshcore_region_list(regions: &[String]) -> Result<Vec<u8>, MobileError> {
+    let mut value = Vec::new();
+    for region in regions {
+        if !valid_meshcore_region_name(region) {
             return Err(MobileError::InvalidUlcpFrame);
         }
         let mut item = vec![0u8; region.len() + 4];
@@ -5879,6 +6101,7 @@ struct DeviceCapabilities {
     ident: bool,
     dev_identity: bool,
     repeater: bool,
+    meshcore_forwarder: bool,
     time: bool,
     gnss: bool,
     advert: bool,
@@ -5894,6 +6117,7 @@ impl DeviceCapabilities {
             ident: state.has_capability(cap::IDENT)?,
             dev_identity: state.has_capability(cap::DEV_IDENTITY)?,
             repeater: state.has_capability(cap::REPEATER)?,
+            meshcore_forwarder: state.has_capability(cap::MESHCORE_FORWARDER)?,
             time: state.has_capability(cap::TIME)?,
             gnss: state.has_capability(cap::GNSS)?,
             advert: state.has_capability(cap::ADVERT)?,
@@ -5909,6 +6133,7 @@ impl DeviceCapabilities {
             ident: sync.supports_ident,
             dev_identity: sync.supports_device_identity,
             repeater: sync.supports_repeater,
+            meshcore_forwarder: sync.supports_meshcore_forwarder,
             time: sync.supports_time,
             gnss: sync.supports_gnss,
             advert: sync.supports_advert,
@@ -6005,8 +6230,28 @@ fn validate_device_settings(
     }
 
     let supports_repeater = capabilities.repeater;
-    if configuration.repeater.is_some() != supports_repeater {
+    if configuration.repeater.is_some() != supports_repeater
+        || configuration.meshcore.is_some() != capabilities.meshcore_forwarder
+    {
         return Err(MobileError::InvalidUlcpFrame);
+    }
+    // Ahead of the repeater's own enable, which is what sets any of it
+    // acting, and policy before its enable for the same reason.
+    if let Some(meshcore) = &configuration.meshcore {
+        values.extend([
+            (
+                prop::MESHCORE_REGIONS,
+                encode_meshcore_region_list(&meshcore.regions)?,
+            ),
+            (
+                prop::MESHCORE_REGION_POLICY,
+                vec![validate_meshcore_region_policy(meshcore.region_policy)?],
+            ),
+            (
+                prop::MESHCORE_FORWARDING_ENABLED,
+                vec![meshcore.enabled as u8],
+            ),
+        ]);
     }
     if let Some(repeater) = &configuration.repeater {
         let regions = encode_region_list(&repeater.regions)?;
@@ -7137,9 +7382,12 @@ mod tests {
             | prop::IDENT_ALTITUDE
             | prop::DEV_PEERS
             | prop::DEV_ADMINS
-            | prop::DEV_CHANNEL_KEYS => Vec::new(),
+            | prop::DEV_CHANNEL_KEYS
+            | prop::MESHCORE_REGIONS => Vec::new(),
             prop::IDENT_MOBILE => vec![0],
             prop::DEV_DISCOVERABLE => vec![1],
+            prop::MESHCORE_FORWARDING_ENABLED => vec![0],
+            prop::MESHCORE_REGION_POLICY => vec![meshcore_region_policy::OPEN],
             other => unreachable!("unexpected property {other}"),
         };
         (property, value)
@@ -8040,6 +8288,7 @@ mod tests {
                     min_rssi_dbm: None,
                     min_snr_db: None,
                 }),
+                meshcore: None,
                 tz_offset_min: None,
                 gnss: None,
                 advert: None,
@@ -8095,6 +8344,7 @@ mod tests {
                     min_rssi_dbm: Some(-115),
                     min_snr_db: Some(-7),
                 }),
+                meshcore: None,
                 tz_offset_min: None,
                 gnss: None,
                 advert: None,
@@ -8186,6 +8436,7 @@ mod tests {
                 ident_mobile,
                 dev_discoverable,
                 repeater,
+                meshcore: None,
                 tz_offset_min: None,
                 gnss: None,
                 advert: None,
@@ -8244,6 +8495,293 @@ mod tests {
         assert_eq!(written.get(&prop::DEV_DISCOVERABLE), Some(&vec![1]));
         assert_eq!(written.get(&prop::MAC_REPEATER_REGIONS), Some(&Vec::new()));
         assert_eq!(written.get(&prop::MAC_REPEATER_MIN_RSSI), Some(&Vec::new()));
+    }
+
+    /// Bring a session to `Attached` against a commissionable device that
+    /// can also forward MeshCore traffic, reporting `meshcore` as its
+    /// current setting.
+    fn attach_meshcore_capable(
+        session: &MobileUlcpSession,
+        meshcore: UlcpMeshCoreSettingsRecord,
+    ) -> UlcpSessionUpdateRecord {
+        let mut capabilities = commissionable_capabilities();
+        capabilities.push(cap::MESHCORE_FORWARDER);
+        let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+        drive_reads(
+            session,
+            begin.outbound_frames,
+            move |property| match property {
+                prop::CAPS => (property, encoded_capabilities(&capabilities)),
+                prop::HOST_KEY => (property, vec![0xAA; 32]),
+                prop::MESHCORE_FORWARDING_ENABLED => (property, vec![meshcore.enabled as u8]),
+                prop::MESHCORE_REGION_POLICY => (property, vec![meshcore.region_policy]),
+                prop::MESHCORE_REGIONS => (
+                    property,
+                    encode_meshcore_region_list(&meshcore.regions).unwrap(),
+                ),
+                _ => commissionable_value(property),
+            },
+        )
+    }
+
+    #[test]
+    fn meshcore_forwarding_is_read_at_attach_only_when_advertised() {
+        let session = MobileUlcpSession::administrative();
+        let attached = attach_meshcore_capable(
+            &session,
+            UlcpMeshCoreSettingsRecord {
+                enabled: true,
+                region_policy: meshcore_region_policy::SCOPED_ONLY,
+                regions: vec!["us-ca".into(), "US-CA".into()],
+            },
+        );
+        let sync = attached.snapshot.provisioning.unwrap();
+        assert!(sync.supports_meshcore_forwarder);
+        assert_eq!(
+            sync.meshcore,
+            Some(UlcpMeshCoreSettingsRecord {
+                enabled: true,
+                region_policy: meshcore_region_policy::SCOPED_ONLY,
+                regions: vec!["us-ca".into(), "US-CA".into()],
+            })
+        );
+        assert!(sync.unreadable_properties.is_empty());
+
+        // Without the capability neither is asked for or reported.
+        let plain = MobileUlcpSession::administrative();
+        let sync = attach_commissionable(&plain, None, Vec::new())
+            .snapshot
+            .provisioning
+            .unwrap();
+        assert!(!sync.supports_meshcore_forwarder);
+        assert_eq!(sync.meshcore, None);
+        let asked =
+            ulcp_inspection_properties(encoded_capabilities(&commissionable_capabilities()))
+                .unwrap();
+        assert!(!asked.contains(&prop::MESHCORE_FORWARDING_ENABLED));
+        assert!(!asked.contains(&prop::MESHCORE_REGION_POLICY));
+        assert!(!asked.contains(&prop::MESHCORE_REGIONS));
+
+        // A policy outside the three the spec names is unreadable, and
+        // takes the pair with it.
+        let mut capabilities = commissionable_capabilities();
+        capabilities.push(cap::MESHCORE_FORWARDER);
+        let sync = inspect_ulcp_sync(vec![
+            response(prop::CAPS, &encoded_capabilities(&capabilities)),
+            response(prop::INTERFACE_TYPE, &[INTERFACE_TYPE as u8]),
+            response(prop::PHY_ENABLED, &[1]),
+            response(prop::PHY_FREQ, &915_000u32.to_le_bytes()),
+            response(prop::PHY_TX_POWER, &[14]),
+            response(prop::MESHCORE_FORWARDING_ENABLED, &[1]),
+            response(prop::MESHCORE_REGION_POLICY, &[3]),
+            response(prop::MESHCORE_REGIONS, &[]),
+        ])
+        .unwrap();
+        assert_eq!(sync.meshcore, None);
+        assert!(
+            sync.unreadable_properties
+                .contains(&prop::MESHCORE_REGION_POLICY)
+        );
+
+        // MeshCore forwarding rides on the repeater.
+        assert_eq!(
+            ulcp_inspection_properties(encoded_capabilities(&[
+                cap::DEV_IDENTITY,
+                cap::MESHCORE_FORWARDER
+            ])),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+    }
+
+    #[test]
+    fn meshcore_forwarding_is_configured_before_the_repeater_enable() {
+        let session = MobileUlcpSession::administrative();
+        attach_meshcore_capable(
+            &session,
+            UlcpMeshCoreSettingsRecord {
+                enabled: false,
+                region_policy: meshcore_region_policy::OPEN,
+                regions: Vec::new(),
+            },
+        );
+        let configuration = |meshcore| UlcpDeviceConfigRecord {
+            radio: UlcpRadioSettingsRecord {
+                device_name: None,
+                phy_enabled: true,
+                frequency_khz: 915_000,
+                transmit_power_dbm: 14,
+                bandwidth_hz: None,
+                spreading_factor: None,
+                coding_rate_denom: None,
+                duty_cycle_limit: None,
+            },
+            ident_role: None,
+            ident_mobile: Some(false),
+            dev_discoverable: Some(true),
+            repeater: Some(UlcpRepeaterSettingsRecord {
+                enabled: true,
+                regions: Vec::new(),
+                default_region: None,
+                min_rssi_dbm: None,
+                min_snr_db: None,
+            }),
+            meshcore,
+            tz_offset_min: None,
+            gnss: None,
+            advert: None,
+        };
+
+        // Present exactly when advertised, and only a policy the spec names.
+        assert_eq!(
+            session.configure_device(configuration(None)),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+        assert_eq!(
+            session.configure_device(configuration(Some(UlcpMeshCoreSettingsRecord {
+                enabled: true,
+                region_policy: 3,
+                regions: Vec::new(),
+            }))),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+
+        for bad in ["", "#us-ca", "$ops"] {
+            assert_eq!(
+                session.configure_device(configuration(Some(UlcpMeshCoreSettingsRecord {
+                    enabled: true,
+                    region_policy: meshcore_region_policy::OPEN,
+                    regions: vec![bad.into()],
+                }))),
+                Err(MobileError::InvalidUlcpFrame)
+            );
+        }
+
+        let configured = session
+            .configure_device(configuration(Some(UlcpMeshCoreSettingsRecord {
+                enabled: true,
+                region_policy: meshcore_region_policy::IGNORE,
+                regions: vec!["us-ca".into()],
+            })))
+            .unwrap();
+        let (written, order, _) = drive_configuration(&session, configured.outbound_frames);
+        assert_eq!(
+            written.get(&prop::MESHCORE_REGION_POLICY),
+            Some(&vec![meshcore_region_policy::IGNORE])
+        );
+        assert_eq!(
+            written.get(&prop::MESHCORE_FORWARDING_ENABLED),
+            Some(&vec![1])
+        );
+        let at = |key| order.iter().position(|&written| written == key).unwrap();
+        assert_eq!(
+            written.get(&prop::MESHCORE_REGIONS),
+            Some(&vec![5, b'u', b's', b'-', b'c', b'a'])
+        );
+        assert!(at(prop::MESHCORE_REGION_POLICY) < at(prop::MESHCORE_FORWARDING_ENABLED));
+        assert!(at(prop::MESHCORE_REGIONS) < at(prop::MESHCORE_FORWARDING_ENABLED));
+        assert!(at(prop::MESHCORE_FORWARDING_ENABLED) < at(prop::MAC_REPEATER_ENABLED));
+
+        // A device without the capability is not told about MeshCore.
+        let plain = MobileUlcpSession::administrative();
+        attach_commissionable(&plain, None, Vec::new());
+        assert_eq!(
+            plain.configure_device(configuration(Some(UlcpMeshCoreSettingsRecord {
+                enabled: false,
+                region_policy: meshcore_region_policy::OPEN,
+                regions: Vec::new(),
+            }))),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+    }
+
+    #[test]
+    fn meshcore_settings_round_trip_through_a_category_read() {
+        let mut capabilities = commissionable_capabilities();
+        assert!(
+            !ulcp_category_properties(
+                UlcpManageCategory::Repeater,
+                encoded_capabilities(&capabilities)
+            )
+            .unwrap()
+            .contains(&prop::MESHCORE_FORWARDING_ENABLED)
+        );
+        capabilities.push(cap::MESHCORE_FORWARDER);
+        let asked = ulcp_category_properties(
+            UlcpManageCategory::Repeater,
+            encoded_capabilities(&capabilities),
+        )
+        .unwrap();
+        for property in [
+            prop::MESHCORE_FORWARDING_ENABLED,
+            prop::MESHCORE_REGION_POLICY,
+            prop::MESHCORE_REGIONS,
+            prop::DEV_KEY,
+        ] {
+            assert!(asked.contains(&property), "property {property}");
+        }
+
+        let read = inspect_ulcp_properties(vec![
+            response(prop::MESHCORE_FORWARDING_ENABLED, &[1]),
+            response(prop::MESHCORE_REGION_POLICY, &[1]),
+            response(prop::MESHCORE_REGIONS, &[3, b'p', b'd', b'x']),
+        ]);
+        assert_eq!(read.meshcore_forwarding_enabled, Some(true));
+        assert_eq!(read.meshcore_region_policy, Some(1));
+        assert_eq!(read.meshcore_regions, Some(vec!["pdx".to_string()]));
+        let unknown = inspect_ulcp_properties(vec![response(prop::MESHCORE_REGION_POLICY, &[3])]);
+        assert_eq!(unknown.meshcore_region_policy, None);
+
+        // Enabling lands after the region settings, whatever the
+        // property numbers.
+        let written = dirty(
+            read.clone(),
+            &[
+                prop::MESHCORE_FORWARDING_ENABLED,
+                prop::MESHCORE_REGION_POLICY,
+                prop::MESHCORE_REGIONS,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            vec![
+                (prop::MESHCORE_REGION_POLICY, vec![1]),
+                (prop::MESHCORE_REGIONS, vec![3, b'p', b'd', b'x']),
+                (prop::MESHCORE_FORWARDING_ENABLED, vec![1]),
+            ]
+        );
+        assert!(
+            dirty(
+                UlcpDevicePropertiesRecord {
+                    meshcore_region_policy: Some(3),
+                    ..read
+                },
+                &[prop::MESHCORE_REGION_POLICY],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn meshcore_region_names_drop_their_hash_and_keep_their_case() {
+        let name = |input: &str| ulcp_meshcore_region_name(input.into());
+        assert_eq!(name("#us-ca").as_deref(), Some("us-ca"));
+        assert_eq!(name(" US-CA ").as_deref(), Some("US-CA"));
+        for bad in ["", "#", "##us-ca", "$ops", &"x".repeat(31)] {
+            assert_eq!(name(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn meshcore_reserves_two_identity_prefixes() {
+        assert!(!ulcp_meshcore_identity_allowed(vec![0x00; 32]));
+        assert!(!ulcp_meshcore_identity_allowed(
+            [vec![0xFF], vec![0x5A; 31]].concat()
+        ));
+        assert!(ulcp_meshcore_identity_allowed(vec![0x5A; 32]));
+        // Not a key, so not a reason to refuse.
+        assert!(ulcp_meshcore_identity_allowed(Vec::new()));
+        assert!(ulcp_meshcore_identity_allowed(vec![0x00; 31]));
     }
 
     #[test]
@@ -8963,6 +9501,7 @@ mod tests {
                 min_rssi_dbm: None,
                 min_snr_db: None,
             }),
+            meshcore: None,
             tz_offset_min: None,
             gnss: None,
             advert: None,
@@ -9025,6 +9564,7 @@ mod tests {
                 min_rssi_dbm: None,
                 min_snr_db: None,
             }),
+            meshcore: None,
             tz_offset_min: None,
             gnss: None,
             advert: None,
@@ -10538,6 +11078,7 @@ mod tests {
                     min_rssi_dbm: None,
                     min_snr_db: None,
                 }),
+                meshcore: None,
                 tz_offset_min: Some(60),
                 gnss: Some(UlcpGnssSettingsRecord {
                     enabled: true,
@@ -10679,6 +11220,7 @@ mod tests {
                 min_rssi_dbm: None,
                 min_snr_db: None,
             }),
+            meshcore: None,
             tz_offset_min: Some(0),
             gnss: Some(UlcpGnssSettingsRecord {
                 enabled: true,
@@ -10790,6 +11332,7 @@ mod tests {
                     min_rssi_dbm: None,
                     min_snr_db: None,
                 }),
+                meshcore: None,
                 tz_offset_min: Some(0),
                 gnss: Some(UlcpGnssSettingsRecord {
                     enabled: true,
@@ -11788,8 +12331,9 @@ mod tests {
 
     #[test]
     fn the_statistics_screen_is_capability_gated_and_resets_with_zeroes() {
-        let full = ulcp_category_properties(UlcpManageCategory::Statistics, managed_capabilities())
-            .unwrap();
+        let mut caps = managed_capabilities();
+        caps.extend(encoded_capabilities(&[cap::MESHCORE_FORWARDER]));
+        let full = ulcp_category_properties(UlcpManageCategory::Statistics, caps).unwrap();
         assert_eq!(
             full,
             vec![
@@ -11804,12 +12348,16 @@ mod tests {
                 prop::STAT_FORWARDED,
                 prop::STAT_FORWARD_DROPPED,
                 prop::STAT_FORWARD_CANCELLED,
+                prop::STAT_MESHCORE_SEEN,
+                prop::STAT_MESHCORE_FORWARDED_ROUTED,
+                prop::STAT_MESHCORE_FORWARDED_FLOOD,
+                prop::STAT_MESHCORE_DECLINED,
             ]
         );
         assert!(
             ulcp_category_properties(
                 UlcpManageCategory::Statistics,
-                encoded_capabilities(&[cap::DEV_IDENTITY, cap::REPEATER])
+                encoded_capabilities(&[cap::DEV_IDENTITY, cap::REPEATER, cap::MESHCORE_FORWARDER])
             )
             .unwrap()
             .is_empty(),
@@ -11822,7 +12370,16 @@ mod tests {
             )
             .unwrap(),
             full[..8],
-            "forwarding counters need CAP_REPEATER"
+            "forwarding counters need CAP_REPEATER, MeshCore ones CAP_MESHCORE_FORWARDER"
+        );
+        assert_eq!(
+            ulcp_category_properties(
+                UlcpManageCategory::Statistics,
+                encoded_capabilities(&[cap::STATS, cap::DEV_IDENTITY, cap::REPEATER])
+            )
+            .unwrap(),
+            full[..11],
+            "MeshCore counters need CAP_MESHCORE_FORWARDER"
         );
 
         let record = inspect_ulcp_properties(vec![
@@ -11830,21 +12387,40 @@ mod tests {
             response(prop::STAT_RX_BAD_CRC, &4u32.to_le_bytes()),
             response(prop::PHY_DUTY_NOW, &655u16.to_le_bytes()),
             response(prop::UPTIME, &3600u32.to_le_bytes()),
+            response(prop::STAT_MESHCORE_SEEN, &120u32.to_le_bytes()),
+            response(prop::STAT_MESHCORE_FORWARDED_ROUTED, &7u32.to_le_bytes()),
+            response(prop::STAT_MESHCORE_FORWARDED_FLOOD, &31u32.to_le_bytes()),
+            response(prop::STAT_MESHCORE_DECLINED, &9u32.to_le_bytes()),
         ]);
         assert_eq!(record.stat_tx_packets, Some(23));
         assert_eq!(record.stat_rx_bad_crc, Some(4));
         assert_eq!(record.duty_cycle_now, Some(655));
         assert_eq!(record.uptime_seconds, Some(3600));
+        assert_eq!(record.stat_meshcore_seen, Some(120));
+        assert_eq!(record.stat_meshcore_forwarded_routed, Some(7));
+        assert_eq!(record.stat_meshcore_forwarded_flood, Some(31));
+        assert_eq!(record.stat_meshcore_declined, Some(9));
 
         assert_eq!(
             dirty(
                 UlcpDevicePropertiesRecord::default(),
-                &[prop::STAT_RX_BAD_CRC, prop::STAT_TX_PACKETS],
+                &[
+                    prop::STAT_RX_BAD_CRC,
+                    prop::STAT_TX_PACKETS,
+                    prop::STAT_MESHCORE_SEEN,
+                    prop::STAT_MESHCORE_FORWARDED_ROUTED,
+                    prop::STAT_MESHCORE_FORWARDED_FLOOD,
+                    prop::STAT_MESHCORE_DECLINED,
+                ],
             )
             .unwrap(),
             vec![
                 (prop::STAT_TX_PACKETS, vec![0, 0, 0, 0]),
                 (prop::STAT_RX_BAD_CRC, vec![0, 0, 0, 0]),
+                (prop::STAT_MESHCORE_SEEN, vec![0, 0, 0, 0]),
+                (prop::STAT_MESHCORE_FORWARDED_ROUTED, vec![0, 0, 0, 0]),
+                (prop::STAT_MESHCORE_FORWARDED_FLOOD, vec![0, 0, 0, 0]),
+                (prop::STAT_MESHCORE_DECLINED, vec![0, 0, 0, 0]),
             ],
             "counter reset writes do not require invented desired values"
         );

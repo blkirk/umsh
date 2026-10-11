@@ -46,6 +46,8 @@ pub mod gnss;
 pub mod i2c;
 #[cfg(feature = "counters")]
 pub mod journal;
+#[cfg(feature = "meshcore-forwarder")]
+pub mod meshcore;
 #[cfg(feature = "counters")]
 pub mod node_counters;
 #[cfg(feature = "radio")]

@@ -270,6 +270,22 @@ pub struct DevDomainSnapshot {
     /// `PROP_MAC_REPEATER_MIN_SNR`: minimum SNR in whole dB to
     /// flood-forward, or `None` for no threshold.
     pub repeater_min_snr: Option<i8>,
+    /// `PROP_MESHCORE_FORWARDING_ENABLED`: whether MeshCore traffic is
+    /// forwarded too, independently of `repeater_enabled`. Always false
+    /// on a board without `CAP_MESHCORE_FORWARDER`.
+    pub meshcore_forwarding_enabled: bool,
+    /// `PROP_MESHCORE_REGION_POLICY`: how MeshCore transport codes gate
+    /// flood forwarding.
+    pub meshcore_region_policy: u8,
+    /// `PROP_MESHCORE_REGIONS`: each MeshCore region name as stored,
+    /// without its `#`. Only a forwarder build carries it; the names
+    /// would otherwise cost every snapshot a few hundred octets for
+    /// nothing.
+    #[cfg(feature = "meshcore-forwarder")]
+    pub meshcore_region_names: heapless::Vec<
+        heapless::Vec<u8, { umsh_ulcp_device::MESHCORE_REGION_NAME_MAX_LEN }>,
+        { umsh_ulcp_device::MAX_MESHCORE_REGIONS },
+    >,
     /// `PROP_IDENT_ROLE`: the advertised `ROLE` byte, or `None` to
     /// derive it from the forwarding state.
     pub ident_role: Option<u8>,
@@ -1164,6 +1180,13 @@ fn sync_dev_domain<A, S, const TXQ: usize, E>(
         repeater_default_region: session.repeater_default_region(),
         repeater_min_rssi: session.repeater_min_rssi(),
         repeater_min_snr: session.repeater_min_snr(),
+        meshcore_forwarding_enabled: session.meshcore_forwarding_enabled(),
+        meshcore_region_policy: session.meshcore_region_policy(),
+        #[cfg(feature = "meshcore-forwarder")]
+        meshcore_region_names: session
+            .meshcore_region_names()
+            .filter_map(|name| heapless::Vec::from_slice(name).ok())
+            .collect(),
         ident_role: session.ident_role(),
         ident_mobile: session.ident_mobile(),
         ident_location: heapless::Vec::from_slice(session.ident_location()).unwrap_or_default(),

@@ -96,6 +96,7 @@ fn session_config() -> SessionConfig {
         // A soft device on the bridge has no antenna of its own.
         stats: None,
         mac_node: false,
+        meshcore_forwarder: false,
         wifi: None,
         ip: None,
         bridge_client: false,

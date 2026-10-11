@@ -60,6 +60,7 @@ Code | Name               | Requires           | Grants
 47   | `CAP_ILLUMINANCE`  | —                  | An ambient light sensor and `PROP_ILLUMINANCE`
 59   | `CAP_DISPLAY_MOTION_WAKE` | — | Orientation-qualified display wake and `PROP_DISPLAY_MOTION_WAKE_ENABLED`
 61 | `CAP_TEMPERATURE` | — | `PROP_TEMPERATURES` and `PROP_TEMPERATURE_NAMES`; the inventory may initially be empty
+62 | `CAP_MESHCORE_FORWARDER` | `CAP_REPEATER` | [MeshCore forwarding](#meshcore-forwarding): `PROP_MESHCORE_FORWARDING_ENABLED`, `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`; with `CAP_STATS`, the [MeshCore counters](ulcp-radio.md#prop-stat-meshcore-seen)
 
 `CAP_ADVERT` requires `CAP_DEV_IDENTITY` because what an advertisement
 carries *is* the device identity, and a beacon's source address names
@@ -232,6 +233,9 @@ Id | Mnemonic                    | Commands                 | Description
 4868 | `PROP_GNSS_IDENT_UPDATE`  | Get, Set                 | Whether fixes update the advertised node identity
 4869 | `PROP_GNSS_IDENT_PRECISION` | Get, Set               | Precision the advertised location is clamped to
 4870 | `PROP_GNSS_TIME_TRUST`    | Get, Set                 | Whether receiver-derived time may set the clock
+4976 | `PROP_MESHCORE_FORWARDING_ENABLED` | Get, Set        | MeshCore forwarding enable
+4977 | `PROP_MESHCORE_REGION_POLICY` | Get, Set             | How MeshCore transport codes gate flood forwarding
+4978 | `PROP_MESHCORE_REGIONS` | Get, Set, Insert, Remove   | MeshCore region names the device forwards scoped floods for
 
 The RF configuration is also device-domain state, but is specified in
 [Radio Control](ulcp-radio.md); so is the transport configuration in
@@ -1125,8 +1129,9 @@ also carries a minimum, the higher of the two applies. Raising it trades
 reach for a quieter mesh, which is what a dense deployment wants from a
 repeater sitting at the edge of everyone's range.
 
-Applies to flood forwarding only. Source-routed packets are forwarded on
-the strength of the route, not the link.
+Applies to flood forwarding only, [MeshCore floods](#meshcore-forwarding)
+included. Source-routed packets are forwarded on the strength of the
+route, not the link.
 
 ### PROP 77: `PROP_MAC_REPEATER_MIN_SNR` {#prop-mac-repeater-min-snr}
 
@@ -1146,7 +1151,102 @@ packet-imposed minimum the same way `PROP_MAC_REPEATER_MIN_RSSI` is. On
 spreading factors that decode well below the noise floor, this is the
 more meaningful of the two thresholds.
 
-Applies to flood forwarding only.
+Applies to flood forwarding only, [MeshCore floods](#meshcore-forwarding)
+included.
+
+### MeshCore forwarding {#meshcore-forwarding}
+
+A device with `CAP_MESHCORE_FORWARDER` also forwards MeshCore v1 packets,
+interoperating with MeshCore repeaters and companions as a MeshCore
+repeater would, with MeshCore repeater firmware v1.17.1 as the
+compatibility baseline. The two protocols share the radio, the duty
+ledger, and the link-quality thresholds; their packets are told apart by
+the version bits of the first octet, so neither is mistaken for the
+other.
+
+The MeshCore forwarder runs only while all of these hold:
+
+~~~text
+PHY enabled AND MESHCORE_FORWARDING_ENABLED
+            AND running identity prefix not reserved
+~~~
+
+`PROP_MAC_REPEATER_ENABLED` governs UMSH forwarding alone; a device may
+forward either protocol without the other.
+
+The forwarder takes its path entries from the public key of the device
+identity it was brought up under; it signs and originates nothing. A
+MeshCore node never runs under a key whose first octet is `0x00` or
+`0xFF`, so a device whose running identity has such a key does not
+forward MeshCore traffic, whatever its settings. A client can apply the
+same test to [`PROP_DEV_KEY`](#prop-dev-key).
+
+Whenever the gate is false, the forwarder discards everything it had
+seen and queued.
+
+MeshCore regions are configured in `PROP_MESHCORE_REGIONS`.
+`PROP_MAC_REPEATER_REGIONS` and `PROP_MAC_REPEATER_DEFAULT_REGION` apply to
+UMSH only.
+
+#### PROP 4976: `PROP_MESHCORE_FORWARDING_ENABLED` {#prop-meshcore-forwarding-enabled}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: No
+* Required: `CAP_MESHCORE_FORWARDER`
+* Value Type: BOOL
+* Post-Reset Value: False, or restored from saved state
+
+Whether the device forwards MeshCore traffic. Independent of
+`PROP_MAC_REPEATER_ENABLED`.
+
+Changing it from false to true **MUST** fail with `STATUS_INVALID_STATE`
+while the first octet of `PROP_DEV_KEY` is `0x00` or `0xFF`. Replacing the
+device identity leaves the value unchanged, and a write that leaves it
+unchanged succeeds.
+
+#### PROP 4977: `PROP_MESHCORE_REGION_POLICY` {#prop-meshcore-region-policy}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: No
+* Required: `CAP_MESHCORE_FORWARDER`
+* Value Type: UINT8
+* Post-Reset Value: 0, or restored from saved state
+
+How MeshCore transport codes gate flood forwarding. A scoped flood
+matches when its first transport code is the one a region in
+`PROP_MESHCORE_REGIONS` gives it.
+
+Value | Policy      | Forwarded floods
+------|-------------|------------------
+0     | Open        | Unscoped floods, and scoped floods that match
+1     | Scoped only | Scoped floods that match
+2     | Ignore      | Every flood, whatever its scope
+
+A device **MUST** reject any other value with `STATUS_INVALID_ARGUMENT`.
+Direct traffic is never gated by region.
+
+#### PROP 4978: `PROP_MESHCORE_REGIONS` {#prop-meshcore-regions}
+
+* Type: Multiple-Value, Read-Write
+* Has Item Length Prefix: Yes
+* Asynchronous Updates: No
+* Required: `CAP_MESHCORE_FORWARDER`
+* Item Form: 1–30 octets of UTF-8 (a MeshCore region name without its `#`)
+* Remove Selector: the region name
+* Post-Reset Value: Empty, or restored from saved state
+
+The MeshCore public regions whose scoped floods the device forwards. Each
+region's transport key is the first 16 octets of SHA-256 over `#` followed
+by the item, as MeshCore derives a hashtag region's key. The derivation is
+case-sensitive, so items compare octet for octet: `us-ca` and `US-CA` are
+two regions. An insert identical to a held item reports `STATUS_ALREADY`,
+and the remove selector matches the same way.
+
+A device **MUST** reject an item that is empty, longer than 30 octets, not
+UTF-8, or begins with `#` or `$` with `STATUS_INVALID_ARGUMENT`, and **MAY**
+reject a write that exceeds the number of entries it can hold. A name
+beginning with `$` is a MeshCore private region, whose key does not derive
+from its name.
 
 ### PROP 78: `PROP_DEV_DISCOVERABLE` {#prop-dev-discoverable}
 

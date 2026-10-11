@@ -1012,6 +1012,7 @@ mod tests {
             // A simulated device has no radio to count for.
             stats: None,
             mac_node: false,
+            meshcore_forwarder: false,
             wifi: Some(WifiConfig::STATION),
             ip: Some(IpConfig::DUAL),
             bridge_client: false,

@@ -59,6 +59,11 @@ final class DeviceConfigDraft {
     var defaultRegion: Data?
     var minRssiDBm: Int16?
     var minSnrDB: Int8?
+    /// MeshCore forwarding, carried as the device reported it. The setup
+    /// sheet does not edit it; the management screens do.
+    var meshCoreEnabled: Bool
+    var meshCoreRegionPolicy: UInt8
+    var meshCoreRegions: [String]
     var timeZoneOffsetMinutes: Int16
     var gnssEnabled: Bool
     var gnssIdentUpdate: Bool
@@ -163,6 +168,9 @@ final class DeviceConfigDraft {
         defaultRegion = repeater?.defaultRegion
         minRssiDBm = repeater?.minRssiDbm
         minSnrDB = repeater?.minSnrDb
+        meshCoreEnabled = sync.meshcore?.enabled ?? false
+        meshCoreRegionPolicy = sync.meshcore?.regionPolicy ?? 0
+        meshCoreRegions = sync.meshcore?.regions ?? []
         // A device with no zone set is one nobody has told where it is,
         // and the phone doing the setup is standing next to it. A goal that
         // assumes the phone's zone overrides this below; a device that already
@@ -256,6 +264,9 @@ final class DeviceConfigDraft {
         if sync.supportsIdent, !showsIdentity { settings.append("its advertised identity") }
         if sync.supportsDeviceIdentity, !showsDiscoverable { settings.append("discoverability") }
         if sync.supportsRepeater, sync.repeater == nil { settings.append("its forwarding policy") }
+        if sync.supportsMeshcoreForwarder, sync.meshcore == nil {
+            settings.append("MeshCore forwarding")
+        }
         if sync.supportsGnss, !showsPositioning { settings.append("its positioning settings") }
         if sync.supportsAdvert, !showsAnnouncements {
             settings.append("what it announces on its own")
@@ -351,6 +362,15 @@ final class DeviceConfigDraft {
                     defaultRegion: defaultRegion,
                     minRssiDbm: minRssiDBm,
                     minSnrDb: minSnrDB
+                )
+                : nil,
+            // A device that would not report these has them left out of the
+            // write by Rust, so the defaults above never land on it.
+            meshcore: sync.supportsMeshcoreForwarder
+                ? UlcpMeshCoreSettingsRecord(
+                    enabled: meshCoreEnabled,
+                    regionPolicy: meshCoreRegionPolicy,
+                    regions: meshCoreRegions
                 )
                 : nil,
             tzOffsetMin: sync.supportsTime ? timeZoneOffsetMinutes : nil,
@@ -600,6 +620,9 @@ final class DeviceConfigDraft {
             return name
         }
         if let name = reported(requested.repeater, readback.repeater, "the repeater policy") {
+            return name
+        }
+        if let name = reported(requested.meshcore, readback.meshcore, "MeshCore forwarding") {
             return name
         }
         if let name = reported(requested.tzOffsetMin, readback.tzOffsetMin, "the time zone") {

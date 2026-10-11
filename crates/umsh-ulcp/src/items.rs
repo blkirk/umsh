@@ -40,6 +40,10 @@ pub const REGION_CODE_LEN: usize = 2;
 /// (`PROP_MAC_REPEATER_REGIONS`, and the Supported Flood Regions
 /// node-identity option). The device derives the code from the string.
 pub const REGION_STRING_MAX_LEN: usize = 24;
+/// Longest a MeshCore region name may be, in UTF-8 bytes, without its
+/// implicit `#` (`PROP_MESHCORE_REGIONS`): what the MeshCore v1.17.1
+/// region table stores.
+pub const MESHCORE_REGION_NAME_MAX_LEN: usize = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemError {

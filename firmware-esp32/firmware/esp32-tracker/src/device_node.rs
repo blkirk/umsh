@@ -94,6 +94,39 @@ async fn node_admin_task(node_handle: DeviceNode, input: &'static SessionInput, 
     umsh_ulcp_runtime::admin_responder::responder_loop(node_handle, input, nonce).await
 }
 
+#[cfg(feature = "meshcore-forwarder")]
+#[embassy_executor::task]
+async fn meshcore_forwarder_task(public_key: [u8; 32], seed: [u8; 32], t_frame_ms: u32) {
+    umsh_ulcp_runtime::meshcore::forwarder_loop(
+        meshcore_storage(public_key, seed),
+        public_key,
+        t_frame_ms,
+        &crate::DUTY_LEDGER,
+        Some(&crate::STATS),
+        hooks().note_external_load,
+    )
+    .await
+}
+
+/// The forwarder's bulk state: external RAM where the board has it, an
+/// internal static otherwise.
+#[cfg(all(feature = "meshcore-forwarder", feature = "psram"))]
+fn meshcore_storage(
+    public_key: [u8; 32],
+    seed: [u8; 32],
+) -> &'static mut umsh_ulcp_runtime::meshcore::MeshCoreStorage {
+    crate::external::meshcore_storage(public_key, seed)
+}
+#[cfg(all(feature = "meshcore-forwarder", not(feature = "psram")))]
+fn meshcore_storage(
+    public_key: [u8; 32],
+    seed: [u8; 32],
+) -> &'static mut umsh_ulcp_runtime::meshcore::MeshCoreStorage {
+    static STORAGE: static_cell::StaticCell<umsh_ulcp_runtime::meshcore::MeshCoreStorage> =
+        static_cell::StaticCell::new();
+    STORAGE.init_with(|| umsh_ulcp_runtime::meshcore::MeshCoreStorage::new(public_key, seed))
+}
+
 // ─── Bring-up ────────────────────────────────────────────────────────────────
 
 /// This board has no battery-level estimator to feed and no indicator
@@ -145,6 +178,15 @@ pub async fn bring_up(
         node_identity_blob_task(
             parts.node.clone(),
             SoftwareIdentity::from_secret_bytes(identity_secret),
+        )
+        .unwrap(),
+    );
+    #[cfg(feature = "meshcore-forwarder")]
+    spawner.spawn(
+        meshcore_forwarder_task(
+            parts.node_key,
+            umsh_ulcp_runtime::meshcore::derive_seed(&node_seed),
+            t_frame_ms,
         )
         .unwrap(),
     );

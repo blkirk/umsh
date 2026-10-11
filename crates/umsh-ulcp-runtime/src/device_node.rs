@@ -236,6 +236,8 @@ pub fn publish_snapshot(snapshot: DevDomainSnapshot) {
             }
         ));
     }
+    #[cfg(feature = "meshcore-forwarder")]
+    crate::meshcore::publish(&snapshot);
     DEV_SYNC.signal(snapshot);
 }
 
@@ -345,6 +347,8 @@ pub fn radio_enabled() -> Option<bool> {
 
 pub fn set_radio_enabled(enabled: bool) {
     RADIO_ENABLED.store(u16::from(enabled), Ordering::Relaxed);
+    #[cfg(feature = "meshcore-forwarder")]
+    crate::meshcore::radio_changed();
 }
 
 /// The applied `PROP_PHY_TX_POWER`, or `None` before the first

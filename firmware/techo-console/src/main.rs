@@ -626,6 +626,7 @@ mod firmware {
             SpreadingFactor::_7,
             Bandwidth::_62KHz,
             umsh_radio_loraphy::MAX_PAYLOAD,
+            umsh_radio_loraphy::profiles::DEFAULT.tx_preamble_symbols,
         );
         {
             let mut cfg = SpimConfig::default();

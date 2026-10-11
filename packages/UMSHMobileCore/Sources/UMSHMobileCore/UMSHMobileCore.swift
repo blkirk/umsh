@@ -8795,6 +8795,7 @@ public struct UlcpDeviceCardRecord: Equatable, Hashable {
     public var supportsLora: Bool
     public var supportsDutyCycleLimit: Bool
     public var supportsRepeater: Bool
+    public var supportsMeshcoreForwarder: Bool
     public var supportsIdent: Bool
     public var supportsDeviceIdentity: Bool
     public var supportsGnss: Bool
@@ -8844,7 +8845,7 @@ public struct UlcpDeviceCardRecord: Equatable, Hashable {
          */deviceVersion: String?,
         /**
          * `PROP_DEV_MODEL`: the hardware, when the device names it.
-         */deviceModel: String?, deviceName: String?, supportsDeviceName: Bool, supportsBattery: Bool, supportsLora: Bool, supportsDutyCycleLimit: Bool, supportsRepeater: Bool, supportsIdent: Bool, supportsDeviceIdentity: Bool, supportsGnss: Bool, supportsAdvert: Bool, supportsAdmin: Bool, supportsAlert: Bool,
+         */deviceModel: String?, deviceName: String?, supportsDeviceName: Bool, supportsBattery: Bool, supportsLora: Bool, supportsDutyCycleLimit: Bool, supportsRepeater: Bool, supportsMeshcoreForwarder: Bool, supportsIdent: Bool, supportsDeviceIdentity: Bool, supportsGnss: Bool, supportsAdvert: Bool, supportsAdmin: Bool, supportsAlert: Bool,
         /**
          * Whether the device has a Bluetooth transport it can be made
          * unreachable over (`CAP_BLE`).
@@ -8873,6 +8874,7 @@ public struct UlcpDeviceCardRecord: Equatable, Hashable {
         self.supportsLora = supportsLora
         self.supportsDutyCycleLimit = supportsDutyCycleLimit
         self.supportsRepeater = supportsRepeater
+        self.supportsMeshcoreForwarder = supportsMeshcoreForwarder
         self.supportsIdent = supportsIdent
         self.supportsDeviceIdentity = supportsDeviceIdentity
         self.supportsGnss = supportsGnss
@@ -8915,6 +8917,7 @@ public struct FfiConverterTypeUlcpDeviceCardRecord: FfiConverterRustBuffer {
                 supportsLora: FfiConverterBool.read(from: &buf),
                 supportsDutyCycleLimit: FfiConverterBool.read(from: &buf),
                 supportsRepeater: FfiConverterBool.read(from: &buf),
+                supportsMeshcoreForwarder: FfiConverterBool.read(from: &buf),
                 supportsIdent: FfiConverterBool.read(from: &buf),
                 supportsDeviceIdentity: FfiConverterBool.read(from: &buf),
                 supportsGnss: FfiConverterBool.read(from: &buf),
@@ -8943,6 +8946,7 @@ public struct FfiConverterTypeUlcpDeviceCardRecord: FfiConverterRustBuffer {
         FfiConverterBool.write(value.supportsLora, into: &buf)
         FfiConverterBool.write(value.supportsDutyCycleLimit, into: &buf)
         FfiConverterBool.write(value.supportsRepeater, into: &buf)
+        FfiConverterBool.write(value.supportsMeshcoreForwarder, into: &buf)
         FfiConverterBool.write(value.supportsIdent, into: &buf)
         FfiConverterBool.write(value.supportsDeviceIdentity, into: &buf)
         FfiConverterBool.write(value.supportsGnss, into: &buf)
@@ -9016,6 +9020,11 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
      */
     public var repeater: UlcpRepeaterSettingsRecord?
     /**
+     * MeshCore forwarding. Present exactly when the device advertises
+     * `CAP_MESHCORE_FORWARDER`.
+     */
+    public var meshcore: UlcpMeshCoreSettingsRecord?
+    /**
      * `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
      * device advertises `CAP_TIME`.
      *
@@ -9061,6 +9070,10 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
          * advertises `CAP_REPEATER`.
          */repeater: UlcpRepeaterSettingsRecord?,
         /**
+         * MeshCore forwarding. Present exactly when the device advertises
+         * `CAP_MESHCORE_FORWARDER`.
+         */meshcore: UlcpMeshCoreSettingsRecord?,
+        /**
          * `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
          * device advertises `CAP_TIME`.
          *
@@ -9081,6 +9094,7 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
         self.identMobile = identMobile
         self.devDiscoverable = devDiscoverable
         self.repeater = repeater
+        self.meshcore = meshcore
         self.tzOffsetMin = tzOffsetMin
         self.gnss = gnss
         self.advert = advert
@@ -9107,6 +9121,7 @@ public struct FfiConverterTypeUlcpDeviceConfigRecord: FfiConverterRustBuffer {
                 identMobile: FfiConverterOptionBool.read(from: &buf),
                 devDiscoverable: FfiConverterOptionBool.read(from: &buf),
                 repeater: FfiConverterOptionTypeUlcpRepeaterSettingsRecord.read(from: &buf),
+                meshcore: FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.read(from: &buf),
                 tzOffsetMin: FfiConverterOptionInt16.read(from: &buf),
                 gnss: FfiConverterOptionTypeUlcpGnssSettingsRecord.read(from: &buf),
                 advert: FfiConverterOptionTypeUlcpAdvertSettingsRecord.read(from: &buf)
@@ -9119,6 +9134,7 @@ public struct FfiConverterTypeUlcpDeviceConfigRecord: FfiConverterRustBuffer {
         FfiConverterOptionBool.write(value.identMobile, into: &buf)
         FfiConverterOptionBool.write(value.devDiscoverable, into: &buf)
         FfiConverterOptionTypeUlcpRepeaterSettingsRecord.write(value.repeater, into: &buf)
+        FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.write(value.meshcore, into: &buf)
         FfiConverterOptionInt16.write(value.tzOffsetMin, into: &buf)
         FfiConverterOptionTypeUlcpGnssSettingsRecord.write(value.gnss, into: &buf)
         FfiConverterOptionTypeUlcpAdvertSettingsRecord.write(value.advert, into: &buf)
@@ -9184,6 +9200,10 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
     public var statForwarded: UInt32?
     public var statForwardDropped: UInt32?
     public var statForwardCancelled: UInt32?
+    public var statMeshcoreSeen: UInt32?
+    public var statMeshcoreForwardedRouted: UInt32?
+    public var statMeshcoreForwardedFlood: UInt32?
+    public var statMeshcoreDeclined: UInt32?
     public var deviceName: String?
     /**
      * `None` is the device deriving its own role, which reads the same
@@ -9324,6 +9344,15 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
     public var repeaterDefaultRegion: Data?
     public var repeaterMinRssiDbm: Int16?
     public var repeaterMinSnrDb: Int8?
+    public var meshcoreForwardingEnabled: Bool?
+    /**
+     * `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+     */
+    public var meshcoreRegionPolicy: UInt8?
+    /**
+     * `PROP_MESHCORE_REGIONS`, without the `#` the device supplies.
+     */
+    public var meshcoreRegions: [String]?
     public var devPeerKeys: [Data]?
     public var devAdminKeys: [Data]?
 
@@ -9335,7 +9364,7 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
          */illuminanceMillilux: UInt32?,
         /**
          * Tenths of kelvin; inner None is an unavailable sensor.
-         */temperatures: [UInt16?]?, temperatureNames: [String]?, phyEnabled: Bool?, frequencyKhz: UInt32?, transmitPowerDbm: Int8?, bandwidthHz: UInt32?, spreadingFactor: UInt8?, codingRateDenom: UInt8?, dutyCycleNow: UInt16?, dutyCycleLimit: UInt16?, statTxPackets: UInt32?, statTxChannelBusy: UInt32?, statRxPackets: UInt32?, statRxBadCrc: UInt32?, statRxNonUmsh: UInt32?, statRxAccepted: UInt32?, statForwarded: UInt32?, statForwardDropped: UInt32?, statForwardCancelled: UInt32?, deviceName: String?,
+         */temperatures: [UInt16?]?, temperatureNames: [String]?, phyEnabled: Bool?, frequencyKhz: UInt32?, transmitPowerDbm: Int8?, bandwidthHz: UInt32?, spreadingFactor: UInt8?, codingRateDenom: UInt8?, dutyCycleNow: UInt16?, dutyCycleLimit: UInt16?, statTxPackets: UInt32?, statTxChannelBusy: UInt32?, statRxPackets: UInt32?, statRxBadCrc: UInt32?, statRxNonUmsh: UInt32?, statRxAccepted: UInt32?, statForwarded: UInt32?, statForwardDropped: UInt32?, statForwardCancelled: UInt32?, statMeshcoreSeen: UInt32?, statMeshcoreForwardedRouted: UInt32?, statMeshcoreForwardedFlood: UInt32?, statMeshcoreDeclined: UInt32?, deviceName: String?,
         /**
          * `None` is the device deriving its own role, which reads the same
          * as never having been told.
@@ -9429,7 +9458,13 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
          * What the device's clock read when it answered. Present when the
          * clock was asked about; the inner epoch is absent on a device that
          * has not found the time.
-         */time: UlcpTimeRecord?, tzOffsetMin: Int16?, repeaterEnabled: Bool?, repeaterRegions: [String]?, repeaterDefaultRegion: Data?, repeaterMinRssiDbm: Int16?, repeaterMinSnrDb: Int8?, devPeerKeys: [Data]?, devAdminKeys: [Data]?) {
+         */time: UlcpTimeRecord?, tzOffsetMin: Int16?, repeaterEnabled: Bool?, repeaterRegions: [String]?, repeaterDefaultRegion: Data?, repeaterMinRssiDbm: Int16?, repeaterMinSnrDb: Int8?, meshcoreForwardingEnabled: Bool?,
+        /**
+         * `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+         */meshcoreRegionPolicy: UInt8?,
+        /**
+         * `PROP_MESHCORE_REGIONS`, without the `#` the device supplies.
+         */meshcoreRegions: [String]?, devPeerKeys: [Data]?, devAdminKeys: [Data]?) {
         self.bridgeEnabled = bridgeEnabled
         self.bridgeHost = bridgeHost
         self.bridgePort = bridgePort
@@ -9457,6 +9492,10 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
         self.statForwarded = statForwarded
         self.statForwardDropped = statForwardDropped
         self.statForwardCancelled = statForwardCancelled
+        self.statMeshcoreSeen = statMeshcoreSeen
+        self.statMeshcoreForwardedRouted = statMeshcoreForwardedRouted
+        self.statMeshcoreForwardedFlood = statMeshcoreForwardedFlood
+        self.statMeshcoreDeclined = statMeshcoreDeclined
         self.deviceName = deviceName
         self.identRole = identRole
         self.identMobile = identMobile
@@ -9503,6 +9542,9 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
         self.repeaterDefaultRegion = repeaterDefaultRegion
         self.repeaterMinRssiDbm = repeaterMinRssiDbm
         self.repeaterMinSnrDb = repeaterMinSnrDb
+        self.meshcoreForwardingEnabled = meshcoreForwardingEnabled
+        self.meshcoreRegionPolicy = meshcoreRegionPolicy
+        self.meshcoreRegions = meshcoreRegions
         self.devPeerKeys = devPeerKeys
         self.devAdminKeys = devAdminKeys
     }
@@ -9550,6 +9592,10 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
                 statForwarded: FfiConverterOptionUInt32.read(from: &buf),
                 statForwardDropped: FfiConverterOptionUInt32.read(from: &buf),
                 statForwardCancelled: FfiConverterOptionUInt32.read(from: &buf),
+                statMeshcoreSeen: FfiConverterOptionUInt32.read(from: &buf),
+                statMeshcoreForwardedRouted: FfiConverterOptionUInt32.read(from: &buf),
+                statMeshcoreForwardedFlood: FfiConverterOptionUInt32.read(from: &buf),
+                statMeshcoreDeclined: FfiConverterOptionUInt32.read(from: &buf),
                 deviceName: FfiConverterOptionString.read(from: &buf),
                 identRole: FfiConverterOptionUInt8.read(from: &buf),
                 identMobile: FfiConverterOptionBool.read(from: &buf),
@@ -9596,6 +9642,9 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
                 repeaterDefaultRegion: FfiConverterOptionData.read(from: &buf),
                 repeaterMinRssiDbm: FfiConverterOptionInt16.read(from: &buf),
                 repeaterMinSnrDb: FfiConverterOptionInt8.read(from: &buf),
+                meshcoreForwardingEnabled: FfiConverterOptionBool.read(from: &buf),
+                meshcoreRegionPolicy: FfiConverterOptionUInt8.read(from: &buf),
+                meshcoreRegions: FfiConverterOptionSequenceString.read(from: &buf),
                 devPeerKeys: FfiConverterOptionSequenceData.read(from: &buf),
                 devAdminKeys: FfiConverterOptionSequenceData.read(from: &buf)
         )
@@ -9629,6 +9678,10 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
         FfiConverterOptionUInt32.write(value.statForwarded, into: &buf)
         FfiConverterOptionUInt32.write(value.statForwardDropped, into: &buf)
         FfiConverterOptionUInt32.write(value.statForwardCancelled, into: &buf)
+        FfiConverterOptionUInt32.write(value.statMeshcoreSeen, into: &buf)
+        FfiConverterOptionUInt32.write(value.statMeshcoreForwardedRouted, into: &buf)
+        FfiConverterOptionUInt32.write(value.statMeshcoreForwardedFlood, into: &buf)
+        FfiConverterOptionUInt32.write(value.statMeshcoreDeclined, into: &buf)
         FfiConverterOptionString.write(value.deviceName, into: &buf)
         FfiConverterOptionUInt8.write(value.identRole, into: &buf)
         FfiConverterOptionBool.write(value.identMobile, into: &buf)
@@ -9675,6 +9728,9 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
         FfiConverterOptionData.write(value.repeaterDefaultRegion, into: &buf)
         FfiConverterOptionInt16.write(value.repeaterMinRssiDbm, into: &buf)
         FfiConverterOptionInt8.write(value.repeaterMinSnrDb, into: &buf)
+        FfiConverterOptionBool.write(value.meshcoreForwardingEnabled, into: &buf)
+        FfiConverterOptionUInt8.write(value.meshcoreRegionPolicy, into: &buf)
+        FfiConverterOptionSequenceString.write(value.meshcoreRegions, into: &buf)
         FfiConverterOptionSequenceData.write(value.devPeerKeys, into: &buf)
         FfiConverterOptionSequenceData.write(value.devAdminKeys, into: &buf)
     }
@@ -10489,6 +10545,10 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
     public var statForwarded: UInt32
     public var statForwardDropped: UInt32
     public var statForwardCancelled: UInt32
+    public var statMeshcoreSeen: UInt32
+    public var statMeshcoreForwardedRouted: UInt32
+    public var statMeshcoreForwardedFlood: UInt32
+    public var statMeshcoreDeclined: UInt32
     public var identRole: UInt32
     public var identMobile: UInt32
     public var identLocation: UInt32
@@ -10537,12 +10597,15 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
     public var repeaterDefaultRegion: UInt32
     public var repeaterMinRssi: UInt32
     public var repeaterMinSnr: UInt32
+    public var meshcoreForwardingEnabled: UInt32
+    public var meshcoreRegionPolicy: UInt32
+    public var meshcoreRegions: UInt32
     public var devPeers: UInt32
     public var devAdmins: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzOffset: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, devPeers: UInt32, devAdmins: UInt32) {
+    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, statMeshcoreSeen: UInt32, statMeshcoreForwardedRouted: UInt32, statMeshcoreForwardedFlood: UInt32, statMeshcoreDeclined: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzOffset: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, meshcoreForwardingEnabled: UInt32, meshcoreRegionPolicy: UInt32, meshcoreRegions: UInt32, devPeers: UInt32, devAdmins: UInt32) {
         self.caps = caps
         self.deviceVersion = deviceVersion
         self.deviceModel = deviceModel
@@ -10581,6 +10644,10 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
         self.statForwarded = statForwarded
         self.statForwardDropped = statForwardDropped
         self.statForwardCancelled = statForwardCancelled
+        self.statMeshcoreSeen = statMeshcoreSeen
+        self.statMeshcoreForwardedRouted = statMeshcoreForwardedRouted
+        self.statMeshcoreForwardedFlood = statMeshcoreForwardedFlood
+        self.statMeshcoreDeclined = statMeshcoreDeclined
         self.identRole = identRole
         self.identMobile = identMobile
         self.identLocation = identLocation
@@ -10629,6 +10696,9 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
         self.repeaterDefaultRegion = repeaterDefaultRegion
         self.repeaterMinRssi = repeaterMinRssi
         self.repeaterMinSnr = repeaterMinSnr
+        self.meshcoreForwardingEnabled = meshcoreForwardingEnabled
+        self.meshcoreRegionPolicy = meshcoreRegionPolicy
+        self.meshcoreRegions = meshcoreRegions
         self.devPeers = devPeers
         self.devAdmins = devAdmins
     }
@@ -10687,6 +10757,10 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
                 statForwarded: FfiConverterUInt32.read(from: &buf),
                 statForwardDropped: FfiConverterUInt32.read(from: &buf),
                 statForwardCancelled: FfiConverterUInt32.read(from: &buf),
+                statMeshcoreSeen: FfiConverterUInt32.read(from: &buf),
+                statMeshcoreForwardedRouted: FfiConverterUInt32.read(from: &buf),
+                statMeshcoreForwardedFlood: FfiConverterUInt32.read(from: &buf),
+                statMeshcoreDeclined: FfiConverterUInt32.read(from: &buf),
                 identRole: FfiConverterUInt32.read(from: &buf),
                 identMobile: FfiConverterUInt32.read(from: &buf),
                 identLocation: FfiConverterUInt32.read(from: &buf),
@@ -10735,6 +10809,9 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
                 repeaterDefaultRegion: FfiConverterUInt32.read(from: &buf),
                 repeaterMinRssi: FfiConverterUInt32.read(from: &buf),
                 repeaterMinSnr: FfiConverterUInt32.read(from: &buf),
+                meshcoreForwardingEnabled: FfiConverterUInt32.read(from: &buf),
+                meshcoreRegionPolicy: FfiConverterUInt32.read(from: &buf),
+                meshcoreRegions: FfiConverterUInt32.read(from: &buf),
                 devPeers: FfiConverterUInt32.read(from: &buf),
                 devAdmins: FfiConverterUInt32.read(from: &buf)
         )
@@ -10779,6 +10856,10 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.statForwarded, into: &buf)
         FfiConverterUInt32.write(value.statForwardDropped, into: &buf)
         FfiConverterUInt32.write(value.statForwardCancelled, into: &buf)
+        FfiConverterUInt32.write(value.statMeshcoreSeen, into: &buf)
+        FfiConverterUInt32.write(value.statMeshcoreForwardedRouted, into: &buf)
+        FfiConverterUInt32.write(value.statMeshcoreForwardedFlood, into: &buf)
+        FfiConverterUInt32.write(value.statMeshcoreDeclined, into: &buf)
         FfiConverterUInt32.write(value.identRole, into: &buf)
         FfiConverterUInt32.write(value.identMobile, into: &buf)
         FfiConverterUInt32.write(value.identLocation, into: &buf)
@@ -10827,6 +10908,9 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.repeaterDefaultRegion, into: &buf)
         FfiConverterUInt32.write(value.repeaterMinRssi, into: &buf)
         FfiConverterUInt32.write(value.repeaterMinSnr, into: &buf)
+        FfiConverterUInt32.write(value.meshcoreForwardingEnabled, into: &buf)
+        FfiConverterUInt32.write(value.meshcoreRegionPolicy, into: &buf)
+        FfiConverterUInt32.write(value.meshcoreRegions, into: &buf)
         FfiConverterUInt32.write(value.devPeers, into: &buf)
         FfiConverterUInt32.write(value.devAdmins, into: &buf)
     }
@@ -10845,6 +10929,97 @@ public func FfiConverterTypeUlcpManagedPropertyIds_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeUlcpManagedPropertyIds_lower(_ value: UlcpManagedPropertyIds) -> RustBuffer {
     return FfiConverterTypeUlcpManagedPropertyIds.lower(value)
+}
+
+
+/**
+ * Whether the device also forwards MeshCore v1 traffic, and under what
+ * regional rule.
+ *
+ * Kept apart from [`UlcpRepeaterSettingsRecord`] because it rides on a
+ * capability of its own (`CAP_MESHCORE_FORWARDER`) and runs independently
+ * of `PROP_MAC_REPEATER_ENABLED`. Read and written as a set, `enabled`
+ * last.
+ */
+public struct UlcpMeshCoreSettingsRecord: Equatable, Hashable {
+    /**
+     * `PROP_MESHCORE_FORWARDING_ENABLED`. The device refuses to set it
+     * while its identity key starts with a prefix MeshCore reserves—see
+     * [`ulcp_meshcore_identity_allowed`].
+     */
+    public var enabled: Bool
+    /**
+     * `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+     */
+    public var regionPolicy: UInt8
+    /**
+     * `PROP_MESHCORE_REGIONS`: MeshCore region names, case-sensitive and
+     * without the `#` the device supplies.
+     */
+    public var regions: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `PROP_MESHCORE_FORWARDING_ENABLED`. The device refuses to set it
+         * while its identity key starts with a prefix MeshCore reserves—see
+         * [`ulcp_meshcore_identity_allowed`].
+         */enabled: Bool,
+        /**
+         * `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
+         */regionPolicy: UInt8,
+        /**
+         * `PROP_MESHCORE_REGIONS`: MeshCore region names, case-sensitive and
+         * without the `#` the device supplies.
+         */regions: [String]) {
+        self.enabled = enabled
+        self.regionPolicy = regionPolicy
+        self.regions = regions
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension UlcpMeshCoreSettingsRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUlcpMeshCoreSettingsRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UlcpMeshCoreSettingsRecord {
+        return
+            try UlcpMeshCoreSettingsRecord(
+                enabled: FfiConverterBool.read(from: &buf),
+                regionPolicy: FfiConverterUInt8.read(from: &buf),
+                regions: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: UlcpMeshCoreSettingsRecord, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterUInt8.write(value.regionPolicy, into: &buf)
+        FfiConverterSequenceString.write(value.regions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUlcpMeshCoreSettingsRecord_lift(_ buf: RustBuffer) throws -> UlcpMeshCoreSettingsRecord {
+    return try FfiConverterTypeUlcpMeshCoreSettingsRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUlcpMeshCoreSettingsRecord_lower(_ value: UlcpMeshCoreSettingsRecord) -> RustBuffer {
+    return FfiConverterTypeUlcpMeshCoreSettingsRecord.lower(value)
 }
 
 
@@ -11830,6 +12005,11 @@ public struct UlcpSyncRecord: Equatable, Hashable {
      */
     public var supportsRepeater: Bool
     /**
+     * The device can also forward MeshCore v1 traffic
+     * (`CAP_MESHCORE_FORWARDER`).
+     */
+    public var supportsMeshcoreForwarder: Bool
+    /**
      * The device serves and configures its own advertised node identity
      * (`CAP_IDENT`).
      */
@@ -11894,6 +12074,11 @@ public struct UlcpSyncRecord: Equatable, Hashable {
      * policy.
      */
     public var repeater: UlcpRepeaterSettingsRecord?
+    /**
+     * Present when `supports_meshcore_forwarder` and the device reported
+     * both settings.
+     */
+    public var meshcore: UlcpMeshCoreSettingsRecord?
     /**
      * `PROP_DEV_PEERS`: the peer public keys stored on the device
      * identity, read back losslessly. Present when
@@ -11994,6 +12179,10 @@ public struct UlcpSyncRecord: Equatable, Hashable {
          * The device can forward for the mesh on its own (`CAP_REPEATER`).
          */supportsRepeater: Bool,
         /**
+         * The device can also forward MeshCore v1 traffic
+         * (`CAP_MESHCORE_FORWARDER`).
+         */supportsMeshcoreForwarder: Bool,
+        /**
          * The device serves and configures its own advertised node identity
          * (`CAP_IDENT`).
          */supportsIdent: Bool,
@@ -12033,6 +12222,10 @@ public struct UlcpSyncRecord: Equatable, Hashable {
          * Present when `supports_repeater` and the device reported the whole
          * policy.
          */repeater: UlcpRepeaterSettingsRecord?,
+        /**
+         * Present when `supports_meshcore_forwarder` and the device reported
+         * both settings.
+         */meshcore: UlcpMeshCoreSettingsRecord?,
         /**
          * `PROP_DEV_PEERS`: the peer public keys stored on the device
          * identity, read back losslessly. Present when
@@ -12108,6 +12301,7 @@ public struct UlcpSyncRecord: Equatable, Hashable {
         self.supportsBattery = supportsBattery
         self.battery = battery
         self.supportsRepeater = supportsRepeater
+        self.supportsMeshcoreForwarder = supportsMeshcoreForwarder
         self.supportsIdent = supportsIdent
         self.supportsDeviceIdentity = supportsDeviceIdentity
         self.supportsTime = supportsTime
@@ -12133,6 +12327,7 @@ public struct UlcpSyncRecord: Equatable, Hashable {
         self.hostPeerCount = hostPeerCount
         self.autoAck = autoAck
         self.repeater = repeater
+        self.meshcore = meshcore
         self.devPeerKeys = devPeerKeys
         self.devAdminKeys = devAdminKeys
         self.devChannelIds = devChannelIds
@@ -12173,6 +12368,7 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
                 supportsBattery: FfiConverterBool.read(from: &buf),
                 battery: FfiConverterOptionTypeUlcpBatteryRecord.read(from: &buf),
                 supportsRepeater: FfiConverterBool.read(from: &buf),
+                supportsMeshcoreForwarder: FfiConverterBool.read(from: &buf),
                 supportsIdent: FfiConverterBool.read(from: &buf),
                 supportsDeviceIdentity: FfiConverterBool.read(from: &buf),
                 supportsTime: FfiConverterBool.read(from: &buf),
@@ -12198,6 +12394,7 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
                 hostPeerCount: FfiConverterOptionUInt32.read(from: &buf),
                 autoAck: FfiConverterOptionBool.read(from: &buf),
                 repeater: FfiConverterOptionTypeUlcpRepeaterSettingsRecord.read(from: &buf),
+                meshcore: FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.read(from: &buf),
                 devPeerKeys: FfiConverterOptionSequenceData.read(from: &buf),
                 devAdminKeys: FfiConverterOptionSequenceData.read(from: &buf),
                 devChannelIds: FfiConverterOptionSequenceData.read(from: &buf),
@@ -12224,6 +12421,7 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
         FfiConverterBool.write(value.supportsBattery, into: &buf)
         FfiConverterOptionTypeUlcpBatteryRecord.write(value.battery, into: &buf)
         FfiConverterBool.write(value.supportsRepeater, into: &buf)
+        FfiConverterBool.write(value.supportsMeshcoreForwarder, into: &buf)
         FfiConverterBool.write(value.supportsIdent, into: &buf)
         FfiConverterBool.write(value.supportsDeviceIdentity, into: &buf)
         FfiConverterBool.write(value.supportsTime, into: &buf)
@@ -12249,6 +12447,7 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.hostPeerCount, into: &buf)
         FfiConverterOptionBool.write(value.autoAck, into: &buf)
         FfiConverterOptionTypeUlcpRepeaterSettingsRecord.write(value.repeater, into: &buf)
+        FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.write(value.meshcore, into: &buf)
         FfiConverterOptionSequenceData.write(value.devPeerKeys, into: &buf)
         FfiConverterOptionSequenceData.write(value.devAdminKeys, into: &buf)
         FfiConverterOptionSequenceData.write(value.devChannelIds, into: &buf)
@@ -16317,6 +16516,30 @@ fileprivate struct FfiConverterOptionTypeUlcpLocalManagementEventRecord: FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeUlcpMeshCoreSettingsRecord: FfiConverterRustBuffer {
+    typealias SwiftType = UlcpMeshCoreSettingsRecord?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeUlcpMeshCoreSettingsRecord.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeUlcpMeshCoreSettingsRecord.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeUlcpMismatchedResponseRecord: FfiConverterRustBuffer {
     typealias SwiftType = UlcpMismatchedResponseRecord?
 
@@ -18315,6 +18538,36 @@ public func ulcpMaxHostPeers() -> UInt8  {
 })
 }
 /**
+ * Whether a device identity key may forward MeshCore traffic.
+ *
+ * MeshCore reserves the 0x00 and 0xFF first-octet prefixes, and a device
+ * whose `PROP_DEV_KEY` starts with either refuses to enable forwarding.
+ * Anything that is not a 32-octet key is not a reason to say no here.
+ */
+public func ulcpMeshcoreIdentityAllowed(devKey: Data) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_ulcp_meshcore_identity_allowed(
+        FfiConverterData.lower(devKey),uniffiCallStatus
+    )
+})
+}
+/**
+ * A MeshCore region name as typed, in the form `PROP_MESHCORE_REGIONS`
+ * stores it: without a leading `#`, and `None` for a name the device
+ * would refuse.
+ *
+ * Case is kept, since MeshCore derives region keys case-sensitively.
+ */
+public func ulcpMeshcoreRegionName(input: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_ulcp_meshcore_region_name(
+        FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+/**
  * Encode a `CMD_PROP_GET` request with the shared ULCP codec.
  */
 public func ulcpPropGet(transactionId: UInt8, propertyId: UInt32)throws  -> Data  {
@@ -18605,6 +18858,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_max_host_peers() != 45637) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_ulcp_meshcore_identity_allowed() != 1906) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_ulcp_meshcore_region_name() != 32316) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_prop_get() != 58684) {

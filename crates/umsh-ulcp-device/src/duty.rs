@@ -15,7 +15,7 @@ use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use umsh_ulcp::airtime::lora_airtime_ms;
+use umsh_ulcp::airtime::lora_airtime_ms_with_preamble;
 use umsh_ulcp::ids::DUTY_LIMIT_DISABLED;
 
 /// Length of one accounting interval in milliseconds (4 minutes).
@@ -121,6 +121,20 @@ struct LedgerState {
     sf: u8,
     bw_hz: u32,
     cr_denom: u8,
+    /// The transmit preamble, in symbols.
+    preamble_symbols: u16,
+}
+
+impl LedgerState {
+    fn airtime_ms(&self, frame_len: usize) -> u32 {
+        lora_airtime_ms_with_preamble(
+            self.sf,
+            self.bw_hz,
+            self.cr_denom,
+            frame_len,
+            self.preamble_symbols,
+        )
+    }
 }
 
 /// The shared duty ledger: one [`DutyTracker`] plus the active limit
@@ -153,6 +167,7 @@ impl DutyLedger {
                 sf: 7,
                 bw_hz: 125_000,
                 cr_denom: 5,
+                preamble_symbols: 32,
             })),
         }
     }
@@ -196,21 +211,20 @@ impl DutyLedger {
 
     /// Update the modulation parameters used for [`Self::airtime_ms`].
     /// The session calls this wherever it (re)applies radio settings.
-    pub fn set_phy(&self, sf: u8, bw_hz: u32, cr_denom: u8) {
+    pub fn set_phy(&self, sf: u8, bw_hz: u32, cr_denom: u8, preamble_symbols: u16) {
         self.state.lock(|state| {
             let mut state = state.borrow_mut();
             state.sf = sf;
             state.bw_hz = bw_hz;
             state.cr_denom = cr_denom;
+            state.preamble_symbols = preamble_symbols;
         });
     }
 
     /// Airtime of a `frame_len`-byte frame at the active modulation.
     pub fn airtime_ms(&self, frame_len: usize) -> u32 {
-        self.state.lock(|state| {
-            let state = state.borrow();
-            lora_airtime_ms(state.sf, state.bw_hz, state.cr_denom, frame_len)
-        })
+        self.state
+            .lock(|state| state.borrow().airtime_ms(frame_len))
     }
 
     /// Admission check for a client that knows only its frame length
@@ -222,7 +236,7 @@ impl DutyLedger {
     pub fn admit(&self, now_ms: u64, frame_len: usize) -> Result<u32, DutyExceeded> {
         self.state.lock(|state| {
             let mut state = state.borrow_mut();
-            let airtime_ms = lora_airtime_ms(state.sf, state.bw_hz, state.cr_denom, frame_len);
+            let airtime_ms = state.airtime_ms(frame_len);
             let limit = state.limit;
             if state.tracker.would_exceed(now_ms, airtime_ms, limit) {
                 Err(DutyExceeded)
@@ -285,7 +299,7 @@ mod tests {
     #[test]
     fn ledger_combines_clients_and_admits_by_frame_length() {
         let ledger = DutyLedger::new();
-        ledger.set_phy(9, 250_000, 5);
+        ledger.set_phy(9, 250_000, 5, 16);
         ledger.set_limit(655); // ≈1%: 36 s of airtime per hour.
 
         // Two "clients" record into the same ledger; the combined
@@ -302,7 +316,10 @@ mod tests {
         // Refusals consume nothing: after the window ages out, a frame
         // is admitted with the modulation-derived airtime.
         let airtime = ledger.admit(20 * INTERVAL_MS, 32).unwrap();
-        assert_eq!(airtime, lora_airtime_ms(9, 250_000, 5, 32));
+        assert_eq!(
+            airtime,
+            lora_airtime_ms_with_preamble(9, 250_000, 5, 32, 16)
+        );
         // Admission alone records nothing either.
         assert_eq!(ledger.usage(20 * INTERVAL_MS), 0);
 
@@ -333,5 +350,31 @@ mod tests {
         assert!(duty.would_exceed(0, 1_000, limit));
         // NODUTY-style unlimited value never blocks.
         assert!(!duty.would_exceed(0, 1_000, u16::MAX));
+    }
+
+    #[test]
+    fn ledger_prices_the_transmit_preamble() {
+        let ledger = DutyLedger::new();
+        // A 255-octet frame at SF7/62.5 kHz: 378 payload symbols plus the
+        // preamble and 4.25 sync symbols, at 2.048 ms each.
+        ledger.set_phy(7, 62_500, 5, 32);
+        assert_eq!(ledger.airtime_ms(255), 849);
+        ledger.set_phy(7, 62_500, 5, 16);
+        assert_eq!(ledger.airtime_ms(255), 816);
+
+        // Across the shipping spreading factors, the 16 symbols between
+        // the two preambles cost 16 symbol times, give or take rounding.
+        for sf in 7..=12u8 {
+            let symbol_us = (1u64 << sf) * 1_000_000 / 62_500;
+            ledger.set_phy(sf, 62_500, 5, 32);
+            let long = ledger.airtime_ms(255);
+            ledger.set_phy(sf, 62_500, 5, 16);
+            let short = ledger.airtime_ms(255);
+            let delta_us = u64::from(long - short) * 1_000;
+            assert!(
+                delta_us.abs_diff(16 * symbol_us) <= 1_000,
+                "SF{sf}: {long} vs {short}"
+            );
+        }
     }
 }

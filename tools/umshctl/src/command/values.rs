@@ -277,6 +277,39 @@ impl FromStr for RegionArg {
     }
 }
 
+/// One MeshCore region name, with or without its `#`, stored without.
+/// Case is kept: MeshCore names derive case-sensitively.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshCoreRegionArg(pub String);
+
+impl FromStr for MeshCoreRegionArg {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        umsh::ulcp::meshcore_region_name(text)
+            .map(|name| Self(name.to_owned()))
+            .map_err(|error| format!("region {text:?}: {error}"))
+    }
+}
+
+/// A comma-separated MeshCore region list, or `none` for the empty list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshCoreRegionListArg(pub Vec<String>);
+
+impl FromStr for MeshCoreRegionListArg {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text == "none" {
+            return Ok(Self(Vec::new()));
+        }
+        text.split(',')
+            .map(|name| name.parse().map(|MeshCoreRegionArg(name)| name))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+}
+
 /// One region code, or `none` to clear the setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptRegionArg(pub Option<RegionCode>);

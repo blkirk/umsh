@@ -41,13 +41,16 @@ psram = []
 # Mix a draw from the SAR ADC entropy source into the pool at every boot.
 # For images whose ADC1 is free at that point.
 entropy-sar-adc = []
+# Forwards MeshCore v1 traffic beside UMSH, as a third radio client.
+# For images plausibly left in place as infrastructure.
+meshcore-forwarder = ["umsh-ulcp-runtime/meshcore-forwarder"]
 # Board identity. Exactly one is on; it selects the BSP module, the pin
 # and peripheral wiring, the radio's power and band limits, and the
 # static capacities the board's RAM budget allows. The feature table is
 # kept in step across the ESP32 device images by
 # `scripts/check_esp32_manifests.py`; `default` and BSP feature
 # forwarding select the image.
-default = ["board-tbeam-supreme", "ble", "psram", "coex", "bridge-client"]
+default = ["board-tbeam-supreme", "ble", "psram", "coex", "bridge-client", "meshcore-forwarder"]
 board-heltec-v2 = ["ulcp-i2c", "chip-esp32", "radio-sx127x", "vext-gates-battery"]
 board-heltec-v3 = ["ulcp-i2c", "chip-esp32s3", "radio-sx126x"]
 board-tlora-pager = ["chip-esp32s3", "radio-sx126x", "display-st7796", "wired-usb-serial-jtag", "gnss", "external-rtc"]

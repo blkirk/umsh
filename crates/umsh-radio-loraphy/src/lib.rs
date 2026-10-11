@@ -1085,32 +1085,24 @@ where
 
 /// Conservative upper bound on LoRa on-air time in milliseconds.
 ///
-/// Uses the standard LoRa airtime formula: explicit header, CRC on, CR 4/5,
-/// auto-LDRO. Call this with `MAX_PAYLOAD` to get the worst-case figure for
-/// `t_frame_ms`.
-pub fn airtime_ms(sf: SpreadingFactor, bw: Bandwidth, payload_bytes: usize) -> u32 {
-    let sf_val: u32 = sf_value(sf);
-    let bw_hz: u64 = bw_value_hz(bw) as u64;
-
-    // Symbol duration in microseconds: t_sym = 2^SF / BW.
-    let t_sym_us: u64 = (1u64 << sf_val) * 1_000_000 / bw_hz;
-
-    // LDRO required when t_sym > 16 ms (SF11/BW125 or SF12/BW125 or BW250).
-    let ldro: u64 = if t_sym_us > 16_000 { 1 } else { 0 };
-
-    // Number of payload symbols (LoRa spec, CR=4/5, explicit header, CRC on).
-    let sf = sf_val as i64;
-    let pl = payload_bytes as i64;
-    let num = (8 * pl - 4 * sf + 44 + 20 - 16 * ldro as i64).max(0);
-    let denom = 4 * (sf - 2 * ldro as i64);
-    // Manual ceiling division for i64 (div_ceil is still nightly-only).
-    let ceil = (num + denom - 1) / denom;
-    let n_pay_sym = 8 + ceil * 5; // CR 4/5 → 5 coding overhead per ceiling block
-
-    // Total: preamble (8 symbols + 4.25, approximated as 12) + payload.
-    let total_sym = 12 + n_pay_sym as u64;
-
-    ((total_sym * t_sym_us) / 1_000) as u32
+/// Explicit header, CRC on, CR 4/5, and the transmit preamble of
+/// `preamble_symbols`; see
+/// [`umsh_ulcp::airtime::lora_airtime_ms_with_preamble`]. Call this with
+/// `MAX_PAYLOAD` and the runner's TX preamble to get the worst-case figure
+/// for `t_frame_ms`.
+pub fn airtime_ms(
+    sf: SpreadingFactor,
+    bw: Bandwidth,
+    payload_bytes: usize,
+    preamble_symbols: u16,
+) -> u32 {
+    umsh_ulcp::airtime::lora_airtime_ms_with_preamble(
+        sf_value(sf) as u8,
+        bw_value_hz(bw),
+        5,
+        payload_bytes,
+        preamble_symbols,
+    )
 }
 
 /// The spreading factor as its numeric value (5–12).

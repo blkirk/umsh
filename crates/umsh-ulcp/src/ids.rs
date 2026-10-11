@@ -142,11 +142,13 @@ pub mod prop {
     /// (`PROP_MAC_REPEATER_DEFAULT_REGION`)—one 2-octet code, or empty
     /// to never tag.
     pub const MAC_REPEATER_DEFAULT_REGION: u32 = 75;
-    /// Minimum received RSSI in dBm for flood forwarding
-    /// (`PROP_MAC_REPEATER_MIN_RSSI`)—INT16, or empty for no threshold.
+    /// Minimum received RSSI in dBm for flood forwarding, MeshCore
+    /// floods included (`PROP_MAC_REPEATER_MIN_RSSI`)—INT16, or empty
+    /// for no threshold.
     pub const MAC_REPEATER_MIN_RSSI: u32 = 76;
-    /// Minimum received SNR in whole dB for flood forwarding
-    /// (`PROP_MAC_REPEATER_MIN_SNR`)—INT8, or empty for no threshold.
+    /// Minimum received SNR in whole dB for flood forwarding, MeshCore
+    /// floods included (`PROP_MAC_REPEATER_MIN_SNR`)—INT8, or empty for
+    /// no threshold.
     pub const MAC_REPEATER_MIN_SNR: u32 = 77;
     /// Whether the device identity answers Identity Requests
     /// (`PROP_DEV_DISCOVERABLE`)—BOOL, default 1. Requires
@@ -312,6 +314,28 @@ pub mod prop {
     /// this node did not have to spend. Requires `CAP_STATS` and
     /// `CAP_REPEATER`.
     pub const STAT_FORWARD_CANCELLED: u32 = 4840;
+    /// MeshCore v1 packets received (`PROP_STAT_MESHCORE_SEEN`)—
+    /// `UINT32_LE`. Every one is also counted in exactly one of
+    /// [`STAT_MESHCORE_FORWARDED_ROUTED`], [`STAT_MESHCORE_FORWARDED_FLOOD`],
+    /// [`STAT_MESHCORE_DECLINED`], or is a duplicate. Requires `CAP_STATS`
+    /// and `CAP_MESHCORE_FORWARDER`.
+    pub const STAT_MESHCORE_SEEN: u32 = 4841;
+    /// MeshCore v1 packets this device chose to forward along their
+    /// source route (`PROP_STAT_MESHCORE_FORWARDED_ROUTED`)—`UINT32_LE`,
+    /// counted at the decision rather than at the transmit. Requires
+    /// `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
+    pub const STAT_MESHCORE_FORWARDED_ROUTED: u32 = 4842;
+    /// MeshCore v1 packets this device chose to flood
+    /// (`PROP_STAT_MESHCORE_FORWARDED_FLOOD`)—`UINT32_LE`, counted at the
+    /// decision rather than at the transmit. Requires `CAP_STATS` and
+    /// `CAP_MESHCORE_FORWARDER`.
+    pub const STAT_MESHCORE_FORWARDED_FLOOD: u32 = 4843;
+    /// MeshCore v1 packets this device neither forwarded nor recognized
+    /// as duplicates (`PROP_STAT_MESHCORE_DECLINED`)—`UINT32_LE`: declined
+    /// by the baseline's rules or the region policy, below the signal
+    /// thresholds, malformed, or dropped for a full queue. Requires
+    /// `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
+    pub const STAT_MESHCORE_DECLINED: u32 = 4844;
     /// Persisted, write-only BLE pairing passkey (`PROP_BLE_PAIRING_PIN`).
     pub const BLE_PAIRING_PIN: u32 = 4864;
     /// Nodes authorized to manage this device over the mesh
@@ -582,6 +606,45 @@ pub mod prop {
     /// host's are meant to be the same view, unlike
     /// [`WIFI_SCAN_RESULTS`].
     pub const WIFI_AP_CLIENTS: u32 = 4915;
+
+    /// Whether the device forwards MeshCore v1 traffic
+    /// (`PROP_MESHCORE_FORWARDING_ENABLED`)—BOOL, default 0. Requires
+    /// `CAP_MESHCORE_FORWARDER`.
+    ///
+    /// Independent of `PROP_MAC_REPEATER_ENABLED`. Never takes effect
+    /// under a device identity whose public key begins with 0x00 or 0xFF;
+    /// enabling it under such a key is refused.
+    pub const MESHCORE_FORWARDING_ENABLED: u32 = 4976;
+    /// How transport codes gate MeshCore flood forwarding
+    /// (`PROP_MESHCORE_REGION_POLICY`)—UINT8, one of
+    /// [`meshcore_region_policy`](super::meshcore_region_policy), default open. Requires
+    /// `CAP_MESHCORE_FORWARDER`.
+    pub const MESHCORE_REGION_POLICY: u32 = 4977;
+    /// MeshCore regions whose scoped floods the device forwards
+    /// (`PROP_MESHCORE_REGIONS`)—multiple-value, each item 1 to 30
+    /// octets of UTF-8 naming a MeshCore public region without its
+    /// implicit leading `#`. Items compare case-sensitively, as the
+    /// transport keys derive. Requires `CAP_MESHCORE_FORWARDER`.
+    pub const MESHCORE_REGIONS: u32 = 4978;
+}
+
+/// `PROP_MESHCORE_REGION_POLICY` values: what happens to an unscoped
+/// flood, and to a scoped one whose first transport code does or does
+/// not match a region in `PROP_MESHCORE_REGIONS`.
+pub mod meshcore_region_policy {
+    /// Unscoped and matching floods are forwarded; unmatched are not.
+    pub const OPEN: u8 = 0;
+    /// Only matching floods are forwarded.
+    pub const SCOPED_ONLY: u8 = 1;
+    /// Every flood is forwarded, whatever its scope.
+    pub const IGNORE: u8 = 2;
+}
+
+/// Whether a device identity whose public key begins with `first_octet`
+/// may forward MeshCore traffic. MeshCore reserves the 0x00 and 0xFF
+/// one-octet identity hashes and runs no repeater under either.
+pub const fn meshcore_identity_allowed(first_octet: u8) -> bool {
+    !matches!(first_octet, 0x00 | 0xFF)
 }
 
 /// `PROP_SAVED` values.
@@ -750,6 +813,11 @@ pub mod cap {
     pub const I2C: u32 = 60;
     /// Both temperature properties, with an append-only inventory.
     pub const TEMPERATURE: u32 = 61;
+    /// `CAP_MESHCORE_FORWARDER`: the device can forward MeshCore v1
+    /// traffic alongside its own (`PROP_MESHCORE_FORWARDING_ENABLED`,
+    /// `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`). Requires
+    /// [`REPEATER`].
+    pub const MESHCORE_FORWARDER: u32 = 62;
 }
 
 /// Whether a property is writable by a mesh administrator.

@@ -64,13 +64,14 @@ Primary source references:
 - Forward MeshCore v1 traffic interoperably: parsing, duplicate suppression,
   path mutation, payload-specific behavior, region scoping, and flood limits
   as the baseline repeater applies them.
-- Keep `PROP_MAC_REPEATER_ENABLED` as the device-wide autonomous-forwarding
-  master. Clearing it disables both UMSH forwarding and MeshCore forwarding.
-  MeshCore additionally has its own opt-in enable, which defaults to false.
+- Give MeshCore forwarding its own enable, defaulting to false and
+  independent of `PROP_MAC_REPEATER_ENABLED`, so a device can forward either
+  protocol without the other.
 - Use the UMSH device identity's Ed25519 public key as the MeshCore repeater
   identity. Never create or persist a second identity.
-- Use the strings in `PROP_MAC_REPEATER_REGIONS` as the common regional
-  policy, deriving UMSH and MeshCore codes independently.
+- Give MeshCore its own region list, `PROP_MESHCORE_REGIONS`, holding
+  MeshCore region names as MeshCore spells them, separate from the UMSH
+  list in `PROP_MAC_REPEATER_REGIONS`.
 - Apply `PROP_MAC_REPEATER_MIN_RSSI` and `PROP_MAC_REPEATER_MIN_SNR` to flood
   forwarding in both protocols.
 - Reuse UMSH's airtime calculation, CAD gate, busy backoff rule, duty
@@ -101,8 +102,8 @@ Primary source references:
 - Exposing MeshCore's tunables (delay factors, flood limits, loop
   detection) through ULCP in the first release. The baseline defaults are
   constants until a deployment needs otherwise.
-- Sharing UMSH peer or channel tables with MeshCore. Only the device identity
-  and regional forwarding policy are shared.
+- Sharing UMSH peer, channel, or region tables with MeshCore. Only the
+  device identity and the link-quality thresholds are shared.
 - Applying `PROP_MAC_REPEATER_DEFAULT_REGION` to MeshCore packets. It
   inserts a UMSH region code, and the forwarder never inserts or rewrites
   MeshCore transport codes.
@@ -246,13 +247,25 @@ These are local choices:
   ordinary direct traffic first, direct TRACE at priority 5, and floods by
   path count after appending this device, with insertion order breaking ties.
 
-### Regions are shared as strings, not codes
+### MeshCore regions are their own list
 
-For every stored `PROP_MAC_REPEATER_REGIONS` item that does not begin with
-`$`, derive a MeshCore public transport key as follows:
+MeshCore and UMSH name regions differently. A UMSH region code derives
+from its string without ASCII case, so `SJC` and `sjc` are one region. A
+MeshCore transport key derives from the exact bytes of `#` and the name, so
+`#us-ca` and `#US-CA` are unrelated regions, and MeshCore communities
+conventionally spell theirs in lower case. A shared list works only when
+the operator happens to type the MeshCore spelling into the UMSH list, and
+the two communities' region names need not coincide at all. MeshCore regions
+therefore live in their own property, `PROP_MESHCORE_REGIONS`, specified
+below under Proposed ULCP surface.
 
-1. Use the stored UTF-8 bytes exactly. Prepend `#` unless the first byte is
-   already `#`.
+The `#` is implicit. Every MeshCore region this forwarder can hold is a
+public hashtag region, so items are stored and shown without it and the
+device supplies it when deriving the key. For every stored
+`PROP_MESHCORE_REGIONS` item, derive a MeshCore public transport key as
+follows:
+
+1. Use the stored UTF-8 bytes exactly, with `#` prepended.
 2. Take the first 16 bytes of SHA-256 over that byte string as the transport
    key.
 3. For each candidate packet, compute HMAC-SHA256 over
@@ -261,17 +274,15 @@ For every stored `PROP_MAC_REPEATER_REGIONS` item that does not begin with
    `ffff` to `fffe`.
 4. Compare only the packet's first transport code, as the baseline does.
 
-UMSH region derivation is case-insensitive, while MeshCore's derivation uses
-the exact spelling. Changing only capitalization can therefore change the
-MeshCore forwarding scope without changing UMSH's scope. A literal such as
-`0x1234` is still a MeshCore public region name and derives from `#0x1234`;
-the UMSH literal-code interpretation must not leak into MeshCore.
+Items compare octet for octet, matching the derivation. A string such as
+`0x1234` is an ordinary MeshCore name deriving from `#0x1234`; the UMSH
+literal-code interpretation does not apply.
 
 A name beginning with `$` is a MeshCore private region. Its transport key is
 loaded from MeshCore's keystore rather than derived from the name. The bare
-forwarder deliberately has no such keystore, so a `$` item contributes no
-MeshCore transport key; it must never be transformed into `#$name`. This does
-not change how the same stored string participates in UMSH region policy.
+forwarder deliberately has no such keystore, so the property refuses items
+beginning with `$` rather than quietly deriving `#$name`, and refuses a
+leading `#`, which would derive `##name`. Clients strip a `#` the user types.
 
 The forwarder never inserts, removes, or rewrites transport codes under any
 policy.
@@ -422,7 +433,7 @@ forwarding depends on it.
 ## Proposed ULCP surface
 
 These are ULCP protocol additions. Reserve a new `CAP_MESHCORE_FORWARDER`
-capability requiring `CAP_REPEATER`, and allocate two device-domain
+capability requiring `CAP_REPEATER`, and allocate three device-domain
 properties in the extended device and transport range. All take the next
 free numbers in the ULCP index when the normative specification is updated
 during implementation; the capability numbers through the fifties and the
@@ -432,6 +443,7 @@ properties through the 4890s are already assigned.
 |---|---|---:|---|
 | `PROP_MESHCORE_FORWARDING_ENABLED` | BOOL | false | MeshCore-specific opt-in |
 | `PROP_MESHCORE_REGION_POLICY` | UINT8 enum | 0 | Flood region posture: 0 open, 1 scoped only, 2 ignore |
+| `PROP_MESHCORE_REGIONS` | multi-value strings | empty | MeshCore regions forwarded for scoped floods |
 
 `PROP_MESHCORE_REGION_POLICY` selects how transport codes gate flood
 forwarding, as defined under Region policy above. Values outside 0–2 fail
@@ -455,8 +467,7 @@ The effective gates are:
 
 ~~~text
 UMSH forwarding     = PHY enabled AND MAC_REPEATER_ENABLED
-MeshCore forwarding = PHY enabled AND MAC_REPEATER_ENABLED
-                      AND MESHCORE_FORWARDING_ENABLED
+MeshCore forwarding = PHY enabled AND MESHCORE_FORWARDING_ENABLED
                       AND running identity prefix not reserved
 ~~~
 
@@ -483,14 +494,68 @@ volatile state. Restarting with an empty duplicate table can at most repeat a
 forward of a frame heard just before the gate closed, which other nodes'
 duplicate suppression absorbs.
 
-No new MeshCore region property is needed. `PROP_MAC_REPEATER_REGIONS` is the
-single shared source of region strings. The default-region setting remains
-UMSH-only.
-
-Both properties are saved. `SAVED_SCHEMA` holds about forty rows against a
+All three properties are saved. `SAVED_SCHEMA` holds about forty rows against a
 64-bit duplicate-detection mask, so the rows fit without touching the
 snapshot machinery. Snapshot encode, decode, reset, clear, restore ordering,
 and older-snapshot compatibility all need tests.
+
+### MeshCore region list
+
+`PROP_MESHCORE_REGIONS` (4978) is a multiple-value, read-write property
+required by `CAP_MESHCORE_FORWARDER`, with length-prefixed items, Insert and
+Remove, and no asynchronous updates, shaped like `PROP_MAC_REPEATER_REGIONS`
+except where MeshCore's naming differs:
+
+- Each item is 1 to 30 octets of UTF-8, the MeshCore region name without its
+  `#`. Thirty is the longest name the baseline's region table stores. An
+  empty or longer item, invalid UTF-8, or a leading `#` or `$` fails with
+  `STATUS_INVALID_ARGUMENT`.
+- Items compare octet for octet, case included. An insert identical to a held
+  item reports `STATUS_ALREADY`; one differing only in case is a second
+  region. The remove selector matches the same way.
+- The device holds eight, the forwarder's key capacity, and may refuse a
+  write that exceeds it.
+- The empty factory default holds no region, so Open forwards only unscoped
+  floods and Scoped only forwards none, exactly as before.
+
+`PROP_MESHCORE_REGION_POLICY` matches scoped floods against this list alone.
+`PROP_MAC_REPEATER_REGIONS` no longer feeds MeshCore, and nothing the device
+advertises carries MeshCore regions: a UMSH node identity describes UMSH
+forwarding.
+
+The device derives keys when the setting changes, not per packet, so the
+runtime snapshot carries the names and the forwarder holds the derived keys,
+as it already did. The snapshot grows by the names, about 250 octets, which
+the ESP32 stack check must still pass on the T-Beam.
+
+A transport code cannot be turned back into a name: it is a two-octet
+truncation of an HMAC under a key hashed from the name. The only way to learn
+an unknown region is to test candidate names against captured scoped floods,
+which belongs in a host tool if anywhere, not in the device.
+
+### Counters
+
+Four statistics join the `PROP_STAT_*` family, implied by
+`CAP_MESHCORE_FORWARDER` together with `CAP_STATS` and behaving exactly as
+the existing counters do: cumulative `UINT32_LE`, reset by writing four zero
+octets, untouched by `CMD_RST`, absent on a device without the forwarder.
+
+| Property | Counts |
+|---|---|
+| `PROP_STAT_MESHCORE_SEEN` | MeshCore packets received while the forwarder runs |
+| `PROP_STAT_MESHCORE_FORWARDED_ROUTED` | forwards along a source route, at the decision |
+| `PROP_STAT_MESHCORE_FORWARDED_FLOOD` | floods, at the decision |
+| `PROP_STAT_MESHCORE_DECLINED` | packets neither forwarded nor duplicates |
+
+Seen equals the two forwarded counters, declined, and duplicates together;
+duplicates have no counter of their own and are the difference. Copies of
+this device's own transmissions, which the mux hands every client, are not
+receptions. Counting forwards at the decision matches `PROP_STAT_FORWARDED`;
+a forward the channel never let out still shows here and not in
+`PROP_STAT_TX_PACKETS`.
+
+The forwarder feeds the device's shared `StatsLedger` directly from its own
+task, so a host's reset holds the way it does for every other counter.
 
 ## Architecture
 
@@ -545,7 +610,7 @@ it, just as a MeshCore repeater ignores repeats of a frame it has heard.
 
 The device-domain snapshot already carries `dev_key`, the forwarding master,
 and both the derived UMSH region codes and original region strings. Extend it
-with the MeshCore enable and region policy, and with the link-quality
+with the MeshCore enable, region policy, and region names, and with the link-quality
 thresholds if it does not already carry them, and publish it to both
 engines. It never carries
 private key material. The present
@@ -634,7 +699,8 @@ panic-free behavior.
 - Allocate the capability and property identifiers in the ULCP index.
 - Add get/set validation, persistence, reset/clear behavior, admin reachability
   policy, describe-table rows, web-debugger names, mobile bindings, and CLI
-  access for both properties, following existing device-domain properties.
+  access for all three properties, following existing device-domain
+  properties.
 - Refuse the MeshCore enable for a reserved-prefix identity, and add a terse
   explanation of the unavailable option in the app, CLI, and web debugger.
 - Extend the link-quality threshold descriptions to MeshCore floods.
@@ -677,8 +743,8 @@ tests pass unmodified.
   duplicates terminate and that neither repeater systematically starves the
   other.
 - Confirm scoped floods with matching and nonmatching regions, an empty
-  region set, case-sensitive MeshCore versus case-insensitive UMSH region
-  strings, and one-, two-, and three-byte path hashes. Repeat the matching,
+  region set, a MeshCore name differing from the companion's only in case,
+  and one-, two-, and three-byte path hashes. Repeat the matching,
   nonmatching, and unscoped cases under each of the three region policies
   and confirm the table under Region policy.
 - Run contention tests while the UMSH node is transmitting and confirm that
@@ -688,8 +754,8 @@ tests pass unmodified.
   heard on one RF segment crosses the existing infrastructure, is accepted by
   the far MeshCore forwarder, and reaches the other RF segment only after
   MeshCore policy. Confirm duplicates terminate.
-- Clear `PROP_MAC_REPEATER_ENABLED` and prove that neither protocol forwards;
-  restore it and prove that only individually enabled protocols resume.
+- Clear each enable in turn and prove that only the other protocol still
+  forwards.
 - Set a minimum RSSI and SNR between two MeshCore companions' signal levels
   and confirm that only the stronger companion's floods are forwarded.
 - Replace the device identity, reboot, and confirm that both forwarders run
@@ -709,8 +775,8 @@ The feature is ready only when all of the following are true:
 
 - The upstream commit the wire behavior follows is named in code, vectors,
   and release notes.
-- The default is off; the radio, the master forwarding switch, and the
-  MeshCore switch must all be on before MeshCore forwarding occurs.
+- The default is off; the radio and the MeshCore switch must both be on
+  before MeshCore forwarding occurs, whatever the UMSH repeater switch says.
 - The MeshCore switch cannot be turned on while the identity has a reserved
   MeshCore prefix, MeshCore forwarding never runs under such an identity, and
   clients explain why.
@@ -724,13 +790,14 @@ The feature is ready only when all of the following are true:
   scheduled advertisement, or management reply exists.
 - Every route and payload class matches the interoperability vectors,
   including negative and malformed cases.
-- MeshCore region codes derive from the existing region strings and do not
-  reuse UMSH's derived two-byte codes; `$` private-region names produce no
-  MeshCore key without a keystore.
+- MeshCore region keys derive from `PROP_MESHCORE_REGIONS` alone, with the
+  `#` supplied, and the UMSH region list does not affect MeshCore
+  forwarding.
 - MeshCore transmits use UMSH's CAD gate, busy backoff rule, airtime
   estimate, RNG, and shared duty ledger, and the UMSH MAC is unchanged.
-- The only ULCP additions are the enable and the region policy; every
-  MeshCore tunable is a constant at its baseline default.
+- The only ULCP additions are the enable, the region policy, the region
+  list, and the counters; every MeshCore tunable is a constant at its
+  baseline default.
 - Each region policy forwards and drops exactly as its row in the Region
   policy table says, for unscoped, matching, and unmatched floods.
 - `PROP_MAC_BACKHAUL` neither disables nor special-cases the forwarder, and a

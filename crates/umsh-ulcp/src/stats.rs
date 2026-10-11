@@ -58,10 +58,19 @@ pub enum Counter {
     ForwardDropped,
     /// Queued repeats dropped after overhearing the destination's ack.
     ForwardCancelled,
+    /// MeshCore v1 packets received.
+    MeshCoreSeen,
+    /// MeshCore v1 packets the forwarder chose to send along their
+    /// source route.
+    MeshCoreForwardedRouted,
+    /// MeshCore v1 packets the forwarder chose to flood.
+    MeshCoreForwardedFlood,
+    /// MeshCore v1 packets neither forwarded nor duplicates.
+    MeshCoreDeclined,
 }
 
 /// How many counters a ledger holds.
-pub const COUNTERS: usize = 9;
+pub const COUNTERS: usize = 13;
 
 impl Counter {
     /// Every counter, in identifier order.
@@ -75,6 +84,10 @@ impl Counter {
         Counter::Forwarded,
         Counter::ForwardDropped,
         Counter::ForwardCancelled,
+        Counter::MeshCoreSeen,
+        Counter::MeshCoreForwardedRouted,
+        Counter::MeshCoreForwardedFlood,
+        Counter::MeshCoreDeclined,
     ];
 
     /// The property identifier this counter is read and cleared through.
@@ -89,6 +102,10 @@ impl Counter {
             Counter::Forwarded => prop::STAT_FORWARDED,
             Counter::ForwardDropped => prop::STAT_FORWARD_DROPPED,
             Counter::ForwardCancelled => prop::STAT_FORWARD_CANCELLED,
+            Counter::MeshCoreSeen => prop::STAT_MESHCORE_SEEN,
+            Counter::MeshCoreForwardedRouted => prop::STAT_MESHCORE_FORWARDED_ROUTED,
+            Counter::MeshCoreForwardedFlood => prop::STAT_MESHCORE_FORWARDED_FLOOD,
+            Counter::MeshCoreDeclined => prop::STAT_MESHCORE_DECLINED,
         }
     }
 
@@ -104,6 +121,10 @@ impl Counter {
             prop::STAT_FORWARDED => Counter::Forwarded,
             prop::STAT_FORWARD_DROPPED => Counter::ForwardDropped,
             prop::STAT_FORWARD_CANCELLED => Counter::ForwardCancelled,
+            prop::STAT_MESHCORE_SEEN => Counter::MeshCoreSeen,
+            prop::STAT_MESHCORE_FORWARDED_ROUTED => Counter::MeshCoreForwardedRouted,
+            prop::STAT_MESHCORE_FORWARDED_FLOOD => Counter::MeshCoreForwardedFlood,
+            prop::STAT_MESHCORE_DECLINED => Counter::MeshCoreDeclined,
             _ => return None,
         })
     }
@@ -111,9 +132,10 @@ impl Counter {
     /// Whether this counter can only be answered by a device running a
     /// node of its own.
     ///
-    /// The four that come from the MAC. A session with nothing behind it
-    /// does not have these properties at all, rather than reporting a
-    /// zero that reads as "this repeater has never repeated anything".
+    /// The four that come from the MAC, and the MeshCore forwarder's,
+    /// which needs one too. A session with nothing behind it does not
+    /// have these properties at all, rather than reporting a zero that
+    /// reads as "this repeater has never repeated anything".
     pub const fn needs_node(self) -> bool {
         matches!(
             self,
@@ -121,6 +143,18 @@ impl Counter {
                 | Counter::Forwarded
                 | Counter::ForwardDropped
                 | Counter::ForwardCancelled
+        ) || self.needs_meshcore()
+    }
+
+    /// Whether this counter is the MeshCore forwarder's, present only
+    /// where one is built in (`CAP_MESHCORE_FORWARDER`).
+    pub const fn needs_meshcore(self) -> bool {
+        matches!(
+            self,
+            Counter::MeshCoreSeen
+                | Counter::MeshCoreForwardedRouted
+                | Counter::MeshCoreForwardedFlood
+                | Counter::MeshCoreDeclined
         )
     }
 }
@@ -321,7 +355,7 @@ mod tests {
     fn only_the_mac_sourced_counters_need_a_node() {
         let needs: Vec<Counter> = Counter::ALL
             .into_iter()
-            .filter(|c| c.needs_node())
+            .filter(|c| c.needs_node() && !c.needs_meshcore())
             .collect();
         assert_eq!(
             needs,
@@ -332,5 +366,23 @@ mod tests {
                 Counter::ForwardCancelled
             ]
         );
+    }
+
+    #[test]
+    fn the_meshcore_counters_need_a_forwarder_and_a_node() {
+        let needs: Vec<Counter> = Counter::ALL
+            .into_iter()
+            .filter(|c| c.needs_meshcore())
+            .collect();
+        assert_eq!(
+            needs,
+            [
+                Counter::MeshCoreSeen,
+                Counter::MeshCoreForwardedRouted,
+                Counter::MeshCoreForwardedFlood,
+                Counter::MeshCoreDeclined
+            ]
+        );
+        assert!(needs.iter().all(|c| c.needs_node()));
     }
 }

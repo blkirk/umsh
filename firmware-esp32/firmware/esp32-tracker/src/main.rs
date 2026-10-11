@@ -419,6 +419,7 @@ fn session_config() -> SessionConfig {
         reboot: true,
         // A real MAC runs behind this session.
         mac_node: true,
+        meshcore_forwarder: cfg!(feature = "meshcore-forwarder"),
         // These chips have the radio, but nothing here drives it yet:
         // the capability is a promise about the property surface, and
         // claiming it before there is a station to serve it would be a
@@ -480,9 +481,17 @@ type RadioCh = umsh_radio_loraphy::Channels<CriticalSectionRawMutex, 4, 2>;
 static RADIO_CH: RadioCh = RadioCh::new();
 
 /// The session's virtual radio endpoint (mux client A). The device
-/// node's endpoint (client B) lives in `device_node::NODE_CH`.
+/// node's endpoint (client B) lives in `device_node::NODE_CH`, and the
+/// MeshCore forwarder's (client C) in `meshcore::MESHCORE_CH`.
 static SESSION_CH: RadioCh = RadioCh::new();
+#[cfg(not(feature = "meshcore-forwarder"))]
 static MUX_CLIENTS: [&RadioCh; 2] = [&SESSION_CH, &device_node::NODE_CH];
+#[cfg(feature = "meshcore-forwarder")]
+static MUX_CLIENTS: [&RadioCh; 3] = [
+    &SESSION_CH,
+    &device_node::NODE_CH,
+    &umsh_ulcp_runtime::meshcore::MESHCORE_CH,
+];
 
 /// Runtime radio settings pushed by the session to the runner.
 static DEVICE_CTL: DeviceControl<CriticalSectionRawMutex> = DeviceControl::new();
@@ -642,7 +651,14 @@ const DEBUG_QUEUE_CAPACITY: usize = if cfg!(feature = "motion-qualification") {
 } else {
     1
 };
-#[cfg(all(feature = "debug-log", not(feature = "board-tlora-pager")))]
+// The T-Beam's main stack holds its 20 KiB reserve with a few KiB to
+// spare; a 32-line queue would spend it. Eight lines still carry a burst.
+#[cfg(all(feature = "debug-log", feature = "board-tbeam-supreme"))]
+const DEBUG_QUEUE_CAPACITY: usize = 8;
+#[cfg(all(
+    feature = "debug-log",
+    not(any(feature = "board-tlora-pager", feature = "board-tbeam-supreme"))
+))]
 const DEBUG_QUEUE_CAPACITY: usize = 32;
 #[cfg(feature = "debug-log")]
 static DEBUG_CH: Channel<CriticalSectionRawMutex, DebugLine, DEBUG_QUEUE_CAPACITY> = Channel::new();
@@ -3095,8 +3111,11 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "board-tlora-pager")]
     let pager_boot_lights =
         board::display::BootBacklights::new(peripherals.GPIO42, peripherals.GPIO46);
-    #[cfg(feature = "board-tlora-pager")]
-    let pager_boot_guard = esp_hal::rtc_cntl::WakeLock::new();
+    // No light sleep until bring-up is over. Before the wired-transport
+    // driver exists nothing else holds a lock, and a settle delay would
+    // otherwise sleep the chip under a USB-Serial-JTAG console mid-boot,
+    // which drops the link and everything printed after it.
+    let boot_guard = esp_hal::rtc_cntl::WakeLock::new();
     #[cfg(all(feature = "wifi", feature = "debug-log"))]
     wifi_memory::init();
     // umsh-node and umsh-sync use `alloc`. The classic ESP32 has roughly
@@ -3117,10 +3136,30 @@ async fn main(spawner: Spawner) {
         // checked 32 KiB nested-call reserve (82 KiB total internal heap).
         #[cfg(feature = "board-tlora-pager")]
         esp_alloc::heap_allocator!(size: 18 * 1024);
-        #[cfg(not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")))]
         // Keep the 20 KiB stack reserve and nested task construction headroom
-        // with the upgraded radio/scheduler's internal static storage.
+        // with the upgraded radio/scheduler's internal static storage. The
+        // MeshCore forwarder adds a few KiB of internal statics (its radio
+        // bundle and task); 4 KiB comes off this arena to pay for them,
+        // leaving 104 KiB in all.
+        #[cfg(all(
+            not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
+            not(feature = "meshcore-forwarder")
+        ))]
         esp_alloc::heap_allocator!(size: 44 * 1024);
+        #[cfg(all(
+            not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
+            feature = "meshcore-forwarder",
+            not(feature = "debug-log")
+        ))]
+        esp_alloc::heap_allocator!(size: 40 * 1024);
+        // A diagnostic build pays for its log queue the same way; the log
+        // itself reports the heap minimum, which is how the cut is judged.
+        #[cfg(all(
+            not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
+            feature = "meshcore-forwarder",
+            feature = "debug-log"
+        ))]
+        esp_alloc::heap_allocator!(size: 36 * 1024);
         esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     }
     #[cfg(feature = "psram")]
@@ -3786,6 +3825,7 @@ async fn main(spawner: Spawner) {
         lora_phy::mod_params::SpreadingFactor::_7,
         lora_phy::mod_params::Bandwidth::_62KHz,
         umsh_radio_loraphy::MAX_PAYLOAD,
+        TX_PREAMBLE_SYMBOLS,
     );
     spawner.spawn(
         device_node::bring_up(
@@ -3907,8 +3947,7 @@ async fn main(spawner: Spawner) {
     }
 
     // ── BLE app: runs the pairing lattice + GATT transport forever ───────
-    #[cfg(feature = "board-tlora-pager")]
-    drop(pager_boot_guard);
+    drop(boot_guard);
     #[cfg(feature = "ble")]
     ble::run(bt, ble_privacy_seed, ble_store_handle).await;
     // With no supervisor to become, main still must not return: what it

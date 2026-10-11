@@ -1,0 +1,22 @@
+[package]
+name = "umsh-meshcore-forwarder"
+description = "MeshCore v1 forwarding engine: wire parsing, duplicate suppression, and the baseline repeater's forwarding decisions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://darconeous.github.io/umsh/docs/rust/umsh_meshcore_forwarder/"
+
+# The compatibility engine only: no radio, no clock, no tasks. The device
+# runtime drives it as a mux client (`umsh-ulcp-runtime`'s
+# `meshcore-forwarder` feature); everything it needs from a board—time,
+# randomness, airtime—arrives as arguments.
+
+[dependencies]
+heapless.workspace = true
+umsh-core = { path = "../umsh-core", default-features = false }
+umsh-crypto = { path = "../umsh-crypto", default-features = false, features = ["software-crypto"] }
+umsh-hal = { path = "../umsh-hal", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"

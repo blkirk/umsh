@@ -11,7 +11,7 @@ use umsh_core::{
 use umsh_crypto::replay::{ReplayVerdict, ReplayWindow};
 use umsh_crypto::{AesProvider, CryptoEngine, PairwiseKeys, Sha256Provider};
 use umsh_ulcp::Status;
-use umsh_ulcp::airtime::lora_airtime_ms;
+use umsh_ulcp::airtime::lora_airtime_ms_with_preamble;
 use umsh_ulcp::alert::AlertState;
 use umsh_ulcp::announce::{Announcement, AnnouncementKind};
 use umsh_ulcp::battery::{self, BatteryStatus};
@@ -27,11 +27,11 @@ use umsh_ulcp::gnss::{self, GnssSnapshot};
 use umsh_ulcp::i2c::{self, BusInfo, DeviceInfo, ScanRequest, TransferRequest};
 use umsh_ulcp::ids::{
     self, DEFAULT_ADVERT_INTERVAL_S, DEFAULT_BEACON_INTERVAL_S, MAX_AUTO_ANNOUNCE_INTERVAL_S,
-    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, prop, stream,
+    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, meshcore_region_policy, prop, stream,
 };
 use umsh_ulcp::ip;
-pub use umsh_ulcp::items::REGION_STRING_MAX_LEN;
 use umsh_ulcp::items::{self, Filter, ItemError, REGION_CODE_LEN};
+pub use umsh_ulcp::items::{MESHCORE_REGION_NAME_MAX_LEN, REGION_STRING_MAX_LEN};
 use umsh_ulcp::meta::{
     self, BufferedRxMeta, RX_FLAG_ACKED, RX_FLAG_BUFFERED, RX_FLAG_SELF_TX, RxMeta, TxMeta,
 };
@@ -325,6 +325,11 @@ pub struct SessionConfig {
     /// `CAP_MAC_BACKHAUL` are absent and the repeater and backhaul
     /// properties are unknown.
     pub mac_node: bool,
+    /// Whether the platform runs a MeshCore forwarder beside its node.
+    /// When set, `CAP_MESHCORE_FORWARDER` is advertised and the MeshCore
+    /// properties exist; otherwise they are unknown. Meaningful only
+    /// alongside [`mac_node`](Self::mac_node), whose repeater it shares.
+    pub meshcore_forwarder: bool,
     /// The I2C buses a host may drive directly, as `PROP_I2C_BUSES`
     /// reports them. Empty: `CAP_I2C` is absent, the two I2C properties
     /// are unknown, and `CMD_I2C_TRANSFER` and `CMD_I2C_SCAN` answer
@@ -883,6 +888,16 @@ struct DeviceDomain {
     /// `PROP_MAC_REPEATER_MIN_SNR`: minimum received SNR in whole dB for
     /// flood forwarding, or `None` for no threshold.
     repeater_min_snr: Option<i8>,
+    /// `PROP_MESHCORE_FORWARDING_ENABLED`: whether MeshCore traffic is
+    /// forwarded, independently of `repeater_enabled`.
+    meshcore_forwarding_enabled: bool,
+    /// `PROP_MESHCORE_REGION_POLICY`: one of
+    /// [`ids::meshcore_region_policy`].
+    meshcore_region_policy: u8,
+    /// `PROP_MESHCORE_REGIONS`: the MeshCore regions whose scoped floods
+    /// are forwarded. Separate from `repeater_regions`, whose names
+    /// derive case-insensitively.
+    meshcore_regions: MeshCoreRegions,
     /// `PROP_IDENT_ROLE`: the advertised `ROLE` byte, or `None` to
     /// derive it from what the device is actually doing.
     ///
@@ -990,9 +1005,12 @@ impl DeviceDomain {
         // ledger's modulation view return to the configured defaults.
         config.duty.reset_accounting();
         config.duty.set_limit(config.default_duty_limit);
-        config
-            .duty
-            .set_phy(settings.sf, settings.bw_hz, settings.cr_denom);
+        config.duty.set_phy(
+            settings.sf,
+            settings.bw_hz,
+            settings.cr_denom,
+            config.tx_preamble_symbols,
+        );
         Self {
             #[cfg(feature = "bridge-client")]
             bridge: Default::default(),
@@ -1007,6 +1025,9 @@ impl DeviceDomain {
             repeater_default_region: None,
             repeater_min_rssi: None,
             repeater_min_snr: None,
+            meshcore_forwarding_enabled: false,
+            meshcore_region_policy: meshcore_region_policy::OPEN,
+            meshcore_regions: MeshCoreRegions::default(),
             ident_role: None,
             ident_mobile: false,
             ident_location: HeaplessVec::new(),
@@ -1745,6 +1766,74 @@ fn region_entry(item: &[u8]) -> Result<RegionEntry, Status> {
     Ok(entry)
 }
 
+/// Maximum number of `PROP_MESHCORE_REGIONS` entries: as many regions as
+/// the MeshCore forwarder holds transport keys for.
+pub const MAX_MESHCORE_REGIONS: usize = 8;
+
+/// One `PROP_MESHCORE_REGIONS` item: a MeshCore region name without its
+/// `#`.
+type MeshCoreRegionName = HeaplessVec<u8, MESHCORE_REGION_NAME_MAX_LEN>;
+
+/// `PROP_MESHCORE_REGIONS`: the MeshCore regions whose scoped floods the
+/// forwarder admits.
+///
+/// Only the names are kept. Their transport keys derive in the forwarder,
+/// which holds them for every packet it gates.
+#[derive(Clone, Default)]
+struct MeshCoreRegions(HeaplessVec<MeshCoreRegionName, MAX_MESHCORE_REGIONS>);
+
+impl MeshCoreRegions {
+    fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.0.iter().map(|name| name.as_slice())
+    }
+
+    /// Add a region. Names compare octet for octet, as their keys derive,
+    /// so one differing from a held name only in case is another region.
+    fn push(&mut self, name: MeshCoreRegionName) -> Result<(), Status> {
+        if self.0.contains(&name) {
+            return Err(Status::ALREADY);
+        }
+        self.0.push(name).map_err(|_| Status::NOMEM)
+    }
+
+    fn remove(&mut self, name: &[u8]) -> Result<(), Status> {
+        let index = self
+            .iter()
+            .position(|held| held == name)
+            .ok_or(Status::ITEM_NOT_FOUND)?;
+        // Order is not meaningful, so the tail fills the hole.
+        self.0.swap_remove(index);
+        Ok(())
+    }
+
+    /// Parse a whole-table write, validating all of it before anything is
+    /// committed. A repeated name collapses.
+    fn parse_table(value: &[u8]) -> Result<Self, Status> {
+        let mut regions = Self::default();
+        for item in items::prefixed_items(value) {
+            let name = meshcore_region_name(item.map_err(|_| Status::INVALID_ARGUMENT)?)?;
+            match regions.push(name) {
+                Ok(()) | Err(Status::ALREADY) => {}
+                Err(status) => return Err(status),
+            }
+        }
+        Ok(regions)
+    }
+}
+
+/// Validate one `PROP_MESHCORE_REGIONS` item: 1 to 30 octets of UTF-8
+/// (ulcp-device.md § PROP_MESHCORE_REGIONS).
+///
+/// A leading `#` is refused rather than stripped: the device supplies it,
+/// and `##name` is another region. A leading `$` names a private region,
+/// whose key no name derives.
+fn meshcore_region_name(item: &[u8]) -> Result<MeshCoreRegionName, Status> {
+    if matches!(item.first(), None | Some(b'#' | b'$')) || core::str::from_utf8(item).is_err() {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    MeshCoreRegionName::from_slice(item).map_err(|_| Status::INVALID_ARGUMENT)
+}
+
 /// Parse a `PROP_MAC_REPEATER_DEFAULT_REGION` value: one region code, or
 /// empty for "never tag".
 fn parse_region_code(value: &[u8]) -> Result<Option<[u8; REGION_CODE_LEN]>, Status> {
@@ -2018,11 +2107,11 @@ impl HostDomain {
 /// [`Session::encode_snapshot`]); sized for every table at capacity
 /// with headroom for future properties.
 ///
-/// Every table at capacity currently encodes to 972 octets, option
-/// framing included (`snapshot_at_capacity_fits_the_buffer` pins it);
-/// the rest is headroom for properties not yet allocated. A persisted
-/// table of public keys costs about 272 octets at capacity, so there is
-/// room for three more before this has to grow. The ceiling is the
+/// Every table at capacity currently encodes to 1452 octets, or 2408
+/// with Wi-Fi and the bridge client, option framing included
+/// (`snapshot_at_capacity_fits_the_buffer` checks the fit); the rest is
+/// headroom for properties not yet allocated. A persisted table of public
+/// keys costs about 272 octets at capacity. The ceiling is the
 /// journal record of the store a firmware binds: 2029 octets in a
 /// half-page record, 4077 in the full-page record the Wi-Fi image
 /// writes. Each firmware asserts the fit where it binds its store.
@@ -2164,6 +2253,9 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     saved(prop::BRIDGE_PORT, ApplyPhase::Config, false),
     #[cfg(feature = "bridge-client")]
     saved(prop::BRIDGE_SERVER_KEY, ApplyPhase::Keys, false),
+    saved(prop::MESHCORE_FORWARDING_ENABLED, ApplyPhase::Config, false),
+    saved(prop::MESHCORE_REGION_POLICY, ApplyPhase::Config, false),
+    saved(prop::MESHCORE_REGIONS, ApplyPhase::Config, true),
 ];
 
 /// [`SavedState::decode`] tracks which single-valued properties it has
@@ -2269,6 +2361,9 @@ struct SavedState {
     repeater_default_region: Option<[u8; REGION_CODE_LEN]>,
     repeater_min_rssi: Option<i16>,
     repeater_min_snr: Option<i8>,
+    meshcore_forwarding_enabled: bool,
+    meshcore_region_policy: u8,
+    meshcore_regions: MeshCoreRegions,
     ident_role: Option<u8>,
     ident_mobile: bool,
     ident_location: HeaplessVec<u8, { gnss::MAX_LOCATION_LEN }>,
@@ -2316,6 +2411,9 @@ impl SavedState {
             repeater_default_region: device.repeater_default_region,
             repeater_min_rssi: device.repeater_min_rssi,
             repeater_min_snr: device.repeater_min_snr,
+            meshcore_forwarding_enabled: device.meshcore_forwarding_enabled,
+            meshcore_region_policy: device.meshcore_region_policy,
+            meshcore_regions: device.meshcore_regions.clone(),
             ident_role: device.ident_role,
             ident_mobile: device.ident_mobile,
             ident_location: device.ident_location.clone(),
@@ -2367,6 +2465,9 @@ impl SavedState {
             repeater_default_region: None,
             repeater_min_rssi: None,
             repeater_min_snr: None,
+            meshcore_forwarding_enabled: false,
+            meshcore_region_policy: meshcore_region_policy::OPEN,
+            meshcore_regions: MeshCoreRegions::default(),
             ident_role: None,
             ident_mobile: false,
             ident_location: HeaplessVec::new(),
@@ -2476,6 +2577,16 @@ impl SavedState {
                 Some(snr) => encoder.put(number, &[snr as u8]),
                 None => Ok(()),
             },
+            prop::MESHCORE_FORWARDING_ENABLED => {
+                encoder.put(number, &[self.meshcore_forwarding_enabled as u8])
+            }
+            prop::MESHCORE_REGION_POLICY => encoder.put(number, &[self.meshcore_region_policy]),
+            prop::MESHCORE_REGIONS => {
+                for name in self.meshcore_regions.iter() {
+                    encoder.put(number, name)?;
+                }
+                Ok(())
+            }
             prop::DEV_DISCOVERABLE => encoder.put(number, &[self.dev_discoverable as u8]),
             prop::ADVERT_INTERVAL => encoder.put(number, &self.advert_interval_s.to_le_bytes()),
             prop::BEACON_INTERVAL => encoder.put(number, &self.beacon_interval_s.to_le_bytes()),
@@ -2687,6 +2798,20 @@ impl SavedState {
             }
             prop::MAC_REPEATER_MIN_SNR => {
                 self.repeater_min_snr = Some(parse_i8(value).map_err(invalid)?)
+            }
+            prop::MESHCORE_FORWARDING_ENABLED => {
+                self.meshcore_forwarding_enabled = parse_bool(value).map_err(invalid)?
+            }
+            prop::MESHCORE_REGION_POLICY => {
+                self.meshcore_region_policy =
+                    validate_meshcore_region_policy(value).map_err(invalid)?
+            }
+            // As for the UMSH regions: a stored name that no longer
+            // validates is dropped rather than failing the whole restore.
+            prop::MESHCORE_REGIONS => {
+                if let Ok(name) = meshcore_region_name(value) {
+                    let _ = self.meshcore_regions.push(name);
+                }
             }
             prop::DEV_DISCOVERABLE => self.dev_discoverable = parse_bool(value).map_err(invalid)?,
             prop::ADVERT_INTERVAL => {
@@ -3359,6 +3484,30 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.device.repeater_min_snr
     }
 
+    /// `PROP_MESHCORE_FORWARDING_ENABLED` as stored. Whether MeshCore
+    /// forwarding actually runs also takes the PHY, the repeater switch,
+    /// and the running identity's prefix.
+    pub fn meshcore_forwarding_enabled(&self) -> bool {
+        self.device.meshcore_forwarding_enabled
+    }
+
+    /// `PROP_MESHCORE_REGION_POLICY`: one of
+    /// [`ids::meshcore_region_policy`].
+    pub fn meshcore_region_policy(&self) -> u8 {
+        self.device.meshcore_region_policy
+    }
+
+    /// `PROP_MESHCORE_REGIONS`: each MeshCore region name as stored,
+    /// without the `#` its transport key derives under.
+    pub fn meshcore_region_names(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.device.meshcore_regions.iter()
+    }
+
+    /// Whether this device serves the MeshCore properties.
+    fn has_meshcore(&self) -> bool {
+        self.config.mac_node && self.config.meshcore_forwarder
+    }
+
     /// The live `PROP_DEV_KEY` value. `None` once a factory reset
     /// (`CMD_CLEAR` + `CMD_RST`) completes—the firmware uses this
     /// edge to make a running device node dormant.
@@ -3395,14 +3544,31 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.apply_radio()
     }
 
+    /// The airtime of a `frame_len`-octet frame at the live modulation
+    /// and this device's transmit preamble: the figure every radio
+    /// client is charged in the duty ledger.
+    fn airtime_ms(&self, frame_len: usize) -> u32 {
+        let settings = &self.device.settings;
+        lora_airtime_ms_with_preamble(
+            settings.sf,
+            settings.bw_hz,
+            settings.cr_denom,
+            frame_len,
+            self.config.tx_preamble_symbols,
+        )
+    }
+
     /// Build the [`Effect::ApplyRadio`] for the current settings,
     /// mirroring the modulation into the shared duty ledger so every
     /// radio client prices airtime against what is actually on the air.
     fn apply_radio(&self) -> Effect {
         let settings = self.device.settings;
-        self.config
-            .duty
-            .set_phy(settings.sf, settings.bw_hz, settings.cr_denom);
+        self.config.duty.set_phy(
+            settings.sf,
+            settings.bw_hz,
+            settings.cr_denom,
+            self.config.tx_preamble_symbols,
+        );
         Effect::ApplyRadio(settings)
     }
 
@@ -3466,6 +3632,19 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     }
                     prop::MAC_REPEATER_MIN_SNR => {
                         self.device.repeater_min_snr = saved.repeater_min_snr
+                    }
+                    // Restored whatever identity the device now runs
+                    // under: the enable is a setting, and a reserved key
+                    // keeps the forwarder from running without the
+                    // setting having to forget itself.
+                    prop::MESHCORE_FORWARDING_ENABLED => {
+                        self.device.meshcore_forwarding_enabled = saved.meshcore_forwarding_enabled
+                    }
+                    prop::MESHCORE_REGION_POLICY => {
+                        self.device.meshcore_region_policy = saved.meshcore_region_policy
+                    }
+                    prop::MESHCORE_REGIONS => {
+                        self.device.meshcore_regions = saved.meshcore_regions.clone()
                     }
                     prop::DEV_DISCOVERABLE => self.device.dev_discoverable = saved.dev_discoverable,
                     prop::ADVERT_INTERVAL => {
@@ -4203,6 +4382,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 .entry
                 .public_key,
         );
+        let airtime_ms = self.airtime_ms(data.len());
 
         let window = &mut self.host.peer_keys.entries[peer_index]
             .as_mut()
@@ -4225,13 +4405,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 // transmission share a single ack. The holdoff stands in
                 // for the MAC's forwarding-confirmation window,
                 // `2 × T_frame + W_max + W_jitter + D_ack` = 2.85 × T_frame.
-                let holdoff_ms = u64::from(lora_airtime_ms(
-                    self.device.settings.sf,
-                    self.device.settings.bw_hz,
-                    self.device.settings.cr_denom,
-                    data.len(),
-                )) * 285
-                    / 100;
+                let holdoff_ms = u64::from(airtime_ms) * 285 / 100;
                 let ack = window
                     .can_acknowledge_duplicate(counter, mic, now_ms, holdoff_ms)
                     .then_some(())
@@ -4278,12 +4452,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if frame_len > usize::from(self.config.mtu) {
             return None;
         }
-        let airtime_ms = lora_airtime_ms(
-            self.device.settings.sf,
-            self.device.settings.bw_hz,
-            self.device.settings.cr_denom,
-            frame_len,
-        );
+        let airtime_ms = self.airtime_ms(frame_len);
         if self.config.duty.would_exceed(now_ms, airtime_ms) {
             return None;
         }
@@ -6621,6 +6790,35 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 self.bump_dev_domain();
                 Ok(false)
             }
+            // Refused only on the way on, and only for a key MeshCore
+            // reserves: an identity installed later leaves the setting
+            // alone, and the forwarder declines to run under it instead.
+            // Rewriting the value already held is not the way on, so a
+            // host replaying a whole configuration still succeeds.
+            prop::MESHCORE_FORWARDING_ENABLED if self.has_meshcore() => {
+                let enabled = parse_bool(value)?;
+                if enabled
+                    && !self.device.meshcore_forwarding_enabled
+                    && self
+                        .dev_key
+                        .is_some_and(|key| !ids::meshcore_identity_allowed(key[0]))
+                {
+                    return Err(Status::INVALID_STATE);
+                }
+                self.device.meshcore_forwarding_enabled = enabled;
+                self.bump_dev_domain();
+                Ok(false)
+            }
+            prop::MESHCORE_REGION_POLICY if self.has_meshcore() => {
+                self.device.meshcore_region_policy = validate_meshcore_region_policy(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
+            prop::MESHCORE_REGIONS if self.has_meshcore() => {
+                self.device.meshcore_regions = MeshCoreRegions::parse_table(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
             // The receiver switch and the positioning policy. All reach
             // the platform through the device-domain mirror rather than
             // through an effect of their own, which is what makes a host
@@ -6900,6 +7098,17 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     Err(status) => self.complete(tid, status, emit),
                 }
             }
+            prop::MESHCORE_REGIONS if self.has_meshcore() => {
+                let result = meshcore_region_name(item)
+                    .and_then(|name| self.device.meshcore_regions.push(name));
+                match result {
+                    Ok(()) => {
+                        self.bump_dev_domain();
+                        self.send_prop_inserted(tid, key, item, emit)
+                    }
+                    Err(status) => self.complete(tid, status, emit),
+                }
+            }
             // Key-bearing inserts require the transport's security
             // binding. The emitted digest never contains key material.
             prop::HOST_CHANNEL_KEYS => {
@@ -7107,6 +7316,17 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     Err(status) => self.complete(tid, status, emit),
                 }
             }
+            prop::MESHCORE_REGIONS if self.has_meshcore() => {
+                let result = meshcore_region_name(selector)
+                    .and_then(|_| self.device.meshcore_regions.remove(selector));
+                match result {
+                    Ok(()) => {
+                        self.bump_dev_domain();
+                        self.send_prop_removed(tid, key, selector, emit)
+                    }
+                    Err(status) => self.complete(tid, status, emit),
+                }
+            }
             // The channel-key remove selector is the key itself; the
             // digest reported back is the derived channel identifier.
             prop::HOST_CHANNEL_KEYS => {
@@ -7295,12 +7515,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         let airtime_ms = if self.session.backhaul {
             0
         } else {
-            lora_airtime_ms(
-                self.device.settings.sf,
-                self.device.settings.bw_hz,
-                self.device.settings.cr_denom,
-                payload.data.len(),
-            )
+            self.airtime_ms(payload.data.len())
         };
         let projected_airtime_ms = self
             .session
@@ -7359,10 +7574,16 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     fn stats_counter(&self, key: u32) -> Option<(Counter, &'static StatsLedger)> {
         let counter = Counter::from_property(key)?;
         let ledger = self.config.stats?;
-        // The four the MAC feeds exist only where there is a MAC.
-        // Answering 0 instead would read as a repeater that has never
-        // repeated anything, which is a different device.
-        (!counter.needs_node() || self.config.mac_node).then_some((counter, ledger))
+        // The four the MAC feeds exist only where there is a MAC, and
+        // the forwarder's only where there is a forwarder. Answering 0
+        // instead would read as a repeater that has never repeated
+        // anything, which is a different device.
+        let present = if counter.needs_meshcore() {
+            self.has_meshcore()
+        } else {
+            !counter.needs_node() || self.config.mac_node
+        };
+        present.then_some((counter, ledger))
     }
 
     /// Whether this device can hear access points at all.
@@ -7462,6 +7683,14 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         }
         if Counter::from_property(key).is_some() {
             return self.stats_counter(key).is_some();
+        }
+        if matches!(
+            key,
+            prop::MESHCORE_FORWARDING_ENABLED
+                | prop::MESHCORE_REGION_POLICY
+                | prop::MESHCORE_REGIONS
+        ) {
+            return self.has_meshcore();
         }
         if matches!(
             key,
@@ -7622,6 +7851,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 }
                 if self.config.stats.is_some() {
                     len += pui::encode(cap::STATS, &mut out[len..]).unwrap_or(0);
+                }
+                if self.has_meshcore() {
+                    len += pui::encode(cap::MESHCORE_FORWARDER, &mut out[len..]).unwrap_or(0);
                 }
                 // Every device with Wi-Fi can scan; only some can join,
                 // so the station's capability is the narrower of the two
@@ -7913,6 +8145,22 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     }
                     None => 0,
                 }
+            }
+            prop::MESHCORE_FORWARDING_ENABLED if self.has_meshcore() => {
+                out[0] = self.device.meshcore_forwarding_enabled as u8;
+                1
+            }
+            prop::MESHCORE_REGION_POLICY if self.has_meshcore() => {
+                out[0] = self.device.meshcore_region_policy;
+                1
+            }
+            prop::MESHCORE_REGIONS if self.has_meshcore() => {
+                let mut len = 0;
+                for name in self.device.meshcore_regions.iter() {
+                    len += items::encode_prefixed_item(name, &mut out[len..])
+                        .expect("out sized for a full region table");
+                }
+                len
             }
             prop::PHY_DUTY_NOW => put(out, &self.config.duty.usage(now_ms).to_le_bytes()),
             prop::PHY_DUTY_LIMIT => put(out, &self.config.duty.limit().to_le_bytes()),
@@ -8222,6 +8470,15 @@ fn put_str(out: &mut [u8], value: &str) -> usize {
     len + 1
 }
 
+/// A `PROP_MESHCORE_REGION_POLICY` value: one of the three assigned.
+fn validate_meshcore_region_policy(value: &[u8]) -> Result<u8, Status> {
+    let policy = parse_u8(value)?;
+    if policy > meshcore_region_policy::IGNORE {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    Ok(policy)
+}
+
 fn parse_bool(value: &[u8]) -> Result<bool, Status> {
     match value {
         [0] => Ok(false),
@@ -8463,6 +8720,7 @@ mod tests {
             ble_pin: true,
             reboot: true,
             mac_node: true,
+            meshcore_forwarder: true,
             wifi: Some(net::WifiConfig::STATION),
             ip: Some(net::IpConfig::DUAL),
             bridge_client: false,
@@ -9040,6 +9298,7 @@ mod tests {
                 cap::BLE,
                 cap::REBOOT,
                 cap::STATS,
+                cap::MESHCORE_FORWARDER,
                 cap::WIFI_SCAN,
                 cap::WIFI,
                 cap::IPV4,
@@ -9191,6 +9450,7 @@ mod tests {
         let mut headless: TestSession = Session::new(
             SessionConfig {
                 mac_node: false,
+                meshcore_forwarder: false,
                 ..test_config()
             },
             Status::RESET_POWER_ON,
@@ -9221,6 +9481,7 @@ mod tests {
     fn caps_omit_the_node_when_none_runs_behind_the_session() {
         let config = SessionConfig {
             mac_node: false,
+            meshcore_forwarder: false,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -9236,6 +9497,9 @@ mod tests {
             prop::MAC_REPEATER_MIN_RSSI,
             prop::MAC_REPEATER_MIN_SNR,
             prop::MAC_BACKHAUL,
+            prop::MESHCORE_FORWARDING_ENABLED,
+            prop::MESHCORE_REGION_POLICY,
+            prop::MESHCORE_REGIONS,
         ] {
             let mut buf = [0u8; 16];
             let len = frame::prop_get(&mut buf, 6, key).unwrap();
@@ -10451,6 +10715,380 @@ mod tests {
         // A fresh unprovisioned session defaults off.
         let fresh: TestSession = Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
         assert!(!fresh.repeater_enabled());
+    }
+
+    /// Both MeshCore settings default off and open, read back what was
+    /// written, and survive save and boot-from-snapshot. Neither depends
+    /// on the repeater switch being on: the switch gates whether they
+    /// take effect, not whether they can be staged.
+    #[test]
+    fn meshcore_settings_round_trip_and_persist() {
+        let mut session = test_session();
+        session.set_boot_identity([0x5A; 32]);
+        assert!(capabilities(&mut session).contains(&cap::MESHCORE_FORWARDER));
+        assert_eq!(get(&mut session, prop::MESHCORE_FORWARDING_ENABLED), [0]);
+        assert_eq!(
+            get(&mut session, prop::MESHCORE_REGION_POLICY),
+            [meshcore_region_policy::OPEN]
+        );
+        assert!(!session.repeater_enabled());
+
+        let version = session.dev_domain_version();
+        let (emitted, effect) = set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[1]);
+        assert_eq!(effect, None);
+        let (_, key, value) = parse_prop_is(&emitted[0]);
+        assert_eq!(
+            (key, value.as_slice()),
+            (prop::MESHCORE_FORWARDING_ENABLED, &[1][..])
+        );
+        set(
+            &mut session,
+            prop::MESHCORE_REGION_POLICY,
+            &[meshcore_region_policy::IGNORE],
+        );
+        assert_ne!(
+            session.dev_domain_version(),
+            version,
+            "the forwarder learns of both through the device-domain mirror"
+        );
+        assert!(session.meshcore_forwarding_enabled());
+        assert_eq!(
+            session.meshcore_region_policy(),
+            meshcore_region_policy::IGNORE
+        );
+
+        save(&mut session);
+        let mut bytes = [0u8; SNAPSHOT_MAX];
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.set_boot_identity([0x5A; 32]);
+        booted.restore_at_boot(&bytes[..len]).unwrap();
+        assert!(booted.meshcore_forwarding_enabled());
+        assert_eq!(
+            booted.meshcore_region_policy(),
+            meshcore_region_policy::IGNORE
+        );
+        booted.attach(true);
+        assert_eq!(get(&mut booted, prop::MESHCORE_FORWARDING_ENABLED), [1]);
+        assert_eq!(
+            get(&mut booted, prop::MESHCORE_REGION_POLICY),
+            [meshcore_region_policy::IGNORE]
+        );
+    }
+
+    /// A snapshot written before the MeshCore settings existed carries
+    /// no option for them, and restores them to their defaults.
+    #[test]
+    fn meshcore_settings_default_from_an_older_snapshot() {
+        let mut session = test_session();
+        set(&mut session, prop::MAC_REPEATER_ENABLED, &[1]);
+        save(&mut session);
+        let mut bytes = [0u8; SNAPSHOT_MAX];
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        // Rebuild the snapshot without the two MeshCore options, as a
+        // build that predates them wrote it.
+        let mut older = [0u8; SNAPSHOT_MAX];
+        older[0] = bytes[0];
+        let mut encoder = OptionEncoder::new(&mut older[1..]);
+        for option in OptionDecoder::new(&bytes[1..len]) {
+            let (number, value) = option.unwrap();
+            if u32::from(number) < prop::MESHCORE_FORWARDING_ENABLED {
+                encoder.put(number, value).unwrap();
+            }
+        }
+        let older_len = 1 + encoder.finish();
+        assert!(older_len < len);
+
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.restore_at_boot(&older[..older_len]).unwrap();
+        assert!(booted.repeater_enabled());
+        assert!(!booted.meshcore_forwarding_enabled());
+        assert_eq!(
+            booted.meshcore_region_policy(),
+            meshcore_region_policy::OPEN
+        );
+    }
+
+    /// A stored policy outside the three assigned values fails the
+    /// snapshot's validation rather than restoring a posture no build
+    /// defines.
+    #[test]
+    fn meshcore_region_policy_rejects_unassigned_values() {
+        let mut session = test_session();
+        for bad in [&[3u8][..], &[0xFF], &[], &[0, 0]] {
+            let (emitted, _) = set(&mut session, prop::MESHCORE_REGION_POLICY, bad);
+            expect_status(&emitted[0], 2, Status::INVALID_ARGUMENT);
+        }
+        let (emitted, _) = set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[2]);
+        expect_status(&emitted[0], 2, Status::INVALID_ARGUMENT);
+        assert_eq!(
+            session.meshcore_region_policy(),
+            meshcore_region_policy::OPEN
+        );
+        assert!(!session.meshcore_forwarding_enabled());
+
+        let mut bad = [0u8; 8];
+        bad[0] = SNAPSHOT_FORMAT;
+        let mut encoder = OptionEncoder::new(&mut bad[1..]);
+        encoder
+            .put(prop::MESHCORE_REGION_POLICY as u16, &[3])
+            .unwrap();
+        let len = 1 + encoder.finish();
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        assert!(booted.restore_at_boot(&bad[..len]).is_err());
+    }
+
+    /// MeshCore reserves the identity hashes 0x00 and 0xFF, so the
+    /// enable is refused under a key that begins with either. Turning it
+    /// off is always allowed, and the policy is never refused.
+    fn meshcore_names(session: &TestSession) -> Vec<String> {
+        session
+            .meshcore_region_names()
+            .map(|name| String::from_utf8(name.to_vec()).unwrap())
+            .collect()
+    }
+
+    /// MeshCore names compare as their keys derive, octet for octet, and
+    /// live apart from the UMSH list, whose names do not.
+    #[test]
+    fn meshcore_regions_are_case_sensitive_and_their_own_list() {
+        let mut session = test_session();
+        assert_eq!(get(&mut session, prop::MESHCORE_REGIONS), Vec::<u8>::new());
+
+        let version = session.dev_domain_version();
+        let (emitted, effect) = insert_item(&mut session, prop::MESHCORE_REGIONS, b"us-ca");
+        assert!(effect.is_none());
+        let (key, digest) = parse_table_notice(&emitted[0], Cmd::PropInserted, 5);
+        assert_eq!(key, prop::MESHCORE_REGIONS);
+        assert_eq!(digest, b"us-ca");
+        assert_ne!(session.dev_domain_version(), version);
+        insert_item(&mut session, prop::MESHCORE_REGIONS, b"US-CA");
+        assert_eq!(meshcore_names(&session), ["us-ca", "US-CA"]);
+        assert_eq!(
+            get(&mut session, prop::MESHCORE_REGIONS),
+            region_table(&["us-ca", "US-CA"])
+        );
+        assert!(region_names(&session).is_empty());
+
+        let (emitted, _) = insert_item(&mut session, prop::MESHCORE_REGIONS, b"us-ca");
+        expect_status(&emitted[0], 5, Status::ALREADY);
+
+        // The `#` is the device's to supply, and `$` names a private
+        // region, whose key no name derives.
+        let too_long = [b'x'; MESHCORE_REGION_NAME_MAX_LEN + 1];
+        for bad in [&b""[..], b"#us-ca", b"$ops", &[0xFF], &too_long] {
+            let (emitted, _) = insert_item(&mut session, prop::MESHCORE_REGIONS, bad);
+            expect_status(&emitted[0], 5, Status::INVALID_ARGUMENT);
+        }
+        insert_item(
+            &mut session,
+            prop::MESHCORE_REGIONS,
+            &too_long[..MESHCORE_REGION_NAME_MAX_LEN],
+        );
+        assert_eq!(meshcore_names(&session).len(), 3);
+
+        let (emitted, _) = remove_item(&mut session, prop::MESHCORE_REGIONS, b"US-CA");
+        let (key, digest) = parse_table_notice(&emitted[0], Cmd::PropRemoved, 6);
+        assert_eq!(
+            (key, digest.as_slice()),
+            (prop::MESHCORE_REGIONS, &b"US-CA"[..])
+        );
+        let (emitted, _) = remove_item(&mut session, prop::MESHCORE_REGIONS, b"US-CA");
+        expect_status(&emitted[0], 6, Status::ITEM_NOT_FOUND);
+
+        // A whole-table write collapses repeats and, refused, changes
+        // nothing.
+        set(
+            &mut session,
+            prop::MESHCORE_REGIONS,
+            &region_table(&["pdx", "sea", "pdx"]),
+        );
+        assert_eq!(meshcore_names(&session), ["pdx", "sea"]);
+        let (emitted, _) = set(
+            &mut session,
+            prop::MESHCORE_REGIONS,
+            &region_table(&["ok", "#bad"]),
+        );
+        expect_status(&emitted[0], 2, Status::INVALID_ARGUMENT);
+        assert_eq!(meshcore_names(&session), ["pdx", "sea"]);
+
+        for index in 0..MAX_MESHCORE_REGIONS - 2 {
+            let name = format!("region-{index}");
+            insert_item(&mut session, prop::MESHCORE_REGIONS, name.as_bytes());
+        }
+        let (emitted, _) = insert_item(&mut session, prop::MESHCORE_REGIONS, b"one-too-many");
+        expect_status(&emitted[0], 5, Status::NOMEM);
+
+        save(&mut session);
+        let mut bytes = [0u8; SNAPSHOT_MAX];
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.restore_at_boot(&bytes[..len]).unwrap();
+        assert_eq!(meshcore_names(&booted), meshcore_names(&session));
+    }
+
+    #[test]
+    fn meshcore_enable_is_refused_under_a_reserved_identity() {
+        for first in [0x00u8, 0xFF] {
+            let mut session = test_session();
+            let mut key = [0x5A; 32];
+            key[0] = first;
+            session.set_boot_identity(key);
+            let (emitted, _) = set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[1]);
+            expect_status(&emitted[0], 2, Status::INVALID_STATE);
+            assert!(!session.meshcore_forwarding_enabled());
+            let (emitted, _) = set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[0]);
+            let (_, key, value) = parse_prop_is(&emitted[0]);
+            assert_eq!(
+                (key, value.as_slice()),
+                (prop::MESHCORE_FORWARDING_ENABLED, &[0][..])
+            );
+            set(
+                &mut session,
+                prop::MESHCORE_REGION_POLICY,
+                &[meshcore_region_policy::SCOPED_ONLY],
+            );
+            assert_eq!(
+                session.meshcore_region_policy(),
+                meshcore_region_policy::SCOPED_ONLY
+            );
+        }
+    }
+
+    /// Replacing the identity leaves both forwarding enables as they
+    /// were, even when the new key is one MeshCore reserves: the running
+    /// forwarder declines to run under it, and the setting is kept.
+    #[test]
+    fn identity_replacement_leaves_both_enables_unchanged() {
+        for replacement in [[0x77; 32], [0xFF; 32]] {
+            let mut session = test_session();
+            session.set_boot_identity([0x5A; 32]);
+            set(&mut session, prop::MAC_REPEATER_ENABLED, &[1]);
+            set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[1]);
+
+            let mut buf = [0u8; 64];
+            let len = frame::prop_set(&mut buf, 5, prop::DEV_PRIVATE_KEY, &[0x11; 32]).unwrap();
+            let (_, effect) = dispatch(&mut session, &buf[..len], 0);
+            assert_eq!(effect, Some(Effect::ProvisionIdentity { tid: 5 }));
+            session.respond_identity(5, Ok(replacement), &mut |_: &[u8]| {});
+
+            assert_eq!(session.dev_key(), Some(&replacement));
+            assert!(session.repeater_enabled());
+            assert!(session.meshcore_forwarding_enabled());
+            assert_eq!(get(&mut session, prop::MESHCORE_FORWARDING_ENABLED), [1]);
+
+            // A host replaying the whole configuration rewrites the
+            // value it holds; that is not the way on, so it succeeds.
+            let (emitted, _) = set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[1]);
+            let (_, key, value) = parse_prop_is(&emitted[0]);
+            assert_eq!(
+                (key, value.as_slice()),
+                (prop::MESHCORE_FORWARDING_ENABLED, &[1][..])
+            );
+            assert!(session.meshcore_forwarding_enabled());
+        }
+    }
+
+    /// `CMD_CLEAR` and `CMD_RST` return both settings to their defaults.
+    #[test]
+    fn meshcore_settings_reset_with_the_device_domain() {
+        let mut session = test_session();
+        session.set_boot_identity([0x5A; 32]);
+        set(&mut session, prop::MESHCORE_FORWARDING_ENABLED, &[1]);
+        set(
+            &mut session,
+            prop::MESHCORE_REGION_POLICY,
+            &[meshcore_region_policy::SCOPED_ONLY],
+        );
+        save(&mut session);
+        let mut buf = [0u8; 16];
+        let len = frame::clear(&mut buf, 3).unwrap();
+        let (_, effect) = dispatch(&mut session, &buf[..len], 0);
+        assert_eq!(effect, Some(Effect::ClearSaved { tid: 3 }));
+        session.respond_clear(3, Ok(()), &mut |_: &[u8]| {});
+        session.reset(Status::RESET_SOFTWARE, &mut |_: &[u8]| {});
+        session.attach(true);
+        assert!(!session.meshcore_forwarding_enabled());
+        assert_eq!(
+            session.meshcore_region_policy(),
+            meshcore_region_policy::OPEN
+        );
+        assert_eq!(get(&mut session, prop::MESHCORE_FORWARDING_ENABLED), [0]);
+    }
+
+    /// A board without the forwarder has neither property and no
+    /// capability, even with a node behind its session.
+    #[test]
+    fn meshcore_settings_are_absent_without_the_forwarder() {
+        let config = SessionConfig {
+            meshcore_forwarder: false,
+            ..test_config()
+        };
+        let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        session.attach(true);
+        assert!(!capabilities(&mut session).contains(&cap::MESHCORE_FORWARDER));
+        for key in [
+            prop::MESHCORE_FORWARDING_ENABLED,
+            prop::MESHCORE_REGION_POLICY,
+            prop::MESHCORE_REGIONS,
+        ] {
+            let (emitted, _) = set(&mut session, key, &[0]);
+            expect_status(&emitted[0], 2, Status::PROP_NOT_FOUND);
+        }
+        // Its counters go with it, though the node's own stay.
+        for counter in Counter::ALL.into_iter().filter(|c| c.needs_meshcore()) {
+            let mut buf = [0u8; 16];
+            let len = frame::prop_get(&mut buf, 1, counter.property()).unwrap();
+            let (emitted, _) = dispatch(&mut session, &buf[..len], 0);
+            expect_status(&emitted[0], 1, Status::PROP_NOT_FOUND);
+        }
+        assert_eq!(get(&mut session, prop::STAT_FORWARDED), 0u32.to_le_bytes());
+    }
+
+    /// The forwarder's counters read and clear like every other, from
+    /// the ledger the forwarder's task feeds.
+    #[test]
+    fn meshcore_counters_report_the_ledger_and_clear_to_zero() {
+        let mut session = test_session();
+        let ledger = session.config.stats.unwrap();
+        ledger.add(Counter::MeshCoreSeen, 5);
+        ledger.add(Counter::MeshCoreForwardedRouted, 1);
+        ledger.add(Counter::MeshCoreForwardedFlood, 2);
+        ledger.add(Counter::MeshCoreDeclined, 1);
+        assert_eq!(
+            get(&mut session, prop::STAT_MESHCORE_SEEN),
+            5u32.to_le_bytes()
+        );
+        assert_eq!(
+            get(&mut session, prop::STAT_MESHCORE_FORWARDED_ROUTED),
+            1u32.to_le_bytes()
+        );
+        assert_eq!(
+            get(&mut session, prop::STAT_MESHCORE_FORWARDED_FLOOD),
+            2u32.to_le_bytes()
+        );
+        assert_eq!(
+            get(&mut session, prop::STAT_MESHCORE_DECLINED),
+            1u32.to_le_bytes()
+        );
+
+        let (emitted, _) = set(&mut session, prop::STAT_MESHCORE_SEEN, &[0, 0, 0, 0]);
+        let (_, key, value) = parse_prop_is(&emitted[0]);
+        assert_eq!(
+            (key, value.as_slice()),
+            (prop::STAT_MESHCORE_SEEN, &[0; 4][..])
+        );
+        ledger.bump(Counter::MeshCoreSeen);
+        assert_eq!(
+            get(&mut session, prop::STAT_MESHCORE_SEEN),
+            1u32.to_le_bytes()
+        );
+        let (emitted, _) = set(&mut session, prop::STAT_MESHCORE_SEEN, &[1, 0, 0, 0]);
+        expect_status(&emitted[0], 2, Status::INVALID_ARGUMENT);
     }
 
     /// The four forwarding gates are configurable while forwarding is
@@ -12310,7 +12948,7 @@ mod tests {
         set(&mut session, prop::PHY_LORA_BW, &7_810u32.to_le_bytes());
         assert_eq!(
             ledger.airtime_ms(32),
-            umsh_ulcp::airtime::lora_airtime_ms(12, 7_810, 5, 32)
+            umsh_ulcp::airtime::lora_airtime_ms_with_preamble(12, 7_810, 5, 32, 32)
         );
     }
 
@@ -14447,6 +15085,15 @@ mod tests {
                 .repeater_regions
                 .push(region_entry(&text).unwrap());
         }
+        for seed in 0..MAX_MESHCORE_REGIONS as u8 {
+            let mut name = [b'm'; MESHCORE_REGION_NAME_MAX_LEN];
+            name[0] = b'a' + seed;
+            session
+                .device
+                .meshcore_regions
+                .push(meshcore_region_name(&name).unwrap())
+                .unwrap();
+        }
         session.device.name = [b'n'; MAX_DEVICE_NAME_LEN];
         session.device.name_len = MAX_DEVICE_NAME_LEN;
         session.set_boot_identity([0xEE; 32]);
@@ -14478,6 +15125,7 @@ mod tests {
         assert_eq!(booted.device.channel_keys.len, MAX_CHANNEL_KEYS);
         assert_eq!(booted.device.peers.len, MAX_DEV_PEERS);
         assert_eq!(booted.device.admins.len, MAX_DEV_ADMINS);
+        assert_eq!(booted.meshcore_region_names().count(), MAX_MESHCORE_REGIONS);
     }
 
     #[test]
@@ -16789,6 +17437,7 @@ mod tests {
             let config = SessionConfig {
                 bridge_client: enabled,
                 mac_node: node,
+                meshcore_forwarder: false,
                 ip: if ip { Some(net::IpConfig::DUAL) } else { None },
                 ..test_config()
             };

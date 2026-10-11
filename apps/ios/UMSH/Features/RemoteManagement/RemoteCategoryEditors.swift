@@ -1113,6 +1113,14 @@ struct RemoteRepeaterEditor: View {
             } footer: {
                 Text("Leave either empty for no threshold.")
             }
+
+            // Secondary to the protocol this screen configures, so a screen
+            // of its own.
+            if model.card?.supportsMeshcoreForwarder == true {
+                Section {
+                    NavigationLink("MeshCore") { RemoteMeshCoreScreen(model: model) }
+                }
+            }
             RemoteProblemSection(model: model)
         }
         // A mutation of plain draft state animates nothing on its own (and a
@@ -1328,6 +1336,168 @@ struct RemoteRepeaterEditor: View {
             desired.repeaterDefaultRegion = typed.defaultRegion.value ?? nil
             desired.repeaterMinRssiDbm = typed.minRssi.value ?? nil
             desired.repeaterMinSnrDb = typed.minSnr.value ?? nil
+            return desired
+        }
+    }
+}
+
+// MARK: - MeshCore
+
+/// Whether this device also forwards MeshCore traffic, and for which
+/// regions. Part of the repeater category on the device; its own screen
+/// because it is secondary to everything the Repeater screen sets.
+struct RemoteMeshCoreScreen: View {
+    let model: ManageDeviceModel
+    @State private var edits = Edits()
+    @State private var newRegion = ""
+    @State private var regionProblem: String?
+
+    private var reading: RemoteCategoryReading? { model.readings[.repeater] }
+    private var problems: [UInt32: String] { model.writeRefusals[.repeater] ?? [:] }
+
+    var body: some View {
+        Form {
+            Section {
+                if edits.enabled.isKnown {
+                    Toggle(isOn: $edits.enabled.edited.replacingNil(with: false)) {
+                        RemoteFieldTitle(
+                            "Forward MeshCore",
+                            problem: problems[edits.enabled.property]
+                        )
+                    }
+                    // Turning it off stays possible whatever the key.
+                    .disabled(!edits.identityAllowed && edits.enabled.reported != true)
+                } else {
+                    RemoteReadOnlyToggle("Forward MeshCore", isOn: nil)
+                }
+                RemotePicker(
+                    "Region policy",
+                    selection: $edits.policy.edited,
+                    problem: problems[edits.policy.property]
+                ) {
+                    Text("Open").tag(UInt8(0))
+                    Text("Scoped only").tag(UInt8(1))
+                    Text("Ignore").tag(UInt8(2))
+                }
+            } footer: {
+                if !edits.identityAllowed {
+                    Text("Unavailable for this device's identity key.")
+                }
+            }
+
+            Section {
+                ForEach(edits.regions.edited ?? [], id: \.self) { region in
+                    Text(region)
+                        .font(.body.monospaced())
+                        .transition(.asymmetric(insertion: .identity, removal: .opacity))
+                }
+                .onDelete { offsets in
+                    var regions = edits.regions.edited ?? []
+                    regions.remove(atOffsets: offsets)
+                    edits.regions.edited = regions
+                }
+                if edits.regions.isKnown {
+                    HStack {
+                        TextField("Region name", text: $newRegion)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .onSubmit { addRegion() }
+                        Button("Add", action: addRegion)
+                            .disabled(newRegion.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                } else {
+                    RemoteValueRow("Regions", value: "Not read")
+                }
+            } header: {
+                Text("Regions")
+            } footer: {
+                if let problem = regionProblem ?? problems[edits.regions.property] {
+                    Text(problem).foregroundStyle(.red)
+                }
+            }
+            RemoteProblemSection(model: model)
+        }
+        .animation(UMSHAnimation.list, value: edits.regions.edited)
+        .remoteCategoryChrome(
+            model: model,
+            category: .repeater,
+            title: "MeshCore",
+            apply: { await apply() },
+            hasEdits: !edits.dirty.isEmpty
+        )
+        .onChange(of: reading?.asOf) { edits = Edits(reading, preserving: edits) }
+        .onAppear { if edits.isEmpty { edits = Edits(reading) } }
+    }
+
+    /// Names are kept as typed, case included, less any `#`.
+    private func addRegion() {
+        let text = newRegion.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        guard let name = ulcpMeshcoreRegionName(input: text) else {
+            regionProblem = "Use 1 to 30 characters, not starting with $."
+            return
+        }
+        regionProblem = nil
+        newRegion = ""
+        var regions = edits.regions.edited ?? []
+        if !regions.contains(name) {
+            regions.append(name)
+        }
+        edits.regions.edited = regions
+    }
+
+    private func apply() async {
+        if await model.apply(.repeater, desired: edits.desired, dirty: edits.dirty) {
+            edits = Edits(model.readings[.repeater])
+        }
+    }
+
+    private struct Edits {
+        var enabled = RemoteField<Bool>(0, nil)
+        var policy = RemoteField<UInt8>(0, nil)
+        var regions = RemoteField<[String]>(0, nil)
+        var isEmpty = true
+        /// What the device last said, in full.
+        var held = UlcpDevicePropertiesRecord.empty
+
+        /// Whether the device's identity key may forward MeshCore at all. A
+        /// key not yet read is not a reason to say no; the device decides.
+        var identityAllowed: Bool {
+            held.devKey.map { ulcpMeshcoreIdentityAllowed(devKey: $0) } ?? true
+        }
+
+        init() {}
+
+        init(_ reading: RemoteCategoryReading?) {
+            let id = ulcpProperties
+            held = reading?.properties ?? UlcpDevicePropertiesRecord.empty
+            enabled = RemoteField(id.meshcoreForwardingEnabled, held.meshcoreForwardingEnabled)
+            policy = RemoteField(id.meshcoreRegionPolicy, held.meshcoreRegionPolicy)
+            regions = RemoteField(id.meshcoreRegions, held.meshcoreRegions)
+            isEmpty = reading == nil
+        }
+
+        init(_ reading: RemoteCategoryReading?, preserving old: Edits) {
+            self.init(reading)
+            guard !old.isEmpty else { return }
+            enabled = enabled.preserving(old.enabled)
+            policy = policy.preserving(old.policy)
+            regions = regions.preserving(old.regions)
+        }
+
+        var dirty: Set<UInt32> {
+            var dirty: Set<UInt32> = []
+            if enabled.isDirty { dirty.insert(enabled.property) }
+            if policy.isDirty { dirty.insert(policy.property) }
+            if regions.isDirty { dirty.insert(regions.property) }
+            return dirty
+        }
+
+        var desired: UlcpDevicePropertiesRecord {
+            var desired = held
+            desired.meshcoreForwardingEnabled = enabled.value
+            desired.meshcoreRegionPolicy = policy.value
+            desired.meshcoreRegions = regions.value
             return desired
         }
     }

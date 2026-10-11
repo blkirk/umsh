@@ -551,6 +551,7 @@ mod firmware {
             reboot: true,
             // A real MAC runs behind every session here.
             mac_node: true,
+            meshcore_forwarder: cfg!(feature = "meshcore-forwarder"),
             // No nRF52840 board has a Wi-Fi radio or a stack of its own,
             // so neither capability is advertised and none of those
             // properties exists.
@@ -996,9 +997,17 @@ mod firmware {
     static RADIO_CH: RadioCh = RadioCh::new();
 
     /// The session's virtual radio endpoint (mux client A). The device
-    /// node's endpoint (client B) lives in `device_node::NODE_CH`.
+    /// node's endpoint (client B) lives in `device_node::NODE_CH`, and
+    /// the MeshCore forwarder's (client C) in `meshcore::MESHCORE_CH`.
     static SESSION_CH: RadioCh = RadioCh::new();
+    #[cfg(not(feature = "meshcore-forwarder"))]
     static MUX_CLIENTS: [&RadioCh; 2] = [&SESSION_CH, &super::device_node::NODE_CH];
+    #[cfg(feature = "meshcore-forwarder")]
+    static MUX_CLIENTS: [&RadioCh; 3] = [
+        &SESSION_CH,
+        &super::device_node::NODE_CH,
+        &umsh_ulcp_runtime::meshcore::MESHCORE_CH,
+    ];
 
     /// Runtime radio settings pushed by the session to the runner.
     static DEVICE_CTL: DeviceControl<ThreadModeRawMutex> = DeviceControl::new();
@@ -6775,6 +6784,7 @@ mod firmware {
             lora_phy::mod_params::SpreadingFactor::_7,
             lora_phy::mod_params::Bandwidth::_62KHz,
             umsh_radio_loraphy::MAX_PAYLOAD,
+            TX_PREAMBLE_SYMBOLS,
         );
         super::device_node::bring_up(
             spawner,

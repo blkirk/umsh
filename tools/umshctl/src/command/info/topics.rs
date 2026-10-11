@@ -117,6 +117,10 @@ pub const TOPICS: &[Topic] = &[
                 prop::STAT_FORWARDED,
                 prop::STAT_FORWARD_DROPPED,
                 prop::STAT_FORWARD_CANCELLED,
+                prop::STAT_MESHCORE_SEEN,
+                prop::STAT_MESHCORE_FORWARDED_ROUTED,
+                prop::STAT_MESHCORE_FORWARDED_FLOOD,
+                prop::STAT_MESHCORE_DECLINED,
                 prop::PHY_DUTY_NOW,
                 prop::UPTIME,
             ]
@@ -148,14 +152,23 @@ pub const TOPICS: &[Topic] = &[
         name: "repeater",
         prefix: "REPEATER",
         gate: |ctx| ctx.has(cap::REPEATER),
-        keys: |_| {
-            vec![
+        keys: |ctx| {
+            let mut keys = vec![
                 prop::MAC_REPEATER_ENABLED,
                 prop::MAC_REPEATER_REGIONS,
                 prop::MAC_REPEATER_DEFAULT_REGION,
                 prop::MAC_REPEATER_MIN_RSSI,
                 prop::MAC_REPEATER_MIN_SNR,
-            ]
+            ];
+            if ctx.has(cap::MESHCORE_FORWARDER) {
+                keys.extend([
+                    prop::MESHCORE_FORWARDING_ENABLED,
+                    prop::MESHCORE_REGION_POLICY,
+                    prop::MESHCORE_REGIONS,
+                    prop::DEV_KEY,
+                ]);
+            }
+            keys
         },
         render: render_repeater,
         env: env_repeater,
@@ -519,6 +532,22 @@ const STAT_FIELDS: &[(u32, &str, &str)] = &[
         "forwards cancelled",
         "FORWARD_CANCELLED",
     ),
+    (prop::STAT_MESHCORE_SEEN, "meshcore seen", "MESHCORE_SEEN"),
+    (
+        prop::STAT_MESHCORE_FORWARDED_ROUTED,
+        "meshcore forwarded routed",
+        "MESHCORE_FORWARDED_ROUTED",
+    ),
+    (
+        prop::STAT_MESHCORE_FORWARDED_FLOOD,
+        "meshcore forwarded flood",
+        "MESHCORE_FORWARDED_FLOOD",
+    ),
+    (
+        prop::STAT_MESHCORE_DECLINED,
+        "meshcore declined",
+        "MESHCORE_DECLINED",
+    ),
 ];
 
 fn render_stats(set: &PropSet, _ctx: &Context) -> Vec<Line> {
@@ -748,23 +777,48 @@ fn precision_cell(bytes: u8) -> &'static str {
 
 fn render_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
     let enabled = set.bool(prop::MAC_REPEATER_ENABLED).unwrap_or(false);
+    let meshcore = meshcore(set);
+    let meshcore_enabled = meshcore.as_ref().is_some_and(|meshcore| meshcore.enabled);
     let mut lines = vec![("forwarding".into(), on_off(enabled).into())];
-    // The gates are inert while forwarding is off, and printing five
+    // Each protocol's gates are inert while it is off, and printing
     // settings that do nothing invites reading them as if they did.
-    if !enabled {
-        return lines;
+    if enabled {
+        lines.push((
+            "regions".into(),
+            crate::command::repeater::format_regions(&regions(set)),
+        ));
+        lines.push((
+            "tags".into(),
+            match default_region(set) {
+                Some(code) => code.to_string(),
+                None => "untagged".to_string(),
+            },
+        ));
     }
-    lines.push((
-        "regions".into(),
-        crate::command::repeater::format_regions(&regions(set)),
-    ));
-    lines.push((
-        "tags".into(),
-        match default_region(set) {
-            Some(code) => code.to_string(),
-            None => "untagged".to_string(),
-        },
-    ));
+    if enabled || meshcore_enabled {
+        lines.push(floor(set));
+    }
+    if let Some(meshcore) = meshcore {
+        lines.push((
+            "meshcore".into(),
+            match (meshcore.enabled, meshcore_identity_allowed(set)) {
+                (false, _) => "off".to_string(),
+                (true, false) => "inactive (identity key begins 00 or FF)".to_string(),
+                (true, true) => format!("on, policy {}", meshcore.region_policy.name()),
+            },
+        ));
+        if meshcore.enabled {
+            lines.push((
+                "meshcore regions".into(),
+                crate::command::repeater::format_meshcore_regions(&meshcore.regions),
+            ));
+        }
+    }
+    lines
+}
+
+/// The link-quality floor, which gates both protocols' floods.
+fn floor(set: &PropSet) -> Line {
     let rssi = set
         .non_empty(prop::MAC_REPEATER_MIN_RSSI)
         .and_then(|value| <[u8; 2]>::try_from(value).ok())
@@ -773,15 +827,38 @@ fn render_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
         .non_empty(prop::MAC_REPEATER_MIN_SNR)
         .and_then(|value| value.first().copied())
         .map(|byte| byte as i8);
-    lines.push((
+    (
         "floor".into(),
         format!(
             "{}/{}",
             rssi.map_or("any".to_string(), |dbm| format!("{dbm} dBm")),
             snr.map_or("any".to_string(), |db| format!("{db} dB"))
         ),
-    ));
-    lines
+    )
+}
+
+fn meshcore(set: &PropSet) -> Option<umsh::ulcp::MeshCoreForwarding> {
+    let enabled = set.bool(prop::MESHCORE_FORWARDING_ENABLED)?;
+    let region_policy = set
+        .non_empty(prop::MESHCORE_REGION_POLICY)
+        .and_then(|value| value.first().copied())
+        .and_then(umsh::ulcp::MeshCoreRegionPolicy::from_u8)
+        .unwrap_or_default();
+    let regions = set
+        .bytes(prop::MESHCORE_REGIONS)
+        .and_then(|value| umsh::ulcp::decode_meshcore_regions(value).ok())
+        .unwrap_or_default();
+    Some(umsh::ulcp::MeshCoreForwarding {
+        enabled,
+        region_policy,
+        regions,
+    })
+}
+
+fn meshcore_identity_allowed(set: &PropSet) -> bool {
+    set.non_empty(prop::DEV_KEY)
+        .and_then(|value| <[u8; 32]>::try_from(value).ok())
+        .is_none_or(|key| umsh::ulcp::meshcore_identity_allowed(&key))
 }
 
 fn env_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
@@ -793,6 +870,16 @@ fn env_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
     }
     if let Some(code) = default_region(set) {
         env.push(("DEFAULT_REGION".into(), code.to_string()));
+    }
+    if let Some(meshcore) = meshcore(set) {
+        env.push(("MESHCORE".into(), bit(meshcore.enabled)));
+        env.push((
+            "MESHCORE_POLICY".into(),
+            meshcore.region_policy.name().into(),
+        ));
+        if !meshcore.regions.is_empty() {
+            env.push(("MESHCORE_REGIONS".into(), meshcore.regions.join(" ")));
+        }
     }
     env
 }
