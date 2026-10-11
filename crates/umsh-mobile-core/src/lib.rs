@@ -59,7 +59,7 @@ uniffi::setup_scaffolding!();
 ///
 /// Increment this when a binding-visible operation, record, or error contract
 /// changes incompatibly. It is independent of the UMSH wire version.
-pub const MOBILE_API_VERSION: u16 = 50;
+pub const MOBILE_API_VERSION: u16 = 51;
 
 /// Stable error categories consumed by platform adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
@@ -916,6 +916,72 @@ pub fn render_router_hint(bytes: Vec<u8>) -> Result<RouterHintRecord, MobileErro
     })
 }
 
+/// How a person wrote a router hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RouterHintInputFormat {
+    /// The leading characters of the node's Base58 address, at least four.
+    Base58Prefix,
+    /// The hint itself as exactly four hexadecimal digits.
+    Hex,
+}
+
+/// Why typed text does not yet name a router hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum RouterHintInputProblem {
+    TooShort,
+    TooLong,
+    InvalidCharacter,
+    /// No address begins with this prefix.
+    OutOfRange,
+}
+
+/// What typed text says about a router hint: the hints it could mean, or
+/// why it means none yet.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RouterHintInputRecord {
+    /// One hint, or two when a Base58 prefix straddles a hint boundary.
+    pub candidates: Vec<RouterHintRecord>,
+    pub problem: Option<RouterHintInputProblem>,
+}
+
+/// Read a router hint typed by a person, as a Base58 address prefix or as
+/// hexadecimal. Surrounding whitespace is ignored.
+#[uniffi::export]
+pub fn parse_router_hint_input(
+    text: String,
+    format: RouterHintInputFormat,
+) -> RouterHintInputRecord {
+    let text = text.trim();
+    let parsed = match format {
+        RouterHintInputFormat::Base58Prefix => RouterHint::candidates_from_base58_prefix(text)
+            .map(|candidates| candidates.iter().collect::<Vec<_>>()),
+        RouterHintInputFormat::Hex => RouterHint::from_hex(text).map(|hint| vec![hint]),
+    };
+    match parsed {
+        Ok(hints) => RouterHintInputRecord {
+            candidates: hints
+                .into_iter()
+                .map(|hint| RouterHintRecord {
+                    bytes: hint.0.to_vec(),
+                    text: hint.to_string(),
+                })
+                .collect(),
+            problem: None,
+        },
+        Err(error) => RouterHintInputRecord {
+            candidates: Vec::new(),
+            problem: Some(match error {
+                umsh_core::HintInputError::TooShort => RouterHintInputProblem::TooShort,
+                umsh_core::HintInputError::TooLong => RouterHintInputProblem::TooLong,
+                umsh_core::HintInputError::InvalidCharacter => {
+                    RouterHintInputProblem::InvalidCharacter
+                }
+                umsh_core::HintInputError::OutOfRange => RouterHintInputProblem::OutOfRange,
+            }),
+        },
+    }
+}
+
 fn render_node_hint_bytes(bytes: [u8; 3]) -> NodeHintRecord {
     NodeHintRecord {
         bytes: bytes.to_vec(),
@@ -1011,6 +1077,49 @@ fn public_identity_record(key: &PublicKey) -> PublicIdentityRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_hint_input_reads_both_forms() {
+        let texts = |record: RouterHintInputRecord| {
+            record
+                .candidates
+                .into_iter()
+                .map(|hint| (hint.bytes, hint.text))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            texts(parse_router_hint_input(
+                " 7Nq4 ".into(),
+                RouterHintInputFormat::Base58Prefix
+            )),
+            vec![(vec![0x5E, 0xBD], "7N*".to_string())]
+        );
+        assert_eq!(
+            texts(parse_router_hint_input(
+                "H12n".into(),
+                RouterHintInputFormat::Base58Prefix
+            )),
+            vec![
+                (vec![0xED, 0xBC], "H1*".to_string()),
+                (vec![0xED, 0xBD], "H1*".to_string())
+            ]
+        );
+        assert_eq!(
+            texts(parse_router_hint_input(
+                "5ebd".into(),
+                RouterHintInputFormat::Hex
+            )),
+            vec![(vec![0x5E, 0xBD], "7N*".to_string())]
+        );
+        assert_eq!(
+            parse_router_hint_input("7Nq".into(), RouterHintInputFormat::Base58Prefix).problem,
+            Some(RouterHintInputProblem::TooShort)
+        );
+        assert_eq!(
+            parse_router_hint_input("7Nq4".into(), RouterHintInputFormat::Hex).problem,
+            Some(RouterHintInputProblem::InvalidCharacter)
+        );
+    }
 
     /// A signed bundle decodes back to the claims it was built from, with a
     /// signature that verifies against the signing key's own address—the

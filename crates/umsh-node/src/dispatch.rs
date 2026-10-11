@@ -54,10 +54,15 @@ impl EventDispatcher {
                     state.repeated = true;
                 });
             }
-            MacEventRef::AckReceived { receipt, .. } => {
+            MacEventRef::AckReceived {
+                receipt,
+                via_route_retry,
+                ..
+            } => {
                 let token = SendToken::new(identity_id, receipt);
                 self.update_ticket(&token, |state| {
                     state.acked = true;
+                    state.acked_via_route_retry = via_route_retry;
                     state.finished = true;
                 });
             }

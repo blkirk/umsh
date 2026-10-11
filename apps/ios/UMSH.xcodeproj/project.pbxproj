@@ -30,6 +30,11 @@
 		10000000000000000000002B /* UMSH/Services/Radio/BluetoothErrorText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002B /* UMSH/Services/Radio/BluetoothErrorText.swift */; };
 		10000000000000000000002C /* UMSH/App/StorageUnavailableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002C /* UMSH/App/StorageUnavailableView.swift */; };
 		10000000000000000000002D /* UMSH/Features/Peers/PeerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000002D /* UMSH/Features/Peers/PeerDetailView.swift */; };
+		6D0A1F0000000000000000B1 /* UMSH/DesignSystem/NeighborRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D0A1F0000000000000000C1 /* UMSH/DesignSystem/NeighborRow.swift */; };
+		6D0A1F0000000000000000B2 /* UMSH/Features/Peers/ManualPath/ManualPathEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D0A1F0000000000000000C2 /* UMSH/Features/Peers/ManualPath/ManualPathEditor.swift */; };
+		6D0A1F0000000000000000B3 /* UMSH/Features/Peers/ManualPath/AddHopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D0A1F0000000000000000C3 /* UMSH/Features/Peers/ManualPath/AddHopScreen.swift */; };
+		6D0A1F0000000000000000B4 /* UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D0A1F0000000000000000C4 /* UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift */; };
+		6D0A1F0000000000000000B5 /* UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D0A1F0000000000000000C5 /* UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift */; };
 		7A1F3C9E2B4D5E6F80A1B2C3 /* UMSH/Features/Peers/PeerRepeatersScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B2E4D0F3C5E6F7A91B2C3D4 /* UMSH/Features/Peers/PeerRepeatersScreen.swift */; };
 		CAAEA04E581BF8293E1A6AC9 /* UMSH/Features/RemoteManagement/ManageDeviceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFD8865E47822B5EEB0275A5 /* UMSH/Features/RemoteManagement/ManageDeviceModel.swift */; };
 		AEAC200AA19C431594F31C70 /* UMSH/Features/RemoteManagement/RemoteCategoryReading.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F4A419D271745C2B76984B9 /* UMSH/Features/RemoteManagement/RemoteCategoryReading.swift */; };
@@ -151,6 +156,11 @@
 		20000000000000000000002B /* UMSH/Services/Radio/BluetoothErrorText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Services/Radio/BluetoothErrorText.swift; sourceTree = "<group>"; };
 		20000000000000000000002C /* UMSH/App/StorageUnavailableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/App/StorageUnavailableView.swift; sourceTree = "<group>"; };
 		20000000000000000000002D /* UMSH/Features/Peers/PeerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/PeerDetailView.swift; sourceTree = "<group>"; };
+		6D0A1F0000000000000000C1 /* UMSH/DesignSystem/NeighborRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/DesignSystem/NeighborRow.swift; sourceTree = "<group>"; };
+		6D0A1F0000000000000000C2 /* UMSH/Features/Peers/ManualPath/ManualPathEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/ManualPath/ManualPathEditor.swift; sourceTree = "<group>"; };
+		6D0A1F0000000000000000C3 /* UMSH/Features/Peers/ManualPath/AddHopScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/ManualPath/AddHopScreen.swift; sourceTree = "<group>"; };
+		6D0A1F0000000000000000C4 /* UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift; sourceTree = "<group>"; };
+		6D0A1F0000000000000000C5 /* UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift; sourceTree = "<group>"; };
 		8B2E4D0F3C5E6F7A91B2C3D4 /* UMSH/Features/Peers/PeerRepeatersScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/Peers/PeerRepeatersScreen.swift; sourceTree = "<group>"; };
 		AFD8865E47822B5EEB0275A5 /* UMSH/Features/RemoteManagement/ManageDeviceModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/RemoteManagement/ManageDeviceModel.swift; sourceTree = "<group>"; };
 		8F4A419D271745C2B76984B9 /* UMSH/Features/RemoteManagement/RemoteCategoryReading.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UMSH/Features/RemoteManagement/RemoteCategoryReading.swift; sourceTree = "<group>"; };
@@ -296,6 +306,11 @@
 				20000000000000000000000B /* UMSH/Features/Peers/PeersView.swift */,
 				20000000000000000000002D /* UMSH/Features/Peers/PeerDetailView.swift */,
 				8B2E4D0F3C5E6F7A91B2C3D4 /* UMSH/Features/Peers/PeerRepeatersScreen.swift */,
+				6D0A1F0000000000000000C5 /* UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift */,
+				6D0A1F0000000000000000C4 /* UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift */,
+				6D0A1F0000000000000000C3 /* UMSH/Features/Peers/ManualPath/AddHopScreen.swift */,
+				6D0A1F0000000000000000C2 /* UMSH/Features/Peers/ManualPath/ManualPathEditor.swift */,
+				6D0A1F0000000000000000C1 /* UMSH/DesignSystem/NeighborRow.swift */,
 				AFD8865E47822B5EEB0275A5 /* UMSH/Features/RemoteManagement/ManageDeviceModel.swift */,
 				8F4A419D271745C2B76984B9 /* UMSH/Features/RemoteManagement/RemoteCategoryReading.swift */,
 				486C2B63FFAA6F5C45337190 /* UMSH/Features/RemoteManagement/ManageDeviceScreen.swift */,
@@ -557,6 +572,11 @@
 				10000000000000000000000B /* UMSH/Features/Peers/PeersView.swift in Sources */,
 				10000000000000000000002D /* UMSH/Features/Peers/PeerDetailView.swift in Sources */,
 				7A1F3C9E2B4D5E6F80A1B2C3 /* UMSH/Features/Peers/PeerRepeatersScreen.swift in Sources */,
+				6D0A1F0000000000000000B5 /* UMSH/Features/Peers/ManualPath/LearnedPathPromptSheet.swift in Sources */,
+				6D0A1F0000000000000000B4 /* UMSH/Features/Peers/ManualPath/RouterHintEntryScreen.swift in Sources */,
+				6D0A1F0000000000000000B3 /* UMSH/Features/Peers/ManualPath/AddHopScreen.swift in Sources */,
+				6D0A1F0000000000000000B2 /* UMSH/Features/Peers/ManualPath/ManualPathEditor.swift in Sources */,
+				6D0A1F0000000000000000B1 /* UMSH/DesignSystem/NeighborRow.swift in Sources */,
 				CAAEA04E581BF8293E1A6AC9 /* UMSH/Features/RemoteManagement/ManageDeviceModel.swift in Sources */,
 				AEAC200AA19C431594F31C70 /* UMSH/Features/RemoteManagement/RemoteCategoryReading.swift in Sources */,
 				9AAAB66E0DA2111510FFC6C9 /* UMSH/Features/RemoteManagement/ManageDeviceScreen.swift in Sources */,

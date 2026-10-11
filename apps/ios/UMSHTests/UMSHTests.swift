@@ -314,6 +314,91 @@ struct RuntimePersistenceTests {
     }
 }
 
+@Suite @MainActor
+struct ManualPathTests {
+    @Test func savedPathRoundTripsUntilItsHoldEnds() async throws {
+        let fixture = try await StoreFixture()
+        defer { fixture.remove() }
+        let owner = fixture.identity.id
+        let address = fixture.identity.publicIdentity.canonicalAddress
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: "Peer", isSaved: true)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let hints = [Data([0x5E, 0xBD]), Data([0xED, 0xBC])]
+        try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
+            hints: hints, holdUntil: now.addingTimeInterval(3600),
+            latitude: 44.05, longitude: -123.09, accuracy: 12)
+        try await fixture.store.settleManualRoutePrompt(ownerIdentityID: owner, publicAddress: address)
+
+        let stored = try #require(try await fixture.store.manualRoute(
+            ownerIdentityID: owner, publicAddress: address, now: now))
+        #expect(stored.hints == hints)
+        #expect(stored.promptSettled)
+        #expect(stored.savedLatitude == 44.05)
+        #expect(try await fixture.store.manualRoutes(ownerIdentityID: owner, now: now).count == 1)
+
+        // Saving again is a new choice: the declined offer does not carry over.
+        try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
+            hints: hints, holdUntil: now.addingTimeInterval(3600),
+            latitude: nil, longitude: nil, accuracy: nil)
+        #expect(try await fixture.store.manualRoute(
+            ownerIdentityID: owner, publicAddress: address, now: now)?.promptSettled == false)
+
+        let later = now.addingTimeInterval(3601)
+        #expect(try await fixture.store.manualRoutes(ownerIdentityID: owner, now: later).isEmpty)
+        #expect(try await fixture.store.manualRoute(
+            ownerIdentityID: owner, publicAddress: address, now: now) == nil)
+    }
+
+    @Test func clearingForgetsThePath() async throws {
+        let fixture = try await StoreFixture()
+        defer { fixture.remove() }
+        let owner = fixture.identity.id
+        let address = fixture.identity.publicIdentity.canonicalAddress
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: "Peer", isSaved: true)
+        try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
+            hints: [Data([1, 2])], holdUntil: .now.addingTimeInterval(60),
+            latitude: nil, longitude: nil, accuracy: nil)
+        try await fixture.store.clearManualRoute(ownerIdentityID: owner, publicAddress: address)
+        #expect(try await fixture.store.manualRoute(ownerIdentityID: owner, publicAddress: address) == nil)
+    }
+
+    private func record(accuracy: Double? = 10, settled: Bool = false) -> ManualPathRecord {
+        ManualPathRecord(holdUntil: .now.addingTimeInterval(3600), savedLatitude: 44.0,
+            savedLongitude: -123.0, savedAccuracy: accuracy, promptSettled: settled)
+    }
+
+    /// About 222 m north of the saved fix, and about 111 m.
+    private let farLatitude = 44.002
+    private let nearLatitude = 44.001
+
+    @Test func movingTwoHundredMetersCounts() {
+        #expect(record().hasMoved(latitude: farLatitude, longitude: -123.0, accuracy: 10))
+        #expect(!record().hasMoved(latitude: nearLatitude, longitude: -123.0, accuracy: 10))
+    }
+
+    @Test func vagueOrMissingFixesNeverCountAsMoving() {
+        #expect(!record().hasMoved(latitude: farLatitude, longitude: -123.0, accuracy: 150))
+        #expect(!record(accuracy: 150).hasMoved(latitude: farLatitude, longitude: -123.0, accuracy: 10))
+        #expect(!record(accuracy: nil).hasMoved(latitude: farLatitude, longitude: -123.0, accuracy: 10))
+    }
+
+    @Test func offerNeedsTwoFloodedAcksOrOneAfterMoving() {
+        let candidate = PeerRoute.Candidate(kind: .source, hints: [], hopCount: 1)
+        func route(acks: UInt8, candidate: PeerRoute.Candidate? = candidate) -> PeerRoute {
+            PeerRoute(kind: .source, hints: [], hopCount: 2, floodHops: nil, floodRegions: [],
+                holdUntil: .now.addingTimeInterval(60), fallbackAcks: acks, candidate: candidate)
+        }
+        #expect(!record().shouldOfferLearnedPath(route: route(acks: 1), moved: false))
+        #expect(record().shouldOfferLearnedPath(route: route(acks: 1), moved: true))
+        #expect(record().shouldOfferLearnedPath(route: route(acks: 2), moved: false))
+        #expect(!record().shouldOfferLearnedPath(route: route(acks: 0), moved: true))
+        #expect(!record().shouldOfferLearnedPath(route: route(acks: 3, candidate: nil), moved: true))
+        #expect(!record(settled: true).shouldOfferLearnedPath(route: route(acks: 3), moved: true))
+    }
+}
+
 private struct StoreFixture {
     let url: URL
     let store: SQLiteApplicationStore

@@ -15,13 +15,16 @@ use umsh_hal::{Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, Tx
 
 use crate::{
     AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
-    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_TX,
-    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS,
-    MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict,
-    ReplayWindow,
+    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS,
+    DEFAULT_TX, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS,
+    MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform,
+    ReplayVerdict, ReplayWindow,
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
-    peers::{ChannelTable, PeerCryptoMap, PeerId, PeerRegistry, RouteOffer},
+    peers::{
+        ChannelTable, HeldRouteOutcome, PeerCryptoMap, PeerId, PeerRegistry, RouteFailure,
+        RouteOffer,
+    },
     route_score::{Hop, path_score},
     send::{
         CompletionSignal, PendingAck, PendingAckError, ResendRecord, SendOptions, SendReceipt,
@@ -965,6 +968,7 @@ pub struct Mac<
     const DUP: usize = DEFAULT_DUP,
     const RN: usize = DEFAULT_CHANNEL_REPLAY,
     const HN: usize = DEFAULT_CHANNEL_HINT_REPLAY,
+    const HOLDS: usize = DEFAULT_ROUTE_HOLDS,
 > {
     radio: P::Radio,
     crypto: CryptoEngine<P::Aes, P::Sha>,
@@ -972,7 +976,7 @@ pub struct Mac<
     rng: P::Rng,
     counter_store: P::CounterStore,
     identities: Vec<Option<IdentitySlot<P::Identity, PEERS, ACKS, FRAME>>, IDENTITIES>,
-    peer_registry: PeerRegistry<PEERS>,
+    peer_registry: PeerRegistry<PEERS, HOLDS>,
     transmitter_observations: crate::TransmitterObservations,
     uplinks: crate::uplinks::UplinkObservations,
     recent_acks: Deque<CompletedAck, RECENT_ACKS>,
@@ -999,7 +1003,8 @@ impl<
     const DUP: usize,
     const RN: usize,
     const HN: usize,
-> Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>
+    const HOLDS: usize,
+> Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     /// Creates a MAC coordinator with the supplied radio, crypto, timing, and policy state.
     pub fn new(
@@ -1102,11 +1107,11 @@ impl<
         &self.dup_cache
     }
     /// Borrow the peer registry.
-    pub fn peer_registry(&self) -> &PeerRegistry<PEERS> {
+    pub fn peer_registry(&self) -> &PeerRegistry<PEERS, HOLDS> {
         &self.peer_registry
     }
     /// Mutably borrow the peer registry.
-    pub fn peer_registry_mut(&mut self) -> &mut PeerRegistry<PEERS> {
+    pub fn peer_registry_mut(&mut self) -> &mut PeerRegistry<PEERS, HOLDS> {
         &mut self.peer_registry
     }
     /// Borrow the channel table.
@@ -2864,7 +2869,8 @@ impl<
         // match against.
         self.cancel_forwards_for_ack_mic(&ack_trailer[..4]);
         if let Some(target_peer) = self.peer_for_ack_trailer(&ack_trailer)
-            && let Some((identity_id, receipt)) = self.complete_ack(&target_peer, &ack_trailer)
+            && let Some((identity_id, receipt, via_route_retry)) =
+                self.complete_ack_reporting_retry(&target_peer, &ack_trailer)
         {
             self.remember_completed_ack(ack_trailer, target_peer);
             // The path the ack came back by is evidence like any other
@@ -2879,6 +2885,7 @@ impl<
                 crate::MacEventRef::AckReceived {
                     peer: target_peer,
                     receipt,
+                    via_route_retry,
                 },
             );
             return true;
@@ -3448,6 +3455,17 @@ impl<
         peer: &PublicKey,
         ack_trailer: &[u8; 8],
     ) -> Option<(LocalIdentityId, SendReceipt)> {
+        self.complete_ack_reporting_retry(peer, ack_trailer)
+            .map(|(identity_id, receipt, _)| (identity_id, receipt))
+    }
+
+    /// [`Self::complete_ack`], also reporting whether the attempt the ack
+    /// answered was the route-retry flood rather than the original send.
+    fn complete_ack_reporting_retry(
+        &mut self,
+        peer: &PublicKey,
+        ack_trailer: &[u8; 8],
+    ) -> Option<(LocalIdentityId, SendReceipt, bool)> {
         let now_ms = self.clock.now_ms();
         for (index, slot) in self.identities.iter_mut().enumerate() {
             let Some(slot) = slot.as_mut() else {
@@ -3462,9 +3480,26 @@ impl<
             });
 
             if let Some(receipt) = receipt {
+                let mut via_route_retry = false;
                 if let Some(pending) = slot.pending_acks.remove(&receipt) {
+                    via_route_retry = Self::frame_is_route_retry(pending.resend.frame.as_slice());
                     self.peer_registry
                         .confirm_route(peer, pending.cached_route_revision, now_ms);
+                    if pending.held_route_missed {
+                        self.peer_registry.note_held_outcome(
+                            peer,
+                            HeldRouteOutcome::FallbackAcked,
+                            now_ms,
+                        );
+                    } else if pending.cached_route_revision != 0 {
+                        // The revision survives only while the attempt is
+                        // still on the route it was sent with.
+                        self.peer_registry.note_held_outcome(
+                            peer,
+                            HeldRouteOutcome::RouteAcked,
+                            now_ms,
+                        );
+                    }
                 }
                 let identity_id = LocalIdentityId(index as u8);
                 // A retransmission may already be queued behind this ack.
@@ -3481,11 +3516,19 @@ impl<
                 {
                     self.post_tx_listen = None;
                 }
-                return Some((identity_id, receipt));
+                return Some((identity_id, receipt, via_route_retry));
             }
         }
 
         None
+    }
+
+    /// Whether `frame` is a route-retry rebuild of an earlier send.
+    fn frame_is_route_retry(frame: &[u8]) -> bool {
+        PacketHeader::parse(frame)
+            .ok()
+            .and_then(|header| ParsedOptions::extract(frame, header.options_range.clone()).ok())
+            .is_some_and(|options| options.route_retry)
     }
 
     /// Expire or retry pending ACK state based on `now_ms`.
@@ -3534,8 +3577,13 @@ impl<
                     {
                         if pending.expects_ack() {
                             let revision = core::mem::take(&mut pending.cached_route_revision);
-                            self.peer_registry
-                                .fail_route(&pending.peer, revision, now_ms);
+                            if self
+                                .peer_registry
+                                .fail_route(&pending.peer, revision, now_ms)
+                                == RouteFailure::Held
+                            {
+                                pending.held_route_missed = true;
+                            }
                         }
                         if !pending.expects_ack() {
                             actions

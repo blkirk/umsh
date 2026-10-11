@@ -7,8 +7,8 @@ use umsh_sync::AsyncRefCell;
 
 use crate::{
     AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
-    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_FRAME, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_TX,
-    Platform,
+    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_FRAME, DEFAULT_IDENTITIES, DEFAULT_PEERS,
+    DEFAULT_ROUTE_HOLDS, DEFAULT_TX, Platform,
     coordinator::{CounterPersistenceError, LocalIdentityId, Mac, MacError, SendError},
     peers::PeerId,
     send::{SendOptions, SendReceipt},
@@ -32,8 +32,9 @@ pub struct MacHandle<
     const DUP: usize = DEFAULT_DUP,
     const RN: usize = DEFAULT_CHANNEL_REPLAY,
     const HN: usize = DEFAULT_CHANNEL_HINT_REPLAY,
+    const HOLDS: usize = DEFAULT_ROUTE_HOLDS,
 > {
-    mac: &'a AsyncRefCell<Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>>,
+    mac: &'a AsyncRefCell<Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>>,
 }
 
 impl<
@@ -48,7 +49,8 @@ impl<
     const DUP: usize,
     const RN: usize,
     const HN: usize,
-> Copy for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>
+    const HOLDS: usize,
+> Copy for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
 }
 
@@ -64,7 +66,8 @@ impl<
     const DUP: usize,
     const RN: usize,
     const HN: usize,
-> Clone for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>
+    const HOLDS: usize,
+> Clone for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     fn clone(&self) -> Self {
         *self
@@ -83,11 +86,14 @@ impl<
     const DUP: usize,
     const RN: usize,
     const HN: usize,
-> MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>
+    const HOLDS: usize,
+> MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     /// Creates a cloneable handle backed by shared coordinator state.
     pub fn new(
-        mac: &'a AsyncRefCell<Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>>,
+        mac: &'a AsyncRefCell<
+            Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>,
+        >,
     ) -> Self {
         Self { mac }
     }
@@ -596,6 +602,65 @@ impl<
         };
         mac.peer_registry_mut().update_route(peer_id, route);
         true
+    }
+
+    /// Install `route` for `peer` and hold it for `hold_ms`, returning
+    /// whether it took: the peer must be registered, and the MAC must have
+    /// room for another hold (its `HOLDS` parameter).
+    ///
+    /// While held, no learned path replaces the route and no missed
+    /// acknowledgment retires it, though a send that misses still falls back
+    /// to a flood. What that flood teaches is kept as a candidate (see
+    /// [`Self::peer_route_status`] and [`Self::adopt_learned_peer_route`]).
+    /// When the hold ends the route stays as an ordinary one. Clearing the
+    /// route ends the hold.
+    pub async fn hold_peer_route(
+        &self,
+        peer: &umsh_core::PublicKey,
+        route: crate::CachedRoute,
+        hold_ms: u64,
+    ) -> bool {
+        let mut mac = self.mac.borrow_mut().await;
+        let now_ms = mac.clock().now_ms();
+        let Some((peer_id, _)) = mac.peer_registry().lookup_by_key(peer) else {
+            return false;
+        };
+        mac.peer_registry_mut()
+            .hold_route(peer_id, route, now_ms.saturating_add(hold_ms), now_ms)
+    }
+
+    /// End the hold on `peer`'s route by switching to the best path learned
+    /// while it was held. `false` when nothing is held or nothing was learned.
+    pub async fn adopt_learned_peer_route(&self, peer: &umsh_core::PublicKey) -> bool {
+        let mut mac = self.mac.borrow_mut().await;
+        let now_ms = mac.clock().now_ms();
+        let Some((peer_id, _)) = mac.peer_registry().lookup_by_key(peer) else {
+            return false;
+        };
+        mac.peer_registry_mut().adopt_candidate(peer_id, now_ms)
+    }
+
+    /// The route cached for `peer` with what is known about it: its hold, if
+    /// any, and how long ago an acknowledgment last vouched for it. `None`
+    /// for an unregistered peer.
+    pub async fn peer_route_status(
+        &self,
+        peer: &umsh_core::PublicKey,
+    ) -> Option<crate::PeerRouteStatus> {
+        let mac = self.mac.borrow().await;
+        let now_ms = mac.clock().now_ms();
+        let (peer_id, info) = mac.peer_registry().lookup_by_key(peer)?;
+        let hold = mac.peer_registry().route_hold(peer_id, now_ms);
+        Some(crate::PeerRouteStatus {
+            route: info.route.clone(),
+            hold_remaining_ms: hold.map(|hold| hold.until_ms - now_ms),
+            fallback_acks: hold.map_or(0, |hold| hold.fallback_acks),
+            candidate: hold
+                .and_then(|hold| hold.candidate.as_ref().map(|(route, _)| route.clone())),
+            confirmed_age_ms: info
+                .route_confirmed_ms()
+                .map(|at| now_ms.saturating_sub(at)),
+        })
     }
 
     /// Invoke `f` for each peer with an established crypto state for `id`,

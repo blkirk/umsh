@@ -549,6 +549,9 @@ struct ChatMessageBubble: View, @MainActor Equatable {
             // A recovery from failure is noteworthy on its own row, unlike a
             // routine "Delivered" which only annotates the newest message.
             if message.isDeliveredLate { return "Delivered Late" }
+            // The route missed and the flood found the way: worth seeing on
+            // every row it happened to, since it says the path is failing.
+            if message.isDeliveredFlooded { return "Delivered · Flooded" }
             return isMostRecentOutbound ? "Delivered" : nil
         case "sent":
             // Still waiting on the ack: not settled, so every row says so,

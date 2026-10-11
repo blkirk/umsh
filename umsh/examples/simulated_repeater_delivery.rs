@@ -627,7 +627,7 @@ fn summarize_mac_event(event: &MacEventRef<'_>) -> String {
             packet.rssi(),
             packet.snr(),
         ),
-        MacEventRef::AckReceived { peer, receipt } => {
+        MacEventRef::AckReceived { peer, receipt, .. } => {
             format!("ack-received peer={} receipt={receipt:?}", full_key(peer))
         }
         MacEventRef::AckTimeout { peer, receipt } => {

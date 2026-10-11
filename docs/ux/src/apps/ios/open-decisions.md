@@ -104,6 +104,16 @@ route-cache expiry, and channel hop counts. The UI can hide mechanics only after
 the application has a reliable policy. Expert overrides need costs and bounds,
 not unexplained numeric fields.
 
+## Manual path override (resolved)
+
+Resolved: the [switch prompt](product-structure.md#manual-path) fires after
+two consecutive misses on the manual path, each with an acknowledged, traced
+flood fallback. A single miss is enough when the phone has moved
+significantly since the path was saved. Holds are bounded: 30 minutes, 1 hour,
+4 hours, 12 hours, or 1 day, with no indefinite option. The override belongs to
+the phone's routing layer alone; a companion radio sending on its own behalf
+does not honor it.
+
 ## Public and emergency channel presence
 
 Decide whether `public` and `EMERGENCY` are present but not joined, joined by

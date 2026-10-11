@@ -316,6 +316,171 @@ this example. Its two-byte router hint would be **Router hint HJ\***.
 Discovery is a bounded listening session. **Announce my identity** opens a
 separate metadata-and-scope preview before transmission; it is not automatic.
 
+## D3. Peer detail: manual path held
+
+```text
+┌─────────────────────────────────────┐
+│ ‹ Peers            [⌁ ◫]            │
+│ Ridge Medic                         │
+│                                     │
+│ ROUTE                               │
+│ Next send          Manual · 4 hops  │
+│ Held until                3:40 PM   │
+│ Last ack                2 min ago   │
+│ ▯ This phone                        │
+│ ▲ Spencer Butte                     │
+│   Router hint BtC                   │
+│ ▲ Skinner Ridge                     │
+│   Router hint 55*                   │
+│ ⬡ Router hint 7N*                   │
+│   Entered by hand                   │
+│ ● Ridge Medic                       │
+│ [Edit Path…]                        │
+│ [Clear Manual Path]                 │
+│ Learned paths can replace it once   │
+│ the hold ends.                      │
+│                                     │
+│ ACTIONS                             │
+│ [Ping]                              │
+│ [Fetch Identity]                    │
+└─────────────────────────────────────┘
+```
+
+The Route section of Peer Detail, scrolled into view. Hop glyphs are the
+avatar shapes: `▲` a repeater, `●` a chat peer, `⬡` gray for a hop known only
+by its hint. The summary row at the top of Peer Detail carries a **Manual**
+badge beside the hop count. With no manual path held, the section shows the
+learned route as it does today and offers **Set Manual Path…** in place of
+the two buttons.
+
+## D4. Manual path editor
+
+```text
+┌─────────────────────────────────────┐
+│ [Cancel]    Manual Path     [Save]  │
+│ PATH TO RIDGE MEDIC        4 hops   │
+│   ▯ This phone                      │
+│ ⊖ ▲ Spencer Butte               ≡   │
+│     Router hint BtC · −84 dBm       │
+│ ⊖ ▲ Skinner Ridge               ≡   │
+│     Router hint 55* · −96 dBm       │
+│ ⊖ ⬡ Router hint 7N*             ≡   │
+│     Entered by hand · 5EBD          │
+│ ⊕   [Add Hop…]                      │
+│   ● Ridge Medic                     │
+│                                     │
+│ TEST                                │
+│ [Ping Along Path]                   │
+│ ✓ Replied in 3.8 s                  │
+│   −101 dBm, 1.5 dB at Ridge Medic   │
+│                                     │
+│ HOLD                                │
+│ Hold for               [1 Hour ⇕]   │
+│ Until                     3:40 PM   │
+│ Then a learned path can replace it. │
+└─────────────────────────────────────┘
+```
+
+A modal sheet in permanent edit mode: `⊖` removes a hop, `≡` reorders it, and
+the endpoints are fixed. A new path starts from the current learned route.
+**Ping Along Path** sends a traced ping down the unsaved draft. **Hold for**
+is a menu: 30 Minutes, 1 Hour (the default), 4 Hours, 12 Hours, 1 Day.
+
+## D5. Add hop
+
+```text
+┌─────────────────────────────────────┐
+│ [Cancel]    Add Hop 3       [Done]  │
+│ (This phone › Spencer Butte ›       │
+│  Skinner Ridge › ?)                 │
+│ [ Name or router hint           ]   │
+│ [Neighbors] [Known Repeaters]       │
+│                                     │
+│ HEARD BY SKINNER RIDGE  [Refresh]   │
+│ ▲ Mt. Pisgah                    ›   │
+│   −88 dBm, 7.5 dB · 4 min ago       │
+│ ⬡ Router hint 8C*               ›   │
+│   −95 dBm, 3.0 dB · 20 min ago      │
+│ ▲ Coburg Hills (faded)          ›   │
+│   −104 dBm, −3.5 dB · yesterday     │
+│ ▲ Spencer Butte           In path   │
+│ [Load More]                4 of 9   │
+│ Read 12 min ago through Spencer     │
+│ Butte.                              │
+│                                     │
+│ [Enter Router Hint…]                │
+└─────────────────────────────────────┘
+```
+
+Choosing a row appends it and advances to the next hop with that node's
+neighbors; **Done** returns to the editor. Signal figures are the previous
+hop's reception of each neighbor. The footer names the path the listing was
+asked through.
+
+## D6. Router hint entry
+
+```text
+┌─────────────────────────────────────┐
+│ ‹ Hop 3      Router Hint     [Add]  │
+│ [Base58 Prefix] [Hex]               │
+│ [ 7Nq4                       ⓧ ]    │
+│ The first 4 or more characters of   │
+│ the address.                        │
+│                                     │
+│ HOP                                 │
+│ Router hint                   7N*   │
+│ Hex                          5EBD   │
+│ Known node                   None   │
+└─────────────────────────────────────┘
+```
+
+When a Base58 prefix spans two router hints, the result section lists both
+and **Add** waits for a choice:
+
+```text
+┌─────────────────────────────────────┐
+│ ‹ Hop 3      Router Hint      Add   │
+│ [Base58 Prefix] [Hex]               │
+│ [ H12n                       ⓧ ]    │
+│ The first 4 or more characters of   │
+│ the address.                        │
+│                                     │
+│ TWO HINTS FIT                       │
+│ [▲ Fern Ridge                    ]  │
+│ [  Router hint H1* · EDBC        ]  │
+│ [⬡ Unknown node                  ]  │
+│ [  Router hint H1* · EDBD        ]  │
+│ Type another character, or pick     │
+│ one.                                │
+└─────────────────────────────────────┘
+```
+
+Both examples are real: `7Nq4` fixes the hint `5EBD`, and `H12n` straddles
+`EDBC` and `EDBD`, which both render as `H1*`.
+
+## D7. Learned path beat the manual one
+
+```text
+┌─────────────────────────────────────┐
+│ Switch to the learned path?         │
+│                                     │
+│ MANUAL                     4 hops   │
+│ Spencer Butte › Skinner Ridge ›     │
+│ 7N*                                 │
+│ ✕ No ack on the last 3 sends        │
+│                                     │
+│ LEARNED                    3 hops   │
+│ Spencer Butte › Mt. Pisgah          │
+│ ✓ Acked 3 of 3                      │
+│                                     │
+│ [Use Learned Path]                  │
+│ [Keep Manual Path]                  │
+└─────────────────────────────────────┘
+```
+
+A half-height sheet over the conversation, whose sends read **Delivered ·
+flooded** while the manual path is failing.
+
 ## E. Scanned private channel preview
 
 ```text
@@ -722,6 +887,7 @@ Conversations
 
 Peers
   List <-> Map -> Node detail -> Messages / Data / Room / Management
+                              -> Manual path -> Add hop -> Router hint
 
 Channels
   Joined / Suggested / On the radio only

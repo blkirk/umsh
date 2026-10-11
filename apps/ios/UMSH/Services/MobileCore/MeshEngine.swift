@@ -20,6 +20,30 @@ struct MeshRouterHint: Hashable, Sendable {
     }
 }
 
+/// How a person wrote a router hint by hand.
+enum RouterHintFormat: Hashable, Sendable, CaseIterable {
+    /// The first four or more characters of the node's address.
+    case base58Prefix
+    /// The hint itself, as four hexadecimal digits.
+    case hex
+}
+
+/// What typed text says about a router hint.
+struct RouterHintInput: Equatable, Sendable {
+    enum Problem: Equatable, Sendable {
+        case tooShort
+        case tooLong
+        case invalidCharacter
+        case outOfRange
+    }
+
+    /// One hint, or two when a prefix straddles a hint boundary.
+    let candidates: [MeshRouterHint]
+    let problem: Problem?
+
+    static let empty = RouterHintInput(candidates: [], problem: .tooShort)
+}
+
 struct MeshPublicIdentity: Hashable, Sendable {
     let canonicalAddress: String
     let hint: MeshNodeHint
@@ -135,6 +159,8 @@ enum MeshEngineError: Error, Equatable, Sendable {
 protocol MeshEngine: Actor {
     func renderNodeHint(_ bytes: Data) throws -> MeshNodeHint
     func renderRouterHint(_ bytes: Data) throws -> MeshRouterHint
+    /// Read a router hint typed by a person.
+    func parseRouterHintInput(_ text: String, format: RouterHintFormat) -> RouterHintInput
     func inspectPublicIdentity(_ address: String) throws -> MeshPublicIdentity
     func inspectNodeURI(_ uri: String) throws -> MeshNodeURIPreview
     func inspectPeerIdentity(_ input: String) throws -> MeshNodeURIPreview

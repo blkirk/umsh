@@ -190,6 +190,26 @@ pub trait MacBackend: Clone {
         let _ = (peer, route);
         false
     }
+
+    /// Install `route` for `peer` and hold it for `hold_ms` against learning
+    /// and failure, returning whether `peer` was registered to receive it.
+    async fn hold_peer_route(&self, peer: &PublicKey, route: CachedRoute, hold_ms: u64) -> bool {
+        let _ = (peer, route, hold_ms);
+        false
+    }
+
+    /// End the hold on `peer`'s route by switching to the best path learned
+    /// while it was held.
+    async fn adopt_learned_peer_route(&self, peer: &PublicKey) -> bool {
+        let _ = peer;
+        false
+    }
+
+    /// The route cached for `peer` with its hold and confirmation state.
+    async fn peer_route_status(&self, peer: &PublicKey) -> Option<umsh_mac::PeerRouteStatus> {
+        let _ = peer;
+        None
+    }
 }
 
 /// Normalized wrapper around MAC-backend failures.
@@ -217,7 +237,9 @@ impl<
     const DUP: usize,
     const RN: usize,
     const HN: usize,
-> MacBackend for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN>
+    const HOLDS: usize,
+> MacBackend
+    for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     type SendError = SendError;
     type CapacityError = CapacityError;
@@ -394,5 +416,17 @@ impl<
 
     async fn restore_peer_route(&self, peer: &PublicKey, route: CachedRoute) -> bool {
         self.restore_peer_route(peer, route).await
+    }
+
+    async fn hold_peer_route(&self, peer: &PublicKey, route: CachedRoute, hold_ms: u64) -> bool {
+        self.hold_peer_route(peer, route, hold_ms).await
+    }
+
+    async fn adopt_learned_peer_route(&self, peer: &PublicKey) -> bool {
+        self.adopt_learned_peer_route(peer).await
+    }
+
+    async fn peer_route_status(&self, peer: &PublicKey) -> Option<umsh_mac::PeerRouteStatus> {
+        self.peer_route_status(peer).await
     }
 }

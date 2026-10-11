@@ -96,6 +96,19 @@ used again for the next send and stays until a newer frame from the peer
 overwrites it—which, if the peer's replies are dying on that very route,
 may be never.
 
+**Held routes.** An application may hold a route for a peer until a
+deadline (`PeerRegistry::hold_route`). Holds sit beside the peer table,
+bounded by the MAC's `HOLDS` parameter, which defaults to zero; the phone
+sets it for manual paths and devices hold nothing. While a route is held,
+no offer replaces it: the best path offered is kept as a candidate the
+application may adopt. A missed acknowledgment does not retire it. The
+Route Retry still floods, and an acknowledgment of that flood counts toward
+the hold's `fallback_acks`, which an acknowledgment on the held route
+resets. `MacEventRef::AckReceived` carries `via_route_retry` for every
+acknowledgment, held or not, so a host can tell a delivery that needed the
+flood. When the hold ends the route stays as an unscored one, and the next
+measured path replaces it.
+
 ### Signal quality
 
 Received RSSI and SNR reach three places: the repeater's forwarding

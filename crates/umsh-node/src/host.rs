@@ -183,7 +183,7 @@ impl<M: MacBackend> Host<M> {
                             );
                         }
                     }
-                    umsh_mac::MacEventRef::AckReceived { peer, receipt } => {
+                    umsh_mac::MacEventRef::AckReceived { peer, receipt, .. } => {
                         node.dispatch_ack_received(
                             peer,
                             crate::SendToken::new(identity_id, receipt),

@@ -24,6 +24,8 @@ actor FakeRadioConnection: RadioConnection {
     /// Lets a preview exercise reset: the canned route is reported once and
     /// then reads as forgotten, as a real one would.
     private var routeCleared = false
+    /// A manual route set through `holdPeerRoute`, by peer address.
+    private var heldRoutes: [String: (hints: [Data], until: Date)] = [:]
     /// Stands in for the phone MAC's channel table.
     /// What the app registered, by key, so a late-built session gets the
     /// same set—and the same ceilings—the app believes it registered.
@@ -422,12 +424,12 @@ actor FakeRadioConnection: RadioConnection {
         publish(updated)
     }
 
-    func ping(peerAddress: String) async throws -> RadioPingResult {
+    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult {
         .reply(
             RadioPingReply(
                 roundTripMilliseconds: 42,
-                hopCount: 2,
-                routeHints: [Data([0x12, 0x34])],
+                hopCount: UInt8(clamping: (route.isEmpty ? 1 : route.count) + 1),
+                routeHints: route.isEmpty ? [Data([0x12, 0x34])] : route,
                 rssiDBm: -72,
                 signalToNoiseCentibels: 650,
                 linkQuality: 180
@@ -441,7 +443,8 @@ actor FakeRadioConnection: RadioConnection {
     /// at the top, as the real responder does.
     func requestPeerRepeaters(
         peerAddress: String,
-        cursor: Data?
+        cursor: Data?,
+        route: [Data]
     ) async throws -> MobileMeshPeerRepeatersPageRecord {
         try await answerAsIfOverTheAir()
         if cursor == FakePeerRepeatersListing.secondPageCursor {
@@ -882,8 +885,35 @@ actor FakeRadioConnection: RadioConnection {
 
     /// Mirrors the fake ping: one router on the way to the peer, so the route
     /// section has something to render in previews.
+    ///
+    /// A held route reads as if its last two sends missed and their floods
+    /// came back over the canned router, so staging can reach the prompt to
+    /// switch paths.
     func peerRoute(peerAddress: String) async throws -> RadioPeerRoute {
-        routeCleared
+        if let held = heldRoutes[peerAddress] {
+            let remaining = held.until.timeIntervalSinceNow
+            if remaining > 0 {
+                return RadioPeerRoute(
+                    kind: .source,
+                    hints: held.hints,
+                    hopCount: UInt8(clamping: held.hints.count + 1),
+                    floodHops: nil,
+                    floodRegions: [],
+                    holdRemainingMilliseconds: UInt64(remaining * 1000),
+                    fallbackAcks: 2,
+                    confirmedAgeMilliseconds: 120_000,
+                    candidate: .init(kind: .source, hints: [Data([0x12, 0x34])], hopCount: 2)
+                )
+            }
+            return RadioPeerRoute(
+                kind: .source,
+                hints: held.hints,
+                hopCount: UInt8(clamping: held.hints.count + 1),
+                floodHops: nil,
+                floodRegions: []
+            )
+        }
+        return routeCleared
             ? .unknown
             : RadioPeerRoute(
                 kind: .source,
@@ -895,8 +925,29 @@ actor FakeRadioConnection: RadioConnection {
     }
 
     func clearPeerRoute(peerAddress: String) async throws -> Bool {
+        if heldRoutes.removeValue(forKey: peerAddress) != nil {
+            routeCleared = true
+            return true
+        }
         defer { routeCleared = true }
         return !routeCleared
+    }
+
+    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool {
+        guard !hints.isEmpty, hints.count <= 15, hints.allSatisfy({ $0.count == 2 }) else {
+            return false
+        }
+        heldRoutes[peerAddress] = (
+            hints, Date().addingTimeInterval(Double(holdMilliseconds) / 1000)
+        )
+        return true
+    }
+
+    func adoptLearnedPeerRoute(peerAddress: String) async throws -> Bool {
+        guard let held = heldRoutes[peerAddress], held.until > Date() else { return false }
+        heldRoutes[peerAddress] = nil
+        routeCleared = false
+        return true
     }
 
     func prepareChat(

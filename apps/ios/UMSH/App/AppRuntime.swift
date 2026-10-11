@@ -447,6 +447,22 @@ final class AppRuntime {
             identifyRepeater: identifyRepeater(_:precededBy:),
             cachedPeerRepeaters: cachedPeerRepeaters,
             loadPeerRepeaters: loadPeerRepeaters(_:cursor:),
+            loadPeerRepeatersAlong: { peer, cursor, route in
+                await self.loadPeerRepeaters(peer, cursor: cursor, route: route)
+            },
+            radioIdentityPeer: radioSnapshot.deviceIdentity.flatMap { identity in
+                peers.first { $0.identity.canonicalAddress == identity.canonicalAddress }
+            },
+            setManualPath: setManualPath,
+            clearManualPath: clearManualPath,
+            adoptLearnedPath: adoptLearnedPath,
+            keepManualPath: keepManualPath,
+            learnedPathOffer: learnedPathOffer,
+            pingAlongPath: { peer, route in await self.pingPeer(peer, along: route) },
+            parseRouterHint: { text, format in
+                await self.meshEngine.parseRouterHintInput(text, format: format)
+            },
+            renderRouterHint: { bytes in try? await self.meshEngine.renderRouterHint(bytes) },
             setFavorite: setPeerFavorite,
             setNotifyWhenHeard: setPeerNotifyWhenHeard,
             setConversationNotifications: setConversationNotifications,
@@ -838,6 +854,8 @@ final class AppRuntime {
         await prepareApplicationState()
         try Task.checkCancellation()
         await prepareChatState()
+        try Task.checkCancellation()
+        await reinstallManualPaths()
         try Task.checkCancellation()
         await loadAdvertisedName()
         try Task.checkCancellation()
@@ -3062,6 +3080,12 @@ final class AppRuntime {
     }
 
     private func pingPeer(_ peer: PeerSummary) async -> PeerPingResult {
+        await pingPeer(peer, along: [])
+    }
+
+    /// Ping `peer`, down `route` when it names any repeaters: a test of a
+    /// path that installs nothing.
+    private func pingPeer(_ peer: PeerSummary, along route: [MeshRouterHint]) async -> PeerPingResult {
         guard radioSnapshot.linkState == .attached || radioSnapshot.linkState == .ready else {
             return .unavailable(reason: "Connect a configured companion radio to ping this peer.")
         }
@@ -3070,7 +3094,8 @@ final class AppRuntime {
         }
         do {
             switch try await radioConnection.ping(
-                peerAddress: peer.identity.canonicalAddress
+                peerAddress: peer.identity.canonicalAddress,
+                route: route.map(\.bytes)
             ) {
             case let .reply(reply):
                 // A pong is evidence we heard from the peer; a timeout is not.
@@ -3101,19 +3126,157 @@ final class AppRuntime {
         guard let route = try? await radioConnection.peerRoute(
             peerAddress: peer.identity.canonicalAddress
         ) else { return .unavailable }
-        let kind: PeerRoute.Kind = switch route.kind {
-        case .unknown: .unknown
-        case .direct: .direct
-        case .source: .source
-        case .flood: .flood
+        let kind = Self.routeKind(route.kind)
+        var candidate: PeerRoute.Candidate?
+        if let learned = route.candidate {
+            candidate = PeerRoute.Candidate(
+                kind: Self.routeKind(learned.kind),
+                hints: await renderRouterHints(learned.hints),
+                hopCount: learned.hopCount
+            )
         }
+        let now = Date()
         return PeerRoute(
             kind: kind,
             hints: await renderRouterHints(route.hints),
             hopCount: route.hopCount,
             floodHops: route.floodHops,
-            floodRegions: route.floodRegions
+            floodRegions: route.floodRegions,
+            holdUntil: route.holdRemainingMilliseconds.map {
+                now.addingTimeInterval(Double($0) / 1000)
+            },
+            fallbackAcks: route.fallbackAcks,
+            lastAcknowledged: route.confirmedAgeMilliseconds.map {
+                now.addingTimeInterval(-Double($0) / 1000)
+            },
+            candidate: candidate
         )
+    }
+
+    private static func routeKind(_ kind: MobileMeshRouteKind) -> PeerRoute.Kind {
+        switch kind {
+        case .unknown: .unknown
+        case .direct: .direct
+        case .source: .source
+        case .flood: .flood
+        }
+    }
+
+    // MARK: - Manual paths
+
+    /// Hold `route` for `peer`, then keep it so the next session can hold it
+    /// again: the phone's routing remembers routes only while it runs.
+    ///
+    /// Notes where the phone is, when it already may know, as the point a
+    /// later move is measured from. Saving a path never asks for location.
+    private func setManualPath(
+        _ peer: PeerSummary,
+        route: [MeshRouterHint],
+        hold: ManualPathHold
+    ) async -> Bool {
+        guard !route.isEmpty else { return false }
+        let holdUntil = Date().addingTimeInterval(hold.duration)
+        let held = (try? await radioConnection.holdPeerRoute(
+            peerAddress: peer.identity.canonicalAddress,
+            hints: route.map(\.bytes),
+            holdMilliseconds: UInt64(hold.duration * 1000)
+        )) ?? false
+        guard held else { return false }
+        let position = await locationService.readOnceIfAuthorized()
+        if let applicationStore, let localIdentity {
+            try? await applicationStore.saveManualRoute(
+                ownerIdentityID: localIdentity.id,
+                publicAddress: peer.identity.canonicalAddress,
+                hints: route.map(\.bytes),
+                holdUntil: holdUntil,
+                latitude: position?.coordinate.latitude,
+                longitude: position?.coordinate.longitude,
+                accuracy: position?.horizontalAccuracy
+            )
+        }
+        return true
+    }
+
+    /// Drop a held path and what the phone kept about it.
+    private func clearManualPath(_ peer: PeerSummary) async -> Bool {
+        await forgetManualPath(peer)
+        return await clearPeerRoute(peer)
+    }
+
+    /// Switch a held path for the one learned while it was held.
+    private func adoptLearnedPath(_ peer: PeerSummary) async -> Bool {
+        let adopted = (try? await radioConnection.adoptLearnedPeerRoute(
+            peerAddress: peer.identity.canonicalAddress
+        )) ?? false
+        if adopted { await forgetManualPath(peer) }
+        return adopted
+    }
+
+    private func keepManualPath(_ peer: PeerSummary) async {
+        guard let applicationStore, let localIdentity else { return }
+        try? await applicationStore.settleManualRoutePrompt(
+            ownerIdentityID: localIdentity.id,
+            publicAddress: peer.identity.canonicalAddress
+        )
+    }
+
+    /// The held route, when its learned rival is due to be offered: the
+    /// rule is `ManualPathRecord.shouldOfferLearnedPath`, and the phone's
+    /// position is read only where location access was already granted.
+    private func learnedPathOffer(_ peer: PeerSummary) async -> PeerRoute? {
+        guard let record = await manualPathRecord(peer), !record.promptSettled else { return nil }
+        let route = await peerRoute(peer)
+        guard route.isHeld, route.candidate != nil, route.fallbackAcks > 0 else { return nil }
+        var moved = false
+        if route.fallbackAcks < 2, let fix = await locationService.readOnceIfAuthorized() {
+            moved = record.hasMoved(
+                latitude: fix.coordinate.latitude,
+                longitude: fix.coordinate.longitude,
+                accuracy: fix.horizontalAccuracy
+            )
+        }
+        return record.shouldOfferLearnedPath(route: route, moved: moved) ? route : nil
+    }
+
+    private func manualPathRecord(_ peer: PeerSummary) async -> ManualPathRecord? {
+        guard let applicationStore, let localIdentity,
+              let stored = try? await applicationStore.manualRoute(
+                  ownerIdentityID: localIdentity.id,
+                  publicAddress: peer.identity.canonicalAddress
+              )
+        else { return nil }
+        return ManualPathRecord(
+            holdUntil: stored.holdUntil,
+            savedLatitude: stored.savedLatitude,
+            savedLongitude: stored.savedLongitude,
+            savedAccuracy: stored.savedAccuracy,
+            promptSettled: stored.promptSettled
+        )
+    }
+
+    private func forgetManualPath(_ peer: PeerSummary) async {
+        guard let applicationStore, let localIdentity else { return }
+        try? await applicationStore.clearManualRoute(
+            ownerIdentityID: localIdentity.id,
+            publicAddress: peer.identity.canonicalAddress
+        )
+    }
+
+    /// Hold again every path still within its hold, for what is left of it.
+    /// A new mesh session starts with no routes at all.
+    private func reinstallManualPaths() async {
+        guard let applicationStore, let localIdentity,
+              let routes = try? await applicationStore.manualRoutes(ownerIdentityID: localIdentity.id)
+        else { return }
+        for route in routes {
+            let remaining = route.holdUntil.timeIntervalSinceNow
+            guard remaining > 0 else { continue }
+            _ = try? await radioConnection.holdPeerRoute(
+                peerAddress: route.publicAddress,
+                hints: route.hints,
+                holdMilliseconds: UInt64(remaining * 1000)
+            )
+        }
     }
 
     /// Discard a peer's learned route. Returns whether one was held, so the
@@ -3163,6 +3326,15 @@ final class AppRuntime {
         _ peer: PeerSummary,
         cursor: Data?
     ) async -> PeerRepeatersPageResult {
+        await loadPeerRepeaters(peer, cursor: cursor, route: [])
+    }
+
+    /// The same, asked down `route` (send order) when it names any repeaters.
+    private func loadPeerRepeaters(
+        _ peer: PeerSummary,
+        cursor: Data?,
+        route: [MeshRouterHint]
+    ) async -> PeerRepeatersPageResult {
         guard radioSnapshot.linkState == .attached || radioSnapshot.linkState == .ready else {
             return .unavailable(
                 reason: "Connect a configured companion radio to ask this repeater."
@@ -3177,7 +3349,8 @@ final class AppRuntime {
         do {
             page = try await radioConnection.requestPeerRepeaters(
                 peerAddress: peer.identity.canonicalAddress,
-                cursor: cursor
+                cursor: cursor,
+                route: route.map(\.bytes)
             )
         } catch RemoteManagementError.noAnswer {
             return .noAnswer
@@ -3967,6 +4140,7 @@ final class AppRuntime {
             isUnavailable: stored.isUnavailable,
             isReceivedLate: stored.receivedLate,
             isDeliveredLate: stored.deliveredLate,
+            isDeliveredFlooded: stored.deliveredFlooded,
             originalBody: stored.originalBody,
             createdAtMilliseconds: stored.createdAtMilliseconds,
             senderAddress: stored.senderAddress,

@@ -368,6 +368,9 @@ struct ChatMessageSummary: Identifiable, Hashable, Sendable {
     /// Outbound message delivered on a resend after a transport failure—
     /// annotated "Delivered Late".
     var isDeliveredLate: Bool = false
+    /// Outbound message whose acknowledgment came back through the flood
+    /// that followed a missed route—annotated "Delivered · Flooded".
+    var isDeliveredFlooded: Bool = false
     /// Pre-edit text of the sender's own edited message, available for review
     /// via the bubble's context menu. The wire archive never resends it.
     var originalBody: String? = nil
@@ -615,6 +618,26 @@ struct PeerRoute: Equatable, Sendable {
     let floodHops: UInt8?
     /// Two-octet region codes learned alongside a flood route.
     let floodRegions: [Data]
+    /// When the hold on a manual route ends; `nil` when the route is not
+    /// held. While held, nothing the mesh teaches replaces it.
+    var holdUntil: Date? = nil
+    /// Consecutive sends on the held route that missed and were then
+    /// acknowledged through the flood fallback.
+    var fallbackAcks: UInt8 = 0
+    /// When an acknowledgment last came back for a send on this route.
+    var lastAcknowledged: Date? = nil
+    /// The best path learned while the route was held.
+    var candidate: Candidate? = nil
+
+    /// A path learned while a manual route was held.
+    struct Candidate: Equatable, Sendable {
+        let kind: Kind
+        /// Repeaters it names, in send order.
+        let hints: [MeshRouterHint]
+        let hopCount: UInt8?
+    }
+
+    var isHeld: Bool { holdUntil != nil }
 
     static let unknown = PeerRoute(
         kind: .unknown, hints: [], hopCount: nil, floodHops: nil, floodRegions: []
@@ -627,6 +650,39 @@ struct PeerRoute: Equatable, Sendable {
     /// empty trace a direct reply carried rather than a separate marker.
     var isDirect: Bool {
         kind == .direct || (kind == .source && hints.isEmpty)
+    }
+}
+
+/// How long a manual path is held before a learned path may replace it.
+enum ManualPathHold: CaseIterable, Identifiable, Hashable, Sendable {
+    case thirtyMinutes
+    case oneHour
+    case fourHours
+    case twelveHours
+    case oneDay
+
+    static let standard = ManualPathHold.oneHour
+
+    var id: Self { self }
+
+    var duration: TimeInterval {
+        switch self {
+        case .thirtyMinutes: 30 * 60
+        case .oneHour: 60 * 60
+        case .fourHours: 4 * 60 * 60
+        case .twelveHours: 12 * 60 * 60
+        case .oneDay: 24 * 60 * 60
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .thirtyMinutes: "30 Minutes"
+        case .oneHour: "1 Hour"
+        case .fourHours: "4 Hours"
+        case .twelveHours: "12 Hours"
+        case .oneDay: "1 Day"
+        }
     }
 }
 
@@ -878,6 +934,31 @@ struct PeerActions {
     /// cursor on its own: every page is a tap, because every page costs the
     /// mesh airtime.
     var loadPeerRepeaters: ((PeerSummary, Data?) async -> PeerRepeatersPageResult)? = nil
+    /// The same ask, sent down an explicit path in send order rather than
+    /// along whatever route this phone holds for the repeater.
+    var loadPeerRepeatersAlong: ((PeerSummary, Data?, [MeshRouterHint]) async -> PeerRepeatersPageResult)? = nil
+    /// The companion radio's own node, which answers for the repeaters this
+    /// phone can reach first. `nil` when no radio has a node identity.
+    var radioIdentityPeer: PeerSummary? = nil
+    /// Hold a path for the node until the hold ends, reporting whether the
+    /// phone's routing took it.
+    var setManualPath: ((PeerSummary, [MeshRouterHint], ManualPathHold) async -> Bool)? = nil
+    /// Drop a held path. The node goes back to what the mesh teaches.
+    var clearManualPath: ((PeerSummary) async -> Bool)? = nil
+    /// Replace a held path with the one learned while it was held.
+    var adoptLearnedPath: ((PeerSummary) async -> Bool)? = nil
+    /// Decline the offer to replace a held path; it is not made again for the
+    /// same path.
+    var keepManualPath: ((PeerSummary) async -> Void)? = nil
+    /// The held route, when it is time to offer the path learned while it
+    /// was held instead. `nil` otherwise.
+    var learnedPathOffer: ((PeerSummary) async -> PeerRoute?)? = nil
+    /// Ping the node down an explicit path without installing it.
+    var pingAlongPath: ((PeerSummary, [MeshRouterHint]) async -> PeerPingResult)? = nil
+    /// Read a router hint typed by a person.
+    var parseRouterHint: ((String, RouterHintFormat) async -> RouterHintInput)? = nil
+    /// Render two key bytes as a router hint.
+    var renderRouterHint: ((Data) async -> MeshRouterHint?)? = nil
     /// Mark or unmark the node as a favorite. Saved nodes only.
     var setFavorite: ((PeerSummary, Bool) async -> Bool)? = nil
     /// Arm or disarm the one-shot watch on the node: notify once, the next
@@ -908,6 +989,47 @@ struct PeerActions {
     /// No app services wired up—used by previews and by any sheet built
     /// before the mesh session exists.
     @MainActor static let unavailable = PeerActions()
+}
+
+/// What the phone keeps about a path it holds for one node, beyond the route
+/// itself.
+struct ManualPathRecord: Equatable, Sendable {
+    let holdUntil: Date
+    /// Where the phone stood when the path was saved, when it knew.
+    let savedLatitude: Double?
+    let savedLongitude: Double?
+    let savedAccuracy: Double?
+    /// The offer to switch to a learned path was declined.
+    let promptSettled: Bool
+
+    /// How far the phone must move from where the path was saved before one
+    /// flooded delivery is enough to offer the learned path.
+    static let movedMeters: Double = 200
+    /// Fixes vaguer than this say nothing about a move of `movedMeters`.
+    static let usableAccuracyMeters: Double = 100
+
+    /// Whether the phone at `latitude`/`longitude` has moved away from where
+    /// the path was saved. Never, when either fix is missing or too vague.
+    func hasMoved(latitude: Double, longitude: Double, accuracy: Double) -> Bool {
+        guard let savedLatitude, let savedLongitude,
+              let savedAccuracy, savedAccuracy >= 0,
+              savedAccuracy <= Self.usableAccuracyMeters,
+              accuracy >= 0, accuracy <= Self.usableAccuracyMeters
+        else { return false }
+        return LocationPresentation.distanceMeters(
+            fromLatitude: savedLatitude,
+            longitude: savedLongitude,
+            toLatitude: latitude,
+            longitude: longitude
+        ) >= Self.movedMeters
+    }
+
+    /// Whether to offer the learned path, given the route as the phone's
+    /// routing reports it and whether the phone has moved.
+    func shouldOfferLearnedPath(route: PeerRoute, moved: Bool) -> Bool {
+        guard !promptSettled, route.isHeld, route.candidate != nil else { return false }
+        return route.fallbackAcks >= 2 || (moved && route.fallbackAcks >= 1)
+    }
 }
 
 enum PeerPingResult: Equatable, Sendable {

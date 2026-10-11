@@ -145,6 +145,21 @@ struct StoredPeerRepeaterListing: Equatable, Sendable {
     let asOf: Date
 }
 
+/// A path the person chose for one node, held until `holdUntil`.
+struct StoredManualRoute: Equatable, Sendable {
+    let publicAddress: String
+    /// Two-byte router hints, in send order.
+    let hints: [Data]
+    let holdUntil: Date
+    /// Where the phone stood when the path was saved, if it knew.
+    let savedLatitude: Double?
+    let savedLongitude: Double?
+    /// Horizontal accuracy of that fix, in meters.
+    let savedAccuracy: Double?
+    /// The offer to switch to a learned path was declined.
+    let promptSettled: Bool
+}
+
 /// A neighbor entry with the row of the router that reported it.
 struct StoredPeerRepeaterReport: Equatable, Sendable {
     let reporterNodeID: Int64
@@ -318,6 +333,9 @@ struct StoredChatMessage: Equatable, Sendable, Identifiable {
     /// message's keyset cursor. Ordering key only—`(sessionID, handle)`
     /// remains the durable identity.
     let rowID: Int64
+    /// An outbound message whose acknowledgment came back through the flood
+    /// that followed a missed route.
+    var deliveredFlooded: Bool = false
     /// Reactions about this message, at most one per sender, oldest first.
     /// Folded at read time from the emote rows that name it—they are
     /// messages in their own right, but never transcript rows.
@@ -476,7 +494,7 @@ actor SQLiteApplicationStore {
     /// store refuses to open any database above this constant, so a stale value
     /// lets the new schema apply once and then locks the user out of their own
     /// data on the next launch. ``migrate(_:)`` checks the two agree.
-    static let currentSchemaVersion: Int32 = 22
+    static let currentSchemaVersion: Int32 = 23
 
     nonisolated(unsafe) private let database: OpaquePointer
 
@@ -1606,6 +1624,149 @@ actor SQLiteApplicationStore {
         }
     }
 
+    // MARK: - Manual routes
+
+    private static let manualRouteColumns = """
+        n.public_address, r.hints, r.hold_until_ms, r.saved_latitude,
+        r.saved_longitude, r.saved_accuracy, r.prompt_settled
+        """
+
+    private static func manualRoute(_ statement: OpaquePointer) -> StoredManualRoute {
+        let packed = dataColumn(statement, at: 1)
+        let hints = stride(from: 0, to: packed.count - packed.count % 2, by: 2).map {
+            Data(packed[packed.startIndex + $0 ..< packed.startIndex + $0 + 2])
+        }
+        return StoredManualRoute(
+            publicAddress: stringColumn(statement, at: 0),
+            hints: hints,
+            holdUntil: Date(timeIntervalSince1970: Double(sqlite3_column_int64(statement, 2)) / 1000),
+            savedLatitude: optionalDoubleColumn(statement, at: 3),
+            savedLongitude: optionalDoubleColumn(statement, at: 4),
+            savedAccuracy: optionalDoubleColumn(statement, at: 5),
+            promptSettled: sqlite3_column_int(statement, 6) != 0
+        )
+    }
+
+    /// The path held for one node, or `nil` when none is held at `now`.
+    func manualRoute(
+        ownerIdentityID: String,
+        publicAddress: String,
+        now: Date = Date()
+    ) throws -> StoredManualRoute? {
+        let statement = try prepare(
+            """
+            SELECT \(Self.manualRouteColumns)
+            FROM node_manual_route r JOIN node n ON n.id = r.node_id
+            WHERE n.owner_identity_id = ? AND n.public_address = ? AND r.hold_until_ms > ?
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(ownerIdentityID, to: statement, at: 1)
+        try bind(publicAddress, to: statement, at: 2)
+        try check(sqlite3_bind_int64(statement, 3, Self.milliseconds(now)))
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return Self.manualRoute(statement)
+    }
+
+    /// Every path still held at `now`, forgetting those whose hold has ended.
+    func manualRoutes(ownerIdentityID: String, now: Date = Date()) throws -> [StoredManualRoute] {
+        try transaction {
+            let expired = try prepare(
+                """
+                DELETE FROM node_manual_route
+                WHERE hold_until_ms <= ?
+                  AND node_id IN (SELECT id FROM node WHERE owner_identity_id = ?)
+                """
+            )
+            defer { sqlite3_finalize(expired) }
+            try check(sqlite3_bind_int64(expired, 1, Self.milliseconds(now)))
+            try bind(ownerIdentityID, to: expired, at: 2)
+            try stepDone(expired)
+
+            let statement = try prepare(
+                """
+                SELECT \(Self.manualRouteColumns)
+                FROM node_manual_route r JOIN node n ON n.id = r.node_id
+                WHERE n.owner_identity_id = ?
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            try bind(ownerIdentityID, to: statement, at: 1)
+            var routes: [StoredManualRoute] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                routes.append(Self.manualRoute(statement))
+            }
+            return routes
+        }
+    }
+
+    /// Hold `hints` for one node until `holdUntil`, replacing any path held
+    /// for it. A new path is a new choice, so a declined offer to switch
+    /// away from the old one does not carry over. A node with no row has
+    /// nowhere to keep it.
+    func saveManualRoute(
+        ownerIdentityID: String,
+        publicAddress: String,
+        hints: [Data],
+        holdUntil: Date,
+        latitude: Double?,
+        longitude: Double?,
+        accuracy: Double?
+    ) throws {
+        try transaction {
+            guard let nodeID = try nodeIdentifier(
+                ownerIdentityID: ownerIdentityID,
+                publicAddress: publicAddress
+            ) else { return }
+            let statement = try prepare(
+                """
+                INSERT OR REPLACE INTO node_manual_route (
+                    node_id, hints, hold_until_ms, saved_latitude, saved_longitude,
+                    saved_accuracy, prompt_settled
+                ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            try check(sqlite3_bind_int64(statement, 1, nodeID))
+            try bind(hints.reduce(Data(), +), to: statement, at: 2)
+            try check(sqlite3_bind_int64(statement, 3, Self.milliseconds(holdUntil)))
+            try bindOptionalDouble(latitude, to: statement, at: 4)
+            try bindOptionalDouble(longitude, to: statement, at: 5)
+            try bindOptionalDouble(accuracy, to: statement, at: 6)
+            try stepDone(statement)
+        }
+    }
+
+    func clearManualRoute(ownerIdentityID: String, publicAddress: String) throws {
+        let statement = try prepare(
+            """
+            DELETE FROM node_manual_route WHERE node_id IN (
+                SELECT id FROM node WHERE owner_identity_id = ? AND public_address = ?
+            )
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(ownerIdentityID, to: statement, at: 1)
+        try bind(publicAddress, to: statement, at: 2)
+        try stepDone(statement)
+    }
+
+    /// Remember that the offer to switch away from this node's path was
+    /// declined, so it is not made again for the same path.
+    func settleManualRoutePrompt(ownerIdentityID: String, publicAddress: String) throws {
+        let statement = try prepare(
+            """
+            UPDATE node_manual_route SET prompt_settled = 1 WHERE node_id IN (
+                SELECT id FROM node WHERE owner_identity_id = ? AND public_address = ?
+            )
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(ownerIdentityID, to: statement, at: 1)
+        try bind(publicAddress, to: statement, at: 2)
+        try stepDone(statement)
+    }
+
     // MARK: - Peer repeater listings
 
     /// What a router last said about its neighbors, or `nil` when it was
@@ -2362,10 +2523,12 @@ actor SQLiteApplicationStore {
                 let fragmentStatement = try prepare(
                     """
                     INSERT INTO chat_delivery_fragment (
-                        owner_identity_id, session_id, handle, fragment_index, state
-                    ) VALUES (?, ?, ?, ?, ?)
+                        owner_identity_id, session_id, handle, fragment_index, state, via_flood
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(owner_identity_id, session_id, handle, fragment_index)
-                    DO UPDATE SET state = CASE
+                    DO UPDATE SET
+                    via_flood = MAX(chat_delivery_fragment.via_flood, excluded.via_flood),
+                    state = CASE
                         -- A positive ack is definitive proof the frame landed;
                         -- it supersedes an earlier transport failure so a
                         -- resent-and-acked fragment can recover from 'failed'.
@@ -2391,6 +2554,7 @@ actor SQLiteApplicationStore {
                     to: fragmentStatement,
                     at: 5
                 )
+                try check(sqlite3_bind_int(fragmentStatement, 6, delivery.viaFlood ? 1 : 0))
                 try stepDone(fragmentStatement)
 
                 try recomputeDeliveryState(
@@ -2437,6 +2601,14 @@ actor SQLiteApplicationStore {
         let message = try prepare(
             """
             UPDATE chat_message SET
+                delivered_flooded = EXISTS (
+                    SELECT 1 FROM chat_delivery_fragment f
+                    WHERE f.owner_identity_id = chat_message.owner_identity_id
+                        AND f.session_id = chat_message.delivery_session_id
+                        AND f.handle = chat_message.delivery_handle
+                        AND f.state = 'acknowledged'
+                        AND f.via_flood = 1
+                ),
                 delivered_late = CASE
                     WHEN chat_message.delivery_state = 'failed'
                         AND (
@@ -2684,7 +2856,7 @@ actor SQLiteApplicationStore {
         wire_id, epoch, edited, presence, received_late, delivered_late, original_body,
         sender_address, sender_hint, sender_handle,
         rx_rssi_dbm, rx_snr_cb, rx_lqi, rx_hop_count,
-        rx_route_hints, rx_source_authenticated, rowid
+        rx_route_hints, rx_source_authenticated, rowid, delivered_flooded
         """
 
     /// How many messages a transcript read will accept in one page, whatever
@@ -3289,7 +3461,8 @@ actor SQLiteApplicationStore {
             senderHint: optionalDataColumn(statement, at: 15),
             senderHandle: optionalStringColumn(statement, at: 16),
             reception: reception(statement, at: 17),
-            rowID: sqlite3_column_int64(statement, 23)
+            rowID: sqlite3_column_int64(statement, 23),
+            deliveredFlooded: sqlite3_column_int(statement, 24) != 0
         )
     }
 
@@ -3837,7 +4010,7 @@ actor SQLiteApplicationStore {
             """
             UPDATE chat_message
             SET delivery_session_id = ?, delivery_handle = ?,
-                delivery_state = 'pending', delivered_late = 0,
+                delivery_state = 'pending', delivered_late = 0, delivered_flooded = 0,
                 fragment_count = COALESCE(?, fragment_count)
             WHERE rowid = ? AND direction = 1
             """
@@ -4765,6 +4938,48 @@ actor SQLiteApplicationStore {
                     ) WITHOUT ROWID;
 
                     PRAGMA user_version = 22;
+                    """
+                )
+                try execute(database, sql: "COMMIT")
+            } catch {
+                try? execute(database, sql: "ROLLBACK")
+                throw error
+            }
+        }
+
+        if version < 23 {
+            try execute(database, sql: "BEGIN IMMEDIATE")
+            do {
+                // A path the person chose for a node, held against what the
+                // mesh teaches until `hold_until_ms` on the wall clock. The
+                // phone's routing keeps routes only in memory, so this is
+                // what reinstalls the hold when a session starts. Where the
+                // phone stood when the path was saved is what "moved" is
+                // measured from; `prompt_settled` remembers that the offer
+                // to switch away from this path was declined.
+                //
+                // A frame acknowledged through the flood that followed a
+                // missed route is marked, and a message any of whose frames
+                // were is marked too, so the transcript can say so.
+                try execute(
+                    database,
+                    sql: """
+                    CREATE TABLE node_manual_route (
+                        node_id INTEGER PRIMARY KEY REFERENCES node(id) ON DELETE CASCADE,
+                        hints BLOB NOT NULL,
+                        hold_until_ms INTEGER NOT NULL,
+                        saved_latitude REAL,
+                        saved_longitude REAL,
+                        saved_accuracy REAL,
+                        prompt_settled INTEGER NOT NULL DEFAULT 0
+                    );
+
+                    ALTER TABLE chat_delivery_fragment
+                        ADD COLUMN via_flood INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE chat_message
+                        ADD COLUMN delivered_flooded INTEGER NOT NULL DEFAULT 0;
+
+                    PRAGMA user_version = 23;
                     """
                 )
                 try execute(database, sql: "COMMIT")

@@ -530,6 +530,28 @@ impl<M: MacBackend> LocalNode<M> {
         self.mac.restore_peer_route(peer, route).await
     }
 
+    /// Install `route` for `peer` and hold it for `hold_ms`; see
+    /// [`umsh_mac::MacHandle::hold_peer_route`].
+    pub async fn hold_peer_route(
+        &self,
+        peer: &PublicKey,
+        route: CachedRoute,
+        hold_ms: u64,
+    ) -> bool {
+        self.mac.hold_peer_route(peer, route, hold_ms).await
+    }
+
+    /// Switch a held route to the best path learned while it was held; see
+    /// [`umsh_mac::MacHandle::adopt_learned_peer_route`].
+    pub async fn adopt_learned_peer_route(&self, peer: &PublicKey) -> bool {
+        self.mac.adopt_learned_peer_route(peer).await
+    }
+
+    /// The route cached for `peer` with its hold and confirmation state.
+    pub async fn peer_route_status(&self, peer: &PublicKey) -> Option<umsh_mac::PeerRouteStatus> {
+        self.mac.peer_route_status(peer).await
+    }
+
     fn add_receive_handler<F>(&self, handler: F) -> SubscriptionHandle
     where
         F: FnMut(&ReceivedPacketRef<'_>) -> bool + 'static,

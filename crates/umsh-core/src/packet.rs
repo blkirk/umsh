@@ -318,9 +318,79 @@ impl core::fmt::Display for NodeHint {
 pub struct RouterHint(pub [u8; 2]);
 
 impl RouterHint {
+    /// The fewest base58 characters that can determine a router hint.
+    ///
+    /// Three digits carry about 15.8 bits, so they never settle sixteen; four
+    /// carry about 21.7, which leaves at most two adjacent hints.
+    pub const MIN_BASE58_PREFIX: usize = 4;
+
     /// Derive the router hint from the first two public-key bytes.
     pub fn from_public_key(key: &PublicKey) -> Self {
         Self([key.0[0], key.0[1]])
+    }
+
+    /// Every router hint carried by an address that begins with `prefix`.
+    ///
+    /// The prefix must be at least [`Self::MIN_BASE58_PREFIX`] characters. A
+    /// prefix whose completions straddle a hint boundary yields both hints;
+    /// a complete address yields its own.
+    pub fn candidates_from_base58_prefix(
+        prefix: &str,
+    ) -> Result<RouterHintCandidates, crate::HintInputError> {
+        use crate::{AddressParseError, HintInputError};
+        if prefix.len() < Self::MIN_BASE58_PREFIX {
+            return Err(HintInputError::TooShort);
+        }
+        let (low, high) =
+            crate::base58::prefix_bounds(prefix.as_bytes()).map_err(|error| match error {
+                AddressParseError::InvalidLength => HintInputError::TooLong,
+                AddressParseError::InvalidCharacter => HintInputError::InvalidCharacter,
+                AddressParseError::Overflow => HintInputError::OutOfRange,
+            })?;
+        let first = Self([low[0], low[1]]);
+        let last = Self([high[0], high[1]]);
+        // Four digits span less than one hint bucket, so the two ends are the
+        // same hint or neighbors.
+        Ok(RouterHintCandidates {
+            first,
+            second: (last != first).then_some(last),
+        })
+    }
+
+    /// The hint written as exactly four hexadecimal digits.
+    pub fn from_hex(text: &str) -> Result<Self, crate::HintInputError> {
+        use crate::HintInputError;
+        let digits = text.as_bytes();
+        if digits.len() < 4 {
+            return Err(HintInputError::TooShort);
+        }
+        if digits.len() > 4 {
+            return Err(HintInputError::TooLong);
+        }
+        let mut value = 0u16;
+        for &digit in digits {
+            let nibble = (digit as char)
+                .to_digit(16)
+                .ok_or(HintInputError::InvalidCharacter)?;
+            value = (value << 4) | nibble as u16;
+        }
+        Ok(Self(value.to_be_bytes()))
+    }
+}
+
+/// The one or two router hints a typed base58 prefix can mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouterHintCandidates {
+    /// The hint of the lowest address beginning with the prefix.
+    pub first: RouterHint,
+    /// The hint of the highest one, when it differs.
+    pub second: Option<RouterHint>,
+}
+
+impl RouterHintCandidates {
+    /// The candidates in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = RouterHint> + '_ {
+        core::iter::once(self.first).chain(self.second)
     }
 }
 
@@ -1196,7 +1266,7 @@ impl<'a> UnsealedPacket<'a> {
 #[cfg(test)]
 mod tests {
     use super::{NodeHint, PacketType, PayloadType, PublicKey, RouterHint};
-    use crate::AddressParseError;
+    use crate::{AddressParseError, HintInputError};
 
     #[test]
     fn node_management_rides_only_unicast() {
@@ -1297,6 +1367,76 @@ mod tests {
         assert_eq!(RouterHint([0x84, 0x81]).to_string(), "9v*");
         // Carry case: only the first digit is pinned down.
         assert_eq!(RouterHint([0x00, 0x41]).to_string(), "1*");
+    }
+
+    #[test]
+    fn router_hint_candidates_from_base58_prefix() {
+        let one = |prefix: &str| {
+            let candidates = RouterHint::candidates_from_base58_prefix(prefix).unwrap();
+            assert_eq!(candidates.second, None, "{prefix}");
+            candidates.first
+        };
+        assert_eq!(one("7Nq4"), RouterHint([0x5E, 0xBD]));
+        assert_eq!(one("HJC9"), RouterHint([0xF2, 0x22]));
+        assert_eq!(one("BtC9"), RouterHint([0xA1, 0xB2]));
+        assert_eq!(
+            one("HJC9DJaaQEn88tAzbMM7BrYbsepNEB69RK1gZiKEYCPp"),
+            RouterHint([0xF2, 0x22])
+        );
+
+        // A prefix that straddles a hint boundary: both render as "H1*".
+        let straddle = RouterHint::candidates_from_base58_prefix("H12n").unwrap();
+        assert_eq!(straddle.first, RouterHint([0xED, 0xBC]));
+        assert_eq!(straddle.second, Some(RouterHint([0xED, 0xBD])));
+        // A fifth character settles it.
+        assert!(
+            RouterHint::candidates_from_base58_prefix("H12n2")
+                .unwrap()
+                .second
+                .is_none()
+        );
+
+        assert_eq!(
+            RouterHint::candidates_from_base58_prefix("HJC"),
+            Err(HintInputError::TooShort)
+        );
+        assert_eq!(
+            RouterHint::candidates_from_base58_prefix("HJ0C"),
+            Err(HintInputError::InvalidCharacter)
+        );
+        assert_eq!(
+            RouterHint::candidates_from_base58_prefix("Kzzz"),
+            Err(HintInputError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn router_hint_candidates_always_include_the_true_hint() {
+        for i in 0..=1023u32 {
+            let mut key = [0u8; 32];
+            for (j, byte) in key.iter_mut().enumerate() {
+                *byte = (i.wrapping_mul(2654435761).rotate_left(j as u32) ^ (j as u32 * 37)) as u8;
+            }
+            let key = PublicKey(key);
+            let encoded = key.to_string();
+            let candidates = RouterHint::candidates_from_base58_prefix(&encoded[..4]).unwrap();
+            assert!(
+                candidates.iter().any(|hint| hint == key.router_hint()),
+                "{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn router_hint_from_hex() {
+        assert_eq!(RouterHint::from_hex("5EBD"), Ok(RouterHint([0x5E, 0xBD])));
+        assert_eq!(RouterHint::from_hex("a1b2"), Ok(RouterHint([0xA1, 0xB2])));
+        assert_eq!(RouterHint::from_hex("a1b"), Err(HintInputError::TooShort));
+        assert_eq!(RouterHint::from_hex("a1b23"), Err(HintInputError::TooLong));
+        assert_eq!(
+            RouterHint::from_hex("a1g2"),
+            Err(HintInputError::InvalidCharacter)
+        );
     }
 
     #[test]

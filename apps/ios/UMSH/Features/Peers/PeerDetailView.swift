@@ -92,6 +92,8 @@ struct PeerDetailView: View {
     @State private var route: PeerRoute?
     @State private var isResettingRoute = false
     @State private var routeWasAlreadyClear = false
+    @State private var isEditingManualPath = false
+    @State private var isClearingManualPath = false
     /// A repeater named by one of this page's paths, pushed from its menu.
     @State private var repeaterPendingDetail: PeerSummary?
     /// Repeaters this page has asked to identify themselves, by hint. Kept for
@@ -460,6 +462,15 @@ struct PeerDetailView: View {
                 updateDraft: updateDraft,
                 sendMessage: sendMessage,
                 messageActions: messageActions
+            )
+        }
+        .sheet(isPresented: $isEditingManualPath) {
+            ManualPathEditor(
+                peer: peer,
+                route: route,
+                actions: actions,
+                radioName: radioSnapshot.name,
+                onSaved: { Task { await loadRoute() } }
             )
         }
         .alert(feedbackTitle, isPresented: $showsFeedback) {
@@ -832,6 +843,18 @@ struct PeerDetailView: View {
         Section {
             if let route {
                 LabeledContent("Next send", value: Self.routeSummary(route))
+                if let holdUntil = route.holdUntil {
+                    LabeledContent("Held until") {
+                        Text(holdUntil, format: .dateTime.hour().minute())
+                    }
+                    LabeledContent("Last ack") {
+                        if let lastAcknowledged = route.lastAcknowledged {
+                            Text(lastAcknowledged, format: .relative(presentation: .named))
+                        } else {
+                            Text("None yet")
+                        }
+                    }
+                }
                 if !route.hints.isEmpty {
                     routeHopRows(cachedRouteHops(route))
                 }
@@ -855,7 +878,29 @@ struct PeerDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if actions.resetRoute != nil {
+                if route.isHeld {
+                    Button {
+                        isEditingManualPath = true
+                    } label: {
+                        Label("Edit Path…", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                    }
+                    Button(role: .destructive) {
+                        Task { await clearManualPath() }
+                    } label: {
+                        Label(
+                            isClearingManualPath ? "Clearing…" : "Clear Manual Path",
+                            systemImage: "xmark.circle"
+                        )
+                    }
+                    .disabled(isClearingManualPath || actions.clearManualPath == nil)
+                } else if actions.setManualPath != nil, route.kind != .unavailable {
+                    Button {
+                        isEditingManualPath = true
+                    } label: {
+                        Label("Set Manual Path…", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                    }
+                }
+                if actions.resetRoute != nil, !route.isHeld {
                     Button(role: .destructive) {
                         Task { await resetRoute() }
                     } label: {
@@ -897,6 +942,9 @@ struct PeerDetailView: View {
     }
 
     private var routeFooter: String {
+        if route?.isHeld == true {
+            return "Learned paths can replace it once the hold ends."
+        }
         if routeWasAlreadyClear {
             return "There was no route to reset. The next message floods until a reply teaches this phone a path."
         }
@@ -914,6 +962,9 @@ struct PeerDetailView: View {
     /// `nil` is the moment before the first read resolves.
     private static func routeSummary(_ route: PeerRoute?) -> String {
         guard let route else { return "Reading…" }
+        if route.isHeld {
+            return "Manual · \(Self.hopsText(route.hopCount ?? UInt8(route.hints.count + 1)))"
+        }
         return switch route.kind {
         case .unavailable:
             "Unavailable"
@@ -944,6 +995,14 @@ struct PeerDetailView: View {
             return
         }
         route = await loadRoute(peer)
+    }
+
+    private func clearManualPath() async {
+        guard let clearManualPath = actions.clearManualPath, !isClearingManualPath else { return }
+        isClearingManualPath = true
+        defer { isClearingManualPath = false }
+        _ = await clearManualPath(peer)
+        await loadRoute()
     }
 
     private func resetRoute() async {

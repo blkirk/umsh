@@ -484,6 +484,90 @@ not message history. If the node is still referenced by a conversation or other
 durable evidence, it remains as an ordinary peer record. A transparent radio
 that does not expose a device identity does not create a synthetic peer.
 
+### Manual path
+
+A manual path is a source route the person chooses for one peer, held for a
+chosen time ahead of anything the phone learns. Wireframes D3–D7 in
+[mockups](mockups.md) show each screen.
+
+**Route section.** Peer Detail's Route section offers **Set Manual Path…**
+whenever no manual path is held. While one is held, the section shows
+**Next send** as **Manual** with the hop count, **Held until**, **Last ack**,
+one row per hop, **Edit Path…**, and **Clear Manual Path**. The summary row at
+the top of Peer Detail carries a **Manual** badge. Clearing returns the peer
+to its learned route, or to flooding when none is held, without a
+confirmation, since nothing is lost that cannot be re-entered.
+
+**Editor.** A modal sheet titled **Manual Path**, always in edit mode, between
+the fixed endpoints **This phone** and the peer. A new path starts from the
+current learned route; an empty one starts with only the endpoints. Hops are
+removed with the delete control and reordered by dragging. **Add Hop…**
+disappears at 15 repeaters, the most a source route carries. Each hop row uses
+the Peer Repeaters row form: the node's name and avatar when this phone knows
+it, otherwise **Router hint** and a gray hexagon. **Ping Along Path** sends a
+traced Echo Request down the unsaved draft and reports the reply as the Ping
+result does. **Save** is enabled once the path has at least one repeater.
+
+**Hold.** **Hold for** is a menu of 30 Minutes, 1 Hour, 4 Hours, 12 Hours, and
+1 Day, defaulting to 1 Hour; there is no indefinite hold. **Until** shows the
+resulting local time. Editing a
+held path restarts the hold from the moment of saving. When the hold ends, the
+path stays in place as an ordinary route that the next measured path replaces.
+The badge and **Held until** row disappear at that point.
+
+**Add Hop.** A sheet titled for the hop being added, with the path so far as a
+breadcrumb, a search field, and two sources:
+
+- **Neighbors** lists what the previous hop reports through Peer Repeaters,
+  in the Neighboring Repeaters row form, stale rows faded. For hop 1 the
+  previous hop is the companion radio. Any other hop is asked along the path
+  already built, and the footer names that path and the listing's age. Opening
+  the sheet shows the cached listing and sends nothing; **Refresh** and
+  **Load More** each send one request. When the previous hop is known only by its
+  hint, there is no address to ask, and the sheet opens on **Known Repeaters**
+  with the Neighbors segment disabled.
+- **Known Repeaters** lists repeater- and bridge-role nodes this phone knows,
+  most recently heard first.
+
+Nodes already in the path are shown but disabled and marked **In path**. When
+the peer itself appears among the neighbors, it pins to the top of the list
+with **Finish Here**, which ends the path. Choosing any other row appends it
+and advances to the next hop with that node's neighbors. **Done** returns to
+the editor with every hop added so far.
+
+**Router hint entry.** **Enter Router Hint…** pushes a field with a
+**Base58 Prefix | Hex** segmented control. The control is explicit because a
+string such as `a1b2` is valid in both alphabets. A Base58 prefix needs at
+least four characters, since three cannot fix sixteen bits. A hex hint is
+exactly four digits. A complete pasted address resolves to the node. Below the
+field, the canonical **Router hint** rendering, the hex value, and any known
+node that matches are shown, with **Add** in the navigation bar. When a
+four-character prefix spans two router hints (about 2% of prefixes), both are
+listed, each with its known node or **Unknown node**, and **Add** waits until
+the person picks one or types another character.
+
+**Delivery while held.** A held manual path is used for every send to the
+peer. A miss does not discard it, and neither does a path learned from other
+traffic. A send that misses its ack still falls back to one traced flood, and
+the transcript's delivery label says **flooded** when the flood is what was
+acknowledged. The next send uses the manual path again.
+
+**Switch prompt.** Suppose two consecutive sends miss on the manual path while
+their flood fallbacks are acknowledged and trace a path. Then the conversation
+presents a half-height sheet, **Switch to the learned path?** A single such
+miss is enough when the phone has moved significantly since the path was
+saved. A learned path that wins only on score, while the manual path is still
+acknowledged, never prompts. The sheet compares the
+two paths, each with its hop count, its repeaters, and its recent ack record.
+**Use Learned Path** clears the manual path and installs the learned one.
+**Keep Manual Path** leaves it in place and suppresses the prompt until the
+path is edited. The prompt appears at most once per saved path.
+
+**Persistence.** A manual path and its hold are stored with the peer and are
+reinstalled when a mesh session for the identity starts, since the routing
+layer keeps routes only in memory. The override belongs to the phone's routing
+layer alone; a companion radio sending on its own behalf does not honor it.
+
 ### General node detail
 
 The header shows local mnemonic alias, advertised name, role, and capabilities. The

@@ -62,7 +62,8 @@ struct ChatSubmissionCoordinator {
 
     nonisolated static func composeError(_ error: MobileMeshError) -> AppOperationError {
         switch error {
-        case .InvalidPeer, .InvalidChannelKey, .UnknownConversation, .InvalidLocation, .InvalidRequest:
+        case .InvalidPeer, .InvalidChannelKey, .UnknownConversation, .InvalidLocation, .InvalidRequest,
+             .InvalidRoute:
             .validation("The message's recipient or request is invalid. Check the conversation before retrying.")
         case .SessionUnavailable:
             .unavailable("Connect a companion radio configured for this phone before sending.")

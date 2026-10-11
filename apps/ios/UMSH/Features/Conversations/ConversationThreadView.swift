@@ -68,6 +68,8 @@ struct ConversationThreadView: View {
     @State private var messageWasSubmitted = false
     @State private var draftError: AppOperationError?
     @State private var editingMessage: ChatMessageSummary?
+    /// The held route, while the offer to replace it is on screen.
+    @State private var learnedPathOffer: LearnedPathOffer?
     @State private var editDraft = ""
     @State private var deletingMessage: ChatMessageSummary?
     @State private var resendingMessage: ChatMessageSummary?
@@ -135,6 +137,13 @@ struct ConversationThreadView: View {
     private var peer: PeerSummary? {
         if case let .direct(direct) = conversation { return direct.peer }
         return nil
+    }
+
+    private func checkLearnedPathOffer() async {
+        guard learnedPathOffer == nil, let peer, let offer = peerActions.learnedPathOffer,
+              let route = await offer(peer)
+        else { return }
+        learnedPathOffer = LearnedPathOffer(peer: peer, route: route)
     }
 
     private var channelConversation: ChannelConversationSummary? {
@@ -424,6 +433,12 @@ struct ConversationThreadView: View {
         // a peer heard, another conversation's traffic, this one being marked
         // read—costs nothing.
         .task(id: conversation.messageRevision) { await refreshTranscript() }
+        // Deliveries are what move a held route's record, so a new revision
+        // is when the offer to replace it may have come due.
+        .task(id: conversation.messageRevision) { await checkLearnedPathOffer() }
+        .sheet(item: $learnedPathOffer) { offer in
+            LearnedPathPromptSheet(peer: offer.peer, route: offer.route, actions: peerActions)
+        }
         .onAppear {
             visibleConversationReporter.appeared(conversation.conversationAddress)
             Task { await markRead(conversation.conversationAddress) }
@@ -1462,4 +1477,11 @@ struct InteractivePopGestureRestorer: UIViewControllerRepresentable {
             recognizer.delegate = coordinator
         }
     }
+}
+
+/// A held route whose learned rival is being offered, keyed by its peer.
+private struct LearnedPathOffer: Identifiable {
+    let peer: PeerSummary
+    let route: PeerRoute
+    var id: Int64 { peer.id }
 }

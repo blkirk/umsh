@@ -26,6 +26,25 @@ actor RustMeshEngine: MeshEngine {
         }
     }
 
+    func parseRouterHintInput(_ text: String, format: RouterHintFormat) -> RouterHintInput {
+        let coreFormat: UMSHMobileCore.RouterHintInputFormat = switch format {
+        case .base58Prefix: .base58Prefix
+        case .hex: .hex
+        }
+        let record = UMSHMobileCore.parseRouterHintInput(text: text, format: coreFormat)
+        return RouterHintInput(
+            candidates: record.candidates.map { MeshRouterHint(bytes: $0.bytes, text: $0.text) },
+            problem: record.problem.map {
+                switch $0 {
+                case .tooShort: .tooShort
+                case .tooLong: .tooLong
+                case .invalidCharacter: .invalidCharacter
+                case .outOfRange: .outOfRange
+                }
+            }
+        )
+    }
+
     func inspectPublicIdentity(_ address: String) throws -> MeshPublicIdentity {
         do {
             let record = try UMSHMobileCore.inspectPublicIdentity(address: address)

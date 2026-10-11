@@ -34,6 +34,8 @@ pub(crate) struct TicketState {
     pub repeated: bool,
     /// Transport ACK received from the destination.
     pub acked: bool,
+    /// The ACK answered the route-retry flood that followed a missed route.
+    pub acked_via_route_retry: bool,
     /// ACK timeout—all retransmits exhausted without ACK.
     pub failed: bool,
     /// MAC is completely done with this send (no more events will fire).
@@ -108,6 +110,12 @@ impl SendProgressTicket {
     /// True after a transport ACK was received from the destination.
     pub fn was_acked(&self) -> bool {
         self.state.borrow().acked
+    }
+
+    /// True when the ACK answered the route-retry flood that followed a miss
+    /// on the cached route, rather than the original send.
+    pub fn was_acked_via_route_retry(&self) -> bool {
+        self.state.borrow().acked_via_route_retry
     }
 
     /// True when the ACK timed out—all retransmits exhausted without ACK.

@@ -52,11 +52,12 @@ pub use builder::{
     BlindUnicastBuilder, BroadcastBuilder, MacAckBuilder, MulticastBuilder, PacketBuilder,
     UnicastBuilder, state,
 };
-pub use error::{AddressParseError, BuildError, EncodeError, ParseError};
+pub use error::{AddressParseError, BuildError, EncodeError, HintInputError, ParseError};
 pub use packet::{
     ChannelId, ChannelKey, ChannelTag, Fcf, FloodHops, MicSize, NodeHint, OptionNumber,
-    PacketHeader, PacketType, ParsedOptions, PayloadType, PublicKey, RouterHint, Scf, SecInfo,
-    SourceAddr, SourceAddrRef, UMSH_VERSION, UnsealedPacket, feed_aad, iter_options,
+    PacketHeader, PacketType, ParsedOptions, PayloadType, PublicKey, RouterHint,
+    RouterHintCandidates, Scf, SecInfo, SourceAddr, SourceAddrRef, UMSH_VERSION, UnsealedPacket,
+    feed_aad, iter_options,
 };
 #[cfg(feature = "region-codec")]
 pub use region::{REGION_NAME_MAX_LEN, RegionCode, RegionCodeError};

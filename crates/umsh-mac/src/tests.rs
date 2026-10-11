@@ -2568,7 +2568,7 @@ fn receive_one_emits_ack_received_for_matching_mac_ack() {
 
     let mut seen = None;
     let handled = block_on(mac.receive_one(|identity, event| {
-        if let MacEventRef::AckReceived { peer, receipt } = event {
+        if let MacEventRef::AckReceived { peer, receipt, .. } = event {
             seen = Some((identity, peer, receipt));
         }
     }))
@@ -2668,7 +2668,7 @@ fn receive_one_emits_ack_received_for_matching_blind_unicast_ack() {
 
     let mut seen = None;
     let handled = block_on(mac.receive_one(|identity, event| {
-        if let MacEventRef::AckReceived { peer, receipt } = event {
+        if let MacEventRef::AckReceived { peer, receipt, .. } = event {
             seen = Some((identity, peer, receipt));
         }
     }))
@@ -8793,7 +8793,7 @@ fn forwarded_send_can_confirm_then_complete_on_later_mac_ack() {
 
     let mut seen = None;
     let handled = block_on(mac.receive_one(|identity, event| {
-        if let MacEventRef::AckReceived { peer, receipt } = event {
+        if let MacEventRef::AckReceived { peer, receipt, .. } = event {
             seen = Some((identity, peer, receipt));
         }
     }))
@@ -8854,7 +8854,9 @@ fn poll_cycle_prefers_mac_ack_over_same_cycle_timeout() {
     let mut ack_seen = None;
     let mut timeout_seen = None;
     block_on(mac.poll_cycle(|identity, event| match event {
-        MacEventRef::AckReceived { peer, receipt } => ack_seen = Some((identity, peer, receipt)),
+        MacEventRef::AckReceived { peer, receipt, .. } => {
+            ack_seen = Some((identity, peer, receipt))
+        }
         MacEventRef::AckTimeout { peer, receipt } => timeout_seen = Some((identity, peer, receipt)),
         _ => {}
     }))
@@ -10399,7 +10401,19 @@ fn duplicate_key_for_secure_frame(frame: &[u8]) -> DupCacheKey {
     }
 }
 
-type TestMac = Mac<DummyPlatform, 4, 16, 8, 16, 16, 256, 64>;
+type TestMac = Mac<
+    DummyPlatform,
+    4,
+    16,
+    8,
+    16,
+    16,
+    256,
+    64,
+    { crate::DEFAULT_CHANNEL_REPLAY },
+    { crate::DEFAULT_CHANNEL_HINT_REPLAY },
+    4,
+>;
 
 #[test]
 fn dfu_reply_receipts_track_unicast_transmission_without_wire_acknowledgments() {

@@ -51,6 +51,30 @@ pub fn decode(digits: &[u8]) -> Result<[u8; 32], AddressParseError> {
     Ok(out)
 }
 
+/// The smallest and largest 32-byte values whose fixed-width encoding begins
+/// with `prefix`.
+///
+/// The interval is clipped to the 32-byte range: a prefix whose upper
+/// padding would overflow still bounds the keys that exist. A prefix whose
+/// lowest completion already overflows names no key at all and is
+/// [`AddressParseError::Overflow`].
+pub fn prefix_bounds(prefix: &[u8]) -> Result<([u8; 32], [u8; 32]), AddressParseError> {
+    if prefix.is_empty() || prefix.len() > ENCODED_LEN {
+        return Err(AddressParseError::InvalidLength);
+    }
+    let mut low = [ALPHABET[0]; ENCODED_LEN];
+    let mut high = [ALPHABET[57]; ENCODED_LEN];
+    low[..prefix.len()].copy_from_slice(prefix);
+    high[..prefix.len()].copy_from_slice(prefix);
+    let low = decode(&low)?;
+    let high = match decode(&high) {
+        Ok(high) => high,
+        Err(AddressParseError::Overflow) => [0xFF; 32],
+        Err(error) => return Err(error),
+    };
+    Ok((low, high))
+}
+
 fn digit_value(digit: u8) -> Result<u8, AddressParseError> {
     ALPHABET
         .iter()
@@ -144,6 +168,25 @@ mod tests {
         assert_eq!(
             decode(&[b'z'; ENCODED_LEN]),
             Err(AddressParseError::Overflow)
+        );
+    }
+
+    #[test]
+    fn prefix_bounds_bracket_every_completion() {
+        let key = leading_zero_key();
+        let encoded = encode(&key);
+        for len in 1..=ENCODED_LEN {
+            let (low, high) = prefix_bounds(&encoded[..len]).unwrap();
+            assert!(low <= key && key <= high, "prefix length {len}");
+        }
+        assert_eq!(prefix_bounds(&encoded).unwrap(), (key, key));
+        // The top of the range clips rather than overflowing.
+        assert_eq!(prefix_bounds(b"JEKN").unwrap().1, MAX);
+        assert_eq!(prefix_bounds(b"K"), Err(AddressParseError::Overflow));
+        assert_eq!(prefix_bounds(b""), Err(AddressParseError::InvalidLength));
+        assert_eq!(
+            prefix_bounds(b"7N0q"),
+            Err(AddressParseError::InvalidCharacter)
         );
     }
 }

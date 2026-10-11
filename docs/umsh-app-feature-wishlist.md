@@ -148,7 +148,7 @@ Guided setup flows built on top of that primitive:
 - [x] Favorite / unfavorite
 	- [x] Favorited peers get a star in the upper-right corner of their icon.
 - [ ] Group membership (organizational / ACL)
-- [ ] Manually set source route
+- [x] Manually set source route
 - [ ] Which blind unicast channel to use, or none
 
 ### Peer actions

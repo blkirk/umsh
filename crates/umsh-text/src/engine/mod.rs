@@ -900,6 +900,15 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
     }
 
     /// Report transport progress for a previously emitted transmission.
+    /// The message and fragment an in-flight transmission carries, until its
+    /// terminal [`Self::transmit_update`].
+    pub fn in_flight_frame(&self, transmission_id: u32) -> Option<(MessageHandle, Option<u8>)> {
+        self.in_flight
+            .iter()
+            .find(|frame| frame.transmission_id == transmission_id)
+            .map(|frame| (frame.handle, frame.fragment))
+    }
+
     pub fn transmit_update(&mut self, transmission_id: u32, state: DeliveryState, now_ms: u64) {
         self.saw_transmit_report = true;
         let Some(position) = self

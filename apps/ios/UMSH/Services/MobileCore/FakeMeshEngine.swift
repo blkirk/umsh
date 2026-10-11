@@ -15,6 +15,29 @@ actor FakeMeshEngine: MeshEngine {
         return MeshRouterHint(bytes: bytes, text: "BtC")
     }
 
+    /// Four hex digits read as themselves; anything four characters or
+    /// longer in Base58 reads as the canned hint.
+    func parseRouterHintInput(_ text: String, format: RouterHintFormat) -> RouterHintInput {
+        let text = text.trimmingCharacters(in: .whitespaces)
+        switch format {
+        case .hex:
+            guard text.count == 4 else {
+                return RouterHintInput(candidates: [], problem: text.count < 4 ? .tooShort : .tooLong)
+            }
+            guard let value = UInt16(text, radix: 16) else {
+                return RouterHintInput(candidates: [], problem: .invalidCharacter)
+            }
+            let bytes = Data([UInt8(value >> 8), UInt8(value & 0xFF)])
+            return RouterHintInput(candidates: [MeshRouterHint(bytes: bytes, text: "BtC")], problem: nil)
+        case .base58Prefix:
+            guard text.count >= 4 else { return RouterHintInput(candidates: [], problem: .tooShort) }
+            return RouterHintInput(
+                candidates: [MeshRouterHint(bytes: Data([0xA1, 0xB2]), text: "BtC")],
+                problem: nil
+            )
+        }
+    }
+
     func inspectPublicIdentity(_ address: String) throws -> MeshPublicIdentity {
         guard address.count == 44 else {
             throw MeshEngineError.invalidAddress

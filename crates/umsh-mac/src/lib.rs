@@ -231,6 +231,10 @@ pub const DEFAULT_DUP: usize = DEFAULT_DUP_CACHE_SIZE;
 pub const DEFAULT_CHANNEL_REPLAY: usize = 8;
 /// Default per-channel hint-only replay-window capacity.
 pub const DEFAULT_CHANNEL_HINT_REPLAY: usize = 8;
+/// Default capacity for routes held against learning (see
+/// [`PeerRegistry::hold_route`]). None: holding a route is something an
+/// application with a person choosing paths opts into.
+pub const DEFAULT_ROUTE_HOLDS: usize = 0;
 
 /// Largest value the `FHOPS_REM` nibble can carry.
 ///
@@ -322,7 +326,7 @@ pub use observations::{
 };
 pub use peers::{
     CachedRoute, ChannelState, ChannelTable, HintReplayState, PeerCryptoMap, PeerCryptoState,
-    PeerId, PeerInfo, PeerRegistry, PeerRemoval,
+    PeerId, PeerInfo, PeerRegistry, PeerRemoval, PeerRouteStatus, RouteHold,
 };
 pub use send::{
     AckState, ChannelInfoRef, CompletionSignal, MacEventRef, PacketFamily, PendingAck,

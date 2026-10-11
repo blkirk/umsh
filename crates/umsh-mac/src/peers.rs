@@ -132,6 +132,12 @@ impl PeerInfo {
         self.route_score
     }
 
+    /// When an acknowledgment last came back for a send on the selected
+    /// route.
+    pub fn route_confirmed_ms(&self) -> Option<u64> {
+        self.route_confirmed_ms
+    }
+
     /// Select `route`, forgetting what was known about the one it replaces.
     fn select_route(&mut self, route: Option<CachedRoute>, score: Option<i16>, revision: u64) {
         self.route = route;
@@ -139,6 +145,59 @@ impl PeerInfo {
         self.route_confirmed_ms = None;
         self.route_revision = revision;
     }
+}
+
+/// A route the application chose for a peer, kept in place until a deadline.
+///
+/// While the hold is in force no learned path replaces the route and no
+/// failure retires it. A send that misses its acknowledgment still falls
+/// back to a flood, and what that teaches is kept beside the route as a
+/// candidate the application may adopt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteHold {
+    /// When the hold ends, on the MAC's clock.
+    pub until_ms: u64,
+    /// Consecutive sends on the held route that missed their acknowledgment
+    /// and were then acknowledged through the flood fallback.
+    pub fallback_acks: u8,
+    /// The best path learned while the hold was in force, with its score.
+    pub candidate: Option<(CachedRoute, Option<i16>)>,
+}
+
+/// A snapshot of the route to one peer, for an application to present.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerRouteStatus {
+    /// The route the next send will use, if any.
+    pub route: Option<CachedRoute>,
+    /// How much longer the route is held; `None` when it is not.
+    pub hold_remaining_ms: Option<u64>,
+    /// See [`RouteHold::fallback_acks`]; zero when nothing is held.
+    pub fallback_acks: u8,
+    /// See [`RouteHold::candidate`].
+    pub candidate: Option<CachedRoute>,
+    /// How long ago an acknowledgment last came back for a send on the
+    /// route.
+    pub confirmed_age_ms: Option<u64>,
+}
+
+/// What became of a route whose send went unacknowledged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteFailure {
+    /// The route was not the one the send used, or there was none.
+    Unrelated,
+    /// The route was retired and held off from passive learning.
+    Retired,
+    /// The route is held, so it stays.
+    Held,
+}
+
+/// How a send to a peer with a held route ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldRouteOutcome {
+    /// The held route itself carried the exchange.
+    RouteAcked,
+    /// The held route missed, and the flood fallback was acknowledged.
+    FallbackAcked,
 }
 
 /// Evidence for a route, as one received frame offers it.
@@ -176,25 +235,56 @@ pub struct PeerRemoval {
 }
 
 /// Fixed-capacity registry of remote peers.
+///
+/// `H` bounds how many peers may have a held route at once (see
+/// [`PeerRegistry::hold_route`]). Holds live beside the peer table rather
+/// than in it, so a node that never holds a route sets `H` to zero and
+/// spends nothing on them.
 #[derive(Clone, Debug)]
-pub struct PeerRegistry<const N: usize> {
+pub struct PeerRegistry<const N: usize, const H: usize = 0> {
     peers: Vec<PeerInfo, N>,
+    holds: Vec<(PeerId, RouteHold), H>,
     next_route_revision: u64,
 }
 
-impl<const N: usize> Default for PeerRegistry<N> {
+impl<const N: usize, const H: usize> Default for PeerRegistry<N, H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> PeerRegistry<N> {
+impl<const N: usize, const H: usize> PeerRegistry<N, H> {
     /// Create an empty peer registry.
     pub fn new() -> Self {
         Self {
             peers: Vec::new(),
+            holds: Vec::new(),
             next_route_revision: 0,
         }
+    }
+
+    /// The hold on `id`'s route, if one is still in force at `now_ms`.
+    pub fn route_hold(&self, id: PeerId, now_ms: u64) -> Option<&RouteHold> {
+        self.holds
+            .iter()
+            .find(|(held, hold)| *held == id && now_ms < hold.until_ms)
+            .map(|(_, hold)| hold)
+    }
+
+    /// Where `id`'s hold sits, if it is in force at `now_ms`. A hold that
+    /// has run out is dropped here; the route itself stays, an ordinary
+    /// route the next measured path replaces.
+    fn hold_index(&mut self, id: PeerId, now_ms: u64) -> Option<usize> {
+        let index = self.holds.iter().position(|(held, _)| *held == id)?;
+        if now_ms < self.holds[index].1.until_ms {
+            return Some(index);
+        }
+        self.holds.swap_remove(index);
+        None
+    }
+
+    fn drop_hold(&mut self, id: PeerId) {
+        self.holds.retain(|(held, _)| *held != id);
     }
 
     /// Iterate over peers whose derived hint matches `hint`.
@@ -288,13 +378,16 @@ impl<const N: usize> PeerRegistry<N> {
             .peers
             .iter()
             .enumerate()
-            .filter(|(_, peer)| !peer.pinned)
+            .filter(|(index, peer)| {
+                !peer.pinned && self.route_hold(PeerId(*index as u8), now_ms).is_none()
+            })
             .min_by_key(|(_, peer)| peer.last_seen_ms)
         else {
             return Err(CapacityError);
         };
 
         let evicted_key = oldest.public_key;
+        self.drop_hold(PeerId(index as u8));
         self.peers[index] = PeerInfo::new(key, false, now_ms);
         Ok(AutoPeerUpdate {
             peer_id: PeerId(index as u8),
@@ -316,6 +409,12 @@ impl<const N: usize> PeerRegistry<N> {
         let last = self.peers.len() - 1;
         let removed = self.peers.swap_remove(index);
         let moved = (index != last).then_some((PeerId(last as u8), id));
+        self.drop_hold(id);
+        if let Some((old, new)) = moved {
+            for (held, _) in self.holds.iter_mut().filter(|(held, _)| *held == old) {
+                *held = new;
+            }
+        }
         Some(PeerRemoval {
             removed_key: removed.public_key,
             moved,
@@ -337,6 +436,83 @@ impl<const N: usize> PeerRegistry<N> {
             peer.select_route(Some(route), None, revision);
             peer.failed_route = None;
         }
+        self.drop_hold(id);
+    }
+
+    /// Install `route` and hold it until `until_ms`.
+    ///
+    /// Until then no learned path replaces it and no missed acknowledgment
+    /// retires it; a send that misses still falls back to a flood. After the
+    /// deadline it is an ordinary unscored route, which the next measured
+    /// path replaces. Installing a route restarts the hold and its record.
+    ///
+    /// `false`, changing nothing, when the peer is unknown or `H` holds are
+    /// already in force for other peers.
+    pub fn hold_route(
+        &mut self,
+        id: PeerId,
+        route: CachedRoute,
+        until_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
+        let hold = RouteHold {
+            until_ms,
+            fallback_acks: 0,
+            candidate: None,
+        };
+        if let Some(index) = self.holds.iter().position(|(held, _)| *held == id) {
+            self.holds[index].1 = hold;
+        } else {
+            self.holds.retain(|(_, held)| now_ms < held.until_ms);
+            if self.holds.push((id, hold)).is_err() {
+                return false;
+            }
+        }
+        let revision = self.next_revision();
+        let peer = self.get_mut(id).expect("peer was just found");
+        peer.select_route(Some(route), None, revision);
+        peer.failed_route = None;
+        true
+    }
+
+    /// Replace a held route with the best path learned while it was held,
+    /// ending the hold. `false` when there is no hold or nothing was learned.
+    pub fn adopt_candidate(&mut self, id: PeerId, now_ms: u64) -> bool {
+        let Some(index) = self.hold_index(id, now_ms) else {
+            return false;
+        };
+        let Some((route, score)) = self.holds[index].1.candidate.take() else {
+            return false;
+        };
+        self.holds.swap_remove(index);
+        let revision = self.next_revision();
+        if let Some(peer) = self.get_mut(id) {
+            peer.select_route(Some(route), score, revision);
+        }
+        true
+    }
+
+    /// Record how a send to a peer with a held route ended.
+    pub(crate) fn note_held_outcome(
+        &mut self,
+        key: &PublicKey,
+        outcome: HeldRouteOutcome,
+        now_ms: u64,
+    ) {
+        let Some((id, _)) = self.lookup_by_key(key) else {
+            return;
+        };
+        let Some(index) = self.hold_index(id, now_ms) else {
+            return;
+        };
+        let hold = &mut self.holds[index].1;
+        hold.fallback_acks = match outcome {
+            HeldRouteOutcome::RouteAcked => 0,
+            HeldRouteOutcome::FallbackAcked => hold.fallback_acks.saturating_add(1),
+        };
     }
 
     /// Weigh the route one received frame offers against the one held,
@@ -372,6 +548,15 @@ impl<const N: usize> PeerRegistry<N> {
             }
             return;
         }
+        if let Some(index) = self.hold_index(id, now_ms) {
+            // A held route stays, whatever the offer; a path it teaches is
+            // kept as the candidate the application may switch to. Even a
+            // superseding offer only proposes: the person chose this route.
+            let hold = &mut self.holds[index].1;
+            hold.candidate = better_candidate(hold.candidate.take(), offer);
+            return;
+        }
+        let peer = self.get_mut(id).expect("peer was just found");
         let confirmed = peer
             .route_confirmed_ms
             .is_some_and(|at| now_ms.saturating_sub(at) <= crate::route_score::CONFIRMATION_TTL_MS);
@@ -402,6 +587,7 @@ impl<const N: usize> PeerRegistry<N> {
     /// Forget a route explicitly; passive learning remains allowed.
     pub fn clear_route(&mut self, id: PeerId) -> bool {
         let revision = self.next_revision();
+        self.drop_hold(id);
         self.get_mut(id)
             .map(|peer| {
                 let held = peer.route.is_some();
@@ -413,18 +599,33 @@ impl<const N: usize> PeerRegistry<N> {
     }
 
     /// Retire only the cached route used by the failed on-air attempt.
-    pub(crate) fn fail_route(&mut self, key: &PublicKey, revision: u64, now_ms: u64) {
+    ///
+    /// A held route is not retired: the caller still falls back to a flood,
+    /// and the route stays for the next send.
+    pub(crate) fn fail_route(
+        &mut self,
+        key: &PublicKey,
+        revision: u64,
+        now_ms: u64,
+    ) -> RouteFailure {
         let Some((id, peer)) = self.lookup_by_key(key) else {
-            return;
+            return RouteFailure::Unrelated;
         };
         if revision == 0 || peer.route_revision != revision {
-            return;
+            return RouteFailure::Unrelated;
+        }
+        if self.hold_index(id, now_ms).is_some() {
+            return RouteFailure::Held;
         }
         let next_revision = self.next_revision();
         let peer = self.get_mut(id).expect("peer was just found");
-        if let Some(route) = peer.route.take() {
-            peer.failed_route = Some((route, now_ms.saturating_add(FAILED_ROUTE_HOLDOFF_MS)));
-            peer.select_route(None, None, next_revision);
+        match peer.route.take() {
+            Some(route) => {
+                peer.failed_route = Some((route, now_ms.saturating_add(FAILED_ROUTE_HOLDOFF_MS)));
+                peer.select_route(None, None, next_revision);
+                RouteFailure::Retired
+            }
+            None => RouteFailure::Unrelated,
         }
     }
 
@@ -453,6 +654,36 @@ impl<const N: usize> PeerRegistry<N> {
             peer.last_seen_ms = now_ms;
         }
     }
+}
+
+/// The better of a held route's candidate and a new offer.
+///
+/// A flood distance names no path to switch to. A measured path beats one
+/// nothing has measured; between two measured paths the newcomer must clear
+/// the usual switching margin.
+fn better_candidate(
+    candidate: Option<(CachedRoute, Option<i16>)>,
+    offer: RouteOffer,
+) -> Option<(CachedRoute, Option<i16>)> {
+    if matches!(offer.route, CachedRoute::Flood { .. }) {
+        return candidate;
+    }
+    let Some((route, score)) = candidate else {
+        return Some((offer.route, offer.score));
+    };
+    if route == offer.route {
+        return Some((route, offer.score.or(score)));
+    }
+    let replace = match (score, offer.score) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(held), Some(new)) => crate::route_score::displaces(new, held, false),
+    };
+    Some(if replace {
+        (offer.route, offer.score)
+    } else {
+        (route, score)
+    })
 }
 
 /// Per-peer secure transport state.

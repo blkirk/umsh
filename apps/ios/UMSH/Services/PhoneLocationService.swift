@@ -69,6 +69,17 @@ final class PhoneLocationService: NSObject {
         await OneShotLocationReader().read()
     }
 
+    /// One fix, only if location access was already granted: for a moment
+    /// that wants to note where the phone is but has no business asking.
+    func readOnceIfAuthorized() async -> CLLocation? {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            return await readOnce()
+        default:
+            return nil
+        }
+    }
+
     private func deliver(_ reading: CLLocation) {
         onReading?(reading)
     }

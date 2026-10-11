@@ -35,6 +35,19 @@ pub enum AddressParseError {
     Overflow,
 }
 
+/// Errors returned while reading a router hint typed by a person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintInputError {
+    /// Too few characters to determine sixteen bits.
+    TooShort,
+    /// Longer than the form allows.
+    TooLong,
+    /// A character was outside the form's alphabet.
+    InvalidCharacter,
+    /// No 32-byte address begins with this prefix.
+    OutOfRange,
+}
+
 /// Errors returned while encoding wire-format values into caller-provided buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncodeError {
@@ -91,6 +104,12 @@ impl fmt::Display for AddressParseError {
     }
 }
 
+impl fmt::Display for HintInputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
@@ -108,6 +127,9 @@ impl std::error::Error for ParseError {}
 
 #[cfg(feature = "std")]
 impl std::error::Error for AddressParseError {}
+
+#[cfg(feature = "std")]
+impl std::error::Error for HintInputError {}
 
 #[cfg(feature = "std")]
 impl std::error::Error for EncodeError {}

@@ -626,6 +626,7 @@ mod tests {
             &MacEventRef::AckReceived {
                 peer: pairwise_from_pfs,
                 receipt: SendReceipt(42),
+                via_route_retry: false,
             },
         );
         assert!(ticket.was_acked());

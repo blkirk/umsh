@@ -192,7 +192,10 @@ protocol RadioConnection: AnyObject, Sendable {
     /// metadata; completion leaves the radio's queue empty. Callers drain
     /// once per attach, after the host tables are reconciled.
     func drainOfflineQueue() async throws
-    func ping(peerAddress: String) async throws -> RadioPingResult
+    /// Send one traced Echo Request. An empty `route` pings the usual way;
+    /// a non-empty one sends it down exactly those router hints, in send
+    /// order, to test a path without installing it.
+    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult
     /// This phone's own node public key—what a device lists to let this
     /// phone manage it from a distance. Nil before a mesh session exists.
     func nodePublicKey() async -> Data?
@@ -317,9 +320,13 @@ protocol RadioConnection: AnyObject, Sendable {
     /// A plain MAC command any node may send: unlike the remote-management
     /// reads above, the router need not list this phone as an administrator.
     /// Throws `RemoteManagementError.noAnswer` when the page deadline passes.
+    ///
+    /// An empty `route` asks along whatever route the MAC holds; a non-empty
+    /// one asks down exactly those router hints, in send order.
     func requestPeerRepeaters(
         peerAddress: String,
-        cursor: Data?
+        cursor: Data?,
+        route: [Data]
     ) async throws -> MobileMeshPeerRepeatersPageRecord
     /// Ask matching nodes around a chosen point to identify themselves, with
     /// one broadcast Identity Request. Replies arrive on
@@ -355,6 +362,13 @@ protocol RadioConnection: AnyObject, Sendable {
     /// Discard this peer's learned route, returning whether one was held.
     /// Keys and counters are untouched.
     func clearPeerRoute(peerAddress: String) async throws -> Bool
+    /// Install `hints` (in send order) as this peer's route and hold it for
+    /// `holdMilliseconds` against learning and failure. Returns whether the
+    /// MAC took it. `clearPeerRoute` ends the hold.
+    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool
+    /// End a hold by switching to the path learned while it was held.
+    /// Returns whether there was one to switch to.
+    func adoptLearnedPeerRoute(peerAddress: String) async throws -> Bool
     func prepareChat(
         peerAddresses: [String],
         checkpoints: [MobileChatCheckpointRecord]
@@ -495,8 +509,29 @@ enum RadioPingResult: Equatable, Sendable {
     case timedOut
 }
 
+extension RadioConnection {
+    func ping(peerAddress: String) async throws -> RadioPingResult {
+        try await ping(peerAddress: peerAddress, route: [])
+    }
+
+    func requestPeerRepeaters(
+        peerAddress: String,
+        cursor: Data?
+    ) async throws -> MobileMeshPeerRepeatersPageRecord {
+        try await requestPeerRepeaters(peerAddress: peerAddress, cursor: cursor, route: [])
+    }
+}
+
 /// The route the phone's MAC currently holds for one peer, as raw wire values.
 struct RadioPeerRoute: Equatable, Sendable {
+    /// A path learned while a route was held.
+    struct Candidate: Equatable, Sendable {
+        let kind: MobileMeshRouteKind
+        /// Routers it names, in send order.
+        let hints: [Data]
+        let hopCount: UInt8?
+    }
+
     let kind: MobileMeshRouteKind
     /// Routers named by a source route, in send order.
     let hints: [Data]
@@ -507,6 +542,15 @@ struct RadioPeerRoute: Equatable, Sendable {
     let floodHops: UInt8?
     /// Two-octet region codes learned with a flood route.
     let floodRegions: [Data]
+    /// How much longer the route is held; `nil` when it is not.
+    let holdRemainingMilliseconds: UInt64?
+    /// Consecutive sends on the held route that missed and were then
+    /// acknowledged through the flood fallback.
+    let fallbackAcks: UInt8
+    /// How long ago an acknowledgment last vouched for the route.
+    let confirmedAgeMilliseconds: UInt64?
+    /// The best path learned while the route was held.
+    let candidate: Candidate?
 
     static let unknown = RadioPeerRoute(
         kind: .unknown, hints: [], hopCount: nil, floodHops: nil, floodRegions: []
@@ -517,13 +561,21 @@ struct RadioPeerRoute: Equatable, Sendable {
         hints: [Data],
         hopCount: UInt8?,
         floodHops: UInt8?,
-        floodRegions: [Data]
+        floodRegions: [Data],
+        holdRemainingMilliseconds: UInt64? = nil,
+        fallbackAcks: UInt8 = 0,
+        confirmedAgeMilliseconds: UInt64? = nil,
+        candidate: Candidate? = nil
     ) {
         self.kind = kind
         self.hints = hints
         self.hopCount = hopCount
         self.floodHops = floodHops
         self.floodRegions = floodRegions
+        self.holdRemainingMilliseconds = holdRemainingMilliseconds
+        self.fallbackAcks = fallbackAcks
+        self.confirmedAgeMilliseconds = confirmedAgeMilliseconds
+        self.candidate = candidate
     }
 
     init(_ record: MobileMeshRouteRecord) {
@@ -532,7 +584,17 @@ struct RadioPeerRoute: Equatable, Sendable {
             hints: record.hints,
             hopCount: record.hopCount,
             floodHops: record.floodHops,
-            floodRegions: record.floodRegions
+            floodRegions: record.floodRegions,
+            holdRemainingMilliseconds: record.holdRemainingMs,
+            fallbackAcks: record.fallbackAcks,
+            confirmedAgeMilliseconds: record.confirmedAgeMs,
+            candidate: record.candidateKind.map {
+                Candidate(
+                    kind: $0,
+                    hints: record.candidateHints,
+                    hopCount: record.candidateHopCount
+                )
+            }
         )
     }
 }

@@ -1087,3 +1087,216 @@ fn a_repeater_that_does_not_hear_us_is_not_chosen_as_the_first_hop() {
     let (route, z, _) = route_after_replies(true);
     assert_eq!(route, CachedRoute::source(&[z]));
 }
+
+/// A keyed peer whose route `[1, 2]` is held for `hold_ms`.
+fn held_route_mac(hold_ms: u64) -> (TestMac, LocalIdentityId, PublicKey, PeerId, CachedRoute) {
+    let (mut mac, local_id, key, peer_id) = mac_with_keyed_peer();
+    let route = CachedRoute::source(&[RouterHint([1, 2])]).unwrap();
+    let now = mac.clock().now_ms();
+    assert!(
+        mac.peer_registry_mut()
+            .hold_route(peer_id, route.clone(), now + hold_ms, now)
+    );
+    (mac, local_id, key, peer_id, route)
+}
+
+/// Queue one ack-requested send, take it off the queue as if aired, and
+/// return its receipt and the ack trailer that will answer it.
+fn send_awaiting_ack(
+    mac: &mut TestMac,
+    local_id: LocalIdentityId,
+    key: &PublicKey,
+) -> (SendReceipt, [u8; 8]) {
+    let receipt = mac
+        .queue_unicast(
+            local_id,
+            key,
+            b"payload",
+            &SendOptions::default().with_ack_requested(true),
+        )
+        .unwrap()
+        .unwrap();
+    mac.tx_queue_mut().pop_next().unwrap();
+    let ack = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .ack_trailer;
+    (receipt, ack)
+}
+
+/// Receive an ack carrying `trace`, returning its `via_route_retry` flag.
+fn receive_ack(mac: &mut TestMac, ack: [u8; 8], trace: &[RouterHint]) -> Option<bool> {
+    mac.radio_mut()
+        .queue_received_mac_ack_with_trace(ack, trace);
+    let mut via = None;
+    block_on(mac.receive_one(|_, event| {
+        if let MacEventRef::AckReceived {
+            via_route_retry, ..
+        } = event
+        {
+            via = Some(via_route_retry);
+        }
+    }))
+    .unwrap();
+    via
+}
+
+#[test]
+fn a_held_route_survives_learning_and_keeps_the_best_offer_as_candidate() {
+    let (mut mac, _, _, peer_id, route) = held_route_mac(60_000);
+    let now = mac.clock().now_ms();
+    let weak = CachedRoute::source(&[RouterHint([3, 4])]).unwrap();
+    let strong = CachedRoute::source(&[RouterHint([5, 6])]).unwrap();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, scored(weak.clone(), -200), now);
+    registry.offer_route(
+        peer_id,
+        RouteOffer {
+            supersedes: true,
+            ..scored(strong.clone(), -10)
+        },
+        now,
+    );
+    // Neither a weaker path nor a flood distance unseats the candidate.
+    registry.offer_route(peer_id, scored(weak, -200), now);
+    registry.offer_route(
+        peer_id,
+        RouteOffer {
+            route: CachedRoute::flood(2, &[]).unwrap(),
+            score: None,
+            supersedes: false,
+            acknowledgment: false,
+        },
+        now,
+    );
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(route));
+    assert_eq!(
+        mac.peer_registry()
+            .route_hold(peer_id, now)
+            .unwrap()
+            .candidate,
+        Some((strong, Some(-10)))
+    );
+}
+
+#[test]
+fn a_missed_held_route_floods_but_stays_and_counts_the_fallback() {
+    let (mut mac, local_id, key, peer_id, route) = held_route_mac(600_000);
+
+    let (receipt, ack) = send_awaiting_ack(&mut mac, local_id, &key);
+    expire_attempt(&mut mac, local_id, receipt);
+    assert_eq!(
+        mac.peer_registry().get(peer_id).unwrap().route,
+        Some(route.clone())
+    );
+    let retry = mac.tx_queue_mut().pop_next().unwrap();
+    let header = PacketHeader::parse(&retry.frame).unwrap();
+    assert!(
+        ParsedOptions::extract(&retry.frame, header.options_range)
+            .unwrap()
+            .route_retry
+    );
+
+    let learned = [RouterHint([7, 8])];
+    assert_eq!(receive_ack(&mut mac, ack, &learned), Some(true));
+    let now = mac.clock().now_ms();
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(route.clone()));
+    let hold = mac.peer_registry().route_hold(peer_id, now).unwrap();
+    assert_eq!(hold.fallback_acks, 1);
+    assert_eq!(
+        hold.candidate.as_ref().map(|(route, _)| route),
+        CachedRoute::source(&learned).as_ref()
+    );
+
+    // The next send goes out on the held route again, and an ack for it
+    // resets the count.
+    let (_, ack) = send_awaiting_ack(&mut mac, local_id, &key);
+    assert_eq!(
+        receive_ack(&mut mac, ack, &[RouterHint([1, 2])]),
+        Some(false)
+    );
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(route));
+    assert_eq!(
+        mac.peer_registry()
+            .route_hold(peer_id, now)
+            .unwrap()
+            .fallback_acks,
+        0
+    );
+}
+
+#[test]
+fn an_expired_hold_leaves_an_ordinary_route() {
+    let (mut mac, _, _, peer_id, route) = held_route_mac(1_000);
+    let now = mac.clock().now_ms();
+    let measured = CachedRoute::source(&[RouterHint([3, 4])]).unwrap();
+    mac.peer_registry_mut()
+        .offer_route(peer_id, scored(measured.clone(), -50), now + 999);
+    assert_eq!(mac.peer_registry().get(peer_id).unwrap().route, Some(route));
+    assert!(
+        mac.peer_registry()
+            .route_hold(peer_id, now + 1_000)
+            .is_none()
+    );
+    mac.peer_registry_mut()
+        .offer_route(peer_id, scored(measured.clone(), -50), now + 1_000);
+    assert_eq!(
+        mac.peer_registry().get(peer_id).unwrap().route,
+        Some(measured)
+    );
+}
+
+#[test]
+fn adopting_or_clearing_ends_the_hold() {
+    let (mut mac, _, _, peer_id, route) = held_route_mac(60_000);
+    let now = mac.clock().now_ms();
+    assert!(!mac.peer_registry_mut().adopt_candidate(peer_id, now));
+    let learned = CachedRoute::source(&[RouterHint([3, 4])]).unwrap();
+    mac.peer_registry_mut()
+        .offer_route(peer_id, scored(learned.clone(), -40), now);
+    assert!(mac.peer_registry_mut().adopt_candidate(peer_id, now));
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(learned));
+    assert_eq!(info.route_score(), Some(-40));
+    assert!(mac.peer_registry().route_hold(peer_id, now).is_none());
+
+    mac.peer_registry_mut()
+        .hold_route(peer_id, route, now + 60_000, now);
+    assert!(mac.peer_registry_mut().clear_route(peer_id));
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert!(info.route.is_none());
+    assert!(mac.peer_registry().route_hold(peer_id, now).is_none());
+}
+
+#[test]
+fn holds_are_bounded_and_follow_their_peer() {
+    let route = CachedRoute::source(&[RouterHint([1, 2])]).unwrap();
+    let mut registry = PeerRegistry::<4, 1>::new();
+    let first = registry.try_insert_or_update(PublicKey([1; 32])).unwrap();
+    let second = registry.try_insert_or_update(PublicKey([2; 32])).unwrap();
+    let third = registry.try_insert_or_update(PublicKey([3; 32])).unwrap();
+    assert!(registry.hold_route(third, route.clone(), 1_000, 0));
+    // One slot, taken until the hold runs out.
+    assert!(!registry.hold_route(second, route.clone(), 1_000, 0));
+    assert!(registry.get(second).unwrap().route.is_none());
+
+    // Removing a peer moves the last one into its slot, hold and all.
+    let removal = registry.remove(first).unwrap();
+    assert_eq!(removal.moved, Some((third, first)));
+    assert!(registry.route_hold(first, 0).is_some());
+    assert!(registry.route_hold(second, 0).is_none());
+
+    // A lapsed hold frees its slot.
+    assert!(registry.hold_route(second, route.clone(), 2_000, 1_000));
+    assert!(registry.route_hold(first, 1_000).is_none());
+
+    // A registry with no room for holds never holds.
+    let mut none = PeerRegistry::<4>::new();
+    let id = none.try_insert_or_update(PublicKey([1; 32])).unwrap();
+    assert!(!none.hold_route(id, route, 1_000, 0));
+}

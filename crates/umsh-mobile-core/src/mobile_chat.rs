@@ -229,6 +229,9 @@ pub struct MobileChatDeliveryRecord {
     pub handle: u32,
     pub fragment_index: Option<u8>,
     pub state: MobileChatDeliveryState,
+    /// The acknowledgment answered the flood that followed a miss on the
+    /// peer's route, not the routed send itself.
+    pub via_flood: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -369,6 +372,9 @@ pub(crate) struct MobileChatState {
     /// Hints already reported to the platform, so one resolution is announced
     /// once rather than on every frame.
     announced_members: BTreeSet<(ChannelTag, [u8; 3])>,
+    /// Frames, as `(handle, fragment)`, whose acknowledgment came back
+    /// through a route-retry flood, held until the delivery is drained.
+    flooded: BTreeSet<(u32, Option<u8>)>,
 }
 
 impl MobileChatState {
@@ -386,6 +392,15 @@ impl MobileChatState {
             channels,
             resolved_members: BTreeMap::new(),
             announced_members: BTreeSet::new(),
+            flooded: BTreeSet::new(),
+        }
+    }
+
+    /// Note that the acknowledgment about to be reported for
+    /// `transmission_id` came back through a route-retry flood.
+    pub fn note_acked_via_flood(&mut self, transmission_id: u32) {
+        if let Some((handle, fragment)) = self.engine.in_flight_frame(transmission_id) {
+            self.flooded.insert((handle.0, fragment));
         }
     }
 
@@ -673,6 +688,8 @@ impl MobileChatState {
                         DeliveryState::Acked => MobileChatDeliveryState::Acknowledged,
                         DeliveryState::Failed => MobileChatDeliveryState::Failed,
                     },
+                    via_flood: state == DeliveryState::Acked
+                        && self.flooded.remove(&(handle.0, fragment)),
                 }),
                 Output::Event(event) => drained.diagnostics.push(format!("{event:?}")),
                 Output::Diagnostic(diagnostic) => {

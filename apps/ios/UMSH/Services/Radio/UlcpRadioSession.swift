@@ -400,7 +400,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
 
     func requestPeerRepeaters(
         peerAddress: String,
-        cursor: Data?
+        cursor: Data?,
+        route: [Data]
     ) async throws -> MobileMeshPeerRepeatersPageRecord {
         // Guarded like a ping rather than like an identity request: this
         // waits up to the page deadline for an answer, and a link that
@@ -409,7 +410,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
         do {
             return try await session.requestPeerRepeatersPage(
                 peerAddress: peerAddress,
-                cursor: cursor
+                cursor: cursor,
+                sourceRoute: route
             )
         } catch MobileMeshError.NoAnswer {
             throw RemoteManagementError.noAnswer
@@ -451,6 +453,20 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
     func clearPeerRoute(peerAddress: String) async throws -> Bool {
         let session = try await currentMeshSession()
         return try await session.clearPeerRoute(peerAddress: peerAddress)
+    }
+
+    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool {
+        let session = try await currentMeshSession()
+        return try await session.holdPeerRoute(
+            peerAddress: peerAddress,
+            hints: hints,
+            holdMs: holdMilliseconds
+        )
+    }
+
+    func adoptLearnedPeerRoute(peerAddress: String) async throws -> Bool {
+        let session = try await currentMeshSession()
+        return try await session.adoptLearnedPeerRoute(peerAddress: peerAddress)
     }
 
     func signIdentityBundle(name: String?) async throws -> Data {
@@ -921,7 +937,7 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
         }
     }
 
-    func ping(peerAddress: String) async throws -> RadioPingResult {
+    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult {
         try await withCheckedThrowingContinuation {
             (result: CheckedContinuation<RadioPingResult, any Error>) in
             sessionQueue.async { [self] in
@@ -936,7 +952,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 do {
                     let operation = try meshSession.ping(
                         peerAddress: peerAddress,
-                        timeoutMs: Self.peerPingTimeoutMilliseconds
+                        timeoutMs: Self.peerPingTimeoutMilliseconds,
+                        sourceRoute: route
                     )
                     pingWaiters[operation] = result
                 } catch {

@@ -411,6 +411,9 @@ pub struct PendingAck<const FRAME: usize = MAX_RESEND_FRAME_LEN> {
     /// Cached-route revision used by this attempt, or zero if no cached
     /// assumption was used. Consumed when that attempt enters route recovery.
     pub(crate) cached_route_revision: u64,
+    /// The attempt rode a held route and missed, so whatever acknowledges
+    /// this send now came back through the flood fallback.
+    pub(crate) held_route_missed: bool,
 }
 
 impl<const FRAME: usize> PendingAck<FRAME> {
@@ -430,6 +433,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             completion: CompletionSignal::Ack,
             confirm_key: None,
             cached_route_revision: 0,
+            held_route_missed: false,
         }
     }
 
@@ -449,6 +453,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             completion: CompletionSignal::Ack,
             confirm_key: None,
             cached_route_revision: 0,
+            held_route_missed: false,
         }
     }
 
@@ -469,6 +474,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             completion: CompletionSignal::RepeatOnly,
             confirm_key: None,
             cached_route_revision: 0,
+            held_route_missed: false,
         }
     }
 
@@ -1290,6 +1296,9 @@ pub enum MacEventRef<'a> {
     AckReceived {
         peer: PublicKey,
         receipt: SendReceipt,
+        /// The acknowledged attempt was the route-retry flood that followed a
+        /// miss on the cached route, not the original send.
+        via_route_retry: bool,
     },
     /// Pending ACK timed out.
     AckTimeout {
