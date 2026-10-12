@@ -276,6 +276,12 @@ receive metadata. The integrated client preserves HDLC-Lite framing, TLS 1.3,
 and the `umsh-bridge/1` ALPN offer. Its eight-frame queues discard the oldest
 frame under pressure and expire queued frames after ten seconds. A connection
 boundary discards both queues and the partial HDLC decoder state.
+
+A device may run an integrated client and a [LAN bearer](lan-bearer.md)
+together. Its node is the one forwarding decision between them: a frame
+from the tunnel is offered to the bearer, and a frame from the bearer is
+carried onto the radio and, by being transmitted, into the tunnel.
+
 ## Host Interfaces {#host-interfaces}
 
 A server **MAY** offer **host interfaces**: interfaces whose far end is

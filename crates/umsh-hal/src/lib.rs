@@ -88,9 +88,40 @@ impl core::fmt::Debug for Snr {
     }
 }
 
+/// Which of a node's bearers a frame crossed.
+///
+/// A bearer is a shared broadcast medium beside the node's radio, such as
+/// an IP multicast group on the local network. A node numbers its own
+/// bearers from zero; the number means nothing to any other node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BearerId(u8);
+
+impl BearerId {
+    /// How many bearers one node can number.
+    pub const COUNT: usize = 8;
+
+    /// The LAN multicast bearer, which every node that has one numbers
+    /// first.
+    pub const LAN: Self = Self(0);
+
+    /// The bearer numbered `index`, if that is below [`Self::COUNT`].
+    pub const fn new(index: u8) -> Option<Self> {
+        if (index as usize) < Self::COUNT {
+            Some(Self(index))
+        } else {
+            None
+        }
+    }
+
+    /// This bearer's number.
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+}
+
 /// Where a received frame came from.
 ///
-/// Only [`RxOrigin::Air`] carries real measurements. The other two arrive
+/// Only [`RxOrigin::Air`] carries real measurements. The others arrive
 /// through paths with no radio in them, so their `rssi`, `snr`, and `lqi`
 /// carry no information and must be reported as unmeasured wherever a
 /// receiver would otherwise read them as a link quality.
@@ -103,12 +134,23 @@ pub enum RxOrigin {
     LocalTx,
     /// A frame handed over by an attached host across a point-to-point link.
     Backhaul,
+    /// A frame received from a shared broadcast bearer, heard by every
+    /// node attached to it.
+    Bearer(BearerId),
 }
 
 impl RxOrigin {
     /// Whether the accompanying signal fields are measurements.
     pub const fn is_measured(self) -> bool {
         matches!(self, Self::Air)
+    }
+
+    /// The bearer this frame arrived on, if it arrived on one.
+    pub const fn bearer(self) -> Option<BearerId> {
+        match self {
+            Self::Bearer(bearer) => Some(bearer),
+            _ => None,
+        }
     }
 }
 

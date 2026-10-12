@@ -100,6 +100,7 @@ fn session_config() -> SessionConfig {
         stats: None,
         mac_node: true,
         meshcore_forwarder: false,
+        lan_bearer: false,
         wifi: Some(WifiConfig::STATION),
         ip: Some(IpConfig::DUAL),
         bridge_client: false,

@@ -330,6 +330,11 @@ pub struct SessionConfig {
     /// properties exist; otherwise they are unknown. Meaningful only
     /// alongside [`mac_node`](Self::mac_node), whose repeater it shares.
     pub meshcore_forwarder: bool,
+    /// Whether the platform runs a LAN bearer beside its node. When set,
+    /// `CAP_LAN_BEARER` is advertised and the LAN bearer properties and
+    /// counters exist; otherwise they are unknown. Meaningful only
+    /// alongside [`mac_node`](Self::mac_node), whose forwarding it shares.
+    pub lan_bearer: bool,
     /// The I2C buses a host may drive directly, as `PROP_I2C_BUSES`
     /// reports them. Empty: `CAP_I2C` is absent, the two I2C properties
     /// are unknown, and `CMD_I2C_TRANSFER` and `CMD_I2C_SCAN` answer
@@ -898,6 +903,8 @@ struct DeviceDomain {
     /// are forwarded. Separate from `repeater_regions`, whose names
     /// derive case-insensitively.
     meshcore_regions: MeshCoreRegions,
+    /// `PROP_LAN_BEARER_ENABLED`, `_GROUP`, and `_INGRESS_LIMIT`.
+    lan_bearer: crate::lan_bearer::LanBearerConfig,
     /// `PROP_IDENT_ROLE`: the advertised `ROLE` byte, or `None` to
     /// derive it from what the device is actually doing.
     ///
@@ -1028,6 +1035,7 @@ impl DeviceDomain {
             meshcore_forwarding_enabled: false,
             meshcore_region_policy: meshcore_region_policy::OPEN,
             meshcore_regions: MeshCoreRegions::default(),
+            lan_bearer: crate::lan_bearer::LanBearerConfig::default(),
             ident_role: None,
             ident_mobile: false,
             ident_location: HeaplessVec::new(),
@@ -2256,6 +2264,9 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     saved(prop::MESHCORE_FORWARDING_ENABLED, ApplyPhase::Config, false),
     saved(prop::MESHCORE_REGION_POLICY, ApplyPhase::Config, false),
     saved(prop::MESHCORE_REGIONS, ApplyPhase::Config, true),
+    saved(prop::LAN_BEARER_ENABLED, ApplyPhase::Enable, false),
+    saved(prop::LAN_BEARER_GROUP, ApplyPhase::Config, false),
+    saved(prop::LAN_BEARER_INGRESS_LIMIT, ApplyPhase::Config, false),
 ];
 
 /// [`SavedState::decode`] tracks which single-valued properties it has
@@ -2364,6 +2375,7 @@ struct SavedState {
     meshcore_forwarding_enabled: bool,
     meshcore_region_policy: u8,
     meshcore_regions: MeshCoreRegions,
+    lan_bearer: crate::lan_bearer::LanBearerConfig,
     ident_role: Option<u8>,
     ident_mobile: bool,
     ident_location: HeaplessVec<u8, { gnss::MAX_LOCATION_LEN }>,
@@ -2414,6 +2426,7 @@ impl SavedState {
             meshcore_forwarding_enabled: device.meshcore_forwarding_enabled,
             meshcore_region_policy: device.meshcore_region_policy,
             meshcore_regions: device.meshcore_regions.clone(),
+            lan_bearer: device.lan_bearer,
             ident_role: device.ident_role,
             ident_mobile: device.ident_mobile,
             ident_location: device.ident_location.clone(),
@@ -2468,6 +2481,7 @@ impl SavedState {
             meshcore_forwarding_enabled: false,
             meshcore_region_policy: meshcore_region_policy::OPEN,
             meshcore_regions: MeshCoreRegions::default(),
+            lan_bearer: crate::lan_bearer::LanBearerConfig::default(),
             ident_role: None,
             ident_mobile: false,
             ident_location: HeaplessVec::new(),
@@ -2586,6 +2600,14 @@ impl SavedState {
                     encoder.put(number, name)?;
                 }
                 Ok(())
+            }
+            prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT => {
+                let mut bytes = [0; umsh_ulcp::lan::GROUP_LEN];
+                let len = self
+                    .lan_bearer
+                    .encode(u32::from(number), &mut bytes)
+                    .ok_or(EncodeError::BufferTooSmall)?;
+                encoder.put(number, &bytes[..len])
             }
             prop::DEV_DISCOVERABLE => encoder.put(number, &[self.dev_discoverable as u8]),
             prop::ADVERT_INTERVAL => encoder.put(number, &self.advert_interval_s.to_le_bytes()),
@@ -2812,6 +2834,11 @@ impl SavedState {
                 if let Ok(name) = meshcore_region_name(value) {
                     let _ = self.meshcore_regions.push(name);
                 }
+            }
+            prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT => {
+                self.lan_bearer
+                    .set(u32::from(number), value)
+                    .map_err(invalid)?;
             }
             prop::DEV_DISCOVERABLE => self.dev_discoverable = parse_bool(value).map_err(invalid)?,
             prop::ADVERT_INTERVAL => {
@@ -3112,6 +3139,8 @@ pub struct Session<A: AesProvider, S: Sha256Provider, const TX: usize = 1> {
     wifi_link: wifi::Link,
     #[cfg(feature = "bridge-client")]
     bridge_link: umsh_ulcp::bridge::Link,
+    /// `PROP_LAN_BEARER_STATE`, as the platform last reported it.
+    lan_bearer_state: umsh_ulcp::lan::State,
     /// `PROP_WIFI_RSSI`: empty until the station has a signal to report,
     /// which is what an unassociated station has.
     wifi_rssi_dbm: Option<i8>,
@@ -3320,6 +3349,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             wifi_link: wifi::Link::default(),
             #[cfg(feature = "bridge-client")]
             bridge_link: Default::default(),
+            lan_bearer_state: Default::default(),
             wifi_rssi_dbm: None,
             wifi_mac: None,
             ipv4_state: ip::FamilyState::default(),
@@ -3508,6 +3538,33 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.config.mac_node && self.config.meshcore_forwarder
     }
 
+    /// The LAN bearer's configuration as stored. Whether the bearer
+    /// actually runs also takes a network to join it on.
+    pub fn lan_bearer_config(&self) -> &crate::lan_bearer::LanBearerConfig {
+        &self.device.lan_bearer
+    }
+
+    /// Report what the platform made of the LAN bearer's configuration,
+    /// announcing a change to an attached host.
+    pub fn set_lan_bearer_state(
+        &mut self,
+        state: umsh_ulcp::lan::State,
+        emit: &mut impl FnMut(&[u8]),
+    ) {
+        if !self.has_lan_bearer() || state == self.lan_bearer_state {
+            return;
+        }
+        self.lan_bearer_state = state;
+        if self.attached {
+            self.announce_prop_is(prop::LAN_BEARER_STATE, &[state as u8], emit);
+        }
+    }
+
+    /// Whether this device serves the LAN bearer properties.
+    fn has_lan_bearer(&self) -> bool {
+        self.config.mac_node && self.config.lan_bearer
+    }
+
     /// The live `PROP_DEV_KEY` value. `None` once a factory reset
     /// (`CMD_CLEAR` + `CMD_RST`) completes—the firmware uses this
     /// edge to make a running device node dormant.
@@ -3645,6 +3702,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     }
                     prop::MESHCORE_REGIONS => {
                         self.device.meshcore_regions = saved.meshcore_regions.clone()
+                    }
+                    prop::LAN_BEARER_ENABLED => {
+                        self.device.lan_bearer.enabled = saved.lan_bearer.enabled
+                    }
+                    prop::LAN_BEARER_GROUP => self.device.lan_bearer.group = saved.lan_bearer.group,
+                    prop::LAN_BEARER_INGRESS_LIMIT => {
+                        self.device.lan_bearer.ingress_limit = saved.lan_bearer.ingress_limit
                     }
                     prop::DEV_DISCOVERABLE => self.device.dev_discoverable = saved.dev_discoverable,
                     prop::ADVERT_INTERVAL => {
@@ -6819,6 +6883,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 self.bump_dev_domain();
                 Ok(false)
             }
+            prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT
+                if self.has_lan_bearer() =>
+            {
+                self.device.lan_bearer.set(key, value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
             // The receiver switch and the positioning policy. All reach
             // the platform through the device-domain mirror rather than
             // through an effect of their own, which is what makes a host
@@ -7580,6 +7651,8 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         // anything, which is a different device.
         let present = if counter.needs_meshcore() {
             self.has_meshcore()
+        } else if counter.needs_lan_bearer() {
+            self.has_lan_bearer()
         } else {
             !counter.needs_node() || self.config.mac_node
         };
@@ -7691,6 +7764,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 | prop::MESHCORE_REGIONS
         ) {
             return self.has_meshcore();
+        }
+        if matches!(
+            key,
+            prop::LAN_BEARER_ENABLED
+                | prop::LAN_BEARER_GROUP
+                | prop::LAN_BEARER_INGRESS_LIMIT
+                | prop::LAN_BEARER_STATE
+        ) {
+            return self.has_lan_bearer();
         }
         if matches!(
             key,
@@ -7854,6 +7936,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 }
                 if self.has_meshcore() {
                     len += pui::encode(cap::MESHCORE_FORWARDER, &mut out[len..]).unwrap_or(0);
+                }
+                if self.has_lan_bearer() {
+                    len += pui::encode(cap::LAN_BEARER, &mut out[len..]).unwrap_or(0);
                 }
                 // Every device with Wi-Fi can scan; only some can join,
                 // so the station's capability is the narrower of the two
@@ -8161,6 +8246,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                         .expect("out sized for a full region table");
                 }
                 len
+            }
+            prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT
+                if self.has_lan_bearer() =>
+            {
+                self.device.lan_bearer.encode(key, out).unwrap_or(0)
+            }
+            prop::LAN_BEARER_STATE if self.has_lan_bearer() => {
+                out[0] = self.lan_bearer_state as u8;
+                1
             }
             prop::PHY_DUTY_NOW => put(out, &self.config.duty.usage(now_ms).to_le_bytes()),
             prop::PHY_DUTY_LIMIT => put(out, &self.config.duty.limit().to_le_bytes()),
@@ -8721,6 +8815,7 @@ mod tests {
             reboot: true,
             mac_node: true,
             meshcore_forwarder: true,
+            lan_bearer: true,
             wifi: Some(net::WifiConfig::STATION),
             ip: Some(net::IpConfig::DUAL),
             bridge_client: false,
@@ -9299,6 +9394,7 @@ mod tests {
                 cap::REBOOT,
                 cap::STATS,
                 cap::MESHCORE_FORWARDER,
+                cap::LAN_BEARER,
                 cap::WIFI_SCAN,
                 cap::WIFI,
                 cap::IPV4,
@@ -9451,6 +9547,7 @@ mod tests {
             SessionConfig {
                 mac_node: false,
                 meshcore_forwarder: false,
+                lan_bearer: false,
                 ..test_config()
             },
             Status::RESET_POWER_ON,
@@ -9482,6 +9579,7 @@ mod tests {
         let config = SessionConfig {
             mac_node: false,
             meshcore_forwarder: false,
+            lan_bearer: false,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -10777,6 +10875,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lan_bearer_settings_round_trip_and_persist() {
+        let mut session = test_session();
+        assert!(capabilities(&mut session).contains(&cap::LAN_BEARER));
+        assert_eq!(get(&mut session, prop::LAN_BEARER_ENABLED), [0]);
+        assert_eq!(
+            get(&mut session, prop::LAN_BEARER_GROUP),
+            [239, 255, 42, 42, 0xCD, 0x1C]
+        );
+        assert_eq!(
+            get(&mut session, prop::LAN_BEARER_INGRESS_LIMIT),
+            umsh_ulcp::lan::DEFAULT_INGRESS_LIMIT.to_le_bytes()
+        );
+        assert_eq!(get(&mut session, prop::LAN_BEARER_STATE), [0]);
+
+        // Only a multicast group, and only a nonzero limit.
+        for (key, value) in [
+            (prop::LAN_BEARER_GROUP, &[10, 0, 0, 1, 0xCD, 0x1C][..]),
+            (prop::LAN_BEARER_INGRESS_LIMIT, &[0, 0][..]),
+            (prop::LAN_BEARER_ENABLED, &[2][..]),
+        ] {
+            let (emitted, _) = set(&mut session, key, value);
+            expect_status(&emitted[0], 2, Status::INVALID_ARGUMENT);
+        }
+        assert_eq!(get(&mut session, prop::LAN_BEARER_STATE), [0]);
+
+        let version = session.dev_domain_version();
+        set(&mut session, prop::LAN_BEARER_ENABLED, &[1]);
+        set(
+            &mut session,
+            prop::LAN_BEARER_GROUP,
+            &[239, 1, 2, 3, 0x10, 0x27],
+        );
+        set(
+            &mut session,
+            prop::LAN_BEARER_INGRESS_LIMIT,
+            &30u16.to_le_bytes(),
+        );
+        assert_ne!(session.dev_domain_version(), version);
+        let config = *session.lan_bearer_config();
+        assert!(config.enabled);
+        assert_eq!(config.group.address, [239, 1, 2, 3]);
+        assert_eq!(config.group.port, 10_000);
+        assert_eq!(config.ingress_limit, 30);
+
+        // The state is the platform's to report, and an attached host
+        // hears it change.
+        let mut emitted = std::vec::Vec::new();
+        session.set_lan_bearer_state(umsh_ulcp::lan::State::Active, &mut |frame| {
+            emitted.push(frame.to_vec())
+        });
+        let (_, key, value) = parse_prop_is(&emitted[0]);
+        assert_eq!((key, value.as_slice()), (prop::LAN_BEARER_STATE, &[1][..]));
+
+        save(&mut session);
+        let mut bytes = [0u8; SNAPSHOT_MAX];
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.restore_at_boot(&bytes[..len]).unwrap();
+        assert_eq!(*booted.lan_bearer_config(), config);
+    }
+
+    #[test]
+    fn a_device_without_a_lan_bearer_has_none_of_its_properties() {
+        let config = SessionConfig {
+            lan_bearer: false,
+            ..test_config()
+        };
+        let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        session.attach(true);
+        assert!(!capabilities(&mut session).contains(&cap::LAN_BEARER));
+        for key in [
+            prop::LAN_BEARER_ENABLED,
+            prop::LAN_BEARER_STATE,
+            prop::STAT_LAN_EXPORTED,
+        ] {
+            let (emitted, _) = set(&mut session, key, &[1]);
+            expect_status(&emitted[0], 2, Status::PROP_NOT_FOUND);
+        }
+    }
+
     /// A snapshot written before the MeshCore settings existed carries
     /// no option for them, and restores them to their defaults.
     #[test]
@@ -11026,6 +11206,7 @@ mod tests {
     fn meshcore_settings_are_absent_without_the_forwarder() {
         let config = SessionConfig {
             meshcore_forwarder: false,
+            lan_bearer: false,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -14942,8 +15123,8 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.phase == ApplyPhase::Enable)
                 .count()
-                == 1 + usize::from(cfg!(feature = "bridge-client")),
-            "PHY and bridge enablement follow their configuration"
+                == 2 + usize::from(cfg!(feature = "bridge-client")),
+            "PHY, LAN bearer, and bridge enablement follow their configuration"
         );
         // And the numeric order really would get it wrong.
         assert!(u32::from(enable.number) < prop::PHY_FREQ);
@@ -17438,6 +17619,7 @@ mod tests {
                 bridge_client: enabled,
                 mac_node: node,
                 meshcore_forwarder: false,
+                lan_bearer: false,
                 ip: if ip { Some(net::IpConfig::DUAL) } else { None },
                 ..test_config()
             };

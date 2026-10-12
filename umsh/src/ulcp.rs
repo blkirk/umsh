@@ -3665,7 +3665,9 @@ where
             rssi: packet.meta.rssi_dbm.unwrap_or(0),
             snr: Snr::from_centibels(packet.meta.snr_cb.unwrap_or(0)),
             lqi: packet.meta.lqi,
-            origin: if self_tx {
+            // A reception the device could not measure—one from a LAN
+            // bearer, say—is as unmeasured here as the device's own.
+            origin: if self_tx || packet.meta.snr_cb.is_none() {
                 RxOrigin::Backhaul
             } else {
                 RxOrigin::Air

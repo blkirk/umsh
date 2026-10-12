@@ -93,6 +93,12 @@ pub enum Target {
         host: String,
         port: u16,
     },
+    /// A virtual radio in this process whose PHY is the LAN bearer's
+    /// multicast group: no hardware, and the mesh reached through
+    /// whichever radios on the LAN forward to it.
+    Lan {
+        group: std::net::SocketAddrV4,
+    },
     /// A device reached over the mesh rather than a wire, through the
     /// Node Management binding. Opening one borrows whatever radio is
     /// attached; the session that results is a device handle like any
@@ -109,6 +115,7 @@ impl Target {
             Self::Serial { .. } => "serial",
             Self::Ble { .. } => "ble",
             Self::Tcp { .. } => "tcp",
+            Self::Lan { .. } => "lan",
             Self::Mesh { .. } => "mesh",
         }
     }
@@ -121,6 +128,7 @@ impl Target {
             }
             Self::Ble { selector, name } => name.clone().unwrap_or_else(|| selector.clone()),
             Self::Tcp { host, port } => format_endpoint(host, *port),
+            Self::Lan { group } => format!("lan {group}"),
             Self::Mesh { key } => umsh::core::PublicKey(*key).to_string(),
         }
     }
@@ -180,6 +188,8 @@ pub enum AnyLink {
     /// Ungated: a socket needs no driver crate, so every build can reach
     /// a bridged radio.
     Tcp(umsh::ulcp::SerialFrameLink<tokio::net::TcpStream>),
+    /// The LAN virtual radio, over its in-process pipe.
+    Lan(umsh::ulcp::SerialFrameLink<tokio::io::DuplexStream>),
     /// Ungated too: the mesh is reached through whatever radio is
     /// already attached, so it needs no transport of its own.
     Mesh(umsh::ulcp_mesh::MeshFrameLink),
@@ -190,17 +200,33 @@ pub enum AnyLink {
     Unavailable,
 }
 
+/// How long a serial port stays open after the last write; see
+/// [`AnyLink::close`].
+#[cfg(feature = "serial-radio")]
+const SERIAL_CLOSE_LINGER: Duration = Duration::from_millis(250);
+
 impl AnyLink {
     /// Let go of the transport, waiting a bounded moment where the far
     /// end has to be told.
     ///
     /// A BLE radio admits one connection and stops advertising while it
     /// holds one, so a link being replaced is closed before the next one
-    /// is looked for. A wire needs nothing beyond being dropped.
+    /// is looked for.
+    ///
+    /// A serial port lingers before it is dropped. macOS can discard
+    /// bytes a USB serial port has not yet put on the bus when the port
+    /// closes, even after a flush, and the commands that end a session—
+    /// `CMD_REBOOT`, `CMD_FACTORY_RESET`—are answered by nothing, so no
+    /// reply proves they arrived.
     pub async fn close(self) {
         match self {
             #[cfg(feature = "ble-radio")]
             Self::Ble(link) => link.close().await,
+            #[cfg(feature = "serial-radio")]
+            Self::Serial(link) => {
+                tokio::time::sleep(SERIAL_CLOSE_LINGER).await;
+                drop(link);
+            }
             _ => {}
         }
     }
@@ -214,6 +240,7 @@ impl FrameLink for AnyLink {
             #[cfg(feature = "ble-radio")]
             Self::Ble(link) => link.send_frame(frame).await,
             Self::Tcp(link) => link.send_frame(frame).await,
+            Self::Lan(link) => link.send_frame(frame).await,
             Self::Mesh(link) => link.send_frame(frame).await,
             Self::Unavailable => Err(UlcpError::Disconnected),
         }
@@ -229,6 +256,7 @@ impl FrameLink for AnyLink {
             #[cfg(feature = "ble-radio")]
             Self::Ble(link) => link.poll_recv_frame(cx),
             Self::Tcp(link) => link.poll_recv_frame(cx),
+            Self::Lan(link) => link.poll_recv_frame(cx),
             Self::Mesh(link) => link.poll_recv_frame(cx),
             Self::Unavailable => core::task::Poll::Ready(Err(UlcpError::Disconnected)),
         }
@@ -519,6 +547,9 @@ async fn open_with(target: &Target, power_on_timeout: Duration) -> Result<AnyLin
         Target::Serial { port, baud } => open_serial(port, *baud).await,
         Target::Ble { selector, .. } => open_ble(selector, power_on_timeout).await,
         Target::Tcp { host, port } => open_tcp(host, *port).await,
+        Target::Lan { group } => Ok(AnyLink::Lan(umsh::ulcp::SerialFrameLink::new(
+            crate::lan::open(*group).await?,
+        ))),
         // A mesh session is not opened by naming a transport: it is
         // built on the radio already attached, by `mesh::open_remote`.
         Target::Mesh { .. } => bail!("a mesh session cannot be reopened on its own"),
@@ -919,7 +950,7 @@ impl Prefs {
 
 /// Where the preferences file and the REPL history live. One directory,
 /// following `XDG_STATE_HOME` when it is set.
-fn state_dir() -> Option<PathBuf> {
+pub fn state_dir() -> Option<PathBuf> {
     if let Some(state) = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(state).join("umsh"));
     }

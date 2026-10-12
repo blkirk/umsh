@@ -1,7 +1,9 @@
 import SwiftUI
 import UMSHMobileCore
 
-/// The device's own tunnel, using the same management flow on local and mesh links.
+/// The ways a device carries the mesh over IP—a tunnel to a server, and a
+/// link to the radios on its own network—using the same management flow on
+/// local and mesh links.
 struct RemoteBridgeScreen: View {
     let model: ManageDeviceModel
     @State private var edits = Edits()
@@ -9,48 +11,14 @@ struct RemoteBridgeScreen: View {
 
     private var reading: RemoteCategoryReading? { model.readings[.bridge] }
     private var problems: [UInt32: String] { model.writeRefusals[.bridge] ?? [:] }
+    private var offered: Set<UInt32> { Set(model.properties(of: .bridge)) }
+    private var hasServer: Bool { offered.contains(ulcpProperties.bridgeEnabled) }
+    private var hasLocal: Bool { offered.contains(ulcpProperties.lanBearerEnabled) }
 
     var body: some View {
         Form {
-            Section {
-                if edits.enabled.isKnown {
-                    Toggle(isOn: $edits.enabled.edited.replacingNil(with: false)) {
-                        RemoteFieldTitle("Bridge enabled", problem: problems[ulcpProperties.bridgeEnabled])
-                    }
-                } else {
-                    RemoteReadOnlyToggle("Bridge enabled", isOn: nil)
-                }
-                RemoteTextField("Host", text: $edits.host.edited.replacingNil(with: ""),
-                                isKnown: edits.host.isKnown, problem: problems[ulcpProperties.bridgeHost])
-                RemoteTextField("Port", text: $edits.port.edited.replacingNil(with: ""),
-                                isKnown: edits.port.isKnown, problem: problems[ulcpProperties.bridgePort])
-                RemoteTextField("Server identity", text: $edits.key.edited.replacingNil(with: ""),
-                                isKnown: edits.key.isKnown, problem: problems[ulcpProperties.bridgeServerKey])
-            } footer: {
-                Text("Enter the server's UMSH identity to authenticate it. Wi-Fi and IP must be configured separately.")
-            }
-            Section("Connection") {
-                RemoteValueRow("Status", value: stateText)
-                if let reason = reasonText { Text(reason).foregroundStyle(.secondary) }
-                RemoteValueRow("Node", value: reading?.properties.repeaterEnabled.map { $0 ? "Repeater" : "Leaf" } ?? "Not read")
-                if reading?.properties.repeaterEnabled == false {
-                    Text("This device can communicate across the bridge but does not forward traffic for other nodes.")
-                        .foregroundStyle(.secondary)
-                }
-                RemoteReadingFooter(reading: reading, isBusy: model.isBusy)
-            }
-            Section("Device identity") {
-                if let key = reading?.properties.devKey, !key.isEmpty,
-                   let identity = try? inspectPublicIdentityBytes(publicKey: key) {
-                    Text(identity.canonicalAddress).font(.footnote.monospaced()).textSelection(.enabled)
-                    Button("Copy device identity", systemImage: "doc.on.doc") {
-                        UIPasteboard.general.string = identity.canonicalAddress
-                    }
-                    Text("Authorize this identity on the bridge server.").foregroundStyle(.secondary)
-                } else {
-                    Text("Not read").foregroundStyle(.secondary)
-                }
-            }
+            if hasLocal { localSections }
+            if hasServer { serverSections }
             if let validation { Text(validation).foregroundStyle(.red) }
             RemoteProblemSection(model: model)
         }
@@ -58,6 +26,91 @@ struct RemoteBridgeScreen: View {
                               apply: { await apply() }, hasEdits: !edits.dirty.isEmpty)
         .onChange(of: reading?.asOf) { edits = Edits(reading, preserving: edits) }
         .onAppear { if edits.isEmpty { edits = Edits(reading) } }
+    }
+
+    // MARK: - Local network
+
+    @ViewBuilder
+    private var localSections: some View {
+        Section {
+            if edits.localEnabled.isKnown {
+                Toggle(isOn: $edits.localEnabled.edited.replacingNil(with: false)) {
+                    RemoteFieldTitle("Local network", problem: problems[ulcpProperties.lanBearerEnabled])
+                }
+            } else {
+                RemoteReadOnlyToggle("Local network", isOn: nil)
+            }
+            RemoteValueRow("Status", value: localStateText)
+        } header: {
+            Text("Local Network")
+        } footer: {
+            Text("Links this radio with radios and apps on the same network.")
+        }
+        Section {
+            RemoteTextField("Group", text: $edits.group.edited.replacingNil(with: ""),
+                            isKnown: edits.group.isKnown, problem: problems[ulcpProperties.lanBearerGroup])
+            RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
+                            isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit])
+            if !hasServer { RemoteReadingFooter(reading: reading, isBusy: model.isBusy) }
+        } header: {
+            Text("Local Network Settings")
+        }
+    }
+
+    private var localStateText: String {
+        switch reading?.properties.lanBearerState {
+        case 0: "Off"
+        case 1: "Connected"
+        case 2: "No network"
+        default: "Not read"
+        }
+    }
+
+    // MARK: - Server
+
+    @ViewBuilder
+    private var serverSections: some View {
+        Section {
+            if edits.enabled.isKnown {
+                Toggle(isOn: $edits.enabled.edited.replacingNil(with: false)) {
+                    RemoteFieldTitle("Bridge enabled", problem: problems[ulcpProperties.bridgeEnabled])
+                }
+            } else {
+                RemoteReadOnlyToggle("Bridge enabled", isOn: nil)
+            }
+            RemoteTextField("Host", text: $edits.host.edited.replacingNil(with: ""),
+                            isKnown: edits.host.isKnown, problem: problems[ulcpProperties.bridgeHost])
+            RemoteTextField("Port", text: $edits.port.edited.replacingNil(with: ""),
+                            isKnown: edits.port.isKnown, problem: problems[ulcpProperties.bridgePort])
+            RemoteTextField("Server identity", text: $edits.key.edited.replacingNil(with: ""),
+                            isKnown: edits.key.isKnown, problem: problems[ulcpProperties.bridgeServerKey])
+        } header: {
+            if hasLocal { Text("Internet Server") }
+        } footer: {
+            Text("Enter the server's UMSH identity to authenticate it. Wi-Fi and IP must be configured separately.")
+        }
+        Section("Connection") {
+            RemoteValueRow("Status", value: stateText)
+            if let reason = reasonText { Text(reason).foregroundStyle(.secondary) }
+            RemoteValueRow("Node", value: reading?.properties.repeaterEnabled.map { $0 ? "Repeater" : "Leaf" } ?? "Not read")
+            if reading?.properties.repeaterEnabled == false {
+                Text("This device can communicate across the bridge but does not forward traffic for other nodes.")
+                    .foregroundStyle(.secondary)
+            }
+            RemoteReadingFooter(reading: reading, isBusy: model.isBusy)
+        }
+        Section("Device identity") {
+            if let key = reading?.properties.devKey, !key.isEmpty,
+               let identity = try? inspectPublicIdentityBytes(publicKey: key) {
+                Text(identity.canonicalAddress).font(.footnote.monospaced()).textSelection(.enabled)
+                Button("Copy device identity", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = identity.canonicalAddress
+                }
+                Text("Authorize this identity on the bridge server.").foregroundStyle(.secondary)
+            } else {
+                Text("Not read").foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var stateText: String {
@@ -84,6 +137,8 @@ struct RemoteBridgeScreen: View {
         }
     }
 
+    // MARK: - Apply
+
     private func apply() async {
         validation = nil
         var desired = edits.held
@@ -100,6 +155,18 @@ struct RemoteBridgeScreen: View {
             do { desired.bridgeServerKey = try ulcpBridgeServerKey(input: edits.key.value ?? "") }
             catch { validation = "Enter a valid UMSH server identity, or leave it empty to clear it."; return }
         }
+        desired.lanBearerEnabled = edits.localEnabled.value
+        if edits.group.isDirty {
+            do { desired.lanBearerGroup = try ulcpLanGroup(input: edits.group.value ?? "") }
+            catch { validation = "Enter a multicast group and port, such as 239.255.42.42:7373."; return }
+        }
+        if edits.limit.isDirty {
+            guard let text = edits.limit.value, let limit = UInt16(text), limit > 0 else {
+                validation = "Enter a limit from 1 to 65535 frames per minute."
+                return
+            }
+            desired.lanBearerIngressLimit = limit
+        }
         if await model.apply(.bridge, desired: desired, dirty: edits.dirty) {
             edits = Edits(model.readings[.bridge])
         }
@@ -110,6 +177,9 @@ struct RemoteBridgeScreen: View {
         var host = RemoteField<String>(0, nil)
         var port = RemoteField<String>(0, nil)
         var key = RemoteField<String>(0, nil)
+        var localEnabled = RemoteField<Bool>(0, nil)
+        var group = RemoteField<String>(0, nil)
+        var limit = RemoteField<String>(0, nil)
         var held = UlcpDevicePropertiesRecord.empty
         var isEmpty = true
 
@@ -124,6 +194,9 @@ struct RemoteBridgeScreen: View {
                 bytes.isEmpty ? "" : ((try? inspectPublicIdentityBytes(publicKey: bytes).canonicalAddress) ?? "")
             }
             key = RemoteField(id.bridgeServerKey, address)
+            localEnabled = RemoteField(id.lanBearerEnabled, held.lanBearerEnabled)
+            group = RemoteField(id.lanBearerGroup, held.lanBearerGroup)
+            limit = RemoteField(id.lanBearerIngressLimit, held.lanBearerIngressLimit.map(String.init))
             isEmpty = reading == nil
         }
         init(_ reading: RemoteCategoryReading?, preserving old: Edits) {
@@ -133,13 +206,14 @@ struct RemoteBridgeScreen: View {
             host = host.preserving(old.host)
             port = port.preserving(old.port)
             key = key.preserving(old.key)
+            localEnabled = localEnabled.preserving(old.localEnabled)
+            group = group.preserving(old.group)
+            limit = limit.preserving(old.limit)
         }
         var dirty: Set<UInt32> {
             var ids: Set<UInt32> = []
-            if enabled.isDirty { ids.insert(enabled.property) }
-            if host.isDirty { ids.insert(host.property) }
-            if port.isDirty { ids.insert(port.property) }
-            if key.isDirty { ids.insert(key.property) }
+            for field in [enabled, localEnabled] where field.isDirty { ids.insert(field.property) }
+            for field in [host, port, key, group, limit] where field.isDirty { ids.insert(field.property) }
             return ids
         }
     }

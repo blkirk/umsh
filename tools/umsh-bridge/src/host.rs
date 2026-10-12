@@ -97,6 +97,7 @@ fn session_config() -> SessionConfig {
         stats: None,
         mac_node: false,
         meshcore_forwarder: false,
+        lan_bearer: false,
         wifi: None,
         ip: None,
         bridge_client: false,

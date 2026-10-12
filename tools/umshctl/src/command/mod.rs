@@ -13,6 +13,7 @@ pub mod duty;
 pub mod gnss;
 pub mod i2c;
 pub mod info;
+pub mod lan;
 pub mod lifecycle;
 pub mod manage;
 pub mod message;
@@ -113,6 +114,12 @@ pub enum Command {
     Bridge {
         #[command(subcommand)]
         op: Option<bridge::BridgeOp>,
+    },
+
+    /// Configure the device's LAN bearer, or browse who is on the LAN.
+    Lan {
+        #[command(subcommand)]
+        op: Option<lan::LanOp>,
     },
 
     /// Show or set the device's wall clock and time zone.
@@ -305,6 +312,7 @@ impl Command {
             // Learned routes are this tool's own notes, and reading them
             // is exactly what you want to do with nothing attached.
             Self::Routes { .. } => false,
+            Self::Lan { op: Some(op) } => op.needs_device(),
             // Saving the attached radio as the default needs one; naming
             // a selector outright does not.
             Self::Default { op } => matches!(op, Some(DefaultOp::Set { selector: None })),
@@ -396,6 +404,7 @@ impl Command {
             Self::Duty { op } => duty::run(app, op).await,
             Self::Repeater { op } => repeater::run(app, op).await,
             Self::Bridge { op } => bridge::run(app, op).await,
+            Self::Lan { op } => lan::run(app, op).await,
             Self::Time { op } => time::run(app, op).await,
             Self::Gnss { op } => gnss::run(app, op).await,
             Self::Advert { op } => advert::run(app, op).await,
@@ -478,6 +487,10 @@ fn default(app: &mut App, op: DefaultOp) -> Result<()> {
                         Target::Tcp { .. } => bail!(
                             "the saved default is a BLE radio: a bridged radio is already named \
                              by its endpoint, so give it with --tcp or set UMSHCTL_TCP instead"
+                        ),
+                        Target::Lan { .. } => bail!(
+                            "the saved default is a BLE radio: the LAN virtual radio is named \
+                             by --lan"
                         ),
                         Target::Mesh { .. } => bail!(
                             "the saved default is a radio to attach to, not a node to manage: \

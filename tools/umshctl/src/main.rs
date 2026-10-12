@@ -19,6 +19,7 @@
 mod command;
 mod connection;
 mod extcap;
+mod lan;
 mod mesh;
 mod output;
 mod repl;
@@ -105,6 +106,22 @@ pub struct ToolArgs {
     ///   socat TCP-LISTEN:9000,reuseaddr /dev/cu.usbmodem101,raw,echo=0,b115200
     #[arg(long, value_name = "HOST:PORT", env = "UMSHCTL_TCP", global = true)]
     tcp: Option<String>,
+
+    /// Use a virtual radio on the LAN bearer, optionally naming its
+    /// group as `GROUP:PORT`.
+    ///
+    /// The radio runs in this process with an identity of its own, and
+    /// reaches the mesh through whichever radios on the LAN have their
+    /// bearer enabled. The group needs the `=` form
+    /// (`--lan=239.255.42.42:7373`); bare `--lan` uses the default.
+    #[arg(
+        long,
+        value_name = "GROUP:PORT",
+        num_args(0..=1),
+        require_equals = true,
+        global = true
+    )]
+    lan: Option<Option<String>>,
 
     /// Choose the radio from a numbered listing, ignoring the saved
     /// default.
@@ -319,12 +336,29 @@ fn announce_attached(session: &Session) {
 /// Work out which radio to talk to, from the flags, the environment,
 /// the saved default, and finally the air.
 async fn resolve(args: &ToolArgs, prefs: &Prefs) -> Result<Option<Target>> {
-    if args.pick && (args.port.is_some() || args.tcp.is_some() || matches!(args.ble, Some(Some(_))))
+    if args.pick
+        && (args.port.is_some()
+            || args.tcp.is_some()
+            || args.lan.is_some()
+            || matches!(args.ble, Some(Some(_))))
     {
         bail!(
-            "--pick chooses a radio from a listing; --port, --tcp, and --ble=SELECTOR already \
-             name one"
+            "--pick chooses a radio from a listing; --port, --tcp, --lan, and --ble=SELECTOR \
+             already name one"
         );
+    }
+    if let Some(group) = &args.lan {
+        if args.port.is_some() || args.ble.is_some() || args.tcp.is_some() {
+            bail!("--lan, --tcp, --port, and --ble name different radios; give one");
+        }
+        let group = match group {
+            Some(spec) => parse_group(spec)?,
+            None => std::net::SocketAddrV4::new(
+                umsh_lan_bearer::DEFAULT_GROUP.into(),
+                umsh_lan_bearer::DEFAULT_PORT,
+            ),
+        };
+        return Ok(Some(Target::Lan { group }));
     }
     if let Some(endpoint) = &args.tcp {
         if args.port.is_some() || args.ble.is_some() {
@@ -356,6 +390,20 @@ async fn resolve(args: &ToolArgs, prefs: &Prefs) -> Result<Option<Target>> {
         eprintln!("discovered: {}", target.provisional_label());
     }
     Ok(target)
+}
+
+/// Parse a `GROUP:PORT` multicast endpoint.
+pub fn parse_group(spec: &str) -> Result<std::net::SocketAddrV4> {
+    let group: std::net::SocketAddrV4 = spec
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{spec:?} is not an IPv4 GROUP:PORT"))?;
+    if !group.ip().is_multicast() {
+        bail!("{} is not a multicast group", group.ip());
+    }
+    if group.port() == 0 {
+        bail!("port 0 is not a destination");
+    }
+    Ok(group)
 }
 
 async fn run(args: ToolArgs) -> Result<()> {

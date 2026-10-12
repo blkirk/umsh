@@ -47,8 +47,9 @@ own. [Phase 2](#phase-2-ios) adds the iOS virtual radio.
 
 - **Per-phone state on radios.** Radios hold no queues, filters, keys, or
   sessions for phones. Everything a phone needs while away lives on the phone.
-- **Delivery across routed networks.** The group is link-local in practice
-  (TTL 1). Joining distant LANs is the internet bridge's job.
+- **Delivery across the internet.** The group reaches as far as the
+  network's multicast routing carries it, which can span a site's subnets.
+  Joining distant sites is the internet bridge's job.
 - **nRF52840 boards.** No Wi-Fi.
 - **Android.** Later work; nothing here precludes it.
 
@@ -370,7 +371,7 @@ Two things stay outside the chapter, following existing precedent:
 7. **Security considerations.**
    - UMSH frames are already authenticated, and encrypted where the
      payload type calls for it. The LAN adds nothing and removes nothing.
-   - TTL 1 keeps datagrams on the local link.
+   - The group reaches as far as the network routes it.
    - Anyone on the LAN can inject frames. They are bounded by the ingress
      limit and the duty ceiling, the same exposure as anyone with a LoRa
      radio, at a higher offered rate.
@@ -380,7 +381,8 @@ Two things stay outside the chapter, following existing precedent:
 
 - **Transport:** UDP over IPv4 multicast. Default group `239.255.42.42`,
   default port 7373 (the values the fake radio and bridge already use). Senders
-  set the multicast TTL to 1.
+  use a multicast TTL of 16; containment is left to the network's multicast
+  routing and the group's administrative scope.
 - **Datagram:** exactly one frame, with no header. UMSH and MeshCore v1 frames
   are distinguished by their version bits. Senders MUST NOT send a frame
   larger than 255 octets. Receivers drop, with accounting, datagrams that are
@@ -444,15 +446,19 @@ missing optional key as false and ignore unknown keys.
   flood contention window is drawn uniformly from `[W_min, W_max]`, plus the
   usual jitter.
 - **Point-to-point backhaul:** keeps its zero window.
-- **Only over-the-air receptions defer or confirm:**
+- **Only over-the-air receptions defer:**
   - Only a copy received over the air may defer or suppress a pending
-    forward.
-  - Only such a copy may satisfy
-    [forwarding confirmation](protocol/src/repeater-operation.md#forwarding-confirmation).
-  - Receptions from a bearer or a backhaul say nothing about who heard the
-    radio channel.
+    forward. Receptions from a bearer or a backhaul say nothing about who
+    heard the radio channel.
   - This also corrects the internet bridge's co-located-client case, where a
     tunnel copy currently reschedules a pending forward to fire immediately.
+- **Bearer copies do not confirm:** a copy received from a bearer does not
+  satisfy
+  [forwarding confirmation](protocol/src/repeater-operation.md#forwarding-confirmation).
+  Backhaul copies still do. A backhauled host's MAC sees its own frame come
+  back from the device's node, as a backhaul reception, once the device has
+  carried it; that return is the host's confirmation, and dropping it would
+  make every backhauled send retry.
 - **Ack-MIC cancellation is unchanged.** It stays origin-independent: an
   acknowledgment proves delivery whichever way it arrived.
 
@@ -554,16 +560,15 @@ committing to an approach.
   queue for the allowed bearers.
 - **Local origination:** the `tx_queue` enqueue sites and the immediate-ACK
   path export frames from `TxPriority::Application` and `ImmediateAck`, not
-  from `Retry`.
+  from `Retry`. A route retry is exported as a new frame. Frames another stack
+  sharing the radio transmits (`LocalTx`) are exported unless the node has
+  already forwarded them.
 - **Contention:** `sample_flood_contention_delay_ms` (`coordinator.rs:5929`)
   draws uniformly over the window for `Bearer`.
 - **Deferral and confirmation:** `defer_pending_forward`
-  (`coordinator.rs:5999`) and `observe_forwarding_confirmation`
-  (`coordinator.rs:6485`) act only on `Air`.
-  - Check that this does not regress a backhaul leaf host. Its MAC sees the
-    device's transmissions through ULCP, so trace the origin it reports on
-    the host side.
-  - Add a regression test for the co-located internet-bridge case.
+  (`coordinator.rs:5999`) acts only on `Air`; `observe_forwarding_confirmation`
+  (`coordinator.rs:6485`) ignores `Bearer` and keeps `Backhaul`, which a
+  backhaul leaf host depends on (P5).
 - **Counters:** add the bearer counters.
 
 **Tests in `umsh-mac`.** Cover every cell of the matrix and:
@@ -585,8 +590,8 @@ bearer, using the `SimulatedNetwork` harness in
 - Move `UdpMulticastRadio` out of `umsh/src/tokio_support.rs`, so the
   umbrella, `umsh-bridge`, `umshctl`, and later `umsh-mobile-core` share one
   implementation.
-- Separate send socket, source-address echo filter, TTL 1, and loopback only
-  when requested.
+- Separate send socket, source-address echo filter, TTL 16, and loopback
+  only when requested.
 - A receive-origin setting: `Bearer` for real use, and the current fixed
   measured `Air` for simulation tests that need signal values.
 - DNS-SD advertise and browse for hosts (the `mdns-sd` crate), with the P3 TXT
@@ -599,6 +604,10 @@ bearer, using the `SimulatedNetwork` harness in
   ingress `RxOrigin`. Hand-off is round-robin among them.
 - `transmitted()` copies go only to attachments that want them. The LAN
   bearer does not, since its egress is the MAC export.
+- An attachment says whether the ULCP session hears it too. The LAN does: it
+  is a shared medium the device hears, like the air, so an attached host in
+  promiscuous or filtered mode sees bearer receptions as unmeasured frames.
+  The internet tunnel does not.
 - Images with Wi-Fi can then run the internet client and the LAN bearer side
   by side.
 - Extend the existing mux tests.
@@ -632,6 +641,10 @@ iOS virtual radio is its second.
   (`message`, `discover`, `ping`, `capture`, and the rest) then works against
   the LAN with no hardware. This is the desktop counterpart of the iOS virtual
   radio, so phase 2 starts from a virtual radio that is already exercised.
+  - Its state (identity, saved configuration) lives under the umshctl state
+    directory, locked so two processes never run one identity.
+  - Like any radio, it comes up with its PHY off until a host enables it and
+    saves; `umshctl --lan set phy-enabled on` once per state directory.
 
 #### 1.9 Phase 1 validation
 
@@ -693,8 +706,11 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 
 - A LoRa node on settings X and one on settings Y exchange direct messages
   through two radios sharing a LAN, with correct hop accounting.
-- With several radios on one channel on one LAN, a frame bridged onto that
-  channel is transmitted once by a radio, not once per radio.
+- With several radios on one channel on one LAN, the radios carrying a
+  bridged frame onto that channel transmit staggered by contention rather
+  than together, and an overheard copy defers the rest. Whether a deferred
+  radio later transmits anyway is the ordinary deferral limit's business,
+  not the bearer's.
 - A radio that loses LoRa contention still bridges the frame.
 - No frame circulates. Each node forwards a given frame at most once per
   egress, and bearer input never returns to its bearer.
@@ -723,7 +739,8 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 - **D2. SSID acquisition.** The extension runs only on listed networks, and
   reading the current SSID may need location permission. The fallback is
   asking the user to confirm the network when radios are first found.
-- **D3. The bearer switch alone makes a bridge.** The matrix lets a node with
+- **D3. The bearer switch alone makes a bridge.** *Decided: as the matrix
+  says. Phase 1 implements and specifies it.* The matrix lets a node with
   the repeater off forward between the LAN and LoRa: one toggle, at a cost.
   - Such a node never repeats on LoRa what it hears on LoRa, so an upstream
     repeater whose only downstream listener is that node hears no repeat and
@@ -738,17 +755,22 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
   to the MAC export path, as another bearer, would make both behave the same.
   That alters [ulcp-bridge.md](protocol/src/ulcp-bridge.md#integrated-clients)
   and is out of scope unless chosen.
-- **D5. Bearer identity in `RxOrigin`.** A payload on `RxOrigin::Bearer`
+- **D5. Bearer identity in `RxOrigin`.** *Decided: a payload,
+  `RxOrigin::Bearer(BearerId)`, with up to eight bearers.* A payload on `RxOrigin::Bearer`
   (a small bearer index) versus a separate tag carried beside the reception.
   The first is simpler; `RxOrigin` is matched in many places.
 - **D6. IPv4 only.** ESP32 images are IPv4-only. An IPv6 link-local group can
   follow if a platform needs it.
 - **D7. Admission.** Anyone on the LAN can transmit on LoRa through a radio.
   The ingress limit and duty ceiling bound it; an allow-list is not proposed.
-- **D8. Non-radio participants in DNS-SD.** Whether desktop tools, the bridge,
+- **D8. Non-radio participants in DNS-SD.** *Decided for phase 1: radios
+  only. The spec makes advertising a SHOULD for bridging radios and a MAY for
+  everyone else.* Whether desktop tools, the bridge,
   and the virtual radio also advertise, and with what role marker.
 - **D9. Notification content.** Generic first; rich content later.
-- **D10. Virtual radio PHY settings.** The phone's MAC times acks from the
+- **D10. Virtual radio PHY settings.** *Decided for phase 1: `umshctl --lan`
+  reports the default profile's settings, fixed. The discovered-slowest
+  proposal remains open for phase 2.* The phone's MAC times acks from the
   radio's frame time, but its frames are actually transmitted later by a LoRa
   radio. Proposed: report the slowest LoRa settings among discovered radios,
   read-only.
@@ -762,6 +784,12 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 - **Traffic merging.** Bridging meshes puts each mesh's floods on the others'
   airtime. Region policy and the existing exit clamp are the tools. A
   per-bearer region list is a possible follow-up if field use shows the need.
+- **No confirmation for LAN endpoints.** A frame an endpoint sends to the
+  group is never returned to the group by the radios that carry it, so an
+  endpoint's MAC never hears its forward and retries up to its cap. The
+  radios absorb the retries as duplicates; the cost is LAN datagrams, not
+  airtime. Treating a send to a bearer as confirmed on transmission is the
+  fix if the retries matter.
 - **ESP32 RAM.** If the bearer and mDNS do not fit beside the internet client
   on an image, that image ships one or the other, decided per board.
 

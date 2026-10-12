@@ -9389,6 +9389,19 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
     public var bridgePort: UInt16?
     public var bridgeServerKey: Data?
     public var bridgeLink: UlcpBridgeLinkRecord?
+    public var lanBearerEnabled: Bool?
+    /**
+     * The multicast group and port, as `GROUP:PORT`.
+     */
+    public var lanBearerGroup: String?
+    /**
+     * Frames per minute the device takes from the group.
+     */
+    public var lanBearerIngressLimit: UInt16?
+    /**
+     * `PROP_LAN_BEARER_STATE`: 0 off, 1 active, 2 no network. Read-only.
+     */
+    public var lanBearerState: UInt8?
     public var devKey: Data?
     public var battery: UlcpBatteryRecord?
     /**
@@ -9575,7 +9588,16 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bridgeEnabled: Bool?, bridgeHost: String?, bridgePort: UInt16?, bridgeServerKey: Data?, bridgeLink: UlcpBridgeLinkRecord?, devKey: Data?, battery: UlcpBatteryRecord?,
+    public init(bridgeEnabled: Bool?, bridgeHost: String?, bridgePort: UInt16?, bridgeServerKey: Data?, bridgeLink: UlcpBridgeLinkRecord?, lanBearerEnabled: Bool?,
+        /**
+         * The multicast group and port, as `GROUP:PORT`.
+         */lanBearerGroup: String?,
+        /**
+         * Frames per minute the device takes from the group.
+         */lanBearerIngressLimit: UInt16?,
+        /**
+         * `PROP_LAN_BEARER_STATE`: 0 off, 1 active, 2 no network. Read-only.
+         */lanBearerState: UInt8?, devKey: Data?, battery: UlcpBatteryRecord?,
         /**
          * Ambient light in millilux. Empty means a measurement was unavailable.
          */illuminanceMillilux: UInt32?,
@@ -9687,6 +9709,10 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
         self.bridgePort = bridgePort
         self.bridgeServerKey = bridgeServerKey
         self.bridgeLink = bridgeLink
+        self.lanBearerEnabled = lanBearerEnabled
+        self.lanBearerGroup = lanBearerGroup
+        self.lanBearerIngressLimit = lanBearerIngressLimit
+        self.lanBearerState = lanBearerState
         self.devKey = devKey
         self.battery = battery
         self.illuminanceMillilux = illuminanceMillilux
@@ -9787,6 +9813,10 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
                 bridgePort: FfiConverterOptionUInt16.read(from: &buf),
                 bridgeServerKey: FfiConverterOptionData.read(from: &buf),
                 bridgeLink: FfiConverterOptionTypeUlcpBridgeLinkRecord.read(from: &buf),
+                lanBearerEnabled: FfiConverterOptionBool.read(from: &buf),
+                lanBearerGroup: FfiConverterOptionString.read(from: &buf),
+                lanBearerIngressLimit: FfiConverterOptionUInt16.read(from: &buf),
+                lanBearerState: FfiConverterOptionUInt8.read(from: &buf),
                 devKey: FfiConverterOptionData.read(from: &buf),
                 battery: FfiConverterOptionTypeUlcpBatteryRecord.read(from: &buf),
                 illuminanceMillilux: FfiConverterOptionUInt32.read(from: &buf),
@@ -9873,6 +9903,10 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
         FfiConverterOptionUInt16.write(value.bridgePort, into: &buf)
         FfiConverterOptionData.write(value.bridgeServerKey, into: &buf)
         FfiConverterOptionTypeUlcpBridgeLinkRecord.write(value.bridgeLink, into: &buf)
+        FfiConverterOptionBool.write(value.lanBearerEnabled, into: &buf)
+        FfiConverterOptionString.write(value.lanBearerGroup, into: &buf)
+        FfiConverterOptionUInt16.write(value.lanBearerIngressLimit, into: &buf)
+        FfiConverterOptionUInt8.write(value.lanBearerState, into: &buf)
         FfiConverterOptionData.write(value.devKey, into: &buf)
         FfiConverterOptionTypeUlcpBatteryRecord.write(value.battery, into: &buf)
         FfiConverterOptionUInt32.write(value.illuminanceMillilux, into: &buf)
@@ -10790,6 +10824,10 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
     public var bridgePort: UInt32
     public var bridgeServerKey: UInt32
     public var bridgeLink: UInt32
+    public var lanBearerEnabled: UInt32
+    public var lanBearerGroup: UInt32
+    public var lanBearerIngressLimit: UInt32
+    public var lanBearerState: UInt32
     public var devKey: UInt32
     public var wifiNetworks: UInt32
     public var wifiNetwork: UInt32
@@ -10822,7 +10860,7 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, statMeshcoreSeen: UInt32, statMeshcoreForwardedRouted: UInt32, statMeshcoreForwardedFlood: UInt32, statMeshcoreDeclined: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzOffset: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, meshcoreForwardingEnabled: UInt32, meshcoreRegionPolicy: UInt32, meshcoreRegions: UInt32, devPeers: UInt32, devAdmins: UInt32) {
+    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, statMeshcoreSeen: UInt32, statMeshcoreForwardedRouted: UInt32, statMeshcoreForwardedFlood: UInt32, statMeshcoreDeclined: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, lanBearerEnabled: UInt32, lanBearerGroup: UInt32, lanBearerIngressLimit: UInt32, lanBearerState: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzOffset: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, meshcoreForwardingEnabled: UInt32, meshcoreRegionPolicy: UInt32, meshcoreRegions: UInt32, devPeers: UInt32, devAdmins: UInt32) {
         self.caps = caps
         self.deviceVersion = deviceVersion
         self.deviceModel = deviceModel
@@ -10889,6 +10927,10 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
         self.bridgePort = bridgePort
         self.bridgeServerKey = bridgeServerKey
         self.bridgeLink = bridgeLink
+        self.lanBearerEnabled = lanBearerEnabled
+        self.lanBearerGroup = lanBearerGroup
+        self.lanBearerIngressLimit = lanBearerIngressLimit
+        self.lanBearerState = lanBearerState
         self.devKey = devKey
         self.wifiNetworks = wifiNetworks
         self.wifiNetwork = wifiNetwork
@@ -11002,6 +11044,10 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
                 bridgePort: FfiConverterUInt32.read(from: &buf),
                 bridgeServerKey: FfiConverterUInt32.read(from: &buf),
                 bridgeLink: FfiConverterUInt32.read(from: &buf),
+                lanBearerEnabled: FfiConverterUInt32.read(from: &buf),
+                lanBearerGroup: FfiConverterUInt32.read(from: &buf),
+                lanBearerIngressLimit: FfiConverterUInt32.read(from: &buf),
+                lanBearerState: FfiConverterUInt32.read(from: &buf),
                 devKey: FfiConverterUInt32.read(from: &buf),
                 wifiNetworks: FfiConverterUInt32.read(from: &buf),
                 wifiNetwork: FfiConverterUInt32.read(from: &buf),
@@ -11101,6 +11147,10 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.bridgePort, into: &buf)
         FfiConverterUInt32.write(value.bridgeServerKey, into: &buf)
         FfiConverterUInt32.write(value.bridgeLink, into: &buf)
+        FfiConverterUInt32.write(value.lanBearerEnabled, into: &buf)
+        FfiConverterUInt32.write(value.lanBearerGroup, into: &buf)
+        FfiConverterUInt32.write(value.lanBearerIngressLimit, into: &buf)
+        FfiConverterUInt32.write(value.lanBearerState, into: &buf)
         FfiConverterUInt32.write(value.devKey, into: &buf)
         FfiConverterUInt32.write(value.wifiNetworks, into: &buf)
         FfiConverterUInt32.write(value.wifiNetwork, into: &buf)
@@ -18911,6 +18961,18 @@ public func ulcpInspectionProperties(capabilities: Data)throws  -> [UInt32]  {
 })
 }
 /**
+ * A LAN multicast group as an operator types it, `GROUP:PORT`, in the
+ * form the device reports it.
+ */
+public func ulcpLanGroup(input: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_ulcp_lan_group(
+        FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+/**
  * Approximate width, at the equator, of the cell one location precision
  * names—2,500 km at one byte down to 15 cm at seven. `None` outside
  * 1–7.
@@ -19311,6 +19373,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_inspection_properties() != 61576) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_ulcp_lan_group() != 32476) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_location_cell_meters() != 13268) {

@@ -656,6 +656,9 @@ actor FakeRadioConnection: RadioConnection {
             let configured = host.count > 1 && managedDevice.values[id.bridgeServerKey]?.count == 32
             managedDevice.values[id.bridgeLink] = Data([enabled ? (configured ? 4 : 1) : 0, 0])
         }
+        if write.propertyId == id.lanBearerEnabled {
+            managedDevice.values[id.lanBearerState] = Data([write.value.first == 1 ? 1 : 0])
+        }
         return MobileMeshManagementAnswerRecord(
             propertyId: write.propertyId,
             value: write.value,
@@ -1519,6 +1522,10 @@ struct FakeManagedDevice: Sendable {
         values[id.bridgePort] = UInt16(21837).littleEndianData
         values[id.bridgeServerKey] = Data()
         values[id.bridgeLink] = Data([0, 0])
+        values[id.lanBearerEnabled] = Data([0])
+        values[id.lanBearerGroup] = Data([239, 255, 42, 42]) + UInt16(7373).littleEndianData
+        values[id.lanBearerIngressLimit] = UInt16(120).littleEndianData
+        values[id.lanBearerState] = Data([0])
         // A real Ed25519 public key, so the identity codec and copy action
         // follow the same path as a physical device (RFC 8032 test key).
         values[id.devKey] = Data([
@@ -1716,14 +1723,15 @@ struct FakeManagedDevice: Sendable {
     /// repeater (40), identity (41), alert (42), administrators (43),
     /// clock (44), receiver (45), advertisement (46), illuminance (47), batched commands
     /// (49), Bluetooth (50), restart (51), statistics (52), Wi-Fi scanning
-    /// (53), the Wi-Fi station (54), IPv4 (55), IPv6 (56), and the LoRa
-    /// modem (515, which needs two PUI octets).
+    /// (53), the Wi-Fi station (54), IPv4 (55), IPv6 (56), the local
+    /// network link (63), and the LoRa modem (515, which needs two PUI
+    /// octets).
     ///
     /// Bond management has no capability of its own: this fake claims it
     /// by answering `PROP_BLE_BOND_COUNT` rather than by listing a code.
     private static let capabilities = Data([
         0x10, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x3D, 0x31, 0x32,
-        0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x3A, 0x3E, 0x83, 0x04,
+        0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x3A, 0x3E, 0x3F, 0x83, 0x04,
     ])
 
     /// The same tracker with a receiver and no station: it lists Wi-Fi

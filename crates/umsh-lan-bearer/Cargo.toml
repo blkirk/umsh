@@ -1,0 +1,30 @@
+[package]
+name = "umsh-lan-bearer"
+description = "UMSH frames over IP multicast on a local network, and DNS-SD discovery of the participants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The protocol half—constants, datagram classification, the DNS-SD TXT
+# schema—is `no_std` and allocation-free, so the ESP32 firmware's own
+# socket task and mDNS responder share it. The host half rides on
+# features: the sockets and the `Radio` over them on Tokio, and DNS-SD
+# advertising and browsing on `mdns-sd`.
+
+[features]
+default = []
+std = []
+tokio = ["std", "dep:tokio", "dep:socket2", "dep:umsh-hal"]
+dnssd = ["std", "dep:mdns-sd"]
+
+[dependencies]
+umsh-core = { path = "../umsh-core", default-features = false }
+heapless.workspace = true
+umsh-hal = { path = "../umsh-hal", default-features = false, optional = true }
+tokio = { version = "1", optional = true, features = ["net", "time"] }
+socket2 = { version = "0.6", optional = true }
+mdns-sd = { version = "0.21", optional = true, default-features = false, features = ["async"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }

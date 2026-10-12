@@ -90,6 +90,7 @@ pub fn web_sim_config() -> umsh_ulcp_simdev::SessionConfig {
         stats: None,
         mac_node: false,
         meshcore_forwarder: false,
+        lan_bearer: false,
         // A station and a dual-stack, for the same reason as the clock
         // and the receiver: the simulator answers the whole property
         // surface, joins its own canned networks, and hands back an

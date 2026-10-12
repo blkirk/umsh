@@ -238,8 +238,9 @@ impl<
     const RN: usize,
     const HN: usize,
     const HOLDS: usize,
+    const EXPORTS: usize,
 > MacBackend
-    for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
+    for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>
 {
     type SendError = SendError;
     type CapacityError = CapacityError;

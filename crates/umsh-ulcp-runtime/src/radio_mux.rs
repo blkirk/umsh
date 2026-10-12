@@ -42,6 +42,14 @@
 //! between the attached host and the mesh, which is what a bridge needs:
 //! its forwarding rules, duplicate suppression, and hop accounting all
 //! apply to the tunneled traffic instead of being reimplemented above it.
+//!
+//! # Bridge attachments
+//!
+//! A [`BridgeAttachment`] feeds frames from something other than the
+//! radio—the internet bridge client's tunnel, a LAN bearer—to one
+//! medium client, marked with the attachment's own [`RxOrigin`]. Any
+//! number may be attached; hand-off round-robins among them, and runs
+//! while a transmit is in flight, since none of them touches the radio.
 
 use core::future::poll_fn;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -100,12 +108,25 @@ pub trait BridgePort {
         &self,
         cx: &mut core::task::Context<'_>,
     ) -> Poll<heapless::Vec<u8, MAX_PAYLOAD>>;
-    fn transmitted(&self, data: &[u8]);
+
+    /// A copy of a frame the node put on the air. A port whose egress is
+    /// something else—a LAN bearer takes the MAC's forwarding decisions,
+    /// not its transmissions—keeps the default, which ignores it.
+    fn transmitted(&self, _data: &[u8]) {}
 }
 
 pub struct BridgeAttachment {
+    /// The medium client this port's frames are handed to, and whose
+    /// transmissions it is offered.
     pub node: usize,
     pub port: &'static dyn BridgePort,
+    /// How the node sees a frame from this port.
+    pub origin: RxOrigin,
+    /// Whether the ULCP session hears this port too, while it is on the
+    /// medium. A shared bearer is something the device hears, like the
+    /// air, and an attached host hears what the device hears. A tunnel
+    /// to one node is not.
+    pub session_hears: bool,
 }
 
 /// Run the multiplexer over the real radio `Channels` bundle.
@@ -132,23 +153,25 @@ pub async fn radio_mux<M, const RX: usize, const TX: usize>(
 where
     M: RawMutex,
 {
-    radio_mux_with_bridge(real, clients, mode, stats, None).await
+    radio_mux_with_bridge(real, clients, mode, stats, &[]).await
 }
 
-/// The ordinary multiplexer plus an independent, node-only bridge attachment.
+/// The ordinary multiplexer plus independent bridge attachments.
 pub async fn radio_mux_with_bridge<M, const RX: usize, const TX: usize>(
     real: &'static Channels<M, RX, TX>,
     clients: &'static [&'static Channels<M, RX, TX>],
     mode: &'static MuxMode,
     stats: Option<&'static StatsLedger>,
-    bridge: Option<BridgeAttachment>,
+    bridges: &'static [BridgeAttachment],
 ) -> !
 where
     M: RawMutex,
 {
-    if let Some(bridge) = &bridge {
+    for bridge in bridges {
         assert!(bridge.node != SESSION && bridge.node < clients.len());
     }
+    // Which attachment the next hand-off scan starts at.
+    let mut handoff_start: usize = 0;
     // The transmit currently at the radio, if any. The frame bytes are
     // kept because `tx_done` reports only a result, and the copy owed to
     // the other clients can only be sent once the radio confirms the
@@ -179,25 +202,36 @@ where
         // Check room before consuming bridge input. This path remains live
         // while RF TX is outstanding and never involves another host port.
         let handoff = poll_fn(|cx| {
-            let Some(bridge) = &bridge else {
-                return Poll::Pending;
-            };
-            let node = clients[bridge.node];
-            if node.rx.poll_ready_to_send(cx).is_pending() {
-                return Poll::Pending;
+            for offset in 0..bridges.len() {
+                let index = (handoff_start + offset) % bridges.len();
+                let bridge = &bridges[index];
+                let node = clients[bridge.node];
+                if node.rx.poll_ready_to_send(cx).is_pending() {
+                    continue;
+                }
+                let Poll::Ready(data) = bridge.port.poll_receive(cx) else {
+                    continue;
+                };
+                let info = unmeasured(data.len(), bridge.origin);
+                // The session's copy is best effort, like any reception
+                // fanned out to a client: a full queue loses it.
+                if bridge.session_hears && !mode.backhaul() {
+                    let session = clients[SESSION];
+                    let copy = RxFrame {
+                        data: data.clone(),
+                        info,
+                    };
+                    if session.rx.try_send(copy).is_ok() {
+                        session.rx_waker.wake();
+                    }
+                }
+                // No await between the readiness check and send. The mux is
+                // the only producer of this virtual node queue.
+                assert!(node.rx.try_send(RxFrame { data, info }).is_ok());
+                node.rx_waker.wake();
+                return Poll::Ready(index);
             }
-            let Poll::Ready(data) = bridge.port.poll_receive(cx) else {
-                return Poll::Pending;
-            };
-            let frame = RxFrame {
-                info: unmeasured(data.len(), RxOrigin::Backhaul),
-                data,
-            };
-            // No await between the readiness check and send. The mux is the
-            // only producer of this virtual node queue.
-            assert!(node.rx.try_send(frame).is_ok());
-            node.rx_waker.wake();
-            Poll::Ready(())
+            Poll::Pending
         });
 
         match select4(real.rx.receive(), tx_done, next_tx, handoff).await {
@@ -227,10 +261,8 @@ where
                 }
                 clients[sent.owner].tx_done.signal(result);
                 if aired {
-                    if let Some(bridge) = &bridge {
-                        if sent.owner == bridge.node {
-                            bridge.port.transmitted(&sent.data);
-                        }
+                    for bridge in bridges.iter().filter(|bridge| bridge.node == sent.owner) {
+                        bridge.port.transmitted(&sent.data);
                     }
                     deliver(
                         clients,
@@ -284,7 +316,7 @@ where
                 real.tx.send(request).await;
                 in_flight = Some(InFlight { owner: who, data });
             }
-            Either4::Fourth(()) => {}
+            Either4::Fourth(index) => handoff_start = (index + 1) % bridges.len(),
         }
     }
 }
@@ -508,17 +540,117 @@ mod tests {
                 assert_eq!(stats.get(Counter::TxPackets), 3);
                 assert_eq!(stats.get(Counter::RxPackets), 1);
             };
+            let attachments = Box::leak(Box::new([BridgeAttachment {
+                node: 1,
+                port: bridge,
+                origin: RxOrigin::Backhaul,
+                session_hears: false,
+            }]));
             match select(
-                radio_mux_with_bridge(
-                    real,
-                    clients,
-                    mode,
-                    Some(stats),
-                    Some(BridgeAttachment {
-                        node: 1,
-                        port: bridge,
-                    }),
-                ),
+                radio_mux_with_bridge(real, clients, mode, Some(stats), attachments),
+                scenario,
+            )
+            .await
+            {
+                Either::First(_) => unreachable!(),
+                Either::Second(()) => {}
+            }
+        });
+    }
+
+    /// A port with no transmit path of its own: a LAN bearer, whose
+    /// egress is the MAC's export queue rather than the radio.
+    struct TestBearer {
+        input: embassy_sync::channel::Channel<NoopRawMutex, heapless::Vec<u8, MAX_PAYLOAD>, 8>,
+    }
+    impl BridgePort for TestBearer {
+        fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<heapless::Vec<u8, MAX_PAYLOAD>> {
+            self.input.poll_receive(cx)
+        }
+    }
+
+    #[test]
+    fn a_bearer_beside_a_tunnel_is_heard_by_the_node_and_the_session() {
+        let real = channels();
+        let session = channels();
+        let node = channels();
+        let clients = Box::leak(Box::new([session, node]));
+        let tunnel = Box::leak(Box::new(TestBridge {
+            input: embassy_sync::channel::Channel::new(),
+            output: Default::default(),
+        }));
+        let lan = Box::leak(Box::new(TestBearer {
+            input: embassy_sync::channel::Channel::new(),
+        }));
+        let bearer = RxOrigin::Bearer(umsh_hal::BearerId::LAN);
+        let mode = mode();
+        let attachments = Box::leak(Box::new([
+            BridgeAttachment {
+                node: 1,
+                port: tunnel,
+                origin: RxOrigin::Backhaul,
+                session_hears: false,
+            },
+            BridgeAttachment {
+                node: 1,
+                port: lan,
+                origin: bearer,
+                session_hears: true,
+            },
+        ]));
+        block_on(async {
+            let scenario = async {
+                // Both ports backed up: hand-off alternates between them.
+                for tag in [0x10, 0x11] {
+                    tunnel
+                        .input
+                        .send(heapless::Vec::from_slice(&[tag]).unwrap())
+                        .await;
+                }
+                for tag in [0x20, 0x21] {
+                    lan.input
+                        .send(heapless::Vec::from_slice(&[tag]).unwrap())
+                        .await;
+                }
+                let mut order = std::vec::Vec::new();
+                for _ in 0..4 {
+                    let rx = node.rx.receive().await;
+                    let expected = if rx.data[0] & 0xF0 == 0x10 {
+                        RxOrigin::Backhaul
+                    } else {
+                        bearer
+                    };
+                    assert_eq!(rx.info.origin, expected);
+                    order.push(rx.data[0]);
+                }
+                assert_eq!(order, [0x10, 0x20, 0x11, 0x21]);
+                // The session heard the bearer and not the tunnel.
+                for tag in [0x20, 0x21] {
+                    let rx = session.rx.receive().await;
+                    assert_eq!(rx.data.as_slice(), &[tag]);
+                    assert_eq!(rx.info.origin, bearer);
+                }
+                assert!(session.rx.try_receive().is_err());
+
+                // The node's transmissions go to the tunnel only.
+                node.tx.send(tx_request(0xA1)).await;
+                real.tx.receive().await;
+                real.tx_done.signal(Ok(()));
+                node.tx_done.wait().await.unwrap();
+                assert_eq!(*tunnel.output.borrow(), vec![vec![0xA1]]);
+                session.rx.receive().await;
+
+                // In backhaul mode the session is off the medium, bearer
+                // included.
+                mode.set_backhaul(true);
+                lan.input
+                    .send(heapless::Vec::from_slice(&[0x22]).unwrap())
+                    .await;
+                assert_eq!(node.rx.receive().await.data.as_slice(), &[0x22]);
+                assert!(session.rx.try_receive().is_err());
+            };
+            match select(
+                radio_mux_with_bridge(real, clients, mode, None, attachments),
                 scenario,
             )
             .await

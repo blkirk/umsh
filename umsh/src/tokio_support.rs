@@ -9,19 +9,13 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     fs, io,
-    net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
 use embedded_hal_async::delay::DelayNs;
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::ReadBuf;
-use tokio::net::UdpSocket;
-use umsh_hal::{
-    Clock, CounterStore, KeyValueStore, Radio, RxInfo, RxOrigin, Snr, TxError, TxOptions,
-};
+use umsh_hal::{Clock, CounterStore, KeyValueStore};
 
 #[cfg(feature = "software-crypto")]
 use crate::{
@@ -117,198 +111,11 @@ impl From<io::Error> for FileStoreError {
     }
 }
 
-/// Errors returned by the UDP multicast radio simulator.
-#[derive(Debug)]
-pub enum UdpMulticastRadioError {
-    Io(io::Error),
-    InvalidConfig(&'static str),
-    FrameTooLarge(usize),
-}
-
-impl From<io::Error> for UdpMulticastRadioError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-/// Configuration for [`UdpMulticastRadio`].
-#[derive(Clone, Copy, Debug)]
-pub struct UdpMulticastRadioConfig {
-    pub bind_addr: Ipv4Addr,
-    pub group_addr: Ipv4Addr,
-    pub interface_addr: Ipv4Addr,
-    pub port: u16,
-    pub max_frame_size: usize,
-    pub t_frame_ms: u32,
-    pub rssi: i16,
-    pub snr: i8,
-    pub loopback: bool,
-}
-
-impl UdpMulticastRadioConfig {
-    /// Create a simple host-local multicast configuration.
-    pub fn localhost(group_addr: Ipv4Addr, port: u16) -> Self {
-        Self {
-            bind_addr: Ipv4Addr::UNSPECIFIED,
-            group_addr,
-            interface_addr: Ipv4Addr::LOCALHOST,
-            port,
-            max_frame_size: 256,
-            // Use a LoRa-like frame duration by default so MAC retry/backoff
-            // behavior on the desktop resembles real deployments.
-            t_frame_ms: 800,
-            rssi: -40,
-            snr: 10,
-            loopback: true,
-        }
-    }
-}
-
-/// Host-side radio simulator backed by UDP multicast.
-///
-/// Raw UMSH frames are sent and received over IPv4 multicast with no additional
-/// framing. Multicast loopback is enabled by default so that multiple processes
-/// on the same host can exchange frames via the loopback interface.
-///
-/// Because multicast loopback echoes every sent frame back to the sender,
-/// [`UdpMulticastRadio`] stores the last transmitted frame and silently drops
-/// any received frame that is an exact byte-for-byte match.  A legitimately
-/// forwarded copy of the frame is never an exact match: repeaters always modify
-/// the packet (decrementing the hop count or removing a source-route entry), so
-/// only the loopback echo is affected.
-pub struct UdpMulticastRadio {
-    socket: UdpSocket,
-    group_addr: SocketAddrV4,
-    max_frame_size: usize,
-    t_frame_ms: u32,
-    rssi: i16,
-    snr: i8,
-    recv_buf: Vec<u8>,
-    last_sent: Vec<u8>,
-}
-
-impl UdpMulticastRadio {
-    /// Bind a UDP multicast simulator socket using a simple localhost-oriented configuration.
-    pub async fn bind_v4(group_addr: Ipv4Addr, port: u16) -> Result<Self, UdpMulticastRadioError> {
-        Self::bind_with_config(UdpMulticastRadioConfig::localhost(group_addr, port)).await
-    }
-
-    /// Bind a UDP multicast simulator socket using the provided configuration.
-    pub async fn bind_with_config(
-        config: UdpMulticastRadioConfig,
-    ) -> Result<Self, UdpMulticastRadioError> {
-        if !config.group_addr.is_multicast() {
-            return Err(UdpMulticastRadioError::InvalidConfig(
-                "group_addr must be an IPv4 multicast address",
-            ));
-        }
-        if config.max_frame_size == 0 {
-            return Err(UdpMulticastRadioError::InvalidConfig(
-                "max_frame_size must be non-zero",
-            ));
-        }
-
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&SocketAddrV4::new(config.bind_addr, config.port).into())?;
-        socket.join_multicast_v4(&config.group_addr, &config.interface_addr)?;
-        socket.set_multicast_if_v4(&config.interface_addr)?;
-        socket.set_multicast_loop_v4(config.loopback)?;
-
-        let group = SocketAddrV4::new(config.group_addr, config.port);
-        let std_socket: std::net::UdpSocket = socket.into();
-        let socket = UdpSocket::from_std(std_socket)?;
-
-        Ok(Self {
-            socket,
-            group_addr: group,
-            max_frame_size: config.max_frame_size,
-            t_frame_ms: config.t_frame_ms,
-            rssi: config.rssi,
-            snr: config.snr,
-            recv_buf: vec![0u8; config.max_frame_size],
-            last_sent: Vec::new(),
-        })
-    }
-}
-
-impl Radio for UdpMulticastRadio {
-    type Error = UdpMulticastRadioError;
-
-    async fn transmit(
-        &mut self,
-        data: &[u8],
-        _options: TxOptions,
-    ) -> Result<(), TxError<Self::Error>> {
-        if data.len() > self.max_frame_size {
-            return Err(TxError::Io(UdpMulticastRadioError::FrameTooLarge(
-                data.len(),
-            )));
-        }
-
-        self.last_sent.clear();
-        self.last_sent.extend_from_slice(data);
-
-        let sent = self
-            .socket
-            .send_to(data, self.group_addr)
-            .await
-            .map_err(UdpMulticastRadioError::Io)
-            .map_err(TxError::Io)?;
-        eprintln!("[udp-radio] TX {} bytes to {}", sent, self.group_addr);
-        Ok(())
-    }
-
-    fn poll_receive(
-        &mut self,
-        cx: &mut core::task::Context<'_>,
-        buf: &mut [u8],
-    ) -> core::task::Poll<Result<RxInfo, Self::Error>> {
-        loop {
-            let mut read_buf = ReadBuf::new(&mut self.recv_buf);
-            let len = match self.socket.poll_recv(cx, &mut read_buf) {
-                core::task::Poll::Ready(Ok(())) => read_buf.filled().len(),
-                core::task::Poll::Ready(Err(error)) => {
-                    return core::task::Poll::Ready(Err(UdpMulticastRadioError::Io(error)));
-                }
-                core::task::Poll::Pending => return core::task::Poll::Pending,
-            };
-            if len == 0 {
-                return core::task::Poll::Pending;
-            }
-
-            // Drop exact loopback echoes of our own last transmission.  A frame
-            // forwarded by a repeater is never an exact match because repeaters
-            // always modify at least the hop-count or source-route field.
-            if self.recv_buf[..len] == self.last_sent[..] {
-                continue;
-            }
-
-            let copy_len = len.min(buf.len());
-            buf[..copy_len].copy_from_slice(&self.recv_buf[..copy_len]);
-            eprintln!("[udp-radio] RX {} bytes", copy_len);
-            return core::task::Poll::Ready(Ok(RxInfo {
-                len: copy_len,
-                rssi: self.rssi,
-                snr: Snr::from_decibels(self.snr),
-                lqi: None,
-                origin: RxOrigin::Air,
-                buffered: None,
-            }));
-        }
-    }
-
-    fn max_frame_size(&self) -> usize {
-        self.max_frame_size
-    }
-
-    fn t_frame_ms(&self) -> u32 {
-        self.t_frame_ms
-    }
-}
+/// The UDP multicast radio: the desktop simulations' shared medium, and
+/// the LAN bearer. It lives in `umsh-lan-bearer`, which every host and
+/// the iOS core share.
+pub use umsh_lan_bearer::radio::{RxMode, UdpMulticastRadio, UdpMulticastRadioError};
+pub use umsh_lan_bearer::socket::{LanConfig, LanSocket};
 
 /// Counter store that persists one file per context key.
 #[derive(Clone, Debug)]
@@ -498,7 +305,9 @@ fn lock_entries<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, FileStoreError
 mod tests {
     use super::*;
     use core::future::poll_fn;
+    use std::net::Ipv4Addr;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use umsh_hal::{Radio, TxOptions};
 
     fn temp_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()

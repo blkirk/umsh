@@ -209,7 +209,7 @@ fn heard(origin: RxOrigin, rssi: i16, snr: umsh_hal::Snr) -> Heard {
     match origin {
         RxOrigin::Air => Heard::Air { rssi, snr },
         RxOrigin::LocalTx => Heard::LocalTx,
-        RxOrigin::Backhaul => Heard::Backhaul,
+        RxOrigin::Backhaul | RxOrigin::Bearer(_) => Heard::Backhaul,
     }
 }
 

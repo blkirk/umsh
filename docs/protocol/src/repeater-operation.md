@@ -124,6 +124,8 @@ A packet that arrives carrying an **empty** source-route option matched no hint 
 
 A [bridge](internet-bridging.md) rewrites nothing of its own: a repeater at each end of it forwards the packet by this procedure, so a crossing applies these rules twice.
 
+A node with [bearers](lan-bearer.md#forwarding-across-bearers) beside its radio applies this procedure once per packet, and offers the one rewritten packet to each egress its forwarding table allows.
+
 ## Forwarding Confirmation
 
 Repeaters do not generate MAC acks—acks are generated only by the [final destination](packet-types.md#mac-ack-packet). Instead, a node can passively confirm that a transmitted or forwarded packet was received by listening for a subsequent retransmission of the same packet (or it's ack).
@@ -145,7 +147,7 @@ confirm_timeout = 2 × T_frame + W_max + 2 × W_jitter + D_ack
 
 where `W_max + 2 × W_jitter` bounds the intentional forwarding delay permitted for the path, including the wait of a repeater that heard the packet below the contention band, and `D_ack` is the [ACK protection interval](channel-access.md#ack-protection-interval) when it applies. With the suggested defaults `W_max = T_frame/2`, `W_jitter = T_frame/10`, and `D_ack = 0.25 × T_frame`, this yields `confirm_timeout = 2.95 × T_frame`.
 
-If the packet is heard before `confirm_timeout` expires, forwarding is confirmed.
+If the packet is heard before `confirm_timeout` expires, forwarding is confirmed. A copy received from a [bearer](lan-bearer.md#channel-access) does not confirm.
 
 If `confirm_timeout` expires without a retransmission, the node SHOULD schedule a retry after a jittered delay:
 

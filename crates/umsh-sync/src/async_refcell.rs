@@ -26,7 +26,9 @@ pub struct AsyncRefCell<T: ?Sized> {
 }
 
 impl<T> AsyncRefCell<T> {
-    /// Construct a new cell holding `value`.
+    /// Construct a new cell holding `value`. Inlined so a large value can
+    /// be built in place.
+    #[inline(always)]
     pub fn new(value: T) -> Self {
         Self {
             cond: AsyncCondition::new(),

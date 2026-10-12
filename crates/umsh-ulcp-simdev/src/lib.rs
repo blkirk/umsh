@@ -1,12 +1,20 @@
-//! Simulated ULCP device: the production device [`Session`] behind a
-//! deterministic in-memory link.
+//! Soft ULCP devices: the production device [`Session`] behind an
+//! HDLC-Lite byte stream, with no hardware under it.
 //!
-//! The storage, radio, RSSI sampler, and entropy source are small
-//! stand-ins; every protocol decision is made by the real session. What
-//! stands where a radio would is a queue: transmissions accumulate until
-//! [`SimulatedDevice::take_transmitted`] drains them, so the caller
-//! decides what "the air" is—the web debugger discards it, a bridge
-//! copies it to real segments.
+//! [`soft::SoftDevice`] is the core, generic over a [`soft::SoftPlatform`]
+//! that supplies storage, entropy, a clock, and peripherals. Two platforms
+//! ship here:
+//!
+//! - [`SimulatedDevice`]: a deterministic test fixture. Storage is RAM,
+//!   identities come from a counter, and the battery, receiver, Wi-Fi
+//!   station, and I2C bus are canned. Every protocol decision is still
+//!   made by the real session. Transmissions accumulate until
+//!   [`SimulatedDevice::take_transmitted`] drains them, so the caller
+//!   decides what "the air" is—the web debugger discards it, a bridge
+//!   copies it to real segments.
+//! - [`host::HostPlatform`]: a real device with no radio of its own, such
+//!   as a LAN virtual radio. State persists in files, identities come
+//!   from the operating system's generator, and the clock is the system's.
 //!
 //! The [`SessionConfig`] is the caller's: it names the device and
 //! declares its capability surface. A simulated device has no node
@@ -14,13 +22,11 @@
 //! [`SessionConfig::mac_node`] unset—a backhaul would connect the host
 //! to nothing.
 
-use std::collections::VecDeque;
+#[cfg(feature = "host")]
+pub mod host;
+pub mod soft;
 
 use umsh_core::{NodeHint, PacketBuilder};
-use umsh_crypto::{
-    CryptoEngine, NodeIdentity,
-    software::{SoftwareAes, SoftwareIdentity, SoftwareSha256},
-};
 use umsh_ulcp::battery::{BatteryChargeState, BatteryStatus};
 use umsh_ulcp::gnss::{FixKind, GnssSnapshot};
 use umsh_ulcp::i2c::{BusInfo, DeviceInfo, ScanRequest, TransferRequest};
@@ -29,43 +35,36 @@ use umsh_ulcp::ip::{FamilyState, V4Address, V6Item};
 use umsh_ulcp::wifi::{
     Association, Link, LinkReason, LinkState, NetworkEntry, ScanResult, SecurityMode,
 };
-use umsh_ulcp::{Status, hdlc, items};
-use umsh_ulcp_device::{AnnounceRequest, Effect, IdentitySource, SNAPSHOT_MAX, Session, TxOutcome};
+use umsh_ulcp::{Status, items};
+use umsh_ulcp_device::{AnnounceRequest, Effect};
+
+use soft::{DeviceSession, SoftDevice, SoftPlatform};
 
 pub use umsh_ulcp_device::{
     AlertConfig, BatteryFields, DutyLedger, GnssConfig, IpConfig, RadioRxInfo, RadioSettings,
     SessionConfig, TimeConfig, WifiConfig,
 };
 
-const WIRE_CAPACITY: usize = umsh_ulcp::gatt::MAX_FRAME;
-
 /// Bonds a fresh simulated device pretends to be holding.
 const SIMULATED_BONDS: u8 = 2;
 
-type DeviceSession = Session<SoftwareAes, SoftwareSha256>;
+/// A deterministic, RAM-backed device that speaks HDLC-Lite exactly like USB.
 
 /// A deterministic, RAM-backed device that speaks HDLC-Lite exactly like USB.
 pub struct SimulatedDevice {
-    session: DeviceSession,
-    config: SessionConfig,
-    decoder: hdlc::Decoder<WIRE_CAPACITY>,
-    outbound: VecDeque<Vec<u8>>,
+    device: SoftDevice<SimulatedPlatform>,
+}
+
+/// What stands where a board's hardware and storage would.
+pub struct SimulatedPlatform {
     snapshot: Option<Vec<u8>>,
-    identity: Option<([u8; 32], [u8; 32])>,
+    identity: Option<[u8; 32]>,
     identity_seed: u8,
     pairing_pin: Option<u32>,
     /// Bonds the simulated transport is holding. Nothing here pairs, so
     /// the count only ever falls—it starts non-zero so a host has
     /// something to clear, which is the state the command is for.
     bond_count: u8,
-    air: Vec<Vec<u8>>,
-    now_ms: u64,
-    /// The caller's clock reading when this device last came up.
-    /// `Clock::now_ms` is specified as milliseconds since boot, and a
-    /// factory reset reboots the hardware, so the simulated clock has to
-    /// restart with it—otherwise a freshly reset device would report the
-    /// uptime of the process driving it.
-    boot_ms: u64,
     /// The simulated wall clock, as a Unix second, or `None` for a device
     /// that has not been told and has never had a fix. Starts unset so the
     /// property's most interesting state is the one you see first.
@@ -76,10 +75,6 @@ pub struct SimulatedDevice {
     fix_step: u32,
     /// What stands where a Wi-Fi driver and an IP stack would.
     network: SimulatedNetwork,
-    /// Every `CMD_ANNOUNCE` the device has taken, oldest first. There is
-    /// no node here to put one on the air, so the record is the whole of
-    /// what a test can observe.
-    announcements: Vec<AnnounceRequest>,
     /// The one peripheral on the simulated bus.
     i2c: SimulatedI2c,
     temperatures: Vec<(String, u16)>,
@@ -247,31 +242,113 @@ impl SimulatedNetwork {
 
 impl SimulatedDevice {
     pub fn new(config: SessionConfig) -> Self {
-        let mut session = DeviceSession::new(
-            config,
-            Status::RESET_POWER_ON,
-            CryptoEngine::new(SoftwareAes, SoftwareSha256),
-        );
-        // Nothing is attached yet, so this only seeds the value a later
-        // read answers with.
-        session.set_ble_bond_count(SIMULATED_BONDS, &mut |_| {});
         Self {
-            session,
-            config,
-            decoder: hdlc::Decoder::new(),
-            outbound: VecDeque::new(),
+            device: SoftDevice::new(config, SimulatedPlatform::new()),
+        }
+    }
+
+    /// Append a sensor without changing any existing index or name.
+    pub fn append_temperature_sensor(&mut self, name: &str, value: u16) -> Result<usize, Status> {
+        self.device
+            .platform_mut()
+            .append_temperature_sensor(name, value)
+    }
+
+    /// Change availability or temperature while preserving the inventory.
+    pub fn set_temperature(&mut self, index: usize, value: u16) -> Result<(), Status> {
+        self.device.platform_mut().set_temperature(index, value)
+    }
+
+    /// Stage registration during the next acquisition for UI/transport scenarios.
+    pub fn append_temperature_during_next_sample(
+        &mut self,
+        name: &str,
+        value: u16,
+    ) -> Result<(), Status> {
+        self.device
+            .platform_mut()
+            .append_temperature_during_next_sample(name, value)
+    }
+
+    pub fn temperature_samples(&self) -> u64 {
+        self.device.platform().temperature_samples()
+    }
+
+    /// Attach over the virtual equivalent of a physically secure serial link.
+    pub fn attach(&mut self) {
+        self.device.attach();
+    }
+
+    pub fn detach(&mut self) {
+        self.device.detach();
+    }
+
+    /// Feed an arbitrary serial byte chunk into the virtual USB link.
+    pub fn ingest(&mut self, bytes: &[u8], now_ms: u64) -> Result<(), String> {
+        self.device.ingest(bytes, now_ms)
+    }
+
+    pub fn take_outbound(&mut self) -> Option<Vec<u8>> {
+        self.device.take_outbound()
+    }
+
+    /// Everything the device has transmitted since the last drain, in
+    /// order. The queue grows until drained; a caller with no air to put
+    /// frames on drains and discards.
+    pub fn take_transmitted(&mut self) -> Vec<Vec<u8>> {
+        self.device.take_transmitted()
+    }
+
+    /// Every `CMD_ANNOUNCE` the device has taken since the last drain, in
+    /// order. Nothing reaches the air—there is no node here—so this is
+    /// where a test reads what was asked for.
+    pub fn take_announcements(&mut self) -> Vec<AnnounceRequest> {
+        self.device.take_announcements()
+    }
+
+    /// Put a canned radio frame through the real device receive path.
+    pub fn inject_radio_rx(&mut self, bytes: &[u8], now_ms: u64) {
+        self.inject_radio_rx_with_info(bytes, &RadioRxInfo::measured(-82, 35, None), now_ms);
+    }
+
+    /// Put a radio frame through the real device receive path with the
+    /// caller's own reception facts—all-`None` for a frame that
+    /// crossed no air and was measured by nobody.
+    pub fn inject_radio_rx_with_info(&mut self, bytes: &[u8], info: &RadioRxInfo, now_ms: u64) {
+        self.device.inject_radio_rx(bytes, info, now_ms);
+    }
+
+    /// Build and inject a small valid UMSH packet for interactive UI demos.
+    pub fn inject_demo_rx(&mut self, now_ms: u64) {
+        let mut bytes = [0; 64];
+        let packet = PacketBuilder::new(&mut bytes)
+            .broadcast()
+            .source_hint(NodeHint([0x11, 0x22, 0x33]))
+            .flood_hops(3)
+            .payload(b"hello from the simulated radio")
+            .build()
+            .expect("fixed demo packet fits")
+            .to_vec();
+        self.inject_radio_rx(&packet, now_ms);
+    }
+
+    /// The simulated bus peripheral, for checking what a transfer did.
+    pub fn i2c(&self) -> &SimulatedI2c {
+        &self.device.platform().i2c
+    }
+}
+
+impl SimulatedPlatform {
+    fn new() -> Self {
+        Self {
             snapshot: None,
             identity: None,
             identity_seed: 0,
             pairing_pin: None,
             bond_count: SIMULATED_BONDS,
-            air: Vec::new(),
-            now_ms: 0,
-            boot_ms: 0,
             epoch: None,
             fix_step: 0,
             network: SimulatedNetwork::default(),
-            announcements: Vec::new(),
             i2c: SimulatedI2c::default(),
             temperatures: vec![
                 ("MCU die".into(), 2981),
@@ -336,442 +413,6 @@ impl SimulatedDevice {
         self.temperature_samples
     }
 
-    /// The caller's clock, rebased onto this device's boot.
-    fn device_ms(&self) -> u64 {
-        self.now_ms.saturating_sub(self.boot_ms)
-    }
-
-    /// Attach over the virtual equivalent of a physically secure serial link.
-    pub fn attach(&mut self) {
-        self.decoder.reset();
-        self.outbound.clear();
-        self.session.attach(true);
-        self.flush_session_reset_notice();
-    }
-
-    pub fn detach(&mut self) {
-        self.decoder.reset();
-        self.outbound.clear();
-        self.session.detach();
-    }
-
-    /// Pay whatever session-reset notice the session is owing, the way
-    /// the firmware driver does at the tail of its loop.
-    fn flush_session_reset_notice(&mut self) {
-        let mut emitted = Vec::new();
-        if self
-            .session
-            .take_session_reset_notice(&mut |frame: &[u8]| emitted.push(frame.to_vec()))
-        {
-            self.queue_emitted(emitted);
-        }
-    }
-
-    /// Feed an arbitrary serial byte chunk into the virtual USB link.
-    pub fn ingest(&mut self, bytes: &[u8], now_ms: u64) -> Result<(), String> {
-        self.now_ms = now_ms;
-        for &byte in bytes {
-            let outcome = self
-                .decoder
-                .push(byte)
-                .map(|result| result.map(<[u8]>::to_vec));
-            if let Some(outcome) = outcome {
-                let frame = outcome.map_err(|error| format!("HDLC decode error: {error:?}"))?;
-                self.handle_frame(&frame);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn take_outbound(&mut self) -> Option<Vec<u8>> {
-        self.outbound.pop_front()
-    }
-
-    /// Everything the device has transmitted since the last drain, in
-    /// order. The queue grows until drained; a caller with no air to put
-    /// frames on drains and discards.
-    pub fn take_transmitted(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.air)
-    }
-
-    /// Every `CMD_ANNOUNCE` the device has taken since the last drain, in
-    /// order. Nothing reaches the air—there is no node here—so this is
-    /// where a test reads what was asked for.
-    pub fn take_announcements(&mut self) -> Vec<AnnounceRequest> {
-        std::mem::take(&mut self.announcements)
-    }
-
-    /// Put a canned radio frame through the real device receive path.
-    pub fn inject_radio_rx(&mut self, bytes: &[u8], now_ms: u64) {
-        self.inject_radio_rx_with_info(bytes, &RadioRxInfo::measured(-82, 35, None), now_ms);
-    }
-
-    /// Put a radio frame through the real device receive path with the
-    /// caller's own reception facts—all-`None` for a frame that
-    /// crossed no air and was measured by nobody.
-    pub fn inject_radio_rx_with_info(&mut self, bytes: &[u8], info: &RadioRxInfo, now_ms: u64) {
-        self.now_ms = now_ms;
-        let device_ms = self.device_ms();
-        let mut emitted = Vec::new();
-        let effect = self
-            .session
-            .on_radio_rx(bytes, info, device_ms, &mut |frame| {
-                emitted.push(frame.to_vec())
-            });
-        self.execute(effect, &mut emitted);
-        self.queue_emitted(emitted);
-    }
-
-    /// Build and inject a small valid UMSH packet for interactive UI demos.
-    pub fn inject_demo_rx(&mut self, now_ms: u64) {
-        let mut bytes = [0; 64];
-        let packet = PacketBuilder::new(&mut bytes)
-            .broadcast()
-            .source_hint(NodeHint([0x11, 0x22, 0x33]))
-            .flood_hops(3)
-            .payload(b"hello from the simulated radio")
-            .build()
-            .expect("fixed demo packet fits")
-            .to_vec();
-        self.inject_radio_rx(&packet, now_ms);
-    }
-
-    fn handle_frame(&mut self, frame: &[u8]) {
-        let device_ms = self.device_ms();
-        let mut emitted = Vec::new();
-        let effect = self
-            .session
-            .handle_frame(frame, device_ms, &mut |bytes| emitted.push(bytes.to_vec()));
-        self.execute(effect, &mut emitted);
-        self.settle_network(&mut |frame: &[u8]| emitted.push(frame.to_vec()));
-        self.queue_emitted(emitted);
-        self.flush_session_reset_notice();
-    }
-
-    fn execute(&mut self, mut effect: Option<Effect>, emitted: &mut Vec<Vec<u8>>) {
-        while effect.is_some() {
-            self.execute_one(effect, emitted);
-            effect = self
-                .session
-                .resume_multi(self.device_ms(), &mut |frame| emitted.push(frame.to_vec()));
-        }
-    }
-
-    fn execute_one(&mut self, effect: Option<Effect>, emitted: &mut Vec<Vec<u8>>) {
-        let mut emit = |frame: &[u8]| emitted.push(frame.to_vec());
-        match effect {
-            // The simulated board has no buzzer or LED to drive, so the
-            // alert is purely the property value the session already holds.
-            None
-            | Some(Effect::ApplyRadio(_))
-            | Some(Effect::DeviceNameChanged)
-            | Some(Effect::ApplyAlert(_)) => {}
-            Some(Effect::StartTransmit) => {
-                let device_ms = self.device_ms();
-                self.air.push(self.session.tx_data().to_vec());
-                self.session
-                    .on_tx_result(TxOutcome::Sent, device_ms, &mut emit);
-            }
-            Some(Effect::SampleRssi { tid }) => {
-                self.session.respond_rssi(tid, Ok(-77), &mut emit);
-            }
-            Some(Effect::SampleBattery { tid }) => {
-                // Stable, human-recognizable simulated measurement; the
-                // configured field set decides what of it is reported.
-                self.session.respond_battery(
-                    tid,
-                    Ok(BatteryStatus {
-                        voltage_mv: Some(4111),
-                        level_percent: Some(87),
-                        charge_state: Some(BatteryChargeState::Charging),
-                    }),
-                    &mut emit,
-                );
-            }
-            Some(Effect::SampleBatteryGroup {
-                tid,
-                key,
-                fields: _,
-            }) => {
-                use umsh_ulcp::battery_diagnostics::{KEYS, Sample, Value, VoltageRequest};
-                let mut sample = Sample::default();
-                sample.snapshot = Ok(BatteryStatus {
-                    voltage_mv: Some(4111),
-                    level_percent: Some(87),
-                    charge_state: Some(BatteryChargeState::Charging),
-                });
-                let values = [
-                    Value::Current(100),
-                    Value::Unsigned(1305),
-                    Value::Unsigned(1500),
-                    Value::Unsigned(1500),
-                    Value::Bool(true),
-                    Value::Bool(true),
-                    Value::Bool(false),
-                    Value::Bool(true),
-                    Value::Bool(false),
-                    Value::Voltage(VoltageRequest::Millivolts(4200)),
-                    Value::Format(1),
-                    Value::Unsigned(8),
-                    Value::Unsigned(0x26),
-                ];
-                for (key, value) in KEYS.into_iter().zip(values) {
-                    sample.set(key, Ok(Some(value)));
-                }
-                self.session
-                    .respond_battery_group(tid, key, sample, &mut emit);
-            }
-            Some(Effect::SampleTemperatures { tid }) => {
-                self.temperature_samples += 1;
-                let values: Vec<_> = self.temperatures.iter().map(|(_, value)| *value).collect();
-                if let Some((name, value)) = self.temperature_append_on_sample.take() {
-                    self.append_temperature_sensor(&name, value)
-                        .expect("staged registration fits");
-                }
-                self.session
-                    .respond_temperatures(tid, Ok(&values), &mut emit);
-            }
-            Some(Effect::ReadTemperatureNames { tid }) => {
-                let names: Vec<_> = self
-                    .temperatures
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect();
-                let mut value = [0; umsh_ulcp_device::TEMPERATURE_NAMES_MAX];
-                let len = umsh_ulcp::temperature::encode_names(&names, &mut value)
-                    .expect("bounded inventory");
-                self.session
-                    .respond_temperature_names(tid, Ok(&value[..len]), &mut emit);
-            }
-            Some(Effect::SampleIlluminance { tid }) => {
-                // A stable simulated reading: ordinary office lighting.
-                self.session
-                    .respond_illuminance(tid, Some(320_000), &mut emit);
-            }
-            // The simulated device has no device node and no signing key,
-            // so PROP_IDENT reads report failure rather than a blob.
-            Some(Effect::SignIdentity { tid }) => {
-                self.session.respond_identity_blob(tid, Err(()), &mut emit);
-            }
-            Some(Effect::SetPairingPin { tid, pin }) => {
-                self.pairing_pin = pin;
-                self.session.respond_pin_set(tid, Ok(()), &mut emit);
-            }
-            Some(Effect::ClearBleBonds { tid }) => {
-                // The full security reset a board performs: bonds, PIN,
-                // and lockout together, and the pairing window a
-                // freshly-cleared device opens.
-                self.bond_count = 0;
-                self.pairing_pin = None;
-                self.session.set_ble_bond_count(0, &mut emit);
-                self.session.set_ble_pairing(true, &mut emit);
-                self.session.respond_ble_bond_count(tid, Ok(()), &mut emit);
-            }
-            Some(Effect::SetBlePairing { tid, open }) => {
-                // Nothing here can pair, so the window opens and nothing
-                // walks through it. A full store is not a refusal—
-                // enrollment at capacity evicts—and the one state that
-                // would refuse an open, a pairing lockout, needs failed
-                // pairings this device cannot have.
-                self.session.respond_ble_pairing(tid, Ok(open), &mut emit);
-            }
-            Some(Effect::DrainQueue) => {
-                let device_ms = self.device_ms();
-                while self.session.drain_step(device_ms, &mut emit) {}
-            }
-            Some(Effect::SaveSnapshot { tid }) => {
-                let mut buf = [0u8; SNAPSHOT_MAX];
-                let result = match self.session.encode_snapshot(&mut buf) {
-                    Some(len) => {
-                        self.snapshot = Some(buf[..len].to_vec());
-                        Ok(())
-                    }
-                    None => Err(()),
-                };
-                self.session.respond_save(tid, result, &mut emit);
-            }
-            Some(Effect::ClearSaved { tid }) => {
-                self.snapshot = None;
-                self.identity = None;
-                self.session.respond_clear(tid, Ok(()), &mut emit);
-            }
-            Some(Effect::FactoryReset) => {
-                // Emulate the platform wipe-and-reboot: drop every persisted
-                // artifact (snapshot, identity, bonds/PIN) and bring the
-                // session back up factory-fresh as from a power cycle. No
-                // reply is emitted—on hardware the reboot drops the link.
-                self.snapshot = None;
-                self.identity = None;
-                self.identity_seed = 0;
-                self.pairing_pin = None;
-                self.bond_count = 0;
-                // The reboot restarts the monotonic clock along with
-                // everything else, so uptime counts from here.
-                self.boot_ms = self.now_ms;
-                self.session = DeviceSession::new(
-                    self.config,
-                    Status::RESET_POWER_ON,
-                    CryptoEngine::new(SoftwareAes, SoftwareSha256),
-                );
-            }
-            Some(Effect::Dfu { tid, .. }) => {
-                self.session
-                    .respond_dfu(tid, Err(Status::UNIMPLEMENTED), &mut emit);
-            }
-            Some(Effect::Reboot) => {
-                // A power cycle and nothing else: the persisted
-                // artifacts survive, the session comes back announcing
-                // its power-on reset, and uptime counts from here. No
-                // reply, as on hardware.
-                self.boot_ms = self.now_ms;
-                self.session = DeviceSession::new(
-                    self.config,
-                    Status::RESET_POWER_ON,
-                    CryptoEngine::new(SoftwareAes, SoftwareSha256),
-                );
-                // A board configures itself from the saved snapshot on
-                // the way up, so replay it here. The identity and the
-                // pairing PIN are this simulator's own fields and are
-                // answered from them, so only the snapshot has to go
-                // back into the session.
-                if let Some(saved) = self.snapshot.clone() {
-                    let _ = self.session.restore_at_boot(&saved);
-                }
-                // Bonds outlive a reboot, and the fresh session starts
-                // from zero, so the transport reports itself again exactly
-                // as a board's does on the way up.
-                self.session
-                    .set_ble_bond_count(self.bond_count, &mut |_| {});
-            }
-            Some(Effect::Announce { tid, request }) => {
-                // Recorded rather than transmitted: this device has no
-                // node (`mac_node` is clear), so nothing reaches `air`.
-                // What a board would answer is the same either way—the
-                // request was taken.
-                self.announcements.push(request);
-                self.session.respond_announce(tid, Ok(()), &mut emit);
-            }
-            Some(Effect::ReadTime { tid }) => {
-                self.session.respond_time(tid, self.epoch, &mut emit);
-            }
-            Some(Effect::ApplyTime { epoch }) => {
-                self.epoch = epoch;
-            }
-            Some(Effect::SampleGnss { tid, key }) => {
-                let sample = self.gnss_sample();
-                self.session.respond_gnss(tid, key, Ok(sample), &mut emit);
-            }
-            Some(Effect::ProvisionIdentity { tid }) => {
-                let result = match self.session.identity_request() {
-                    Some(source) => {
-                        let secret = match source {
-                            IdentitySource::Install(secret) => secret,
-                            IdentitySource::Generate => {
-                                self.identity_seed = self.identity_seed.wrapping_add(1).max(1);
-                                [self.identity_seed; 32]
-                            }
-                        };
-                        let public = SoftwareIdentity::from_secret_bytes(&secret).public_key().0;
-                        self.identity = Some((secret, public));
-                        Ok(public)
-                    }
-                    None => Err(()),
-                };
-                self.session.respond_identity(tid, result, &mut emit);
-            }
-            // A scan the whole way through, in the four frames the spec
-            // orders: the clear, the reply, an insert per access point,
-            // and the drop to zero. Instant rather than progressive,
-            // which is the shape of every stack that hands a scan back
-            // only when it finishes.
-            Some(Effect::SetWifiScanning { tid, scanning }) => {
-                if self.session.wifi_station() && !self.session.wifi_enabled() {
-                    self.session
-                        .respond_wifi_scanning(tid, Err(Status::INVALID_STATE), &mut emit);
-                    return;
-                }
-                if !scanning {
-                    self.session
-                        .respond_wifi_scanning(tid, Ok(false), &mut emit);
-                    return;
-                }
-                self.network.scanned = true;
-                self.session.clear_scan_results(&mut emit);
-                self.session.respond_wifi_scanning(tid, Ok(true), &mut emit);
-                for &(frequency_mhz, rssi_dbm, bssid, ssid) in SIMULATED_ACCESS_POINTS {
-                    self.session.publish_scan_result(
-                        &ScanResult {
-                            modes: Self::simulated_modes(ssid),
-                            frequency_mhz,
-                            rssi_dbm,
-                            bssid,
-                            ssid,
-                        },
-                        &mut emit,
-                    );
-                }
-                self.session.set_wifi_scanning(false, &mut emit);
-            }
-            Some(Effect::SelectWifiNetwork { tid }) => {
-                let ssid = self.session.pending_network().to_vec();
-                let result = match ssid.is_empty() || self.network.position(&ssid).is_some() {
-                    true => Ok(()),
-                    false => Err(Status::ITEM_NOT_FOUND),
-                };
-                self.session.respond_wifi_network(tid, result, &mut emit);
-            }
-            Some(Effect::InsertWifiNetwork { tid }) => {
-                let entry = self.session.pending_network_entry().to_vec();
-                // A mode the simulated hardware does not do, so that a
-                // host's step-down path has something to step down from.
-                let result = match NetworkEntry::decode(&entry).map(|entry| entry.security) {
-                    Ok(SecurityMode::Wpa3Ent192) => Err(Status::UNIMPLEMENTED),
-                    _ => {
-                        self.network.store(&entry);
-                        Ok(())
-                    }
-                };
-                self.session
-                    .respond_wifi_network_stored(tid, result, &mut emit);
-            }
-            Some(Effect::RemoveWifiNetwork { tid }) => {
-                let ssid = self.session.pending_network().to_vec();
-                let result = match self.network.position(&ssid) {
-                    Some(index) => {
-                        self.network.networks.remove(index);
-                        Ok(())
-                    }
-                    None => Err(Status::ITEM_NOT_FOUND),
-                };
-                self.session
-                    .respond_wifi_network_forgotten(tid, result, &mut emit);
-            }
-            Some(Effect::ReadNetworkTable { tid, key }) => {
-                let items = self.network_table(key);
-                self.session
-                    .respond_network_table(tid, key, Ok(&items), &mut emit);
-            }
-            Some(Effect::I2cTransfer { tid }) => {
-                let request = self.session.i2c_request();
-                let result = self.i2c.transact(request.addr, request);
-                self.session.respond_i2c(
-                    tid,
-                    result.as_deref().map_err(|status| *status),
-                    &mut emit,
-                );
-            }
-            Some(Effect::I2cScan { tid }) => {
-                let found = self.i2c.scan(self.session.i2c_scan_request());
-                self.session.respond_i2c(tid, Ok(&found), &mut emit);
-            }
-        }
-    }
-
-    /// The simulated bus peripheral, for checking what a transfer did.
-    pub fn i2c(&self) -> &SimulatedI2c {
-        &self.i2c
-    }
-
     /// What the simulated access points offer, by name.
     ///
     /// The office network is a WPA2/WPA3 transition deployment, the guest
@@ -788,7 +429,7 @@ impl SimulatedDevice {
 
     /// One of the tables the platform owns rather than the session,
     /// encoded as a length-prefixed item list.
-    fn network_table(&self, key: u32) -> Vec<u8> {
+    fn network_table(&self, session: &DeviceSession, key: u32) -> Vec<u8> {
         let mut items = Vec::new();
         let mut push = |item: &[u8]| {
             let mut buf = [0u8; 1 + umsh_ulcp::wifi::NETWORK_ENTRY_MAX_LEN];
@@ -864,12 +505,8 @@ impl SimulatedDevice {
             // where it has one, and the network's offer where it does
             // not.
             prop::IP_RESOLVERS if self.network.associated => {
-                let configured: Vec<Vec<u8>> = self
-                    .session
-                    .dns_resolvers()
-                    .iter()
-                    .map(<[u8]>::to_vec)
-                    .collect();
+                let configured: Vec<Vec<u8>> =
+                    session.dns_resolvers().iter().map(<[u8]>::to_vec).collect();
                 match configured.is_empty() {
                     true => push(&[192, 168, 8, 1]),
                     false => configured.iter().for_each(|resolver| push(resolver)),
@@ -886,16 +523,15 @@ impl SimulatedDevice {
     /// after every frame, so a write that switches the station off or
     /// picks a different network is followed by the state that write
     /// produced.
-    fn settle_network(&mut self, emit: &mut impl FnMut(&[u8])) {
-        if !self.session.wifi_station() {
+    fn settle_network(&mut self, session: &mut DeviceSession, mut emit: &mut dyn FnMut(&[u8])) {
+        if !session.wifi_station() {
             return;
         }
-        self.session.set_wifi_mac(SIMULATED_WIFI_MAC);
-        let selected = self.session.selected_network().to_vec();
-        let associated = self.session.wifi_enabled()
+        session.set_wifi_mac(SIMULATED_WIFI_MAC);
+        let selected = session.selected_network().to_vec();
+        let associated = session.wifi_enabled()
             && !selected.is_empty()
-            && self
-                .session
+            && session
                 .known_networks()
                 .get(&selected)
                 .is_some_and(|entry| {
@@ -919,15 +555,14 @@ impl SimulatedDevice {
             },
             false => Link::default(),
         };
-        self.session.set_wifi_link(link, emit);
-        self.session
-            .set_wifi_rssi(associated.then_some(SIMULATED_ACCESS_POINTS[0].1));
+        session.set_wifi_link(link, &mut emit);
+        session.set_wifi_rssi(associated.then_some(SIMULATED_ACCESS_POINTS[0].1));
         let state = match associated {
             true => FamilyState::Ready,
             false => FamilyState::NoLink,
         };
-        self.session.set_ip_state(prop::IPV4_STATE, state, emit);
-        self.session.set_ip_state(prop::IPV6_STATE, state, emit);
+        session.set_ip_state(prop::IPV4_STATE, state, &mut emit);
+        session.set_ip_state(prop::IPV6_STATE, state, &mut emit);
     }
 
     /// The simulated receiver's view, walked one cell east per sample.
@@ -936,8 +571,8 @@ impl SimulatedDevice {
     /// [`GnssSnapshot::SEARCHING`]—zero for the facts it is sure of,
     /// empty for the position it does not have—which is the state most
     /// worth being able to see in a debugger.
-    fn gnss_sample(&mut self) -> GnssSnapshot {
-        if !self.session.gnss_enabled() {
+    fn gnss_sample(&mut self, session: &DeviceSession) -> GnssSnapshot {
+        if !session.gnss_enabled() {
             return GnssSnapshot::SEARCHING;
         }
         self.fix_step = self.fix_step.wrapping_add(1);
@@ -951,14 +586,242 @@ impl SimulatedDevice {
         snapshot.set_location(&[0x8a, 0x1f, 0x4c, 0x00, 0xd0 | step]);
         snapshot
     }
+}
 
-    fn queue_emitted(&mut self, emitted: Vec<Vec<u8>>) {
-        for frame in emitted {
-            let mut encoded = vec![0; hdlc::max_encoded_len(frame.len())];
-            let len = hdlc::encode_frame(&frame, &mut encoded)
-                .expect("simulated device output buffer uses HDLC worst-case size");
-            encoded.truncate(len);
-            self.outbound.push_back(encoded);
+impl SoftPlatform for SimulatedPlatform {
+    fn load_snapshot(&mut self) -> Option<Vec<u8>> {
+        self.snapshot.clone()
+    }
+
+    fn store_snapshot(&mut self, snapshot: Option<&[u8]>) -> Result<(), ()> {
+        self.snapshot = snapshot.map(<[u8]>::to_vec);
+        Ok(())
+    }
+
+    fn load_identity(&mut self) -> Option<[u8; 32]> {
+        self.identity
+    }
+
+    fn store_identity(&mut self, secret: Option<&[u8; 32]>) -> Result<(), ()> {
+        self.identity = secret.copied();
+        Ok(())
+    }
+
+    /// Deterministic: the first identity generated is all ones, the next
+    /// all twos.
+    fn generate_secret(&mut self) -> [u8; 32] {
+        self.identity_seed = self.identity_seed.wrapping_add(1).max(1);
+        [self.identity_seed; 32]
+    }
+
+    fn wall_clock(&mut self) -> Option<u32> {
+        self.epoch
+    }
+
+    fn set_wall_clock(&mut self, epoch: Option<u32>) {
+        self.epoch = epoch;
+    }
+
+    /// Bonds outlive a reboot, and a fresh session starts from zero, so
+    /// the transport reports itself exactly as a board's does on the way
+    /// up.
+    fn on_boot(&mut self, session: &mut DeviceSession) {
+        session.set_ble_bond_count(self.bond_count, &mut |_| {});
+    }
+
+    fn erase(&mut self) {
+        self.identity_seed = 0;
+        self.pairing_pin = None;
+        self.bond_count = 0;
+    }
+
+    fn settle(&mut self, session: &mut DeviceSession, emit: &mut dyn FnMut(&[u8])) {
+        self.settle_network(session, emit);
+    }
+
+    fn peripheral(
+        &mut self,
+        effect: Effect,
+        session: &mut DeviceSession,
+        mut emit: &mut dyn FnMut(&[u8]),
+    ) {
+        match effect {
+            Effect::SampleRssi { tid } => {
+                session.respond_rssi(tid, Ok(-77), &mut emit);
+            }
+            Effect::SampleBattery { tid } => {
+                // Stable, human-recognizable simulated measurement; the
+                // configured field set decides what of it is reported.
+                session.respond_battery(
+                    tid,
+                    Ok(BatteryStatus {
+                        voltage_mv: Some(4111),
+                        level_percent: Some(87),
+                        charge_state: Some(BatteryChargeState::Charging),
+                    }),
+                    &mut emit,
+                );
+            }
+            Effect::SampleBatteryGroup {
+                tid,
+                key,
+                fields: _,
+            } => {
+                use umsh_ulcp::battery_diagnostics::{KEYS, Sample, Value, VoltageRequest};
+                let mut sample = Sample::default();
+                sample.snapshot = Ok(BatteryStatus {
+                    voltage_mv: Some(4111),
+                    level_percent: Some(87),
+                    charge_state: Some(BatteryChargeState::Charging),
+                });
+                let values = [
+                    Value::Current(100),
+                    Value::Unsigned(1305),
+                    Value::Unsigned(1500),
+                    Value::Unsigned(1500),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Voltage(VoltageRequest::Millivolts(4200)),
+                    Value::Format(1),
+                    Value::Unsigned(8),
+                    Value::Unsigned(0x26),
+                ];
+                for (key, value) in KEYS.into_iter().zip(values) {
+                    sample.set(key, Ok(Some(value)));
+                }
+                session.respond_battery_group(tid, key, sample, &mut emit);
+            }
+            Effect::SampleTemperatures { tid } => {
+                self.temperature_samples += 1;
+                let values: Vec<_> = self.temperatures.iter().map(|(_, value)| *value).collect();
+                if let Some((name, value)) = self.temperature_append_on_sample.take() {
+                    self.append_temperature_sensor(&name, value)
+                        .expect("staged registration fits");
+                }
+                session.respond_temperatures(tid, Ok(&values), &mut emit);
+            }
+            Effect::ReadTemperatureNames { tid } => {
+                let names: Vec<_> = self
+                    .temperatures
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let mut value = [0; umsh_ulcp_device::TEMPERATURE_NAMES_MAX];
+                let len = umsh_ulcp::temperature::encode_names(&names, &mut value)
+                    .expect("bounded inventory");
+                session.respond_temperature_names(tid, Ok(&value[..len]), &mut emit);
+            }
+            Effect::SampleIlluminance { tid } => {
+                // A stable simulated reading: ordinary office lighting.
+                session.respond_illuminance(tid, Some(320_000), &mut emit);
+            }
+            Effect::SetPairingPin { tid, pin } => {
+                self.pairing_pin = pin;
+                session.respond_pin_set(tid, Ok(()), &mut emit);
+            }
+            Effect::ClearBleBonds { tid } => {
+                // The full security reset a board performs: bonds, PIN,
+                // and lockout together, and the pairing window a
+                // freshly-cleared device opens.
+                self.bond_count = 0;
+                self.pairing_pin = None;
+                session.set_ble_bond_count(0, &mut emit);
+                session.set_ble_pairing(true, &mut emit);
+                session.respond_ble_bond_count(tid, Ok(()), &mut emit);
+            }
+            Effect::SetBlePairing { tid, open } => {
+                // Nothing here can pair, so the window opens and nothing
+                // walks through it. A full store is not a refusal—
+                // enrollment at capacity evicts—and the one state that
+                // would refuse an open, a pairing lockout, needs failed
+                // pairings this device cannot have.
+                session.respond_ble_pairing(tid, Ok(open), &mut emit);
+            }
+            Effect::SampleGnss { tid, key } => {
+                let sample = self.gnss_sample(session);
+                session.respond_gnss(tid, key, Ok(sample), &mut emit);
+            }
+            // A scan the whole way through, in the four frames the spec
+            // orders: the clear, the reply, an insert per access point,
+            // and the drop to zero. Instant rather than progressive,
+            // which is the shape of every stack that hands a scan back
+            // only when it finishes.
+            Effect::SetWifiScanning { tid, scanning } => {
+                if session.wifi_station() && !session.wifi_enabled() {
+                    session.respond_wifi_scanning(tid, Err(Status::INVALID_STATE), &mut emit);
+                    return;
+                }
+                if !scanning {
+                    session.respond_wifi_scanning(tid, Ok(false), &mut emit);
+                    return;
+                }
+                self.network.scanned = true;
+                session.clear_scan_results(&mut emit);
+                session.respond_wifi_scanning(tid, Ok(true), &mut emit);
+                for &(frequency_mhz, rssi_dbm, bssid, ssid) in SIMULATED_ACCESS_POINTS {
+                    session.publish_scan_result(
+                        &ScanResult {
+                            modes: Self::simulated_modes(ssid),
+                            frequency_mhz,
+                            rssi_dbm,
+                            bssid,
+                            ssid,
+                        },
+                        &mut emit,
+                    );
+                }
+                session.set_wifi_scanning(false, &mut emit);
+            }
+            Effect::SelectWifiNetwork { tid } => {
+                let ssid = session.pending_network().to_vec();
+                let result = match ssid.is_empty() || self.network.position(&ssid).is_some() {
+                    true => Ok(()),
+                    false => Err(Status::ITEM_NOT_FOUND),
+                };
+                session.respond_wifi_network(tid, result, &mut emit);
+            }
+            Effect::InsertWifiNetwork { tid } => {
+                let entry = session.pending_network_entry().to_vec();
+                // A mode the simulated hardware does not do, so that a
+                // host's step-down path has something to step down from.
+                let result = match NetworkEntry::decode(&entry).map(|entry| entry.security) {
+                    Ok(SecurityMode::Wpa3Ent192) => Err(Status::UNIMPLEMENTED),
+                    _ => {
+                        self.network.store(&entry);
+                        Ok(())
+                    }
+                };
+                session.respond_wifi_network_stored(tid, result, &mut emit);
+            }
+            Effect::RemoveWifiNetwork { tid } => {
+                let ssid = session.pending_network().to_vec();
+                let result = match self.network.position(&ssid) {
+                    Some(index) => {
+                        self.network.networks.remove(index);
+                        Ok(())
+                    }
+                    None => Err(Status::ITEM_NOT_FOUND),
+                };
+                session.respond_wifi_network_forgotten(tid, result, &mut emit);
+            }
+            Effect::ReadNetworkTable { tid, key } => {
+                let items = self.network_table(session, key);
+                session.respond_network_table(tid, key, Ok(&items), &mut emit);
+            }
+            Effect::I2cTransfer { tid } => {
+                let request = session.i2c_request();
+                let result = self.i2c.transact(request.addr, request);
+                session.respond_i2c(tid, result.as_deref().map_err(|status| *status), &mut emit);
+            }
+            Effect::I2cScan { tid } => {
+                let found = self.i2c.scan(session.i2c_scan_request());
+                session.respond_i2c(tid, Ok(&found), &mut emit);
+            }
+            // Everything else is served by the core.
+            _ => {}
         }
     }
 }
@@ -966,10 +829,12 @@ impl SimulatedDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::soft::WIRE_CAPACITY;
     use umsh_ulcp::announce::{Announcement, AnnouncementKind};
+    use umsh_ulcp::hdlc;
     use umsh_ulcp::{Frame, PropPayload, frame, ids::prop};
 
-    fn test_config() -> SessionConfig {
+    pub(crate) fn test_config() -> SessionConfig {
         SessionConfig {
             dev_version: "umsh-simdev-test/0.1",
             dev_model: None,
@@ -1013,6 +878,7 @@ mod tests {
             stats: None,
             mac_node: false,
             meshcore_forwarder: false,
+            lan_bearer: false,
             wifi: Some(WifiConfig::STATION),
             ip: Some(IpConfig::DUAL),
             bridge_client: false,

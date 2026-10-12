@@ -31,6 +31,7 @@
 #[cfg(feature = "bridge-client")]
 pub mod bridge;
 pub mod duty;
+pub mod lan_bearer;
 pub mod net;
 pub mod session;
 

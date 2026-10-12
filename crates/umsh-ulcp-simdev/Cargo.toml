@@ -15,3 +15,8 @@ umsh-ulcp-device = { path = "../umsh-ulcp-device", features = ["wifi"] }
 # Host implementation of critical-section for the DutyLedger's blocking
 # mutex; firmware images provide theirs via nrf-mpsl.
 critical-section = { version = "1", features = ["std"] }
+rand = { workspace = true, optional = true, features = ["std", "thread_rng", "sys_rng"] }
+
+[features]
+# A file-backed platform for a real soft device on a host.
+host = ["dep:rand"]

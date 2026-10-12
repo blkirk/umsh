@@ -67,10 +67,20 @@ pub enum Counter {
     MeshCoreForwardedFlood,
     /// MeshCore v1 packets neither forwarded nor duplicates.
     MeshCoreDeclined,
+    /// LAN datagrams handed to the node.
+    LanRx,
+    /// LAN datagrams dropped by the ingress limit.
+    LanRxLimited,
+    /// LAN datagrams dropped as malformed.
+    LanRxMalformed,
+    /// Frames the node offered to the LAN.
+    LanExported,
+    /// Frames lost from the LAN's transmit queue.
+    LanExportDropped,
 }
 
 /// How many counters a ledger holds.
-pub const COUNTERS: usize = 13;
+pub const COUNTERS: usize = 18;
 
 impl Counter {
     /// Every counter, in identifier order.
@@ -88,6 +98,11 @@ impl Counter {
         Counter::MeshCoreForwardedRouted,
         Counter::MeshCoreForwardedFlood,
         Counter::MeshCoreDeclined,
+        Counter::LanRx,
+        Counter::LanRxLimited,
+        Counter::LanRxMalformed,
+        Counter::LanExported,
+        Counter::LanExportDropped,
     ];
 
     /// The property identifier this counter is read and cleared through.
@@ -106,6 +121,11 @@ impl Counter {
             Counter::MeshCoreForwardedRouted => prop::STAT_MESHCORE_FORWARDED_ROUTED,
             Counter::MeshCoreForwardedFlood => prop::STAT_MESHCORE_FORWARDED_FLOOD,
             Counter::MeshCoreDeclined => prop::STAT_MESHCORE_DECLINED,
+            Counter::LanRx => prop::STAT_LAN_RX,
+            Counter::LanRxLimited => prop::STAT_LAN_RX_LIMITED,
+            Counter::LanRxMalformed => prop::STAT_LAN_RX_MALFORMED,
+            Counter::LanExported => prop::STAT_LAN_EXPORTED,
+            Counter::LanExportDropped => prop::STAT_LAN_EXPORT_DROPPED,
         }
     }
 
@@ -125,6 +145,11 @@ impl Counter {
             prop::STAT_MESHCORE_FORWARDED_ROUTED => Counter::MeshCoreForwardedRouted,
             prop::STAT_MESHCORE_FORWARDED_FLOOD => Counter::MeshCoreForwardedFlood,
             prop::STAT_MESHCORE_DECLINED => Counter::MeshCoreDeclined,
+            prop::STAT_LAN_RX => Counter::LanRx,
+            prop::STAT_LAN_RX_LIMITED => Counter::LanRxLimited,
+            prop::STAT_LAN_RX_MALFORMED => Counter::LanRxMalformed,
+            prop::STAT_LAN_EXPORTED => Counter::LanExported,
+            prop::STAT_LAN_EXPORT_DROPPED => Counter::LanExportDropped,
             _ => return None,
         })
     }
@@ -144,6 +169,20 @@ impl Counter {
                 | Counter::ForwardDropped
                 | Counter::ForwardCancelled
         ) || self.needs_meshcore()
+            || self.needs_lan_bearer()
+    }
+
+    /// Whether this counter is the LAN bearer's, present only where one
+    /// is built in (`CAP_LAN_BEARER`).
+    pub const fn needs_lan_bearer(self) -> bool {
+        matches!(
+            self,
+            Counter::LanRx
+                | Counter::LanRxLimited
+                | Counter::LanRxMalformed
+                | Counter::LanExported
+                | Counter::LanExportDropped
+        )
     }
 
     /// Whether this counter is the MeshCore forwarder's, present only
@@ -355,7 +394,7 @@ mod tests {
     fn only_the_mac_sourced_counters_need_a_node() {
         let needs: Vec<Counter> = Counter::ALL
             .into_iter()
-            .filter(|c| c.needs_node() && !c.needs_meshcore())
+            .filter(|c| c.needs_node() && !c.needs_meshcore() && !c.needs_lan_bearer())
             .collect();
         assert_eq!(
             needs,

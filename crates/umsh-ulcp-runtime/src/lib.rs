@@ -46,6 +46,8 @@ pub mod gnss;
 pub mod i2c;
 #[cfg(feature = "counters")]
 pub mod journal;
+#[cfg(feature = "lan-bearer")]
+pub mod lan_bearer;
 #[cfg(feature = "meshcore-forwarder")]
 pub mod meshcore;
 #[cfg(feature = "counters")]

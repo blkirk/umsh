@@ -38,6 +38,7 @@ pub mod i2c;
 pub mod ids;
 pub mod ip;
 pub mod items;
+pub mod lan;
 pub mod meta;
 pub mod profiles;
 pub mod pui;

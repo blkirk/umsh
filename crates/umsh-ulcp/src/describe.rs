@@ -109,6 +109,11 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::STAT_MESHCORE_FORWARDED_ROUTED => "PROP_STAT_MESHCORE_FORWARDED_ROUTED",
         prop::STAT_MESHCORE_FORWARDED_FLOOD => "PROP_STAT_MESHCORE_FORWARDED_FLOOD",
         prop::STAT_MESHCORE_DECLINED => "PROP_STAT_MESHCORE_DECLINED",
+        prop::STAT_LAN_RX => "PROP_STAT_LAN_RX",
+        prop::STAT_LAN_RX_LIMITED => "PROP_STAT_LAN_RX_LIMITED",
+        prop::STAT_LAN_RX_MALFORMED => "PROP_STAT_LAN_RX_MALFORMED",
+        prop::STAT_LAN_EXPORTED => "PROP_STAT_LAN_EXPORTED",
+        prop::STAT_LAN_EXPORT_DROPPED => "PROP_STAT_LAN_EXPORT_DROPPED",
         prop::BLE_PAIRING_PIN => "PROP_BLE_PAIRING_PIN",
         prop::DEV_ADMINS => "PROP_DEV_ADMINS",
         prop::TIME => "PROP_TIME",
@@ -149,6 +154,10 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::MESHCORE_FORWARDING_ENABLED => "PROP_MESHCORE_FORWARDING_ENABLED",
         prop::MESHCORE_REGION_POLICY => "PROP_MESHCORE_REGION_POLICY",
         prop::MESHCORE_REGIONS => "PROP_MESHCORE_REGIONS",
+        prop::LAN_BEARER_ENABLED => "PROP_LAN_BEARER_ENABLED",
+        prop::LAN_BEARER_GROUP => "PROP_LAN_BEARER_GROUP",
+        prop::LAN_BEARER_INGRESS_LIMIT => "PROP_LAN_BEARER_INGRESS_LIMIT",
+        prop::LAN_BEARER_STATE => "PROP_LAN_BEARER_STATE",
         _ => return None,
     })
 }
@@ -249,6 +258,11 @@ pub const PROPERTIES: &[u32] = &[
     prop::STAT_MESHCORE_FORWARDED_ROUTED,
     prop::STAT_MESHCORE_FORWARDED_FLOOD,
     prop::STAT_MESHCORE_DECLINED,
+    prop::STAT_LAN_RX,
+    prop::STAT_LAN_RX_LIMITED,
+    prop::STAT_LAN_RX_MALFORMED,
+    prop::STAT_LAN_EXPORTED,
+    prop::STAT_LAN_EXPORT_DROPPED,
     prop::BLE_PAIRING_PIN,
     prop::DEV_ADMINS,
     prop::TIME,
@@ -291,6 +305,10 @@ pub const PROPERTIES: &[u32] = &[
     prop::MESHCORE_FORWARDING_ENABLED,
     prop::MESHCORE_REGION_POLICY,
     prop::MESHCORE_REGIONS,
+    prop::LAN_BEARER_ENABLED,
+    prop::LAN_BEARER_GROUP,
+    prop::LAN_BEARER_INGRESS_LIMIT,
+    prop::LAN_BEARER_STATE,
 ];
 
 /// How a property's octets are meant to be read.
@@ -411,7 +429,12 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         | prop::STAT_MESHCORE_SEEN
         | prop::STAT_MESHCORE_FORWARDED_ROUTED
         | prop::STAT_MESHCORE_FORWARDED_FLOOD
-        | prop::STAT_MESHCORE_DECLINED => U32,
+        | prop::STAT_MESHCORE_DECLINED
+        | prop::STAT_LAN_RX
+        | prop::STAT_LAN_RX_LIMITED
+        | prop::STAT_LAN_RX_MALFORMED
+        | prop::STAT_LAN_EXPORTED
+        | prop::STAT_LAN_EXPORT_DROPPED => U32,
         prop::BLE_PAIRING_PIN => U32,
         prop::TIME => U32,
         prop::TZ_OFFSET => I16,
@@ -448,6 +471,11 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         prop::MESHCORE_REGION_POLICY => U8,
         // UTF-8 MeshCore region names, one per item.
         prop::MESHCORE_REGIONS => Text,
+        prop::LAN_BEARER_ENABLED => Bool,
+        // An address and a port.
+        prop::LAN_BEARER_GROUP => Bytes,
+        prop::LAN_BEARER_INGRESS_LIMIT => U16,
+        prop::LAN_BEARER_STATE => U8,
         _ => return None,
     })
 }
@@ -489,6 +517,7 @@ pub const fn capability_name(code: u32) -> Option<&'static str> {
         cap::BRIDGE_CLIENT => "BRIDGE_CLIENT",
         cap::I2C => "I2C",
         cap::MESHCORE_FORWARDER => "MESHCORE_FORWARDER",
+        cap::LAN_BEARER => "LAN_BEARER",
         _ => return None,
     })
 }
@@ -820,7 +849,8 @@ mod tests {
             capability_name(cap::MESHCORE_FORWARDER),
             Some("MESHCORE_FORWARDER")
         );
-        assert_eq!(capability_name(cap::MESHCORE_FORWARDER + 1), None);
+        assert_eq!(capability_name(cap::LAN_BEARER), Some("LAN_BEARER"));
+        assert_eq!(capability_name(cap::LAN_BEARER + 1), None);
     }
 
     #[test]

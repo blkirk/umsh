@@ -287,6 +287,8 @@ fn publish(state: State, reason: Reason) {
         if *old != link {
             *old = link;
             EVENTS.signal(link);
+            #[cfg(feature = "lan-bearer")]
+            super::lan::set_bridge_up(state == State::Connected);
             super::debug_log(format_args!("bridge: {:?} {:?}", state, reason));
         }
     });

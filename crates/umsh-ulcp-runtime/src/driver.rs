@@ -436,8 +436,25 @@ pub enum PublishEvent {
     IpState(u32, umsh_ulcp::ip::FamilyState),
     #[cfg(feature = "bridge-client")]
     BridgeLink(umsh_ulcp::bridge::Link),
+    /// What the LAN bearer made of its configuration: running, switched
+    /// off, or waiting for a network to join its group on.
+    LanBearerState(umsh_ulcp::lan::State),
     #[cfg(feature = "wifi")]
     NetworkTableChanged(u32, heapless::Vec<u8, NETWORK_TABLE_MAX>),
+}
+
+/// The LAN bearer's configuration and the facts its DNS-SD record
+/// publishes (`lan-bearer.md` § Discovery).
+#[derive(Clone, Copy, Debug)]
+pub struct LanBearerSettings<'a> {
+    pub config: umsh_ulcp_device::lan_bearer::LanBearerConfig,
+    /// The DNS-SD instance name.
+    pub name: &'a str,
+    pub node_key: Option<[u8; 32]>,
+    /// The LoRa settings in use, or `None` while the PHY is off.
+    pub lora: Option<umsh_ulcp_device::session::RadioSettings>,
+    pub repeater: bool,
+    pub meshcore: bool,
 }
 
 /// Board couplings of the session driver. Everything the loop needs from
@@ -647,6 +664,13 @@ pub trait DeviceEnv {
         identity: Option<[u8; 32]>,
     ) {
         let _ = (config, identity);
+    }
+    /// Apply the LAN bearer's configuration, together with what its
+    /// DNS-SD advertisement describes. Called with every device-domain
+    /// change, so idempotent like the other mirror hooks. Boards without a
+    /// bearer keep the default.
+    fn apply_lan_bearer(&mut self, settings: LanBearerSettings<'_>) {
+        let _ = settings;
     }
     /// A `PROP_WIFI_SCANNING` write: start looking for access points, or
     /// abandon a scan in progress.
@@ -1231,6 +1255,15 @@ fn sync_dev_domain<A, S, const TXQ: usize, E>(
     env.set_ble_enabled(snapshot.ble_enabled);
     #[cfg(feature = "bridge-client")]
     env.apply_bridge_config(session.bridge_config(), snapshot.dev_key);
+    let radio = session.settings();
+    env.apply_lan_bearer(LanBearerSettings {
+        config: *session.lan_bearer_config(),
+        name: session.device_name(),
+        node_key: snapshot.dev_key,
+        lora: radio.enabled.then_some(radio),
+        repeater: snapshot.repeater_enabled,
+        meshcore: snapshot.meshcore_forwarding_enabled,
+    });
     env.publish_dev_domain(snapshot);
 }
 
@@ -2017,6 +2050,8 @@ where
                     // Backhaul frames travel host-to-node, so the session
                     // never sees one arriving.
                     RxOrigin::LocalTx | RxOrigin::Backhaul => RadioRxInfo::self_transmitted(),
+                    // Heard on a bearer, where nothing measures a signal.
+                    RxOrigin::Bearer(_) => RadioRxInfo::default(),
                 };
                 let effect = session.on_radio_rx(
                     &data,
@@ -2109,6 +2144,9 @@ where
                     }
                     #[cfg(feature = "bridge-client")]
                     PublishEvent::BridgeLink(link) => session.set_bridge_link(link, emit),
+                    PublishEvent::LanBearerState(state) => {
+                        session.set_lan_bearer_state(state, emit)
+                    }
                     PublishEvent::IdentityFix(location, altitude_m) => {
                         // The session clamps, compares, and bumps the
                         // device-domain version if the advertised

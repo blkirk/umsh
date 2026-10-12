@@ -26,7 +26,7 @@ pub use umsh_ulcp_runtime::device_node::{
 /// board's counter store.
 type CounterStore = crate::NodeCounterStore;
 type DeviceNode = node::DeviceNode<CounterStore>;
-type DeviceNodeHandle = node::DeviceNodeHandle<CounterStore>;
+pub(crate) type DeviceNodeHandle = node::DeviceNodeHandle<CounterStore>;
 type DeviceNodeHost = node::DeviceNodeHost<CounterStore>;
 
 /// The driver's inbound event channel, which a Node Management exchange
@@ -94,6 +94,12 @@ async fn node_admin_task(node_handle: DeviceNode, input: &'static SessionInput, 
     umsh_ulcp_runtime::admin_responder::responder_loop(node_handle, input, nonce).await
 }
 
+#[cfg(feature = "lan-bearer")]
+#[embassy_executor::task]
+async fn lan_bearer_task(stack: embassy_net::Stack<'static>, mac: DeviceNodeHandle) {
+    crate::lan::run(stack, mac).await
+}
+
 #[cfg(feature = "meshcore-forwarder")]
 #[embassy_executor::task]
 async fn meshcore_forwarder_task(public_key: [u8; 32], seed: [u8; 32], t_frame_ms: u32) {
@@ -155,6 +161,7 @@ pub async fn bring_up(
     counters: &'static crate::NodeCountersMutex,
     input: &'static SessionInput,
     admin_nonce: u16,
+    #[cfg(feature = "lan-bearer")] stack: embassy_net::Stack<'static>,
 ) {
     // Seed the node's copy of the device name before bring-up, so the
     // Identity Request responder's profile is correct from its first
@@ -202,5 +209,7 @@ pub async fn bring_up(
         .unwrap(),
     );
     spawner.spawn(node_advert_task(parts.mac).unwrap());
+    #[cfg(feature = "lan-bearer")]
+    spawner.spawn(lan_bearer_task(stack, parts.mac).unwrap());
     spawner.spawn(node_reboot_quiesce_task(parts.mac).unwrap());
 }

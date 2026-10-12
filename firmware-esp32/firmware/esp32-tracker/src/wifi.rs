@@ -155,6 +155,12 @@ pub fn apply(config: NetworkConfig<'_>) {
 fn settings() -> Option<Settings> {
     SETTINGS.lock(|cell| cell.borrow().clone())
 }
+
+/// The station's DHCP host name, which is also its mDNS one.
+#[cfg(feature = "lan-bearer")]
+pub(super) fn hostname() -> Option<heapless::String<63>> {
+    SETTINGS.lock(|cell| cell.borrow().as_ref().map(|s| s.hostname.clone()))
+}
 fn scan_state() -> (bool, u32) {
     SCAN.lock(|cell| *cell.borrow())
 }

@@ -121,6 +121,11 @@ pub const TOPICS: &[Topic] = &[
                 prop::STAT_MESHCORE_FORWARDED_ROUTED,
                 prop::STAT_MESHCORE_FORWARDED_FLOOD,
                 prop::STAT_MESHCORE_DECLINED,
+                prop::STAT_LAN_RX,
+                prop::STAT_LAN_RX_LIMITED,
+                prop::STAT_LAN_RX_MALFORMED,
+                prop::STAT_LAN_EXPORTED,
+                prop::STAT_LAN_EXPORT_DROPPED,
                 prop::PHY_DUTY_NOW,
                 prop::UPTIME,
             ]
@@ -172,6 +177,21 @@ pub const TOPICS: &[Topic] = &[
         },
         render: render_repeater,
         env: env_repeater,
+    },
+    Topic {
+        name: "lan",
+        prefix: "LAN",
+        gate: |ctx| ctx.has(cap::LAN_BEARER),
+        keys: |_| {
+            vec![
+                prop::LAN_BEARER_ENABLED,
+                prop::LAN_BEARER_GROUP,
+                prop::LAN_BEARER_INGRESS_LIMIT,
+                prop::LAN_BEARER_STATE,
+            ]
+        },
+        render: render_lan,
+        env: env_lan,
     },
     Topic {
         name: "advert",
@@ -548,6 +568,23 @@ const STAT_FIELDS: &[(u32, &str, &str)] = &[
         "meshcore declined",
         "MESHCORE_DECLINED",
     ),
+    (prop::STAT_LAN_RX, "lan received", "LAN_RX"),
+    (
+        prop::STAT_LAN_RX_LIMITED,
+        "lan rx limited",
+        "LAN_RX_LIMITED",
+    ),
+    (
+        prop::STAT_LAN_RX_MALFORMED,
+        "lan rx malformed",
+        "LAN_RX_MALFORMED",
+    ),
+    (prop::STAT_LAN_EXPORTED, "lan exported", "LAN_EXPORTED"),
+    (
+        prop::STAT_LAN_EXPORT_DROPPED,
+        "lan export dropped",
+        "LAN_EXPORT_DROPPED",
+    ),
 ];
 
 fn render_stats(set: &PropSet, _ctx: &Context) -> Vec<Line> {
@@ -922,6 +959,59 @@ fn env_advert(set: &PropSet, _ctx: &Context) -> Vec<Line> {
     }
     if let Some(startup) = set.bool(prop::STARTUP_BEACON) {
         env.push(("STARTUP_BEACON".into(), bit(startup)));
+    }
+    env
+}
+
+// ─── lan ─────────────────────────────────────────────────────────────
+
+fn lan_group(set: &PropSet) -> Option<std::net::SocketAddrV4> {
+    let group = umsh::ulcp_wire::lan::Group::decode(set.bytes(prop::LAN_BEARER_GROUP)?)?;
+    Some(std::net::SocketAddrV4::new(
+        group.address.into(),
+        group.port,
+    ))
+}
+
+fn lan_state(set: &PropSet) -> Option<&'static str> {
+    use umsh::ulcp_wire::lan::State;
+    Some(match State::decode(set.u8(prop::LAN_BEARER_STATE)?)? {
+        State::Disabled => "disabled",
+        State::Active => "active",
+        State::NoNetwork => "no network",
+    })
+}
+
+fn render_lan(set: &PropSet, _ctx: &Context) -> Vec<Line> {
+    let mut lines = Vec::new();
+    if let Some(enabled) = set.bool(prop::LAN_BEARER_ENABLED) {
+        lines.push(("bearer".into(), on_off(enabled).into()));
+    }
+    if let Some(state) = lan_state(set) {
+        lines.push(("state".into(), state.into()));
+    }
+    if let Some(group) = lan_group(set) {
+        lines.push(("group".into(), group.to_string()));
+    }
+    if let Some(limit) = set.u16(prop::LAN_BEARER_INGRESS_LIMIT) {
+        lines.push(("ingress limit".into(), format!("{limit} frames/min")));
+    }
+    lines
+}
+
+fn env_lan(set: &PropSet, _ctx: &Context) -> Vec<Line> {
+    let mut env = Vec::new();
+    if let Some(enabled) = set.bool(prop::LAN_BEARER_ENABLED) {
+        env.push(("ENABLED".into(), bit(enabled)));
+    }
+    if let Some(state) = set.u8(prop::LAN_BEARER_STATE) {
+        env.push(("STATE".into(), state.to_string()));
+    }
+    if let Some(group) = lan_group(set) {
+        env.push(("GROUP".into(), group.to_string()));
+    }
+    if let Some(limit) = set.u16(prop::LAN_BEARER_INGRESS_LIMIT) {
+        env.push(("INGRESS_LIMIT".into(), limit.to_string()));
     }
     env
 }

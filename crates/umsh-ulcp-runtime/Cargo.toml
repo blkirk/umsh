@@ -78,6 +78,9 @@ device-node = [
     "dep:rand",
     "reseed",
 ]
+# The LAN bearer's datagram handling and its port into the multiplexer;
+# with `device-node`, a MAC that queues frames for the bearer to carry.
+lan-bearer = ["radio", "dep:umsh-lan-bearer"]
 # The MeshCore forwarder: a third mux client that forwards MeshCore v1
 # traffic beside the device node, under the same duty ledger and CAD gate.
 meshcore-forwarder = ["device-node", "dep:umsh-meshcore-forwarder"]
@@ -111,6 +114,7 @@ embassy-sync = { version = "0.8", default-features = false }
 embassy-time = { version = "0.5", default-features = false, optional = true }
 heapless = { workspace = true, optional = true }
 umsh-core = { path = "../umsh-core", default-features = false, optional = true }
+umsh-lan-bearer = { path = "../umsh-lan-bearer", optional = true }
 umsh-mac = { path = "../umsh-mac", default-features = false, features = ["software-crypto"], optional = true }
 umsh-node = { path = "../umsh-node", default-features = false, features = ["alloc", "software-crypto"], optional = true }
 umsh-node-mgmt = { path = "../umsh-node-mgmt", default-features = false, optional = true }

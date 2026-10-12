@@ -111,6 +111,7 @@ Subsystem | Capabilities
 [Wi-Fi](ulcp-wifi.md) | `CAP_WIFI_SCAN`, `CAP_WIFI`, `CAP_WIFI_AP`
 [IP Connectivity](ulcp-ip.md) | `CAP_IPV4`, `CAP_IPV6`
 [Bridge Client](ulcp-bridge.md) | `CAP_BRIDGE_CLIENT`
+[LAN Bearer](ulcp-lan-bearer.md) | `CAP_LAN_BEARER`
 [I2C Bus Access](ulcp-i2c.md) | `CAP_I2C`
 
 A device advertising none of them is a transparent radio: it configures

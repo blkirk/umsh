@@ -49,6 +49,7 @@ fn session(name: &'static str) -> TestSession {
             reboot: false,
             mac_node: false,
             meshcore_forwarder: false,
+            lan_bearer: false,
             wifi: None,
             ip: None,
             bridge_client: false,

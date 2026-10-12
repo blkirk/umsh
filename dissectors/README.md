@@ -50,11 +50,15 @@ SNR the radio reported, so the reception metadata survives into the capture.
 > prompt. Name a serial port in the capture options to sidestep it, or run
 > `tshark -i umsh` from a terminal.
 
-## Capturing from the UDP Multicast Pseudo-Radio
+## Capturing the LAN Bearer
 
-The `UdpMulticastRadio` transport sends raw UMSH frames over IPv4 multicast
-with no additional framing. Wireshark can capture these directly from the
-loopback or LAN interface.
+The [LAN bearer](../docs/protocol/src/lan-bearer.md) carries one raw UMSH
+frame per UDP datagram, with no additional framing, to an IPv4 multicast group
+(by default `239.255.42.42:7373`). Capture on the interface the radios and
+hosts share, with `udp.port == 7373`.
+
+The desktop examples' `UdpMulticastRadio` uses the same datagram format on the
+loopback interface, so the steps below apply to both.
 
 ### 1. Start a capture on the right interface
 

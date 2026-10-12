@@ -379,22 +379,31 @@ async fn dump(
         let info = match tokio::time::timeout(idle_probe_interval, receive).await {
             Ok(result) => result?,
             Err(_) => {
-                let value = session.device.get_prop(prop::PHY_RSSI).await?;
-                let [rssi] = value.as_slice() else {
-                    bail!("idle health probe returned malformed PHY_RSSI value: {value:02x?}");
+                // Any answer proves the link, a refusal included: a device
+                // with no receiver to sample, such as a LAN virtual radio,
+                // refuses the read.
+                let rssi = match session.device.get_prop(prop::PHY_RSSI).await {
+                    Ok(value) => match value.as_slice() {
+                        [rssi] => Some(*rssi as i8),
+                        _ => bail!(
+                            "idle health probe returned malformed PHY_RSSI value: {value:02x?}"
+                        ),
+                    },
+                    Err(umsh::ulcp::UlcpError::Status(_)) => None,
+                    Err(error) => return Err(error.into()),
                 };
                 // The probe itself is the point: it proves the link is
                 // still answering. Only the narration is suppressed.
                 if !args.quiet {
                     println!(
                         "idle +{:.3}s  received={}  displayed={}  filtered={}  session={}  \
-                         link=ok  channel RSSI={} dBm",
+                         link=ok  channel RSSI={}",
                         stats.started.elapsed().as_secs_f64(),
                         stats.sequence,
                         stats.displayed,
                         stats.filtered,
                         stats.sessions,
-                        *rssi as i8,
+                        rssi.map_or("unavailable".into(), |rssi| format!("{rssi} dBm")),
                     );
                 }
                 stats.last_progress = Instant::now();

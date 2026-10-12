@@ -336,6 +336,27 @@ pub mod prop {
     /// thresholds, malformed, or dropped for a full queue. Requires
     /// `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
     pub const STAT_MESHCORE_DECLINED: u32 = 4844;
+    /// Datagrams received from the LAN bearer that were handed to the
+    /// node (`PROP_STAT_LAN_RX`)—`UINT32_LE`. Requires `CAP_STATS` and
+    /// `CAP_LAN_BEARER`.
+    pub const STAT_LAN_RX: u32 = 4845;
+    /// LAN datagrams dropped by the ingress limit
+    /// (`PROP_STAT_LAN_RX_LIMITED`)—`UINT32_LE`. Requires `CAP_STATS` and
+    /// `CAP_LAN_BEARER`.
+    pub const STAT_LAN_RX_LIMITED: u32 = 4846;
+    /// LAN datagrams dropped as empty, oversized, or of an unknown
+    /// protocol version (`PROP_STAT_LAN_RX_MALFORMED`)—`UINT32_LE`.
+    /// Requires `CAP_STATS` and `CAP_LAN_BEARER`.
+    pub const STAT_LAN_RX_MALFORMED: u32 = 4847;
+    /// Frames the node offered to the LAN bearer
+    /// (`PROP_STAT_LAN_EXPORTED`)—`UINT32_LE`, its forwards and its own
+    /// originations alike, counted at the decision. Requires `CAP_STATS`
+    /// and `CAP_LAN_BEARER`.
+    pub const STAT_LAN_EXPORTED: u32 = 4848;
+    /// Frames lost from the bearer's transmit queue
+    /// (`PROP_STAT_LAN_EXPORT_DROPPED`)—`UINT32_LE`. Requires `CAP_STATS`
+    /// and `CAP_LAN_BEARER`.
+    pub const STAT_LAN_EXPORT_DROPPED: u32 = 4849;
     /// Persisted, write-only BLE pairing passkey (`PROP_BLE_PAIRING_PIN`).
     pub const BLE_PAIRING_PIN: u32 = 4864;
     /// Nodes authorized to manage this device over the mesh
@@ -626,6 +647,23 @@ pub mod prop {
     /// implicit leading `#`. Items compare case-sensitively, as the
     /// transport keys derive. Requires `CAP_MESHCORE_FORWARDER`.
     pub const MESHCORE_REGIONS: u32 = 4978;
+
+    /// Whether the node forwards onto and from the LAN bearer
+    /// (`PROP_LAN_BEARER_ENABLED`)—BOOL, default 0. Requires
+    /// `CAP_LAN_BEARER`. Independent of `PROP_MAC_REPEATER_ENABLED`.
+    pub const LAN_BEARER_ENABLED: u32 = 4992;
+    /// The bearer's multicast group (`PROP_LAN_BEARER_GROUP`)—six
+    /// octets: an IPv4 multicast address in network byte order, then
+    /// the UDP port as a `UINT16_LE`. Requires `CAP_LAN_BEARER`.
+    pub const LAN_BEARER_GROUP: u32 = 4993;
+    /// Datagrams per minute the node will carry from the LAN onto the
+    /// radio (`PROP_LAN_BEARER_INGRESS_LIMIT`)—`UINT16_LE`, nonzero.
+    /// Requires `CAP_LAN_BEARER`.
+    pub const LAN_BEARER_INGRESS_LIMIT: u32 = 4994;
+    /// Whether the bearer is running (`PROP_LAN_BEARER_STATE`)—UINT8,
+    /// one of [`lan::State`](crate::lan::State). Read-only. Requires
+    /// `CAP_LAN_BEARER`.
+    pub const LAN_BEARER_STATE: u32 = 4995;
 }
 
 /// `PROP_MESHCORE_REGION_POLICY` values: what happens to an unscoped
@@ -818,6 +856,11 @@ pub mod cap {
     /// `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`). Requires
     /// [`REPEATER`].
     pub const MESHCORE_FORWARDER: u32 = 62;
+    /// `CAP_LAN_BEARER`: the device's node forwards across an IP
+    /// multicast group on its local network (`PROP_LAN_BEARER_ENABLED`,
+    /// `PROP_LAN_BEARER_GROUP`, `PROP_LAN_BEARER_INGRESS_LIMIT`,
+    /// `PROP_LAN_BEARER_STATE`). Requires [`REPEATER`] and [`IPV4`].
+    pub const LAN_BEARER: u32 = 63;
 }
 
 /// Whether a property is writable by a mesh administrator.

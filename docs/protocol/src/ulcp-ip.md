@@ -470,6 +470,6 @@ party.
 * **A second interface.** A selector for a later revision. The device's
   own access point is not one of these interfaces; see
   [`PROP_WIFI_AP_CONFIG`](ulcp-wifi.md#prop-wifi-ap-config).
-* **mDNS.** Letting a phone find the device by name is a service the
-  device offers rather than a property of its stack, and it waits for
-  whatever first needs it.
+* **mDNS.** A service the device offers rather than a property of its
+  stack. A device running a [LAN bearer](lan-bearer.md#discovery)
+  advertises over it.

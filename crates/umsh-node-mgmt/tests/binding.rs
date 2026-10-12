@@ -104,6 +104,7 @@ impl<const PAYLOAD: usize> Device<PAYLOAD> {
             stats: None,
             mac_node: true,
             meshcore_forwarder: false,
+            lan_bearer: false,
             wifi: None,
             ip: None,
             bridge_client: false,

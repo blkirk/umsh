@@ -193,6 +193,8 @@ mod external;
 #[cfg(feature = "wifi")]
 mod ip;
 mod journals;
+#[cfg(feature = "lan-bearer")]
+mod lan;
 #[cfg(feature = "board-tlora-pager")]
 mod pager;
 #[cfg(feature = "chip-esp32s3")]
@@ -420,6 +422,8 @@ fn session_config() -> SessionConfig {
         // A real MAC runs behind this session.
         mac_node: true,
         meshcore_forwarder: cfg!(feature = "meshcore-forwarder"),
+        // The device node above is what the bearer forwards through.
+        lan_bearer: cfg!(feature = "lan-bearer"),
         // These chips have the radio, but nothing here drives it yet:
         // the capability is a promise about the property surface, and
         // claiming it before there is a station to serve it would be a
@@ -1216,6 +1220,10 @@ impl DeviceEnv for BoardDeviceEnv {
     ) {
         bridge::apply(config, identity);
     }
+    #[cfg(feature = "lan-bearer")]
+    fn apply_lan_bearer(&mut self, settings: driver::LanBearerSettings<'_>) {
+        lan::apply(settings);
+    }
     #[cfg(feature = "wifi")]
     fn apply_network_config(&mut self, config: driver::NetworkConfig<'_>) {
         wifi::apply(config);
@@ -1548,22 +1556,39 @@ async fn radio_task(lora: board_radio::Radio) {
 /// completion routing plus RX fan-out to every client.
 #[embassy_executor::task]
 async fn radio_mux_task() {
-    #[cfg(feature = "bridge-client")]
-    let attachment = Some(radio_mux::BridgeAttachment {
-        node: 1,
-        port: &bridge::PORT,
-    });
-    #[cfg(not(feature = "bridge-client"))]
-    let attachment = None;
+    // What reaches the device node besides the air: the internet bridge's
+    // tunnel, a point-to-point backhaul only the node hears, and the LAN
+    // bearer, a shared medium the attached host hears as the device does.
+    // Leaked rather than a `static`, which would need the ports' trait
+    // objects to be `Sync`; it lives as long as the mux, which is forever.
+    let attachments: [radio_mux::BridgeAttachment; BRIDGE_ATTACHMENTS] = [
+        #[cfg(feature = "bridge-client")]
+        radio_mux::BridgeAttachment {
+            node: 1,
+            port: &bridge::PORT,
+            origin: umsh_hal::RxOrigin::Backhaul,
+            session_hears: false,
+        },
+        #[cfg(feature = "lan-bearer")]
+        radio_mux::BridgeAttachment {
+            node: 1,
+            port: &lan::PORT,
+            origin: umsh_hal::RxOrigin::Bearer(umsh_hal::BearerId::LAN),
+            session_hears: true,
+        },
+    ];
     radio_mux::radio_mux_with_bridge(
         &RADIO_CH,
         &MUX_CLIENTS,
         &radio_mux::MUX_MODE,
         Some(&STATS),
-        attachment,
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(attachments)),
     )
     .await
 }
+
+const BRIDGE_ATTACHMENTS: usize =
+    cfg!(feature = "bridge-client") as usize + cfg!(feature = "lan-bearer") as usize;
 
 // ─── GNSS ────────────────────────────────────────────────────────────────
 
@@ -3149,17 +3174,27 @@ async fn main(spawner: Spawner) {
         #[cfg(all(
             not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
             feature = "meshcore-forwarder",
-            not(feature = "debug-log")
+            not(feature = "debug-log"),
+            not(feature = "lan-bearer")
         ))]
         esp_alloc::heap_allocator!(size: 40 * 1024);
-        // A diagnostic build pays for its log queue the same way; the log
-        // itself reports the heap minimum, which is how the cut is judged.
+        // A diagnostic build pays for its log queue the same way, and the
+        // LAN bearer for its port, export queue, and task; the log itself
+        // reports the heap minimum, which is how the cut is judged.
         #[cfg(all(
             not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
             feature = "meshcore-forwarder",
-            feature = "debug-log"
+            any(feature = "debug-log", feature = "lan-bearer"),
+            not(all(feature = "debug-log", feature = "lan-bearer"))
         ))]
         esp_alloc::heap_allocator!(size: 36 * 1024);
+        #[cfg(all(
+            not(any(feature = "board-heltec-v3", feature = "board-tlora-pager")),
+            feature = "meshcore-forwarder",
+            feature = "debug-log",
+            feature = "lan-bearer"
+        ))]
+        esp_alloc::heap_allocator!(size: 32 * 1024);
         esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
     }
     #[cfg(feature = "psram")]
@@ -3540,13 +3575,15 @@ async fn main(spawner: Spawner) {
     // that keeps it fed.
     spawner.spawn(entropy::task(entropy_service).unwrap());
     #[cfg(feature = "wifi")]
-    #[cfg_attr(not(feature = "bridge-client"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "bridge-client", feature = "lan-bearer")),
+        allow(unused_variables)
+    )]
     let network_stack = {
-        const SOCKETS: usize = if cfg!(feature = "bridge-client") {
-            3
-        } else {
-            1
-        };
+        // DHCP; the bridge's TCP and DNS; the LAN bearer's group and mDNS.
+        const SOCKETS: usize = 1
+            + 2 * cfg!(feature = "bridge-client") as usize
+            + 2 * cfg!(feature = "lan-bearer") as usize;
         static RESOURCES: StaticCell<embassy_net::StackResources<SOCKETS>> = StaticCell::new();
         let interface = wifi::interface();
         let mac = interface.mac_address();
@@ -3836,6 +3873,8 @@ async fn main(spawner: Spawner) {
             node_counters,
             &INPUT_CH,
             admin_nonce,
+            #[cfg(feature = "lan-bearer")]
+            network_stack,
         )
         .unwrap(),
     );

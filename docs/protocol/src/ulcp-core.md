@@ -1364,6 +1364,7 @@ Code | Name                      | Requires                             | Define
 60   | `CAP_I2C`                 | —                                    | [I2C Bus Access](ulcp-i2c.md#capabilities)
 61   | `CAP_TEMPERATURE` | — | [Device Domain](ulcp-device.md#capabilities)
 62   | `CAP_MESHCORE_FORWARDER`  | `CAP_REPEATER`                       | [Device Domain](ulcp-device.md#capabilities)
+63   | `CAP_LAN_BEARER`          | `CAP_REPEATER`, `CAP_IPV4`           | [LAN Bearer](ulcp-lan-bearer.md#capabilities)
 515  | `CAP_PHY_LORA`            | —                                    | [Radio Control](ulcp-radio.md#capabilities)
 
 A device **MUST NOT** advertise a capability without also advertising the

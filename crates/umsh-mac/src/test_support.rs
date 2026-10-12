@@ -147,6 +147,7 @@ struct QueuedFrame {
     data: Vec<u8>,
     rssi: i16,
     snr: Snr,
+    origin: RxOrigin,
 }
 
 #[derive(Clone, Copy)]
@@ -252,6 +253,7 @@ impl SimulatedNetwork {
             data: frame.to_vec(),
             rssi,
             snr,
+            origin: RxOrigin::Air,
         });
     }
 
@@ -270,6 +272,7 @@ impl SimulatedNetwork {
                 data: frame.to_vec(),
                 rssi,
                 snr,
+                origin: RxOrigin::Air,
             });
         }
     }
@@ -296,7 +299,7 @@ impl SimulatedNetwork {
             rssi: frame.rssi,
             snr: frame.snr,
             lqi: None,
-            origin: RxOrigin::Air,
+            origin: frame.origin,
             buffered: None,
         }
     }
@@ -508,6 +511,22 @@ impl ModeledNetwork {
         *link = profile;
     }
 
+    /// Hand `frame` to one radio as a reception from `bearer`: at once,
+    /// unmeasured, and outside the radio channel, so it neither collides
+    /// nor occupies the air.
+    pub fn deliver_from_bearer(&self, to: usize, frame: &[u8], bearer: umsh_hal::BearerId) {
+        let mut state = self.inner.borrow_mut();
+        let Some(queue) = state.inboxes.get_mut(to) else {
+            panic!("unknown modeled radio id {to}");
+        };
+        queue.push_back(QueuedFrame {
+            data: frame.to_vec(),
+            rssi: 0,
+            snr: Snr::from_centibels(0),
+            origin: RxOrigin::Bearer(bearer),
+        });
+    }
+
     /// Return whether any future deliveries are still pending.
     pub fn has_pending_deliveries(&self) -> bool {
         !self.inner.borrow().scheduled.is_empty()
@@ -531,6 +550,7 @@ impl ModeledNetwork {
                 data: delivery.data,
                 rssi: delivery.rssi,
                 snr: delivery.snr,
+                origin: RxOrigin::Air,
             });
         }
     }
@@ -669,7 +689,7 @@ impl ModeledNetwork {
             rssi: frame.rssi,
             snr: frame.snr,
             lqi: None,
-            origin: RxOrigin::Air,
+            origin: frame.origin,
             buffered: None,
         }
     }

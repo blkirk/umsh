@@ -11,14 +11,17 @@ use umsh_core::{
     options::{OptionEncoder, TraceSignalEntry},
 };
 use umsh_crypto::{CryptoEngine, CryptoError, DerivedChannelKeys, NodeIdentity, PairwiseKeys};
-use umsh_hal::{Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, TxError, TxOptions};
+use umsh_hal::{
+    BearerId, Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, TxError, TxOptions,
+};
 
 use crate::{
-    AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
-    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS,
-    DEFAULT_TX, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS,
-    MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform,
-    ReplayVerdict, ReplayWindow,
+    AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_BEARER_EXPORTS, DEFAULT_CHANNEL_HINT_REPLAY,
+    DEFAULT_CHANNEL_REPLAY, DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS,
+    DEFAULT_ROUTE_HOLDS, DEFAULT_TX, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES,
+    MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN,
+    MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict, ReplayWindow,
+    bearer::{BearerConfig, BearerExports},
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
     peers::{
@@ -949,6 +952,12 @@ pub struct MacCounters {
     /// operator made about *this* frame—counting them here would bury
     /// the refusals a repeater's settings can actually move.
     pub forward_dropped_policy: u32,
+    /// Frames offered to a bearer: forwards, and this node's own
+    /// originations. A frame offered to two bearers counts once.
+    pub bearer_exported: u32,
+    /// Frames lost from the bearer export queue because a bearer fell
+    /// behind it.
+    pub bearer_export_dropped: u32,
 }
 
 impl MacCounters {
@@ -969,6 +978,7 @@ pub struct Mac<
     const RN: usize = DEFAULT_CHANNEL_REPLAY,
     const HN: usize = DEFAULT_CHANNEL_HINT_REPLAY,
     const HOLDS: usize = DEFAULT_ROUTE_HOLDS,
+    const EXPORTS: usize = DEFAULT_BEARER_EXPORTS,
 > {
     radio: P::Radio,
     crypto: CryptoEngine<P::Aes, P::Sha>,
@@ -986,6 +996,8 @@ pub struct Mac<
     tx_queue: TxQueue<TX, FRAME>,
     post_tx_listen: Option<PostTxListen>,
     repeater: RepeaterConfig,
+    bearers: BearerConfig,
+    bearer_exports: BearerExports<EXPORTS, FRAME>,
     operating_policy: OperatingPolicy,
     auto_register_full_key_peers: bool,
     deferred_counter_resync_frame: Option<DeferredCounterResyncFrame<FRAME>>,
@@ -1004,9 +1016,15 @@ impl<
     const RN: usize,
     const HN: usize,
     const HOLDS: usize,
-> Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
+    const EXPORTS: usize,
+> Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>
 {
     /// Creates a MAC coordinator with the supplied radio, crypto, timing, and policy state.
+    ///
+    /// Always inlined: a `Mac` is tens of kilobytes, and only inlined into
+    /// its caller does the value get built where the caller stores it
+    /// rather than on the stack first.
+    #[inline(always)]
     pub fn new(
         radio: P::Radio,
         crypto: CryptoEngine<P::Aes, P::Sha>,
@@ -1033,6 +1051,8 @@ impl<
             tx_queue: TxQueue::new(),
             post_tx_listen: None,
             repeater,
+            bearers: BearerConfig::default(),
+            bearer_exports: BearerExports::new(),
             operating_policy,
             auto_register_full_key_peers: false,
             deferred_counter_resync_frame: None,
@@ -1129,6 +1149,29 @@ impl<
     /// Mutably borrow repeater configuration.
     pub fn repeater_config_mut(&mut self) -> &mut RepeaterConfig {
         &mut self.repeater
+    }
+    /// Borrow the bearer configuration.
+    pub fn bearer_config(&self) -> &BearerConfig {
+        &self.bearers
+    }
+    /// Enable or disable forwarding onto and from `bearer`.
+    ///
+    /// Disabling a bearer forgets whatever was still waiting for it: a
+    /// bearer that comes back has no use for frames from before it left.
+    pub fn set_bearer_enabled(&mut self, bearer: BearerId, enabled: bool) {
+        self.bearers.enabled = self.bearers.enabled.with(bearer, enabled);
+        if !enabled {
+            self.bearer_exports.clear(bearer);
+        }
+    }
+    /// Take the oldest frame waiting for `bearer`, copied into `buf`.
+    ///
+    /// Returns the frame's length, or `None` when nothing is waiting. The
+    /// MAC holds no waker for this: whoever drains a bearer polls again
+    /// after the coordinator is next released, which is when anything new
+    /// could have arrived.
+    pub fn pop_bearer_export(&mut self, bearer: BearerId, buf: &mut [u8]) -> Option<usize> {
+        self.bearer_exports.pop(bearer, buf)
     }
     /// Borrow the local operating policy.
     pub fn operating_policy(&self) -> &OperatingPolicy {
@@ -1612,6 +1655,7 @@ impl<
                 0,
             )
             .map_err(|_| SendError::QueueFull)?;
+        self.export_originated(frame);
         Ok(receipt)
     }
 
@@ -1806,6 +1850,7 @@ impl<
             }
             return Err(SendError::QueueFull);
         }
+        self.export_originated(frame);
         Ok(())
     }
 
@@ -1850,6 +1895,7 @@ impl<
         self.tx_queue
             .enqueue(TxPriority::ImmediateAck, frame, None, None)
             .map_err(|_| SendError::QueueFull)?;
+        self.export_originated(frame);
         Ok(())
     }
 
@@ -2689,8 +2735,16 @@ impl<
             // carrying the acknowledged packet—not at this frame's
             // addressee.
             self.cancel_forwards_for_ack_mic_option(&buf[..current_len], &header);
-            let forwarding_confirmed = if let Some((identity_id, receipt)) =
-                self.observe_forwarding_confirmation(&buf[..current_len])
+            // A bearer copy confirms nothing: every node on the bearer
+            // exports the frames it forwards, so the copy shows that some
+            // node decided to forward, not that anyone carried the frame
+            // over a radio.
+            let forwarding_confirmed = if let Some((identity_id, receipt)) = current_rx
+                .origin
+                .bearer()
+                .is_none()
+                .then(|| self.observe_forwarding_confirmation(&buf[..current_len]))
+                .flatten()
             {
                 let hint = match header.source {
                     SourceAddrRef::Hint(h) => Some(RouterHint([h.0[0], h.0[1]])),
@@ -3707,6 +3761,10 @@ impl<
                                 0,
                                 0,
                             )?;
+                            // Queued as a retry, but a new frame to every
+                            // other node: it floods under a forwarding
+                            // identity of its own.
+                            self.export_originated(rewritten.frame.as_slice());
                         } else {
                             if let Some(slot) = self.identity_mut(identity_id) {
                                 slot.pending_acks.remove(&receipt);
@@ -3879,6 +3937,7 @@ impl<
                 0,
             )
             .map_err(|_| SendError::QueueFull)?;
+        self.export_originated(packet.as_bytes());
         Ok(())
     }
 
@@ -5097,7 +5156,8 @@ impl<
     fn inbound_hop(rx: &RxInfo) -> Hop {
         match rx.origin {
             RxOrigin::Air => Hop::Inbound(rx.snr.as_centibels()),
-            RxOrigin::Backhaul => Hop::PointToPoint,
+            // A LAN or other shared bearer is as lossless as a wire.
+            RxOrigin::Backhaul | RxOrigin::Bearer(_) => Hop::PointToPoint,
             RxOrigin::LocalTx => Hop::Unmeasured,
         }
     }
@@ -5285,7 +5345,19 @@ impl<
         rx: &RxInfo,
         locally_handled_unicast: bool,
     ) -> bool {
-        if !self.repeater.enabled {
+        // Where this frame may go (lan-bearer.md § Forwarding Across
+        // Bearers). The radio is an egress when the repeater is on, or
+        // when the frame came in on an enabled bearer: a bearer's switch
+        // is what bridges it to the radio. Every enabled bearer is an
+        // egress except the one the frame arrived on, so a bearer never
+        // relays its own traffic back to itself.
+        let arriving = rx.origin.bearer();
+        let to_radio = match arriving {
+            Some(bearer) => self.bearers.enabled.contains(bearer),
+            None => self.repeater.enabled,
+        };
+        let to_bearers = self.bearers.enabled.without(arriving);
+        if !to_radio && to_bearers.is_empty() {
             return false;
         }
         if !header.packet_type().is_routable() {
@@ -5298,9 +5370,17 @@ impl<
         // duplicate key is the other half—a neighbor's repeat of the
         // same frame will arrive shortly, and repeating that would put a
         // frame back on the air that already left this antenna once.
+        //
+        // To a bearer the attached host's frame is this node's own
+        // origination, and goes out as it went on the air—unless this
+        // node already carried it, in which case the bearer has it.
         if rx.origin == RxOrigin::LocalTx {
             if let Some(cache_key) = Self::forward_dup_key(header, frame) {
-                self.dup_cache.insert(cache_key, self.clock.now_ms());
+                let now_ms = self.clock.now_ms();
+                if !self.dup_cache.contains(&cache_key, now_ms) {
+                    self.export_to_bearers(frame, to_bearers);
+                }
+                self.dup_cache.insert(cache_key, now_ms);
             }
             return false;
         }
@@ -5355,31 +5435,60 @@ impl<
         if total_len > self.radio.max_frame_size() {
             return false;
         }
+        let rewritten = &rewritten[..total_len];
 
         let now_ms = self.clock.now_ms();
-        if self
-            .tx_queue
-            .enqueue_with_state(
-                TxPriority::Forward,
-                &rewritten[..total_len],
-                None,
-                None,
-                now_ms.saturating_add(plan.delay_ms),
-                0,
-                0,
-            )
-            .is_err()
-        {
+        let queued_for_radio = to_radio
+            && self
+                .tx_queue
+                .enqueue_with_state(
+                    TxPriority::Forward,
+                    rewritten,
+                    None,
+                    None,
+                    now_ms.saturating_add(plan.delay_ms),
+                    0,
+                    0,
+                )
+                .is_ok();
+        if !queued_for_radio && to_bearers.is_empty() {
             return false;
         }
+        // Offered to the bearers now, at the decision, and not when the
+        // radio transmits: a repeat another repeater beats to the air is
+        // withdrawn here, and the bearer would never see it.
+        self.export_to_bearers(rewritten, to_bearers);
         self.dup_cache.insert(cache_key, now_ms);
-        // Counted at the decision to repeat rather than at the eventual
-        // transmit, so the tally measures what this node chose to carry.
-        // The frame is also counted again in `tx_frames` when it actually
-        // goes out, which is the correct relationship: a repeat that CAD
-        // abandons shows up here and not there.
-        MacCounters::bump(&mut self.counters.forwarded);
+        if queued_for_radio {
+            // Counted at the decision to repeat rather than at the eventual
+            // transmit, so the tally measures what this node chose to carry.
+            // The frame is also counted again in `tx_frames` when it actually
+            // goes out, which is the correct relationship: a repeat that CAD
+            // abandons shows up here and not there.
+            MacCounters::bump(&mut self.counters.forwarded);
+        }
         true
+    }
+
+    /// Offer `frame` to `bearers`, counting it and anything the export
+    /// queue lost to make room.
+    fn export_to_bearers(&mut self, frame: &[u8], bearers: crate::BearerSet) {
+        if bearers.is_empty() {
+            return;
+        }
+        let dropped = self.bearer_exports.push(frame, bearers);
+        self.counters.bearer_export_dropped =
+            self.counters.bearer_export_dropped.saturating_add(dropped);
+        MacCounters::bump(&mut self.counters.bearer_exported);
+    }
+
+    /// Offer a frame this node originated to every enabled bearer.
+    ///
+    /// Called where a first transmission is queued, never for a
+    /// retransmission: the bearer already has the frame, and every node
+    /// on it would discard the second copy as a duplicate.
+    fn export_originated(&mut self, frame: &[u8]) {
+        self.export_to_bearers(frame, self.bearers.enabled);
     }
 
     fn plan_forwarding(
@@ -5978,9 +6087,14 @@ impl<
         // Contention delay staggers the repeaters that all heard one
         // transmission, weighted so the best-placed one goes first. A
         // frame handed over a point-to-point link was heard by exactly
-        // one repeater, so there is no race to stagger.
-        if !rx.origin.is_measured() {
-            return 0;
+        // one repeater, so there is no race to stagger. A frame from a
+        // bearer was heard by every node on it, equally well, so the race
+        // is there and nothing ranks the runners: the window is drawn
+        // uniformly.
+        match rx.origin {
+            RxOrigin::Air => {}
+            RxOrigin::Bearer(_) => return self.sample_unranked_contention_delay_ms(),
+            RxOrigin::LocalTx | RxOrigin::Backhaul => return 0,
         }
         let floor = lora_snr_floor_cb(self.radio.spreading_factor());
         let effective_threshold = Self::effective_min_snr(options, &self.repeater)
@@ -6028,6 +6142,27 @@ impl<
         }
     }
 
+    /// A contention delay drawn uniformly over the flood contention window,
+    /// plus the usual jitter, for receptions that carry no measurement to
+    /// rank by.
+    fn sample_unranked_contention_delay_ms(&mut self) -> u64 {
+        let t_frame_ms = u64::from(self.radio.t_frame_ms());
+        let min_window_ms = t_frame_ms
+            .saturating_mul(u64::from(self.repeater.flood_contention_min_window_percent))
+            / 100;
+        let max_window_ms = (t_frame_ms
+            .saturating_mul(u64::from(self.repeater.flood_contention_max_window_percent))
+            / 100)
+            .max(min_window_ms);
+        let jitter_ms = t_frame_ms
+            .saturating_mul(u64::from(self.repeater.flood_contention_jitter_percent))
+            / 100;
+        let span_ms = max_window_ms
+            .saturating_sub(min_window_ms)
+            .saturating_add(jitter_ms);
+        min_window_ms.saturating_add(self.rng.random_range(..span_ms.saturating_add(1)))
+    }
+
     /// ACK protection interval: minimum head start granted to a destination's
     /// immediate ACK before any flood forward of the same packet may transmit.
     fn ack_guard_delay_ms(&self) -> u64 {
@@ -6051,6 +6186,13 @@ impl<
         rx: &RxInfo,
         options: &ParsedOptions,
     ) {
+        // Deferral answers to the radio channel: someone else's repeat was
+        // heard on it, so this one can wait or go. A copy from a bearer or
+        // a backhaul link was heard on no radio channel, and says nothing
+        // about who will hear this one.
+        if rx.origin != RxOrigin::Air {
+            return;
+        }
         let Some(queued) = self.tx_queue.remove_first_matching(|entry| {
             entry.priority == TxPriority::Forward
                 && Self::confirmation_key(entry.frame.as_slice())

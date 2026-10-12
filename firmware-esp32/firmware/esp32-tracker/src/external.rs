@@ -84,6 +84,17 @@ pub fn bridge_queues() -> &'static mut super::bridge::Queues {
     }
 }
 
+#[cfg(feature = "lan-bearer")]
+pub fn lan_buffers() -> &'static mut super::lan::Buffers {
+    // Socket buffers and scratch: plain data. The sockets themselves, and
+    // the stack's state, stay internal.
+    unsafe {
+        let ptr = storage::<super::lan::Buffers>();
+        ptr.write(super::lan::Buffers::new());
+        &mut *ptr
+    }
+}
+
 #[cfg(feature = "board-tlora-pager")]
 pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRAME_BYTES] {
     unsafe {

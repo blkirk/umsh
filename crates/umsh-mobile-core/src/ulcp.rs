@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    net::SocketAddrV4,
     sync::{Arc, Mutex},
 };
 
@@ -20,6 +21,7 @@ use umsh_ulcp::{
     },
     ip,
     items::{self, Filter},
+    lan,
     meta::{BufferedRxMeta, RX_FLAG_ACKED, RX_FLAG_BUFFERED},
     pui, wifi,
 };
@@ -4439,6 +4441,10 @@ pub struct UlcpManagedPropertyIds {
     pub bridge_port: u32,
     pub bridge_server_key: u32,
     pub bridge_link: u32,
+    pub lan_bearer_enabled: u32,
+    pub lan_bearer_group: u32,
+    pub lan_bearer_ingress_limit: u32,
+    pub lan_bearer_state: u32,
     pub dev_key: u32,
     pub wifi_networks: u32,
     pub wifi_network: u32,
@@ -4540,6 +4546,10 @@ pub fn ulcp_managed_property_ids() -> UlcpManagedPropertyIds {
         bridge_port: prop::BRIDGE_PORT,
         bridge_server_key: prop::BRIDGE_SERVER_KEY,
         bridge_link: prop::BRIDGE_LINK,
+        lan_bearer_enabled: prop::LAN_BEARER_ENABLED,
+        lan_bearer_group: prop::LAN_BEARER_GROUP,
+        lan_bearer_ingress_limit: prop::LAN_BEARER_INGRESS_LIMIT,
+        lan_bearer_state: prop::LAN_BEARER_STATE,
         dev_key: prop::DEV_KEY,
         wifi_networks: prop::WIFI_NETWORKS,
         wifi_network: prop::WIFI_NETWORK,
@@ -4771,18 +4781,31 @@ pub fn ulcp_category_properties(
                 &[prop::IP_DNS, prop::IP_RESOLVERS],
             );
         }
-        UlcpManageCategory::Bridge => when(
-            has(cap::BRIDGE_CLIENT),
-            &[
-                prop::BRIDGE_ENABLED,
-                prop::BRIDGE_HOST,
-                prop::BRIDGE_PORT,
-                prop::BRIDGE_SERVER_KEY,
-                prop::BRIDGE_LINK,
-                prop::DEV_KEY,
-                prop::MAC_REPEATER_ENABLED,
-            ],
-        ),
+        // Both ways a device carries the mesh over IP: a tunnel to a
+        // server, and a multicast group on its own network.
+        UlcpManageCategory::Bridge => {
+            when(
+                has(cap::BRIDGE_CLIENT),
+                &[
+                    prop::BRIDGE_ENABLED,
+                    prop::BRIDGE_HOST,
+                    prop::BRIDGE_PORT,
+                    prop::BRIDGE_SERVER_KEY,
+                    prop::BRIDGE_LINK,
+                    prop::DEV_KEY,
+                    prop::MAC_REPEATER_ENABLED,
+                ],
+            );
+            when(
+                has(cap::LAN_BEARER),
+                &[
+                    prop::LAN_BEARER_ENABLED,
+                    prop::LAN_BEARER_GROUP,
+                    prop::LAN_BEARER_INGRESS_LIMIT,
+                    prop::LAN_BEARER_STATE,
+                ],
+            );
+        }
         UlcpManageCategory::Repeater => {
             when(
                 has(cap::REPEATER),
@@ -5028,6 +5051,24 @@ pub fn ulcp_bridge_server_key(input: String) -> Result<Vec<u8>, MobileError> {
     decode_bridge_key(&key.0)
 }
 
+/// A LAN multicast group as an operator types it, `GROUP:PORT`, in the
+/// form the device reports it.
+#[uniffi::export]
+pub fn ulcp_lan_group(input: String) -> Result<String, MobileError> {
+    let group = parse_lan_group(input.trim())?;
+    Ok(SocketAddrV4::new(group.address.into(), group.port).to_string())
+}
+
+fn parse_lan_group(text: &str) -> Result<lan::Group, MobileError> {
+    let address: SocketAddrV4 = text.parse().map_err(|_| MobileError::InvalidUlcpFrame)?;
+    let group = lan::Group {
+        address: address.ip().octets(),
+        port: address.port(),
+    };
+    // The device's own rule: a multicast address and a nonzero port.
+    lan::Group::decode(&group.encode()).ok_or(MobileError::InvalidUlcpFrame)
+}
+
 /// A diagnostic decoded by the shared wire codec. Empty successful values
 /// are unavailable; malformed values fail inspection. Transport statuses
 /// remain with the individual management answer.
@@ -5077,6 +5118,13 @@ pub struct UlcpDevicePropertiesRecord {
     pub bridge_port: Option<u16>,
     pub bridge_server_key: Option<Vec<u8>>,
     pub bridge_link: Option<UlcpBridgeLinkRecord>,
+    pub lan_bearer_enabled: Option<bool>,
+    /// The multicast group and port, as `GROUP:PORT`.
+    pub lan_bearer_group: Option<String>,
+    /// Frames per minute the device takes from the group.
+    pub lan_bearer_ingress_limit: Option<u16>,
+    /// `PROP_LAN_BEARER_STATE`: 0 off, 1 active, 2 no network. Read-only.
+    pub lan_bearer_state: Option<u8>,
     pub dev_key: Option<Vec<u8>>,
     pub battery: Option<UlcpBatteryRecord>,
     /// Ambient light in millilux. Empty means a measurement was unavailable.
@@ -5299,6 +5347,18 @@ pub fn inspect_ulcp_properties(
                 state: link.state as u8,
                 reason: link.reason as u8,
             })
+        }),
+        lan_bearer_enabled: optional_value(at, prop::LAN_BEARER_ENABLED, decode_bool),
+        lan_bearer_group: optional_value(at, prop::LAN_BEARER_GROUP, |value| {
+            let group = lan::Group::decode(value).ok_or(MobileError::InvalidUlcpFrame)?;
+            Ok(SocketAddrV4::new(group.address.into(), group.port).to_string())
+        }),
+        lan_bearer_ingress_limit: optional_value(at, prop::LAN_BEARER_INGRESS_LIMIT, decode_u16),
+        lan_bearer_state: optional_value(at, prop::LAN_BEARER_STATE, |value| {
+            let state = decode_u8(value)?;
+            lan::State::decode(state)
+                .map(|_| state)
+                .ok_or(MobileError::InvalidUlcpFrame)
         }),
         battery: optional_value(at, prop::BATTERY, |value| {
             inspect_ulcp_battery(value.to_vec())
@@ -5624,6 +5684,19 @@ pub fn ulcp_dirty_writes(
             prop::BRIDGE_SERVER_KEY => {
                 decode_bridge_key(desired.bridge_server_key.as_deref().ok_or_else(missing)?)?
             }
+            prop::LAN_BEARER_ENABLED => vec![desired.lan_bearer_enabled.ok_or_else(missing)? as u8],
+            prop::LAN_BEARER_GROUP => {
+                parse_lan_group(desired.lan_bearer_group.as_deref().ok_or_else(missing)?)?
+                    .encode()
+                    .to_vec()
+            }
+            prop::LAN_BEARER_INGRESS_LIMIT => {
+                let limit = desired.lan_bearer_ingress_limit.ok_or_else(missing)?;
+                if limit == 0 {
+                    return Err(missing());
+                }
+                limit.to_le_bytes().to_vec()
+            }
             prop::WIFI_SCANNING => vec![desired.wifi_scanning.ok_or_else(missing)? as u8],
             // The empty value deselects, which is a state a host writes
             // deliberately, so an empty SSID here is a value and not a
@@ -5726,10 +5799,15 @@ pub fn ulcp_dirty_writes(
         values.push((prop::PHY_ENABLED, vec![ends_enabled as u8]));
     }
 
-    // A newly enabled client sees its endpoint and pin first, and newly
-    // enabled MeshCore forwarding its region settings. Disabling stays first,
-    // so an operator can stop either before changing its settings.
-    for enable_key in [prop::BRIDGE_ENABLED, prop::MESHCORE_FORWARDING_ENABLED] {
+    // A newly enabled client sees its endpoint and pin first, a newly
+    // enabled LAN link its group, and newly enabled MeshCore forwarding its
+    // region settings. Disabling stays first, so an operator can stop any
+    // of them before changing its settings.
+    for enable_key in [
+        prop::BRIDGE_ENABLED,
+        prop::LAN_BEARER_ENABLED,
+        prop::MESHCORE_FORWARDING_ENABLED,
+    ] {
         if let Some(index) = values
             .iter()
             .position(|(key, value)| *key == enable_key && value == &[1])
@@ -5891,6 +5969,7 @@ fn validate_capability_dependencies(capabilities: &[u32]) -> Result<(), MobileEr
         || has(cap::WIFI) && !has(cap::WIFI_SCAN)
         || has(cap::WIFI_AP) && !has(cap::WIFI_SCAN)
         || has(cap::BRIDGE_CLIENT) && (!has(cap::REPEATER) || !(has(cap::IPV4) || has(cap::IPV6)))
+        || has(cap::LAN_BEARER) && (!has(cap::REPEATER) || !has(cap::IPV4))
     {
         return Err(MobileError::InvalidUlcpFrame);
     }
@@ -11990,6 +12069,62 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn lan_edits_are_validated_and_the_group_precedes_enabling() {
+        let mut desired = UlcpDevicePropertiesRecord {
+            lan_bearer_enabled: Some(true),
+            lan_bearer_group: Some("239.1.2.3:7000".into()),
+            lan_bearer_ingress_limit: Some(60),
+            ..Default::default()
+        };
+        let ids = vec![
+            prop::LAN_BEARER_ENABLED,
+            prop::LAN_BEARER_GROUP,
+            prop::LAN_BEARER_INGRESS_LIMIT,
+        ];
+        let writes = ulcp_dirty_writes(desired.clone(), ids.clone()).unwrap();
+        assert_eq!(writes.last().unwrap().property_id, prop::LAN_BEARER_ENABLED);
+        assert_eq!(writes[0].value, [239, 1, 2, 3, 0x58, 0x1B]);
+        assert_eq!(writes[1].value, 60u16.to_le_bytes());
+        assert!(ulcp_dirty_writes(desired.clone(), vec![prop::LAN_BEARER_STATE]).is_err());
+        desired.lan_bearer_ingress_limit = Some(0);
+        assert!(ulcp_dirty_writes(desired.clone(), ids.clone()).is_err());
+        desired.lan_bearer_ingress_limit = Some(60);
+        desired.lan_bearer_group = Some("192.168.1.1:7000".into());
+        assert!(ulcp_dirty_writes(desired, ids).is_err());
+
+        assert_eq!(
+            ulcp_lan_group(" 239.255.42.42:7373 ".into()).unwrap(),
+            "239.255.42.42:7373"
+        );
+        assert!(ulcp_lan_group("239.255.42.42:0".into()).is_err());
+        assert!(ulcp_lan_group("239.255.42.42".into()).is_err());
+
+        let actual = inspect_ulcp_properties(vec![
+            response(prop::LAN_BEARER_ENABLED, &[1]),
+            response(prop::LAN_BEARER_GROUP, &[239, 255, 42, 42, 0xCD, 0x1C]),
+            response(prop::LAN_BEARER_INGRESS_LIMIT, &120u16.to_le_bytes()),
+            response(prop::LAN_BEARER_STATE, &[2]),
+        ]);
+        assert_eq!(actual.lan_bearer_enabled, Some(true));
+        assert_eq!(
+            actual.lan_bearer_group.as_deref(),
+            Some("239.255.42.42:7373")
+        );
+        assert_eq!(actual.lan_bearer_ingress_limit, Some(120));
+        assert_eq!(actual.lan_bearer_state, Some(2));
+
+        // The LAN link alone brings the Bridge screen, without the
+        // tunnel's properties.
+        let properties = ulcp_category_properties(
+            UlcpManageCategory::Bridge,
+            encoded_capabilities(&[cap::DEV_IDENTITY, cap::REPEATER, cap::IPV4, cap::LAN_BEARER]),
+        )
+        .unwrap();
+        assert!(properties.contains(&prop::LAN_BEARER_ENABLED));
+        assert!(!properties.contains(&prop::BRIDGE_ENABLED));
     }
 
     #[test]
