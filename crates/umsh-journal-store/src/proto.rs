@@ -27,16 +27,42 @@ pub fn encode_identity(secret: &[u8; 32], public: &[u8; 32]) -> [u8; IDENTITY_PA
     payload
 }
 
-/// Split a persisted identity payload into (secret, public); anything
-/// but the exact expected length is treated as no identity.
+/// Split a persisted identity payload into (secret, public).
+///
+/// Octets past [`IDENTITY_PAYLOAD_LEN`] are ignored, so a later writer
+/// can append to the record without this firmware losing the key. A
+/// shorter payload is not an identity.
 pub fn decode_identity(payload: &[u8]) -> Option<([u8; 32], [u8; 32])> {
-    if payload.len() != IDENTITY_PAYLOAD_LEN {
-        return None;
-    }
+    let keys = payload.get(..IDENTITY_PAYLOAD_LEN)?;
     Some((
-        payload[..32].try_into().expect("length checked"),
-        payload[32..].try_into().expect("length checked"),
+        keys[..32].try_into().expect("length checked"),
+        keys[32..].try_into().expect("length checked"),
     ))
+}
+
+/// What the device-identity journal holds, as boot must act on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoredIdentity {
+    /// No identity is committed: an empty journal, or a tombstone. Boot
+    /// generates one and persists it.
+    Absent,
+    /// A committed record carrying the keypair.
+    Keys { secret: [u8; 32], public: [u8; 32] },
+    /// A committed record that cannot be read as an identity. It is
+    /// still the device's identity as far as anything saved alongside it
+    /// is concerned, so boot **MUST NOT** write over it: the device runs
+    /// on a volatile key until a host installs or clears one.
+    Unparseable,
+}
+
+/// Classify the payload a mount of the identity journal returned
+/// (`None` when no record is committed or the newest is a tombstone).
+pub fn classify_identity(payload: Option<&[u8]>) -> StoredIdentity {
+    match payload.map(decode_identity) {
+        None => StoredIdentity::Absent,
+        Some(Some((secret, public))) => StoredIdentity::Keys { secret, public },
+        Some(None) => StoredIdentity::Unparseable,
+    }
 }
 
 /// Two records per page. A journal may instead give each record a whole
@@ -554,6 +580,35 @@ mod tests {
         assert_eq!(decode_identity(&payload), Some(([0x11; 32], [0x22; 32])));
         assert_eq!(decode_identity(&payload[..63]), None);
         assert_eq!(decode_identity(&[]), None);
+    }
+
+    /// Content appended past the keypair does not cost the device its
+    /// key.
+    #[test]
+    fn identity_payload_ignores_appended_octets() {
+        let mut payload = [0x33; IDENTITY_PAYLOAD_LEN + 9];
+        payload[..IDENTITY_PAYLOAD_LEN].copy_from_slice(&encode_identity(&[0x11; 32], &[0x22; 32]));
+        assert_eq!(decode_identity(&payload), Some(([0x11; 32], [0x22; 32])));
+    }
+
+    /// An absent identity and a committed one that cannot be read are
+    /// different outcomes: only the first may be generated over.
+    #[test]
+    fn classify_identity_tells_absent_from_unparseable() {
+        let payload = encode_identity(&[0x11; 32], &[0x22; 32]);
+        assert_eq!(classify_identity(None), StoredIdentity::Absent);
+        assert_eq!(
+            classify_identity(Some(&payload)),
+            StoredIdentity::Keys {
+                secret: [0x11; 32],
+                public: [0x22; 32]
+            }
+        );
+        assert_eq!(
+            classify_identity(Some(&payload[..63])),
+            StoredIdentity::Unparseable
+        );
+        assert_eq!(classify_identity(Some(&[])), StoredIdentity::Unparseable);
     }
 
     /// Generation comparison survives wraparound: a record numbered 0

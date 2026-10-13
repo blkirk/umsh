@@ -68,6 +68,7 @@ enum Event {
     Domain,
     Ready,
     Dfu(umsh_ulcp::DfuMode),
+    SnapshotPersisted,
 }
 
 struct Env {
@@ -87,7 +88,8 @@ impl DeviceEnv for Env {
         panic!("test bootloader handoff")
     }
     async fn persist_snapshot(&mut self, _: &[u8]) -> Result<(), ()> {
-        unreachable!()
+        self.events.borrow_mut().push(Event::SnapshotPersisted);
+        Ok(())
     }
     async fn clear_snapshot(&mut self) -> Result<(), ()> {
         unreachable!()
@@ -323,4 +325,70 @@ fn dfu_preparation_and_matching_transmission_precede_handoff() {
             .count(),
         1
     );
+}
+
+#[test]
+fn stored_identity_must_match_its_own_secret() {
+    use umsh_journal_store::proto::StoredIdentity;
+    let secret = [0x5a; 32];
+    let (public, record) = device_identity_record(&secret);
+    assert_eq!(
+        stored_device_identity(Some(&record)),
+        StoredIdentity::Keys { secret, public }
+    );
+    let mut damaged = record;
+    damaged[40] ^= 1;
+    assert_eq!(
+        stored_device_identity(Some(&damaged)),
+        StoredIdentity::Unparseable
+    );
+    assert_eq!(
+        stored_device_identity(Some(&record[..32])),
+        StoredIdentity::Unparseable
+    );
+    assert_eq!(stored_device_identity(None), StoredIdentity::Absent);
+}
+
+/// A change the device makes on its own is persisted only over a
+/// snapshot that is current: never onto a device with nothing saved,
+/// and never over a generation boot rejected, where the write would
+/// bury the fault `PROP_SAVED` reports.
+#[test]
+fn device_changes_persist_only_over_a_current_snapshot() {
+    use embassy_futures::block_on;
+    let mut saved = [0; SNAPSHOT_MAX];
+    let len = session("Saved radio").encode_snapshot(&mut saved).unwrap();
+    let saved = &saved[..len];
+    for (restored, rejected, expected_status, persists) in [
+        (false, false, SavedStatus::None, false),
+        (true, false, SavedStatus::Current, true),
+        (true, true, SavedStatus::Fallback, false),
+        (false, true, SavedStatus::Unreadable, false),
+    ] {
+        let mut session = session("Device change");
+        if rejected {
+            session.note_snapshot_rejected();
+        }
+        if restored {
+            session.restore_at_boot(saved).unwrap();
+        }
+        assert_eq!(session.saved_status(), expected_status);
+        let events = Rc::new(RefCell::new(std::vec::Vec::new()));
+        let mut env = Env {
+            events: events.clone(),
+            older: None,
+            restore_gate: Box::leak(Box::new(Signal::new())),
+            name_gate: None,
+            dfu_result: Err(Status::UNIMPLEMENTED),
+        };
+        let mut snapshot = [0; SNAPSHOT_MAX];
+        assert_eq!(session.toggle_ble(&mut |_| {}), Some(false));
+        block_on(persist_device_change(&mut session, &mut snapshot, &mut env));
+        assert_eq!(
+            events.borrow().contains(&Event::SnapshotPersisted),
+            persists,
+            "{expected_status:?}"
+        );
+        assert_eq!(session.saved_status(), expected_status);
+    }
 }

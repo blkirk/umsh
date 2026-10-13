@@ -61,6 +61,23 @@ pub fn device_identity_record(secret: &[u8; 32]) -> ([u8; 32], [u8; proto::IDENT
     (public_key, proto::encode_identity(secret, &public_key))
 }
 
+/// Read the device identity a boot mount of the identity journal
+/// returned, checking the stored public key against its secret.
+///
+/// A record whose halves disagree is [`proto::StoredIdentity::
+/// Unparseable`]: there is no telling which half is damaged, and the
+/// record must survive for whoever can tell.
+pub fn stored_device_identity(payload: Option<&[u8]>) -> proto::StoredIdentity {
+    match proto::classify_identity(payload) {
+        proto::StoredIdentity::Keys { secret, public }
+            if device_identity_record(&secret).0 != public =>
+        {
+            proto::StoredIdentity::Unparseable
+        }
+        stored => stored,
+    }
+}
+
 /// How many older snapshot generations boot will try after the newest
 /// one is rejected.
 ///
@@ -1133,6 +1150,36 @@ async fn apply_effect<A, S, const TXQ: usize, M, const RX: usize, const TX: usiz
     }
 }
 
+/// Keep the saved snapshot in step with a change the device made on its
+/// own—a switch the operator flipped at the board, a network picked from
+/// its menu—so the change survives the next reboot.
+///
+/// Only a [`SavedStatus::Current`] snapshot is kept in step. A device
+/// with nothing saved gets nothing saved: manufacturing a snapshot from
+/// a button press would persist every other live-only value with it. A
+/// device that rejected its newest generation at boot (`Fallback` or
+/// `Unreadable`) must not write one either: the write would become the
+/// newest generation, bury the rejected record under defaults or stale
+/// values, and clear the fault `PROP_SAVED` exists to report. The
+/// change still applies live in both cases; only a host's `CMD_SAVE`
+/// writes over a fault.
+async fn persist_device_change<A, S, const TXQ: usize, E>(
+    session: &mut Session<A, S, TXQ>,
+    snapshot_buf: &mut [u8],
+    env: &mut E,
+) where
+    A: AesProvider,
+    S: Sha256Provider,
+    E: DeviceEnv,
+{
+    if session.saved_status() == SavedStatus::Current
+        && let Some(len) = session.encode_snapshot(snapshot_buf)
+        && env.persist_snapshot(&snapshot_buf[..len]).await.is_ok()
+    {
+        session.note_snapshot_saved();
+    }
+}
+
 /// Mirror the session's device-domain node tables to the device node
 /// when their generation moved (device-node plan increment 3).
 /// `synced_version` is the caller's cache of the last published
@@ -1928,15 +1975,7 @@ where
                     apply_effect(&session, effect, &rt, &mut env).await;
                     // Keep an existing snapshot in step, so a switch the
                     // operator flipped is still flipped after a reboot.
-                    // A device with nothing saved gets nothing saved:
-                    // manufacturing a snapshot from a button press would
-                    // persist every other live-only value with it.
-                    if session.saved_status() != SavedStatus::None
-                        && let Some(len) = session.encode_snapshot(snapshot_buf)
-                        && env.persist_snapshot(&snapshot_buf[..len]).await.is_ok()
-                    {
-                        session.note_snapshot_saved();
-                    }
+                    persist_device_change(session, snapshot_buf, &mut env).await;
                     crate::log::debug_log(format_args!(
                         "ulcp: {:?} {} at the device",
                         setting,
@@ -1954,12 +1993,8 @@ where
                         out: rt.out,
                     })
                     .await;
-                if result.is_ok()
-                    && session.saved_status() != SavedStatus::None
-                    && let Some(len) = session.encode_snapshot(snapshot_buf)
-                    && env.persist_snapshot(&snapshot_buf[..len]).await.is_ok()
-                {
-                    session.note_snapshot_saved();
+                if result.is_ok() {
+                    persist_device_change(session, snapshot_buf, &mut env).await;
                 }
                 env.wifi_selection_result(result);
             }
@@ -1977,12 +2012,7 @@ where
                     // Persisted like a toggle: the gesture is the device's
                     // own control for the property, and a radio rescued by
                     // it should stay rescued across the next reboot.
-                    if session.saved_status() != SavedStatus::None
-                        && let Some(len) = session.encode_snapshot(snapshot_buf)
-                        && env.persist_snapshot(&snapshot_buf[..len]).await.is_ok()
-                    {
-                        session.note_snapshot_saved();
-                    }
+                    persist_device_change(session, snapshot_buf, &mut env).await;
                     crate::log::debug_log(format_args!(
                         "ulcp: Bluetooth forced ON by the power-on gesture"
                     ));

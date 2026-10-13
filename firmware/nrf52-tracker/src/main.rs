@@ -6454,32 +6454,51 @@ mod firmware {
         // ChaCha20 stream seeded below: that stream is fine, but there
         // is no reason to put a derivation between the noise source and
         // a key that outlives the device's configuration.
-        let mut identity_keys = identity_payload
-            .as_deref()
-            .and_then(proto_store::decode_identity);
-        if identity_keys.is_none() {
-            let mut secret = [0u8; 32];
-            rng.fill_bytes(&mut secret).await;
-            let (public, record) = driver::device_identity_record(&secret);
-            // A persist failure is not fatal: the device runs on this
-            // key for the current boot and generates another next time.
-            // Reporting it matters more than refusing to boot, because
-            // the alternative is a radio that is silently inert.
-            match identity_store.persist(&record).await {
-                Ok(()) => debug_log(format_args!(
-                    "device identity generated at first boot key={}",
-                    umsh_core::PublicKey(public)
-                )),
-                Err(()) => debug_log(format_args!(
-                    "device identity generated but persist=FAILED—volatile this boot"
-                )),
+        //
+        // Generation is for an *absent* identity only. A committed
+        // record this image cannot read is still the key the saved
+        // configuration belongs to; writing over it would lose that key
+        // for good. That boot runs on a volatile key instead, and the
+        // record waits for a host to install or clear one.
+        let stored_identity = driver::stored_device_identity(identity_payload.as_deref());
+        let boot_identity_keys = match stored_identity {
+            proto_store::StoredIdentity::Keys { secret, public } => Some((secret, public)),
+            proto_store::StoredIdentity::Absent | proto_store::StoredIdentity::Unparseable => {
+                let mut secret = [0u8; 32];
+                rng.fill_bytes(&mut secret).await;
+                let (public, record) = driver::device_identity_record(&secret);
+                if stored_identity == proto_store::StoredIdentity::Unparseable {
+                    debug_log(format_args!(
+                        "device identity record UNREADABLE len={}—kept; volatile key={} this boot",
+                        identity_payload.as_ref().map_or(0, |payload| payload.len()),
+                        umsh_core::PublicKey(public)
+                    ));
+                } else {
+                    // A persist failure is not fatal: the device runs on
+                    // this key for the current boot and generates another
+                    // next time. Reporting it matters more than refusing
+                    // to boot, because the alternative is a radio that is
+                    // silently inert.
+                    match identity_store.persist(&record).await {
+                        Ok(()) => debug_log(format_args!(
+                            "device identity generated at first boot key={}",
+                            umsh_core::PublicKey(public)
+                        )),
+                        Err(()) => debug_log(format_args!(
+                            "device identity generated but persist=FAILED—volatile this boot"
+                        )),
+                    }
+                }
+                Some((secret, public))
             }
-            identity_keys = Some((secret, public));
-        }
-        let boot_identity_keys = identity_keys;
+        };
         // A replaced identity leaves its TX boundary behind in the
-        // counter journal; drop it so the map cannot silt up.
-        if let Some((_, public)) = boot_identity_keys.as_ref() {
+        // counter journal; drop it so the map cannot silt up. Not under
+        // a volatile key: the boundary it would drop may be the kept
+        // record's.
+        if stored_identity != proto_store::StoredIdentity::Unparseable
+            && let Some((_, public)) = boot_identity_keys.as_ref()
+        {
             prune_stale_tx_counters(node_counters, public).await;
         }
         // Seed the identity-generation and device-node CSPRNGs from the

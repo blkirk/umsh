@@ -146,6 +146,7 @@ use board::vext::VextHandle as Vext;
 #[cfg(not(feature = "psram"))]
 use umsh_crypto::CryptoEngine;
 use umsh_crypto::software::{SoftwareAes, SoftwareSha256};
+use umsh_journal_store::proto::StoredIdentity;
 #[cfg(feature = "board-tlora-pager")]
 use umsh_pager_peripherals::rtc::Pcf85063 as RtcChip;
 #[cfg(feature = "pmic-axp2101")]
@@ -3508,27 +3509,47 @@ async fn main(spawner: Spawner) {
     // path above ran on the RF-gated TRNG—so a first-boot identity is
     // true-random by construction, and a later regeneration inherits
     // the pool's ratcheted, TRNG-healed state.
-    let mut identity_keys = identity_payload
-        .as_deref()
-        .and_then(umsh_journal_store::proto::decode_identity);
-    if identity_keys.is_none() {
-        let mut secret = [0u8; 32];
-        pool_draw(b"device-identity", &mut secret);
-        let (public, record) = driver::device_identity_record(&secret);
-        // A persist failure is not fatal: the device runs on this key
-        // for the current boot and generates another next time.
-        match identity_store.persist(&record).await {
-            Ok(()) => println!("device identity generated at first boot"),
-            Err(()) => {
-                println!("device identity generated but persist FAILED—volatile this boot")
+    //
+    // Generation is for an *absent* identity only. A committed record
+    // this image cannot read is still the key the saved configuration
+    // belongs to; writing over it would lose that key for good. That
+    // boot runs on a volatile key instead, and the record waits for a
+    // host to install or clear one.
+    let stored_identity = driver::stored_device_identity(identity_payload.as_deref());
+    let boot_identity_keys = match stored_identity {
+        StoredIdentity::Keys { secret, public } => Some((secret, public)),
+        StoredIdentity::Absent | StoredIdentity::Unparseable => {
+            let mut secret = [0u8; 32];
+            pool_draw(b"device-identity", &mut secret);
+            let (public, record) = driver::device_identity_record(&secret);
+            if stored_identity == StoredIdentity::Unparseable {
+                let len = identity_payload.as_ref().map_or(0, |payload| payload.len());
+                let key = umsh_core::PublicKey(public);
+                println!(
+                    "device identity record UNREADABLE len={len}—kept; volatile key={key} this boot"
+                );
+                debug_log(format_args!(
+                    "device identity record UNREADABLE len={len}—kept; volatile key={key} this boot"
+                ));
+            } else {
+                // A persist failure is not fatal: the device runs on this
+                // key for the current boot and generates another next time.
+                match identity_store.persist(&record).await {
+                    Ok(()) => println!("device identity generated at first boot"),
+                    Err(()) => {
+                        println!("device identity generated but persist FAILED—volatile this boot")
+                    }
+                }
             }
+            Some((secret, public))
         }
-        identity_keys = Some((secret, public));
-    }
-    let boot_identity_keys = identity_keys;
+    };
     // A replaced identity leaves its TX boundary behind in the counter
-    // journal; drop it so the map cannot silt up.
-    if let Some((_, public)) = boot_identity_keys.as_ref() {
+    // journal; drop it so the map cannot silt up. Not under a volatile
+    // key: the boundary it would drop may be the kept record's.
+    if stored_identity != StoredIdentity::Unparseable
+        && let Some((_, public)) = boot_identity_keys.as_ref()
+    {
         prune_stale_tx_counters(node_counters, public).await;
     }
     println!(
