@@ -4,8 +4,8 @@
 > This section is an early work in progress and this protocol may change significantly.
 
 The LAN bearer carries UMSH frames between the participants on one local
-network, using IPv4 multicast. Radios on the network join their LoRa meshes
-to it, so that two meshes on different LoRa settings, or two radios out of
+network, using IPv4 multicast. Repeaters on the network join their LoRa
+meshes to it, so that two meshes on different LoRa settings, or two radios out of
 range of each other, are joined by the network they share. Hosts with no
 radio of their own join it too, and reach every mesh a radio on the network
 carries.
@@ -16,8 +16,11 @@ present.
 
 ## Participants
 
-- A **bridging radio** has a LoRa radio and a node, and forwards between the
-  two by the rules in [Forwarding Across Bearers](#forwarding-across-bearers).
+- A **bridging radio** has a LoRa radio and a node whose repeater is enabled,
+  and forwards between the two by the rules in
+  [Forwarding Across Bearers](#forwarding-across-bearers). A radio whose
+  repeater is disabled sends only its own traffic and its host's to the group,
+  as an endpoint does.
 - An **endpoint** has a node and no LoRa radio. It sends its own traffic to
   the group and receives what is sent there. A desktop tool or a phone on the
   network is an endpoint.
@@ -118,58 +121,39 @@ settings, before it sends anything.
 
 A node MAY have one or more **bearers** beside its radio: shared media, such
 as a LAN, on which every other participant hears what the node sends. A
-reception records which bearer it arrived on.
+bearer works as [backhaul](ulcp-host.md#prop-mac-backhaul) does:
 
-### The Forwarding Decision
+- **What arrives on a bearer is a reception.** The node handles it as it
+  handles a packet heard on its radio, recording which bearer it arrived
+  on, and applies the
+  [forwarding procedure](repeater-operation.md#forwarding-procedure) to it
+  once. With its repeater enabled the node may repeat it on its radio; with
+  its repeater disabled it forwards nothing, whatever the packet arrived on.
+- **What the radio transmits goes to every bearer.** Each frame the node's
+  radio puts on the air is sent to each bearer the node participates in:
+  its own packets and acknowledgments, its repeats, and the transmissions
+  of any other stack sharing the radio. A frame the radio does not
+  transmit—a repeat abandoned to a better-placed repeater, or cancelled by
+  an overheard acknowledgment—does not reach the bearer.
 
-When a node receives a packet, it applies the
-[forwarding procedure](repeater-operation.md#forwarding-procedure) once,
-whatever the packet arrived on. If the procedure decides to forward, the
-rewritten packet—flood hops accounted, source-route hint consumed, trace
-hint prepended, region code inserted—is offered to each egress the table
-below allows. Every copy is the same rewritten packet, and the decision
-inserts one entry in the duplicate cache.
+Enabling a bearer therefore makes the node a participant on it, not a
+forwarder: a node whose repeater is disabled sends only its own traffic,
+and its host's, to the bearer.
 
-Arrived from | To the radio | To a bearer
--------------|--------------|------------
-The radio | If the repeater is enabled | If that bearer is enabled
-A bearer | If the arriving bearer is enabled | If that bearer is enabled and is not the arriving bearer
-A point-to-point link | If the repeater is enabled | If that bearer is enabled
-
-- **A frame is never returned to the bearer it arrived on.** The medium
-  never relays: every participant on it has already heard the frame.
-- **The bearer switch alone makes a bridge.** A node with its bearer
-  enabled carries bearer receptions onto its radio, and its radio's
-  receptions onto the bearer, with LoRa-to-LoRa repeating off.
-- **Export happens at the decision.** A copy is offered to a bearer when the
-  decision is made, whether or not the radio transmission later happens. A
-  radio transmission that is deferred, abandoned to a better-placed repeater,
-  or cancelled by an overheard acknowledgment does not withdraw the bearer
-  copy.
-- **Retransmissions are not offered again.** A retry after an unconfirmed
-  transmission is the same frame on the same radio. A
-  [Route Retry](packet-options.md#route-retry-option-6) copy is a new
-  forwarding identity and is offered like any other.
-
-A packet the node originates, and a packet another stack sharing the node's
-radio transmits, is offered to every enabled bearer as it is transmitted,
-unless the node has already forwarded it.
-
-Crossing between two bridging radios spends two flood hops: one at the
-radio that hears the packet and offers it to the bearer, one at the radio
-that receives it from the bearer and transmits it. A packet a bridging radio
-originates spends one, at the radio that carries it onto LoRa.
-
-A bridging radio that consumes a source-route hint forwards on every egress
-the table allows, since it cannot know on which side the next hint is.
+A crossing between two bridging radios spends two flood hops: one at the
+radio that hears the packet and repeats it, which is what reaches the
+bearer, and one at the radio that receives it from the bearer and repeats
+it. A packet a bridging radio originates spends one. A repeat returns to
+the bearer it came from, where every participant has already seen the
+packet and suppresses it as a duplicate.
 
 A bearer reception adds a [Trace Signal](packet-options.md#trace-signal-option-10)
 entry recording that nothing was measured, as a point-to-point reception
 does.
 
 The [duty cycle](channel-access.md) a radio spends carrying bearer
-receptions counts against its limit like any other forward. Bearer copies
-spend no radio airtime.
+receptions counts against its limit like any other forward. Copies sent to
+a bearer spend no radio airtime.
 
 ### Ingress Limit
 
@@ -195,11 +179,10 @@ anything about the air.
   abandons a pending forward. A copy received from a bearer or a
   point-to-point link says nothing about who has transmitted on the radio's
   channel, and is a duplicate and nothing more.
-- **A bearer copy does not confirm.** A copy received from a bearer does not
-  satisfy [forwarding confirmation](repeater-operation.md#forwarding-confirmation).
-  Every participant on the bearer received the packet from the node that
-  offered it, so its return on the bearer says nothing about whether the
-  next hop carried it.
+- **A bearer copy confirms.** A copy received from a bearer is a frame some
+  radio transmitted, and satisfies
+  [forwarding confirmation](repeater-operation.md#forwarding-confirmation)
+  as a copy overheard on the air does.
 - **Ack cancellation is unchanged.** An overheard acknowledgment
   [cancels](repeater-operation.md#ack-cancellation) a matching pending forward
   whatever it arrived on: it proves delivery either way.

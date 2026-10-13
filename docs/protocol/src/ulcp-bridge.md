@@ -7,7 +7,7 @@ change IP configuration, or change `PROP_MAC_REPEATER_ENABLED`.
 
 ## Capabilities
 
-`CAP_BRIDGE_CLIENT` (58) requires `CAP_REPEATER` and at least one implemented IP
+`CAP_BRIDGE_CLIENT` (58) requires `CAP_DEV_IDENTITY` and at least one implemented IP
 family. It requires all five properties below. The IP-family requirement is an
 alternative expressed here in prose, not an AND-list of capability codes.
 

@@ -766,8 +766,8 @@ pub mod cap {
     pub const ILLUMINANCE: u32 = 47;
     /// `CAP_MAC_BACKHAUL`—the device can carry the host on a
     /// point-to-point link to its own node (`PROP_MAC_BACKHAUL`).
-    /// Requires `CAP_REPEATER`: without a repeater there is nothing on
-    /// the far side of that link to carry the host's traffic onward.
+    /// Requires `CAP_DEV_IDENTITY`: the far side of that link is the
+    /// device's node.
     pub const MAC_BACKHAUL: u32 = 48;
     /// `CAP_CMD_MULTI`—the device accepts `CMD_PROP_MULTI_GET` and
     /// `CMD_PROP_MULTI_SET` and answers them with `CMD_PROP_ARE`.
@@ -839,7 +839,7 @@ pub mod cap {
     /// with different state, and a device that has one and not the
     /// other is describable.
     pub const WIFI_AP: u32 = 57;
-    /// Autonomous bridge client. Requires a node with repeater capability and IP.
+    /// Autonomous bridge client. Requires a node of its own and IP.
     pub const BRIDGE_CLIENT: u32 = 58;
 
     /// Orientation-qualified display wake is supported.
@@ -856,10 +856,10 @@ pub mod cap {
     /// `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`). Requires
     /// [`REPEATER`].
     pub const MESHCORE_FORWARDER: u32 = 62;
-    /// `CAP_LAN_BEARER`: the device's node forwards across an IP
+    /// `CAP_LAN_BEARER`: the device's node participates in an IP
     /// multicast group on its local network (`PROP_LAN_BEARER_ENABLED`,
     /// `PROP_LAN_BEARER_GROUP`, `PROP_LAN_BEARER_INGRESS_LIMIT`,
-    /// `PROP_LAN_BEARER_STATE`). Requires [`REPEATER`] and [`IPV4`].
+    /// `PROP_LAN_BEARER_STATE`). Requires [`DEV_IDENTITY`] and [`IPV4`].
     pub const LAN_BEARER: u32 = 63;
 }
 

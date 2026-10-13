@@ -1,16 +1,18 @@
 # LAN Bearer
 
 A device with a [LAN bearer](lan-bearer.md) joins its node to a multicast
-group on the local network, and forwards between that group and its radio.
+group on the local network. With
+[`PROP_MAC_REPEATER_ENABLED`](ulcp-device.md#prop-mac-repeater-enabled) set,
+its node forwards between that group and its radio, as the
+[forwarding table](lan-bearer.md#the-forwarding-decision) describes; without
+it, the node sends only its own traffic and its host's to the group.
 Configuration belongs to the device domain and is independent of the
 attached host. Enabling the bearer does not enable Wi-Fi, change IP
-configuration, or change `PROP_MAC_REPEATER_ENABLED`: the bearer forwards by
-its own switch, as the [forwarding table](lan-bearer.md#the-forwarding-decision)
-describes.
+configuration, or change `PROP_MAC_REPEATER_ENABLED`.
 
 ## Capabilities
 
-`CAP_LAN_BEARER` (63) requires `CAP_REPEATER` and `CAP_IPV4`. It requires all
+`CAP_LAN_BEARER` (63) requires `CAP_DEV_IDENTITY` and `CAP_IPV4`. It requires all
 four properties below, and, with `CAP_STATS`, the five counters.
 
 ## PROP_LAN_BEARER_ENABLED {#prop-lan-bearer-enabled}
@@ -60,8 +62,8 @@ Property | Name | Counts
 4845 | `PROP_STAT_LAN_RX` | Datagrams handed to the node
 4846 | `PROP_STAT_LAN_RX_LIMITED` | Datagrams dropped by the ingress limit, or because the node had not yet taken earlier ones
 4847 | `PROP_STAT_LAN_RX_MALFORMED` | Datagrams dropped as empty, oversized, or of no recognized protocol
-4848 | `PROP_STAT_LAN_EXPORTED` | Frames the node offered to the bearer
-4849 | `PROP_STAT_LAN_EXPORT_DROPPED` | Offered frames discarded before they could be sent
+4848 | `PROP_STAT_LAN_EXPORTED` | Transmitted frames queued for the group
+4849 | `PROP_STAT_LAN_EXPORT_DROPPED` | Queued frames discarded before they could be sent
 
 ## Persistence and lifecycle
 

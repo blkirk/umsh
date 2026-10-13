@@ -1349,7 +1349,7 @@ Code | Name                      | Requires                             | Define
 45   | `CAP_GNSS`                | `CAP_TIME`                           | [Device Domain](ulcp-device.md#capabilities)
 46   | `CAP_ADVERT`              | `CAP_DEV_IDENTITY`                   | [Device Domain](ulcp-device.md#capabilities)
 47   | `CAP_ILLUMINANCE`         | —                                    | [Device Domain](ulcp-device.md#capabilities)
-48   | `CAP_MAC_BACKHAUL`        | `CAP_REPEATER`                       | [Tethered Host Services](ulcp-host.md#capabilities)
+48   | `CAP_MAC_BACKHAUL`        | `CAP_DEV_IDENTITY`                   | [Tethered Host Services](ulcp-host.md#capabilities)
 49   | `CAP_CMD_MULTI`           | —                                    | [Framing and Common Semantics](ulcp-core.md#cmd-prop-multi-get)
 50   | `CAP_BLE`                 | —                                    | [BLE Binding](ulcp-ble.md#capabilities)
 51   | `CAP_REBOOT`              | —                                    | [Framing and Common Semantics](ulcp-core.md#cmd-reboot)
@@ -1359,12 +1359,12 @@ Code | Name                      | Requires                             | Define
 55   | `CAP_IPV4`                | —                                    | [IP Connectivity](ulcp-ip.md#capabilities)
 56   | `CAP_IPV6`                | —                                    | [IP Connectivity](ulcp-ip.md#capabilities)
 57   | `CAP_WIFI_AP`             | `CAP_WIFI_SCAN`                      | [Wi-Fi](ulcp-wifi.md#capabilities)
-58   | `CAP_BRIDGE_CLIENT`       | `CAP_REPEATER`; IP family requirement in prose | [Bridge Client](ulcp-bridge.md#capabilities)
+58   | `CAP_BRIDGE_CLIENT`       | `CAP_DEV_IDENTITY`; IP family requirement in prose | [Bridge Client](ulcp-bridge.md#capabilities)
 59   | `CAP_DISPLAY_MOTION_WAKE` | — | [Device Services](ulcp-device.md#display-motion-wake)
 60   | `CAP_I2C`                 | —                                    | [I2C Bus Access](ulcp-i2c.md#capabilities)
 61   | `CAP_TEMPERATURE` | — | [Device Domain](ulcp-device.md#capabilities)
 62   | `CAP_MESHCORE_FORWARDER`  | `CAP_REPEATER`                       | [Device Domain](ulcp-device.md#capabilities)
-63   | `CAP_LAN_BEARER`          | `CAP_REPEATER`, `CAP_IPV4`           | [LAN Bearer](ulcp-lan-bearer.md#capabilities)
+63   | `CAP_LAN_BEARER`          | `CAP_DEV_IDENTITY`, `CAP_IPV4`       | [LAN Bearer](ulcp-lan-bearer.md#capabilities)
 515  | `CAP_PHY_LORA`            | —                                    | [Radio Control](ulcp-radio.md#capabilities)
 
 A device **MUST NOT** advertise a capability without also advertising the

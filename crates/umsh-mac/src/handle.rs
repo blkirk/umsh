@@ -6,9 +6,9 @@ use umsh_hal::{Clock, CounterStore};
 use umsh_sync::AsyncRefCell;
 
 use crate::{
-    AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_BEARER_EXPORTS, DEFAULT_CHANNEL_HINT_REPLAY,
-    DEFAULT_CHANNEL_REPLAY, DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_FRAME, DEFAULT_IDENTITIES,
-    DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS, DEFAULT_TX, Platform,
+    AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
+    DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_FRAME, DEFAULT_IDENTITIES, DEFAULT_PEERS,
+    DEFAULT_ROUTE_HOLDS, DEFAULT_TX, Platform,
     coordinator::{CounterPersistenceError, LocalIdentityId, Mac, MacError, SendError},
     peers::PeerId,
     send::{SendOptions, SendReceipt},
@@ -33,11 +33,8 @@ pub struct MacHandle<
     const RN: usize = DEFAULT_CHANNEL_REPLAY,
     const HN: usize = DEFAULT_CHANNEL_HINT_REPLAY,
     const HOLDS: usize = DEFAULT_ROUTE_HOLDS,
-    const EXPORTS: usize = DEFAULT_BEARER_EXPORTS,
 > {
-    mac: &'a AsyncRefCell<
-        Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>,
-    >,
+    mac: &'a AsyncRefCell<Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>>,
 }
 
 impl<
@@ -53,9 +50,7 @@ impl<
     const RN: usize,
     const HN: usize,
     const HOLDS: usize,
-    const EXPORTS: usize,
-> Copy
-    for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>
+> Copy for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
 }
 
@@ -72,9 +67,7 @@ impl<
     const RN: usize,
     const HN: usize,
     const HOLDS: usize,
-    const EXPORTS: usize,
-> Clone
-    for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>
+> Clone for MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     fn clone(&self) -> Self {
         *self
@@ -94,13 +87,12 @@ impl<
     const RN: usize,
     const HN: usize,
     const HOLDS: usize,
-    const EXPORTS: usize,
-> MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>
+> MacHandle<'a, P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>
 {
     /// Creates a cloneable handle backed by shared coordinator state.
     pub fn new(
         mac: &'a AsyncRefCell<
-            Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS, EXPORTS>,
+            Mac<P, IDENTITIES, PEERS, CHANNELS, ACKS, TX, FRAME, DUP, RN, HN, HOLDS>,
         >,
     ) -> Self {
         Self { mac }
@@ -247,44 +239,6 @@ impl<
     /// stops honoring newly received frames.
     pub async fn set_repeater_enabled(&self, enabled: bool) {
         self.mac.borrow_mut().await.repeater_config_mut().enabled = enabled;
-    }
-
-    /// Whether the MAC forwards onto and from `bearer`.
-    pub async fn bearer_enabled(&self, bearer: umsh_hal::BearerId) -> bool {
-        self.mac
-            .borrow()
-            .await
-            .bearer_config()
-            .enabled
-            .contains(bearer)
-    }
-
-    /// Enable or disable forwarding onto and from `bearer`.
-    pub async fn set_bearer_enabled(&self, bearer: umsh_hal::BearerId, enabled: bool) {
-        self.mac
-            .borrow_mut()
-            .await
-            .set_bearer_enabled(bearer, enabled);
-    }
-
-    /// Wait for the next frame the MAC offers to `bearer`, copy it into
-    /// `buf`, and return its length.
-    ///
-    /// Frames are offered when the forwarding decision is made and when
-    /// this node originates one; see [`crate::bearer`]. Every release of
-    /// the coordinator re-polls the wait, so a frame offered by any task
-    /// is picked up as soon as that task lets go.
-    pub async fn next_bearer_export(&self, bearer: umsh_hal::BearerId, buf: &mut [u8]) -> usize {
-        let mut ticket = self.mac.scoped_ticket();
-        poll_fn(|cx| {
-            self.mac.poll_with_mut(cx, &mut ticket, |mac, _cx| {
-                match mac.pop_bearer_export(bearer, buf) {
-                    Some(len) => core::task::Poll::Ready(len),
-                    None => core::task::Poll::Pending,
-                }
-            })
-        })
-        .await
     }
 
     /// Replace the forwarding policy applied to flood-forwarded frames.

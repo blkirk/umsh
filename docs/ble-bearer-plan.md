@@ -1,7 +1,7 @@
 # BLE Bearer—Research and Implementation Plan
 
 Let nearby UMSH devices exchange frames over Bluetooth LE without pairing or
-connections, so that a device with the feature enabled bridges between that
+connections, so that a repeater with the feature enabled bridges between that
 local BLE space and its LoRa mesh. Two devices on different LoRa frequencies,
 placed near each other with the feature on, join their meshes through the BLE
 space between them.
@@ -12,9 +12,11 @@ in [Protocol changes](#protocol-changes) so they can be reviewed as a unit.
 
 ## Goals
 
-- **Bridge mode.** A LoRa node with the bearer enabled exports what it
-  forwards and originates to the BLE space, and forwards what it hears there
-  onto LoRa. No server, no configuration beyond one toggle.
+- **Bridge mode.** A device with the bearer enabled advertises everything
+  its antenna transmits into the BLE space, and hands what it hears there to
+  its node as receptions, exactly as backhaul does. With its repeater enabled
+  the node forwards them onto LoRa; with it off it forwards nothing. No
+  server.
 - **Frequency bridging.** Two bridges on different LoRa channels in BLE range
   of each other join the two meshes. Any number of bridges may share one BLE
   space, on the same channel or on different ones, without collisions or
@@ -82,8 +84,8 @@ The integrated client ([ulcp-bridge.md](protocol/src/ulcp-bridge.md#integrated-c
 `firmware-esp32/firmware/esp32-tracker/src/bridge.rs`) attaches to the radio
 multiplexer through `BridgePort` (`crates/umsh-ulcp-runtime/src/radio_mux.rs:98`).
 Ingress goes to the node as `RxOrigin::Backhaul`, and egress is the node's
-successful transmissions. The BLE bearer follows the same model with three
-deliberate departures, each forced by the medium being a shared broadcast space
+successful transmissions. The BLE bearer follows the same model, as a
+radio-mux attachment, with two deliberate departures, each forced by the medium being a shared broadcast space
 rather than a point-to-point tunnel:
 
 1. **Ingress must contend on LoRa.** The MAC skips the contention window for
@@ -92,19 +94,14 @@ rather than a point-to-point tunnel:
    (`crates/umsh-mac/src/coordinator.rs:5930`). On BLE that is false. Every
    bridge in range hears every bearer frame, and bridges on the same LoRa
    channel would all transmit it at once.
-2. **Export must happen at the forwarding decision, not the transmission.** A
-   bridge that loses LoRa contention to an ordinary repeater has its forward
-   suppressed (`defer_pending_forward`, `coordinator.rs:5999`), so under
-   export-on-transmission it would bridge only the frames it happened to win.
-   In a dense mesh that is most of them. The integrated internet client has
-   the same weakness; see [Risks and decisions](#risks-and-decisions).
-3. **Only over-the-air copies may speak for the LoRa channel.** A bearer copy
+2. **Only over-the-air copies may speak for the LoRa channel.** A bearer copy
    does not say which LoRa channel, if any, its sender transmitted on. Today
    any duplicate defers a pending forward, and an unmeasured one reschedules it
    with zero delay. Any copy matching a post-TX listen also ends it
    (`observe_forwarding_confirmation`, called at `coordinator.rs:2688` with no
-   origin check). Both are LoRa-channel observations and must come only from
-   `RxOrigin::Air`.
+   origin check). Deferral is a LoRa-channel observation and must come only
+   from `RxOrigin::Air`. Confirmation is not: a bearer copy is a frame some
+   radio transmitted, and confirms as a backhaul copy does.
 
 ### Platform capabilities
 
@@ -167,24 +164,22 @@ reconnect path the iOS app depends on and needs its own hardware pass.
 ```
   LoRa channel X                        BLE space                        LoRa channel Y
  ───────────────┐                                                   ┌───────────────
-   SX1262 ── radio mux ── node MAC ──export──▶ bearer TX ··· bearer RX ──▶ radio mux ── node MAC ── SX1262
-                    ▲           │                                         (RxOrigin::Bearer)  │
-                    └─(RxOrigin::Bearer)── bearer RX ◀··· bearer TX ◀──export──────────────────┘
+   node MAC ── radio mux ── SX1262                                   SX1262 ── radio mux ── node MAC
+                  │  ▲                                                          │  ▲
+         antenna TX  (RxOrigin::Bearer)                                antenna TX  (RxOrigin::Bearer)
+                  ▼  │                                                          ▼  │
+              bearer TX/RX ·························· BLE ·························· bearer TX/RX
 ```
 
-**The node's MAC gains a secondary egress, the bearer.** One forwarding
-decision now produces up to two outputs:
+**The bearer is a radio-mux attachment, as backhaul is.** The MAC has no
+bearer machinery:
 
-- the existing LoRa enqueue, with contention, deferral, and confirmation;
-- an immediate bearer export, with none of those.
-
-**Bearer ingress uses the existing `BridgePort` hand-off.** It enters the
-radio multiplexer and reaches the node as a reception tagged
-`RxOrigin::Bearer`.
-
-**The MAC exposes exported frames as a bounded queue.** The node driver
-drains it into the bearer's transmit queue. This keeps a new associated type
-off `Platform`, which every adapter would otherwise have to carry.
+- **Ingress** uses the existing `BridgePort` hand-off and reaches the node as
+  a reception tagged `RxOrigin::Bearer`, subject to the ordinary forwarding
+  procedure and its repeater gate.
+- **Egress** is every frame the antenna transmits, from any mux client,
+  copied to the attachment (`BridgePort::transmitted`) and queued for
+  advertising.
 
 **One firmware-side task pair owns the BLE bearer:**
 
@@ -200,66 +195,37 @@ The ULCP connectable advertiser becomes a second set beside the bearer set.
 The ULCP peripheral connection continues unchanged; the controller schedules
 scanning and advertising around its connection events.
 
-### Forwarding matrix
+### Forwarding
 
-Rows are where a frame came from; columns are where the node may send it.
-"Decision" means the ordinary forwarding procedure passed: not a duplicate,
-flood hops remain or the source route names this node, region policy allows
-it, and not addressed to this node.
-
-| Arrived from | To LoRa | To the bearer |
-|---|---|---|
-| LoRa (`Air`) | Decision, repeater enabled | Decision, bearer enabled |
-| Bearer | Decision, bearer enabled; contended | Never (first increment) |
-| Internet tunnel or host (`Backhaul`) | Decision, repeater enabled (unchanged) | Decision, bearer enabled |
-| Local origination | Always (unchanged) | Bearer enabled |
-
-**The second row makes the bearer switch alone sufficient for a device to
-bridge.** It forwards across interfaces even when LoRa-to-LoRa repeating is
-off. That is the "turn on this feature on each one" behavior, and whether to
-keep it is a decision listed under [Risks and decisions](#risks-and-decisions).
-
-**One decision, one dup-cache entry, one rewrite.** The frame exported to the
-bearer is byte-for-byte the frame enqueued for LoRa:
-
-- FHOPS decremented or source-route hint consumed;
-- this node's router hint prepended to the trace;
-- region code inserted.
-
-Retransmissions of an already-exported frame (`TxPriority::Retry`) are not
-exported again. A route retry carries a new forwarding identity and is
-exported as a new frame.
+There is no matrix of its own. A node with its repeater disabled forwards
+nothing, from any medium; its own and its host's transmissions still reach
+the BLE space because the antenna sent them. A node with its repeater
+enabled repeats bearer receptions on LoRa, and its LoRa repeats reach the
+BLE space, where every other bridge drops them as duplicates.
 
 ### Worked crossings
 
 **Two bridges, different channels.**
 
 1. A node on X transmits.
-2. Bridge A (on X) hears it, decides, enqueues a LoRa repeat on X and
-   exports the same rewrite to BLE.
+2. Bridge A (on X) hears it, decides, and repeats it on X. The transmission
+   is advertised to BLE.
 3. Bridge C (on Y) receives the BLE copy as `Bearer`. It passes the dup
-   check, decrements the hop, and enqueues on Y after a contention window.
-4. C does not export it back to BLE.
+   check, decrements the hop, and repeats on Y after a contention window.
+   That transmission is advertised too, and A drops it as a duplicate.
 
-The crossing costs two flood hops, as in the internet bridge. If A's repeat
-on X is suppressed because an ordinary repeater went first, the export has
-already happened.
+The crossing costs two flood hops, as in the internet bridge.
 
 **Three bridges, same channel X, one on Y.**
 
-- **X to Y:** A and B both hear the LoRa frame and both export to BLE. C
-  takes the first copy; the second is a dup.
-- **Y to X:**
-  - C exports to BLE. A and B each receive it as `Bearer` and contend with
-    windows drawn uniformly from the flood contention range.
-  - A transmits first. B hears A's LoRa transmission over the air and defers
-    as it would for any repeat it overheard.
-  - B also receives nothing more from BLE: C exported once, and A does not
-    re-export bearer input.
+- **X to Y:** A and B both hear the LoRa frame and contend. The first to
+  transmit crosses; the other hears it over the air and defers.
+- **Y to X:** C's repeat on Y is advertised. A and B each receive it as
+  `Bearer` and contend with windows drawn uniformly from the flood contention
+  range. A transmits first; B hears it over the air and defers.
 
 **A device's own traffic.** A node originating a message on X transmits on
-X and exports to BLE in parallel. A bridge on Y carries it there without the
-LoRa repeat on X having to happen first.
+X, and the transmission is advertised to BLE.
 
 ## Protocol changes
 
@@ -353,29 +319,23 @@ must support AdvData up to the two-structure maximum.
   ([internet-bridging.md](protocol/src/internet-bridging.md#host-interfaces)).
   BLE injection is cheap, and every admitted frame may cost LoRa airtime.
 - **Duplicates:** repeated copies of one frame (other advertising events,
-  other bridges' exports) are ordinary duplicates for the node's dup cache.
+  other bridges' copies) are ordinary duplicates for the node's dup cache.
   A receiver may also drop them earlier.
 
 ### P2. Forwarding across a bearer (`repeater-operation.md`, `routing-overview.md`, `packet-processing.md`)
 
-- **The model:** a node may have a *bearer* in addition to its radio. The
-  [forwarding matrix](#forwarding-matrix) becomes normative.
-- **Export at decision:** the frame offered to the bearer is the
-  forwarding procedure's rewritten output, offered when the decision is
-  made, whether or not the radio transmission later happens.
-- **No re-export:** frames received from the bearer are not offered to the
-  bearer.
+- **The model:** a node may have a *bearer* in addition to its radio,
+  working as backhaul does: receptions in, the antenna's transmissions out.
+  The repeater switch alone decides forwarding.
 - **Hop accounting:** a crossing between two radios costs two flood hops. A
-  frame originated by the exporting node costs one, at the importing node.
+  frame a bridge originates costs one, at the bridge that repeats it.
 - **Trace:** a bearer reception adds the existing "nothing was measured"
   trace signal entry, so no new trace semantics are needed. A distinct
   bearer marker is deferred until route scoring has a use for it.
-- **Source routes:** a hint consumed by a bridge leads to forwarding on
-  both egresses allowed by the matrix, because the bridge cannot know which
-  side the next hint is on. Pruning by learned neighbor side is an
-  optimization, deferred.
+- **Source routes:** a hint consumed by a bridge leads to one transmission,
+  which reaches both the air and the BLE space.
 - **Duty ceiling:** bridged LoRa transmissions count against it like any
-  other forward. Bearer exports spend no LoRa airtime.
+  other forward. Bearer copies spend no LoRa airtime.
 
 ### P3. Channel access (`channel-access.md`)
 
@@ -421,7 +381,7 @@ clear of the MeshCore block (4976–4978).
 - bearer frames received;
 - dropped by the ingress limit;
 - malformed;
-- exported;
+- advertised;
 - dropped from the bearer transmit queue.
 
 **Independence from other switches.**
@@ -488,38 +448,21 @@ malformed `VER`.
 
 **`umsh-mac`.**
 
-- **Configuration:** `BearerConfig { enabled }` beside `RepeaterConfig`.
-- **Export queue:** a bounded queue of exported frames (8 × `FRAME`, about
-  2 KB inside `Mac`), drained through `poll_bearer_export(cx)`. A full queue
-  drops the oldest frame and counts it.
-- **Entry gate:** `maybe_forward_received` runs when either the repeater or
-  the bearer is enabled.
-- **Planning:** `plan_forwarding` computes the egress set from the matrix,
-  shares one dup-cache insert and one rewrite, enqueues for LoRa when that
-  egress is allowed, and pushes the rewrite to the export queue when that
-  egress is allowed.
-- **Local origination:** the three `tx_queue` enqueue sites and the
-  immediate-ACK path export frames from `TxPriority::Application` and
-  `ImmediateAck`, not from `Retry`.
+- **No bearer state.** The MAC gains no configuration, queue, or export
+  path; ingress arrives through the radio mux and the repeater gate in
+  `maybe_forward_received` applies unchanged.
 - **Contention:** `sample_flood_contention_delay_ms` draws uniformly over
   the window for `Bearer`.
-- **Deferral and confirmation:** `defer_pending_forward` and
-  `observe_forwarding_confirmation` act only on `Air`.
-  - Check that this does not regress a backhaul leaf host. Its MAC sees the
-    device's transmissions through ULCP, so trace the origin it reports on
-    the host side.
-  - Add a regression test for the co-located internet-bridge case.
-- **Counters:** add the bearer counters.
+- **Deferral:** `defer_pending_forward` acts only on `Air`. Add a
+  regression test for the co-located internet-bridge case.
+- **Confirmation:** `observe_forwarding_confirmation` accepts every origin.
 
-**Tests in `umsh-mac`.** Cover every cell of the matrix and:
+**Tests in `umsh-mac`.**
 
-- export when the LoRa forward is later suppressed;
-- no re-export of bearer input;
-- two-hop crossing accounting;
+- a bearer reception repeated only with the repeater enabled;
 - a nonzero window for `Bearer` and zero for `Backhaul`;
 - no deferral from `Bearer` or `Backhaul` copies;
-- no confirmation from them;
-- `Retry` not exported.
+- confirmation from a `Bearer` copy.
 
 **Topology test.** A three-node topology test with two simulated channels
 and a shared bearer. Reuse whatever harness the `umsh-bridge` integration
@@ -542,8 +485,8 @@ tests use to stand up several nodes in one process.
 
 - `radio_mux_with_bridge` takes a slice of attachments, each with its own
   ingress `RxOrigin`. Hand-off is round-robin among them.
-- `transmitted()` copies go only to attachments that want them; the BLE
-  bearer does not, since its egress is the MAC export.
+- `transmitted()` copies every frame the antenna sends, from any client, to
+  every attachment.
 - The Pager and T-Beam then run the internet client and the bearer side
   by side.
 - Extend the existing mux tests.
@@ -559,9 +502,7 @@ tests use to stand up several nodes in one process.
 - **ULCP advertiser:** move it to `advertise_ext` with a legacy-PDU set,
   coordinated with the bearer set through whatever per-set control the
   spike settled.
-- **Wiring:** spawn the bearer runner and attach its port to the mux. The
-  device node driver drains `poll_bearer_export` into the bearer transmit
-  queue.
+- **Wiring:** spawn the bearer runner and attach its port to the mux.
 - **BLE gate:** stop scanning and advertising when BLE is gated off.
 - **Builds:** all five boards (`make` targets). Record flash and RAM in
   `docs/firmware-architecture.md`.
@@ -604,13 +545,14 @@ tests use to stand up several nodes in one process.
 
 ## Acceptance criteria
 
-- Two devices on different LoRa channels, each with only the bearer enabled,
+- Two repeaters on different LoRa channels, each with the bearer enabled,
   carry chat both ways with no other configuration.
 - With several bridges on one channel in one BLE space, a frame bridged onto
   that channel is transmitted once by a bridge, not once per bridge.
-- A bridge that loses LoRa contention still bridges the frame.
+- A device with its repeater disabled forwards nothing between BLE and
+  LoRa.
 - No frame circulates. Each node forwards a given frame at most once per
-  egress, and bearer input is never re-exported.
+  medium.
 - Tethered ULCP over BLE behaves as before on iOS, including bonding and
   reconnect, with the bearer on and off.
 - Bearer ingress is rate-limited; bridged LoRa transmissions stay under the
@@ -644,24 +586,12 @@ tests use to stand up several nodes in one process.
 - Recommendation: Coded S8, unless the spike shows ESP32-S3 coexistence or
   reception trouble.
 
-**D3. Bearer switch alone makes a bridge.**
+**D3. Who may bridge.** *Decided: the repeater switch*, as for the
+[LAN bearer](lan-bearer-plan.md). A node forwards across interfaces only with
+its repeater enabled; the bearer's switch alone makes it a participant.
 
-- The matrix lets a node with the repeater off forward across interfaces.
-  That is the one-toggle experience, at a cost.
-- **Cost 1, no LoRa ingress repeat.** Such a bridge never repeats on LoRa
-  what it hears on LoRa. A LoRa repeater upstream whose only downstream
-  listener is the bridge hears no repeat and retries up to its retry cap.
-- **Cost 2, the `REP` advertisement bit.** The bit is driven by the
-  repeater switch, so it understates what a bearer-only bridge does.
-  Whether bridges advertise themselves distinctly is open.
-- **The alternative:** require the repeater switch as well, with two
-  toggles in the UI.
-
-**D4. Integrated internet client parity.** The client exports on
-transmission and so has the contention-loss weakness described above. Moving
-it to the MAC export path would make both bridges behave the same. The change
-alters [ulcp-bridge.md](protocol/src/ulcp-bridge.md#integrated-clients) and is
-out of scope here unless chosen.
+**D4. Integrated internet client parity.** *Decided: both are mux
+attachments,* fed the same transmitted frames.
 
 **Risks.**
 
@@ -682,8 +612,8 @@ out of scope here unless chosen.
 
 ## Later work
 
-- **Relaying inside the BLE space.** This lifts the "never re-export"
-  rule:
+- **Relaying inside the BLE space.** A repeat heard on BLE is today a
+  duplicate everywhere it lands. Relaying would add:
   - bearer-to-bearer forwarding with its own contention window, scaled to
     the bearer's delivery window (about `N_EVENTS` × interval) rather than
     LoRa's T_frame;

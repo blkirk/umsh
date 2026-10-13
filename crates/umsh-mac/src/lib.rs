@@ -235,10 +235,6 @@ pub const DEFAULT_CHANNEL_HINT_REPLAY: usize = 8;
 /// [`PeerRegistry::hold_route`]). None: holding a route is something an
 /// application with a person choosing paths opts into.
 pub const DEFAULT_ROUTE_HOLDS: usize = 0;
-/// Default capacity of the queue of frames offered to bearers (see
-/// [`bearer`]). None: a node with no bearer has nothing to export, and a
-/// node with one opts in by sizing the queue.
-pub const DEFAULT_BEARER_EXPORTS: usize = 0;
 
 /// Largest value the `FHOPS_REM` nibble can carry.
 ///
@@ -306,7 +302,6 @@ pub trait Platform {
     type KeyValueStore: umsh_hal::KeyValueStore;
 }
 
-pub mod bearer;
 mod cache;
 mod coordinator;
 pub mod forward_id;
@@ -317,7 +312,6 @@ mod route_score;
 mod send;
 mod uplinks;
 
-pub use bearer::{BearerConfig, BearerSet};
 pub use cache::{
     DUP_CACHE_TTL_MS, DupCacheKey, DuplicateCache, RecentMic, ReplayVerdict, ReplayWindow,
 };

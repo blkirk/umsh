@@ -15,10 +15,10 @@
 //! - **The hand-off.** A [`BridgePort`] the radio multiplexer drains into
 //!   the node as [`RxOrigin::Bearer`](umsh_hal::RxOrigin), and into the
 //!   ULCP session, which hears the LAN as the device does.
-//!
-//! The bearer's egress is not here at all. The node's MAC offers frames
-//! to the bearer at its forwarding decisions, and the board's socket task
-//! drains them with `MacHandle::next_bearer_export`.
+//! - **The egress.** Every UMSH frame the radio puts on the air, as the
+//!   multiplexer reports it, queued for the board's socket task. The LAN
+//!   works as backhaul does: whether a frame is carried is the node's
+//!   ordinary forwarding decision, and the LAN sees what came of it.
 //!
 //! Spec: `docs/protocol/src/lan-bearer.md`.
 
@@ -46,6 +46,10 @@ const _: () = {
 /// Datagrams waiting for the multiplexer. The node drains them as fast as
 /// it receives anything; a few absorb a burst while it is busy.
 const QUEUE: usize = 4;
+
+/// Transmitted frames waiting for the socket task, which sends each at
+/// once; a few absorb a burst while it is busy.
+const OUTGOING: usize = 4;
 
 /// What became of one datagram.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +139,8 @@ struct State {
     limit: IngressLimit,
     queue: Deque<Vec<u8, MAX_PAYLOAD>, QUEUE>,
     waker: WakerRegistration,
+    outgoing: Deque<Vec<u8, MAX_PAYLOAD>, OUTGOING>,
+    outgoing_waker: WakerRegistration,
 }
 
 /// The LAN bearer's port into the radio multiplexer.
@@ -155,19 +161,22 @@ impl<M: RawMutex> LanPort<M> {
                 limit: IngressLimit::new(umsh_ulcp::lan::DEFAULT_INGRESS_LIMIT, 0),
                 queue: Deque::new(),
                 waker: WakerRegistration::new(),
+                outgoing: Deque::new(),
+                outgoing_waker: WakerRegistration::new(),
             })),
             stats,
         }
     }
 
     /// Start or stop accepting datagrams, at `per_minute`. Stopping drops
-    /// whatever was waiting: frames from before the bearer went away are
-    /// not worth carrying when it comes back.
+    /// whatever was waiting in either direction: frames from before the
+    /// bearer went away are not worth carrying when it comes back.
     pub fn configure(&self, active: bool, per_minute: u16, now_ms: u64) {
         self.state.lock(|cell| {
             let mut state = cell.borrow_mut();
             if !active {
                 state.queue.clear();
+                state.outgoing.clear();
             }
             if active && (!state.active || state.limit.per_minute != per_minute) {
                 state.limit = IngressLimit::new(per_minute, now_ms);
@@ -210,7 +219,51 @@ impl<M: RawMutex> LanPort<M> {
     }
 }
 
+impl<M: RawMutex> LanPort<M> {
+    /// Wait for the next frame to send to the group.
+    pub async fn outgoing(&self) -> Vec<u8, MAX_PAYLOAD> {
+        core::future::poll_fn(|cx| {
+            self.state.lock(|cell| {
+                let mut state = cell.borrow_mut();
+                state.outgoing_waker.register(cx.waker());
+                match state.outgoing.pop_front() {
+                    Some(frame) => Poll::Ready(frame),
+                    None => Poll::Pending,
+                }
+            })
+        })
+        .await
+    }
+}
+
 impl<M: RawMutex> BridgePort for LanPort<M> {
+    /// Queue a frame the radio put on the air for the group. A MeshCore
+    /// frame is left off, as one from the group is.
+    fn transmitted(&self, data: &[u8]) {
+        if classify(data) != Verdict::Accepted {
+            return;
+        }
+        let outcome = self.state.lock(|cell| {
+            let mut state = cell.borrow_mut();
+            if !state.active {
+                return None;
+            }
+            let frame = Vec::from_slice(data).expect("classified as fitting");
+            // The oldest goes first: the newest frame is the one a
+            // neighbor on the LAN is still waiting for.
+            let dropped = state.outgoing.is_full() && state.outgoing.pop_front().is_some();
+            let _ = state.outgoing.push_back(frame);
+            state.outgoing_waker.wake();
+            Some(dropped)
+        });
+        if let (Some(stats), Some(dropped)) = (self.stats, outcome) {
+            stats.bump(Counter::LanExported);
+            if dropped {
+                stats.bump(Counter::LanExportDropped);
+            }
+        }
+    }
+
     fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<Vec<u8, MAX_PAYLOAD>> {
         self.state.lock(|cell| {
             let mut state = cell.borrow_mut();
@@ -291,5 +344,27 @@ mod tests {
         port.offer(&[UMSH, 3], 60_000);
         port.configure(false, 10, 60_000);
         assert!(port.poll_receive(&mut cx).is_pending(), "stopping drops it");
+    }
+
+    /// What the radio sends goes to the group while the bearer runs, oldest
+    /// first, newest kept when it overflows; MeshCore stays off the LAN.
+    #[test]
+    fn transmitted_frames_queue_for_the_group() {
+        let port = LanPort::<NoopRawMutex>::new(None);
+        let next = || embassy_futures::block_on(port.outgoing());
+        port.transmitted(&[UMSH, 0]);
+        port.configure(true, 60, 0);
+        port.transmitted(&[0b0000_0000, 1]);
+        for tag in 1..=OUTGOING as u8 + 1 {
+            port.transmitted(&[UMSH, tag]);
+        }
+        for tag in 2..=OUTGOING as u8 + 1 {
+            assert_eq!(next().as_slice(), &[UMSH, tag]);
+        }
+        port.transmitted(&[UMSH, 9]);
+        port.configure(false, 60, 0);
+        port.configure(true, 60, 0);
+        port.transmitted(&[UMSH, 10]);
+        assert_eq!(next().as_slice(), &[UMSH, 10], "stopping drops what waited");
     }
 }

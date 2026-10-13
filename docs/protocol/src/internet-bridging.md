@@ -200,8 +200,7 @@ that old describes a mesh that has moved on.
 Each participant attaches to its device as an ordinary tethered host,
 without resetting it, and sets
 [`PROP_MAC_BACKHAUL`](ulcp-host.md#prop-mac-backhaul) to true. This
-requires the device to advertise `CAP_MAC_BACKHAUL`, which in turn
-requires `CAP_REPEATER`.
+requires the device to advertise `CAP_MAC_BACKHAUL`.
 
 A device that does not advertise `CAP_MAC_BACKHAUL` **MUST NOT** be
 attached to a bridge on the shared medium instead. A host on the medium
@@ -279,9 +278,11 @@ frame under pressure and expire queued frames after ten seconds. A connection
 boundary discards both queues and the partial HDLC decoder state.
 
 A device may run an integrated client and a [LAN bearer](lan-bearer.md)
-together. Its node is the one forwarding decision between them: a frame
-from the tunnel is offered to the bearer, and a frame from the bearer is
-carried onto the radio and, by being transmitted, into the tunnel.
+together. Both receive every frame the radio transmits, and both hand their
+frames to the node as receptions, so the node's repeater is the one
+forwarding decision between them: a frame from either crosses to the other by
+being repeated on the radio. With its repeater disabled the node carries
+nothing between them; its own traffic still reaches both.
 
 ## Host Interfaces {#host-interfaces}
 

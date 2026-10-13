@@ -943,11 +943,14 @@ and the master switch for the repeater policy in
 `PROP_MAC_REPEATER_MIN_RSSI`, and `PROP_MAC_REPEATER_MIN_SNR`, which are
 configurable while forwarding is disabled and take effect when it is
 enabled. When true, the **device identity** acts as an
-autonomous mesh repeater: its on-board node forwards overheard routable
-frames according to [Repeater Operation](repeater-operation.md), and it
-sets the repeater capability bit in its [node
-identity](node-identity.md). When false, the device identity does not
-forward and the bit is clear.
+autonomous mesh repeater: its on-board node forwards the routable UMSH
+frames it receives—off the air, from a [LAN bearer](lan-bearer.md), or over
+[backhaul](ulcp-host.md#prop-mac-backhaul)—according to [Repeater
+Operation](repeater-operation.md) and [Forwarding Across
+Bearers](lan-bearer.md#forwarding-across-bearers), and it sets the repeater
+capability bit in its [node identity](node-identity.md). When false, the
+device identity forwards nothing on any medium—it sends only its own traffic
+and its attached host's—and the bit is clear.
 
 The capability bit is a statement of fact and **MUST** track the live
 forwarding state. The advertised *role* is a separate matter: it is

@@ -5,11 +5,11 @@
 //! is switched on and the station has an IPv4 address, it joins the
 //! group, offers every datagram from it to [`PORT`] (which validates,
 //! rate-limits, and queues it for the node), sends the group every frame
-//! the node's MAC exports to the bearer, and answers mDNS queries for the
-//! `_umsh._udp` record. When any of that stops holding—the bearer
-//! switched off or regrouped, the address lost or replaced across a
-//! Wi-Fi reconnect—the MAC stops exporting, the task leaves both groups,
-//! and it starts over. A join reports membership once, so starting over
+//! the radio transmits, as [`PORT`] collects them, and answers mDNS
+//! queries for the `_umsh._udp` record. When any of that stops
+//! holding—the bearer switched off or regrouped, the address lost or
+//! replaced across a Wi-Fi reconnect—the port stops collecting, the task
+//! leaves both groups, and it starts over. A join reports membership once, so starting over
 //! is also what gets a reconnected station back into a snooping access
 //! point's or switch's forwarding table.
 //!
@@ -29,15 +29,12 @@ use embassy_net::{IpAddress, IpEndpoint, Ipv4Address, Stack};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use umsh_hal::BearerId;
 use umsh_lan_bearer::MAX_FRAME;
 use umsh_lan_bearer::txt::{Advertisement, LoraSettings};
 use umsh_ulcp::lan::State;
 use umsh_ulcp_device::lan_bearer::LanBearerConfig;
 use umsh_ulcp_runtime::driver::{LanBearerSettings, PublishEvent};
 use umsh_ulcp_runtime::lan_bearer::LanPort;
-
-use super::device_node::DeviceNodeHandle;
 
 /// The bearer's port into the radio multiplexer.
 pub static PORT: LanPort<CriticalSectionRawMutex> = LanPort::new(Some(&super::STATS));
@@ -151,7 +148,6 @@ pub struct Buffers {
     /// One octet over the limit, so an oversized datagram arrives as
     /// one and is counted as malformed.
     datagram: [u8; MAX_FRAME + 1],
-    export: [u8; MAX_FRAME],
     mdns_rx_meta: [PacketMetadata; 2],
     mdns_rx: [u8; MDNS_QUERY],
     /// One reply at a time: the next waits for this one to go out.
@@ -168,7 +164,6 @@ impl Buffers {
             tx_meta: [PacketMetadata::EMPTY; 2],
             tx: [0; 2 * MAX_FRAME],
             datagram: [0; MAX_FRAME + 1],
-            export: [0; MAX_FRAME],
             mdns_rx_meta: [PacketMetadata::EMPTY; 2],
             mdns_rx: [0; MDNS_QUERY],
             mdns_tx_meta: [PacketMetadata::EMPTY; 1],
@@ -218,19 +213,18 @@ async fn report(published: &mut Option<State>, state: State) {
     }
 }
 
-/// Stop the MAC exporting and the port accepting.
-async fn stop(mac: &DeviceNodeHandle) {
-    mac.set_bearer_enabled(BearerId::LAN, false).await;
+/// Stop the port carrying anything either way.
+fn stop() {
     PORT.configure(false, 0, now_ms());
 }
 
 /// Run the bearer for the life of the device. Spawned with the device
-/// node, whose MAC it feeds and drains.
-pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
+/// node, which it reaches through [`PORT`].
+pub async fn run(stack: Stack<'static>) -> ! {
     let buffers = storage();
     let mut published = None;
-    // The MAC starts with the bearer off, and every pass that switches it
-    // on ends by switching it off, so the idle states below need not.
+    // The port starts off, and every pass that switches it on ends by
+    // switching it off, so the idle states below need not.
     loop {
         // Changes from here on are seen: the configuration is read after.
         CONFIG_CHANGED.reset();
@@ -282,7 +276,6 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
         let mdns_ready =
             stack.join_multicast_group(MDNS_GROUP).is_ok() && mdns.bind(MDNS_PORT).is_ok();
 
-        mac.set_bearer_enabled(BearerId::LAN, true).await;
         PORT.configure(true, config.ingress_limit(), now_ms());
         report(&mut published, State::Active).await;
         let own = IpEndpoint::new(IpAddress::Ipv4(address), config.group().port);
@@ -297,13 +290,13 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
                     (!multicast).then_some(destination),
                     &mut buffers.datagram,
                 ),
-                export(&socket, &mac, destination, &mut buffers.export),
+                export(&socket, destination),
             ),
             advertise(&mut mdns, mdns_ready, address, &mut buffers.reply),
         )
         .await;
 
-        stop(&mac).await;
+        stop();
         drop(socket);
         drop(mdns);
         let _ = stack.leave_multicast_group(group);
@@ -336,17 +329,12 @@ async fn receive(
     }
 }
 
-/// Send the group every frame the node's MAC exports to the bearer.
-async fn export(
-    socket: &UdpSocket<'_>,
-    mac: &DeviceNodeHandle,
-    destination: IpEndpoint,
-    frame: &mut [u8; MAX_FRAME],
-) {
+/// Send the group every frame the radio transmits.
+async fn export(socket: &UdpSocket<'_>, destination: IpEndpoint) {
     loop {
-        let len = mac.next_bearer_export(BearerId::LAN, frame).await;
+        let frame = PORT.outgoing().await;
         // A send that fails is lost the way a collided transmission is.
-        if let Err(error) = socket.send_to(&frame[..len], destination).await {
+        if let Err(error) = socket.send_to(&frame, destination).await {
             super::debug_log(format_args!("lan: send failed: {:?}", error));
         }
     }

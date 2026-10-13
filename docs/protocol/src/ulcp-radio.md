@@ -64,9 +64,9 @@ Id   | Mnemonic              | Commands | Description
 * Value Type: BOOL
 * Post-Reset Value: 0 (false)
 
-Set to 1 if the PHY is enabled, set to 0 otherwise. May be directly enabled to
-bypass higher-level packet processing in order to implement things like packet
-sniffers.
+Set to 1 if the PHY is enabled, set to 0 otherwise. Enabling the PHY bypasses
+nothing: a device with a node of its own brings up whatever that node is
+configured to do, forwarding included.
 
 ### PROP 35: `PROP_PHY_FREQ` {#prop-phy-freq}
 

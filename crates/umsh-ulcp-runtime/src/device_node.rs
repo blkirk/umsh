@@ -174,8 +174,7 @@ pub const MAX_NODE_PEERS: usize = MAX_DEV_PEERS + MAX_DEV_ADMINS;
 /// bytes per tracked sender): 4 full-key + 2 hint-only senders per
 /// channel keeps the whole table ~2 KiB/channel; extra concurrent senders
 /// on one channel fail closed (dropped, never accepted unchecked).
-/// No route holds (a device has no person choosing paths), and room for
-/// [`NODE_BEARER_EXPORTS`] frames awaiting the LAN bearer.
+/// No route holds (a device has no person choosing paths).
 pub type DeviceNodeMac<CS> = umsh_mac::Mac<
     DeviceNodePlatform<CS>,
     1,
@@ -188,7 +187,6 @@ pub type DeviceNodeMac<CS> = umsh_mac::Mac<
     4,
     2,
     0,
-    NODE_BEARER_EXPORTS,
 >;
 pub type DeviceNodeHandle<CS> = MacHandle<
     'static,
@@ -203,14 +201,7 @@ pub type DeviceNodeHandle<CS> = MacHandle<
     4,
     2,
     0,
-    NODE_BEARER_EXPORTS,
 >;
-
-/// Frames the node's MAC holds for the LAN bearer: about 1 KiB on a board
-/// with one, nothing on a board without. The bearer task sends each as
-/// soon as it is offered, so the queue only absorbs a forwarding burst
-/// while the socket is busy.
-pub const NODE_BEARER_EXPORTS: usize = if cfg!(feature = "lan-bearer") { 4 } else { 0 };
 pub type DeviceNodeHost<CS> = Host<DeviceNodeHandle<CS>>;
 pub type DeviceNode<CS> = LocalNode<DeviceNodeHandle<CS>>;
 
@@ -323,8 +314,6 @@ static MAC_RX_ACCEPTED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARDED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARD_CANCELLED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARD_DROPPED_POLICY: AtomicU32 = AtomicU32::new(0);
-static MAC_BEARER_EXPORTED: AtomicU32 = AtomicU32::new(0);
-static MAC_BEARER_EXPORT_DROPPED: AtomicU32 = AtomicU32::new(0);
 
 /// The most recently published MAC tallies.
 ///
@@ -340,8 +329,6 @@ pub fn mac_counters() -> MacCounters {
         forwarded: MAC_FORWARDED.load(Ordering::Relaxed),
         forward_cancelled: MAC_FORWARD_CANCELLED.load(Ordering::Relaxed),
         forward_dropped_policy: MAC_FORWARD_DROPPED_POLICY.load(Ordering::Relaxed),
-        bearer_exported: MAC_BEARER_EXPORTED.load(Ordering::Relaxed),
-        bearer_export_dropped: MAC_BEARER_EXPORT_DROPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -353,8 +340,6 @@ fn publish_mac_counters(counters: MacCounters) {
     MAC_FORWARDED.store(counters.forwarded, Ordering::Relaxed);
     MAC_FORWARD_CANCELLED.store(counters.forward_cancelled, Ordering::Relaxed);
     MAC_FORWARD_DROPPED_POLICY.store(counters.forward_dropped_policy, Ordering::Relaxed);
-    MAC_BEARER_EXPORTED.store(counters.bearer_exported, Ordering::Relaxed);
-    MAC_BEARER_EXPORT_DROPPED.store(counters.bearer_export_dropped, Ordering::Relaxed);
 }
 
 /// The transmit power the radio was last configured with, in dBm, offset
@@ -816,8 +801,6 @@ struct MacMirrors {
     forwarded: Mirror,
     forward_dropped_policy: Mirror,
     forward_cancelled: Mirror,
-    bearer_exported: Mirror,
-    bearer_export_dropped: Mirror,
 }
 
 impl MacMirrors {
@@ -827,8 +810,6 @@ impl MacMirrors {
             forwarded: Mirror::new(),
             forward_dropped_policy: Mirror::new(),
             forward_cancelled: Mirror::new(),
-            bearer_exported: Mirror::new(),
-            bearer_export_dropped: Mirror::new(),
         }
     }
 
@@ -846,15 +827,6 @@ impl MacMirrors {
             stats,
             Counter::ForwardCancelled,
             counters.forward_cancelled,
-        );
-        // The MAC's only bearer is the LAN, so its bearer tallies are the
-        // LAN's.
-        self.bearer_exported
-            .advance(stats, Counter::LanExported, counters.bearer_exported);
-        self.bearer_export_dropped.advance(
-            stats,
-            Counter::LanExportDropped,
-            counters.bearer_export_dropped,
         );
     }
 }

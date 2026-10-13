@@ -47,9 +47,12 @@
 //!
 //! A [`BridgeAttachment`] feeds frames from something other than the
 //! radio—the internet bridge client's tunnel, a LAN bearer—to one
-//! medium client, marked with the attachment's own [`RxOrigin`]. Any
-//! number may be attached; hand-off round-robins among them, and runs
-//! while a transmit is in flight, since none of them touches the radio.
+//! medium client, marked with the attachment's own [`RxOrigin`], and is
+//! handed a copy of every frame the radio puts on the air. That is all an
+//! attachment is: whether a frame crosses from one to another is the
+//! node's ordinary forwarding decision. Any number may be attached;
+//! hand-off round-robins among them, and runs while a transmit is in
+//! flight, since none of them touches the radio.
 
 use core::future::poll_fn;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -109,9 +112,7 @@ pub trait BridgePort {
         cx: &mut core::task::Context<'_>,
     ) -> Poll<heapless::Vec<u8, MAX_PAYLOAD>>;
 
-    /// A copy of a frame the node put on the air. A port whose egress is
-    /// something else—a LAN bearer takes the MAC's forwarding decisions,
-    /// not its transmissions—keeps the default, which ignores it.
+    /// A copy of a frame the radio put on the air, from any client.
     fn transmitted(&self, _data: &[u8]) {}
 }
 
@@ -261,7 +262,9 @@ where
                 }
                 clients[sent.owner].tx_done.signal(result);
                 if aired {
-                    for bridge in bridges.iter().filter(|bridge| bridge.node == sent.owner) {
+                    // Every attachment hears what the antenna sends,
+                    // whichever client sent it.
+                    for bridge in bridges {
                         bridge.port.transmitted(&sent.data);
                     }
                     deliver(
@@ -471,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_is_node_only_and_handoffs_continue_during_rf_transmission() {
+    fn a_bridge_hears_the_antenna_and_handoffs_continue_during_rf_transmission() {
         let real = channels();
         let session = channels();
         let node = channels();
@@ -523,7 +526,9 @@ mod tests {
                     assert_eq!(node.rx.receive().await.data.as_slice(), &[tag]);
                 }
 
-                // Neither RF overhearing nor direct host traffic is mirrored.
+                // What the radio hears is not mirrored; what it sends is,
+                // whichever client sent it. A backhauled frame never
+                // reaches the air, so it is not.
                 real.rx.send(umsh_rx_frame(0xC1)).await;
                 node.rx.receive().await;
                 session.rx.receive().await;
@@ -536,7 +541,8 @@ mod tests {
                 session.tx.send(tx_request(0xC3)).await;
                 session.tx_done.wait().await.unwrap();
                 assert_eq!(node.rx.receive().await.info.origin, RxOrigin::Backhaul);
-                assert_eq!(bridge.output.borrow().len(), 2);
+                assert_eq!(bridge.output.borrow().len(), 3);
+                assert_eq!(bridge.output.borrow()[2], vec![0xC2]);
                 assert_eq!(stats.get(Counter::TxPackets), 3);
                 assert_eq!(stats.get(Counter::RxPackets), 1);
             };

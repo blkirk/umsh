@@ -326,8 +326,8 @@ is enabled, and what state the connection is in.
 ### [LAN Bearer](ulcp-lan-bearer.md)
 
 The device's own node joined to a [LAN bearer](lan-bearer.md): whether
-it is enabled, which multicast group it joins, how fast it lets the
-network spend its airtime, and whether it has joined.
+it is enabled, which multicast group it joins, how many frames from the
+network it takes, and whether it has joined.
 
 ### [I2C Bus Access](ulcp-i2c.md)
 

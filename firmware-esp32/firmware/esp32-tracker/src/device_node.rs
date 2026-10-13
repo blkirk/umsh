@@ -96,8 +96,8 @@ async fn node_admin_task(node_handle: DeviceNode, input: &'static SessionInput, 
 
 #[cfg(feature = "lan-bearer")]
 #[embassy_executor::task]
-async fn lan_bearer_task(stack: embassy_net::Stack<'static>, mac: DeviceNodeHandle) {
-    crate::lan::run(stack, mac).await
+async fn lan_bearer_task(stack: embassy_net::Stack<'static>) {
+    crate::lan::run(stack).await
 }
 
 #[cfg(feature = "meshcore-forwarder")]
@@ -210,6 +210,6 @@ pub async fn bring_up(
     );
     spawner.spawn(node_advert_task(parts.mac).unwrap());
     #[cfg(feature = "lan-bearer")]
-    spawner.spawn(lan_bearer_task(stack, parts.mac).unwrap());
+    spawner.spawn(lan_bearer_task(stack).unwrap());
     spawner.spawn(node_reboot_quiesce_task(parts.mac).unwrap());
 }

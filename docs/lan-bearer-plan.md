@@ -24,9 +24,10 @@ own. [Phase 2](#phase-2-ios) adds the iOS virtual radio.
 
 ## Goals
 
-- **Radios as LAN repeaters.** A radio with the LAN bearer enabled exports
-  what it forwards and originates to the multicast group, and forwards what
-  it hears there onto LoRa, with the same forwarding engine it uses for
+- **Radios as LAN repeaters.** A radio on the LAN sends everything its
+  antenna transmits to the multicast group, and hands what it hears there to
+  its node as receptions, exactly as backhaul does. With its repeater enabled
+  the node forwards them onto LoRa with the same engine it uses for
   LoRa-to-LoRa repeating.
 - **Channel bridging.** Several radios on one LAN join their LoRa meshes,
   whether they share LoRa settings or not.
@@ -97,9 +98,10 @@ multiplexer through `BridgePort` (`crates/umsh-ulcp-runtime/src/radio_mux.rs:98`
 Ingress goes to the node as `RxOrigin::Backhaul`, and egress is the node's
 successful transmissions.
 
-The LAN bearer follows the same model with three deliberate departures, each
-forced by the LAN being a shared broadcast space rather than a point-to-point
-tunnel:
+The LAN bearer follows the same model—a radio-mux attachment that receives
+every frame the antenna transmits and hands its own frames to the node as
+receptions—with two deliberate departures, each forced by the LAN being a
+shared broadcast space rather than a point-to-point tunnel:
 
 1. **Ingress must contend on LoRa.** The MAC skips the contention window for
    unmeasured receptions because "a frame handed over a point-to-point link
@@ -107,19 +109,14 @@ tunnel:
    (`crates/umsh-mac/src/coordinator.rs:5930`). On the LAN that is false.
    Every radio on the network hears every datagram, and radios on the same
    LoRa channel would all transmit it at once.
-2. **Export must happen at the forwarding decision, not the transmission.** A
-   radio that loses LoRa contention to an ordinary repeater has its forward
-   suppressed (`defer_pending_forward`, `coordinator.rs:5999`). Under
-   export-on-transmission it would bridge only the frames it happened to win,
-   which in a dense mesh is a minority. The integrated internet client has the
-   same weakness (decision D4).
-3. **Only over-the-air copies may speak for the LoRa channel.** A LAN copy
+2. **Only over-the-air copies may speak for the LoRa channel.** A LAN copy
    says nothing about which LoRa channel, if any, its sender transmitted on.
    Today any duplicate defers a pending forward, and an unmeasured one
    reschedules it with zero delay. Any copy matching a post-TX listen also
    ends it (`observe_forwarding_confirmation`, called at `coordinator.rs:2688`
-   with no origin check). Both are LoRa-channel observations and must come
-   only from `RxOrigin::Air`.
+   with no origin check). Deferral is a LoRa-channel observation and must
+   come only from `RxOrigin::Air`. Confirmation is not: a LAN copy is a frame
+   some radio transmitted, and confirms as a backhaul copy does.
 
 These are properties of any shared broadcast bearer, not of IP. The MAC work
 is written for any number of bearers, of which the LAN is the first; a later
@@ -201,7 +198,7 @@ the same wrapper with real storage, OS entropy, and persistent counters.
 
 ```
  LoRa X ── radio A ──┐                                ┌── radio B ── LoRa Y
-     (export at decision, Bearer ingress)             │
+     (antenna TX out, Bearer ingress)                 │
                      ╞══════ LAN multicast group ═════╡
                      │         239.255.134.121:15056      │
           desktop tools, bridge,           phone: Network Extension
@@ -211,79 +208,57 @@ the same wrapper with real storage, OS entropy, and persistent counters.
                                                  └── UMSH app (MAC + chat)
 ```
 
-**Radios** join the group as a bearer of their node's MAC. One forwarding
-decision now produces up to two kinds of output:
+**Radios** attach the group to the radio multiplexer as a `BridgePort`, as
+backhaul and the integrated internet client do. The MAC has no bearer
+machinery of its own:
 
-- the existing LoRa enqueue, with contention, deferral, and confirmation;
-- an immediate export to each eligible bearer, with none of those.
-
-Bearer ingress enters the radio multiplexer through a `BridgePort` attachment
-and reaches the node as `RxOrigin::Bearer`. The MAC exposes exported frames as
-a bounded queue that the node driver drains into the bearer's transmit path.
-That keeps a new associated type off `Platform`, which every adapter would
-otherwise have to carry.
+- **Ingress:** a datagram reaches the node as `RxOrigin::Bearer` and goes
+  through the ordinary forwarding procedure, which requires the repeater.
+- **Egress:** every frame the antenna transmits, from any mux client, is
+  copied to the attachment (`BridgePort::transmitted`) and sent to the group.
+  A frame the radio does not transmit does not reach the LAN.
 
 ### Forwarding matrix
 
-Rows are where a frame came from; columns are where the node may send it.
-"Decision" means the ordinary forwarding procedure passed: not a duplicate,
-flood hops remain or the source route names this node, region policy allows
-it, and not addressed to this node.
+There is no matrix of its own. A node with its repeater disabled forwards
+nothing, from any medium; its own and its host's transmissions still reach
+the LAN because the antenna sent them. A node with its repeater enabled
+repeats LAN receptions on LoRa, and its LoRa repeats reach the LAN.
 
-| Arrived from | To LoRa | To a bearer |
-|---|---|---|
-| LoRa (`Air`) | Decision, repeater enabled | Decision, that bearer enabled |
-| A bearer | Decision, that bearer enabled; contended | Decision, if a different bearer |
-| Internet tunnel or host (`Backhaul`) | Decision, repeater enabled (unchanged) | Decision, that bearer enabled |
-| Local origination | Always (unchanged) | That bearer enabled |
-
-- **Never back to the arriving bearer.** A frame is not exported to the bearer
-  it came from, so the medium itself never relays.
-- **The bearer switch alone makes a bridge.** The second row forwards to LoRa
-  even with LoRa-to-LoRa repeating off. Whether to keep that is decision D3.
-- **One decision, one dup-cache entry, one rewrite.** Every exported copy is
-  byte-for-byte the frame enqueued for LoRa: FHOPS decremented or source-route
-  hint consumed, this node's router hint prepended to the trace, region code
-  inserted.
-- **No re-export on retry.** Retransmissions of an already exported frame
-  (`TxPriority::Retry`) are not exported again. A route retry carries a new
-  forwarding identity and is exported as a new frame.
+- **Nothing returns to the LAN unsent.** A LAN reception reaches the LAN
+  again only if the node repeats it on air, where every participant has
+  already seen it and drops it as a duplicate.
+- **One decision, one rewrite.** The LAN copy is byte-for-byte the frame
+  the antenna sent.
 
 ### Worked crossings
 
 **Two radios, different settings.**
 
 1. A node on X transmits.
-2. Radio A (on X) hears it, decides, enqueues a LoRa repeat on X, and exports
-   the same rewrite to the LAN.
+2. Radio A (on X) hears it, decides, and repeats it on X. The transmission
+   goes to the LAN.
 3. Radio C (on Y) receives the datagram as `Bearer`. It passes the dup check,
-   decrements the hop, and enqueues on Y after a contention window.
-4. C does not export it back to the LAN.
+   decrements the hop, and repeats on Y after a contention window. That
+   transmission goes to the LAN too, where A drops it as a duplicate.
 
-The crossing costs two flood hops, as with the internet bridge. If A's repeat
-on X is suppressed because an ordinary repeater went first, the export has
-already happened.
+The crossing costs two flood hops, as with the internet bridge.
 
 **Three radios on X, one on Y.**
 
-- **X to Y:** A and B both hear the LoRa frame and both export it. C takes the
-  first copy; the second is a duplicate.
-- **Y to X:**
-  - C exports. A and B each receive it as `Bearer` and contend with windows
-    drawn uniformly from the flood contention range.
-  - A transmits first. B hears A's LoRa transmission over the air and defers,
-    as it would for any repeat it overheard.
-  - B receives nothing more from the LAN: C exported once, and A does not
-    re-export bearer input.
+- **X to Y:** A and B both hear the LoRa frame and contend. The first to
+  transmit crosses; the other hears it over the air and defers.
+- **Y to X:** C's repeat on Y reaches the LAN. A and B each receive it as
+  `Bearer` and contend with windows drawn uniformly from the flood contention
+  range. A transmits first; B hears it over the air and defers.
 
 **A phone's frame.** The virtual radio sends it to the group. Every radio
 receives it as `Bearer` and contends; the first to transmit on each channel
 suppresses the others on that channel. One flood hop is spent at each radio
 that carries it onto LoRa.
 
-**A radio's own traffic.** A node originating a message on X transmits on X
-and exports in parallel. A radio on Y carries it there without the LoRa
-transmission on X having to happen first.
+**A radio's own traffic.** A node originating a message on X transmits on X,
+and the transmission goes to the LAN.
 
 **The virtual radio** is a ULCP device whose PHY is the multicast group:
 
@@ -420,25 +395,18 @@ missing optional key as false and ignore unknown keys.
 ### P4. Forwarding across bearers
 
 - **The model:** a node may have one or more *bearers* in addition to its
-  radio. The [forwarding matrix](#forwarding-matrix) becomes normative.
-- **Export at decision:** the frame offered to a bearer is the forwarding
-  procedure's rewritten output, offered when the decision is made, whether or
-  not the radio transmission later happens.
-- **No return to the arriving bearer:** a frame received from a bearer is not
-  offered back to that bearer. It may be offered to a different one.
-- **Bearer identity:** a reception records which bearer it arrived on, so the
-  node knows which egress to skip.
+  radio, each working as backhaul does: receptions in, the antenna's
+  transmissions out. The repeater switch alone decides forwarding.
+- **Bearer identity:** a reception records which bearer it arrived on.
 - **Hop accounting:** a crossing between two radios costs two flood hops. A
-  frame originated by the exporting node costs one, at the importing node.
+  frame a bridging radio originates costs one, at the radio that repeats it.
 - **Trace:** a bearer reception adds the existing "nothing was measured" trace
   signal entry, so no new trace semantics are needed. A distinct bearer marker
   is deferred until route scoring has a use for it.
-- **Source routes:** a hint consumed by a bridging node leads to forwarding on
-  every egress the matrix allows, because the node cannot know which side the
-  next hint is on. Pruning by learned neighbor side is an optimization,
-  deferred.
+- **Source routes:** a hint consumed by a bridging node leads to one
+  transmission, which reaches both the air and the LAN.
 - **Duty ceiling:** LoRa transmissions of bearer input count against it like
-  any other forward. Bearer exports spend no LoRa airtime.
+  any other forward. LAN copies spend no LoRa airtime.
 
 ### P5. Channel access
 
@@ -453,13 +421,11 @@ missing optional key as false and ignore unknown keys.
     heard the radio channel.
   - This also corrects the internet bridge's co-located-client case, where a
     tunnel copy currently reschedules a pending forward to fire immediately.
-- **Bearer copies do not confirm:** a copy received from a bearer does not
-  satisfy
-  [forwarding confirmation](protocol/src/repeater-operation.md#forwarding-confirmation).
-  Backhaul copies still do. A backhauled host's MAC sees its own frame come
-  back from the device's node, as a backhaul reception, once the device has
-  carried it; that return is the host's confirmation, and dropping it would
-  make every backhauled send retry.
+- **Bearer copies confirm:** a copy received from a bearer satisfies
+  [forwarding confirmation](protocol/src/repeater-operation.md#forwarding-confirmation),
+  as a backhaul copy does. A LAN endpoint's frame comes back to the group
+  when a radio repeats it on air; that return is the endpoint's
+  confirmation.
 - **Ack-MIC cancellation is unchanged.** It stays origin-independent: an
   acknowledgment proves delivery whichever way it arrived.
 
@@ -493,7 +459,7 @@ empty write is `PROP_IDENT_ROLE`, where empty means "derive your own."
 associated, the bearer reports state 2.
 
 Counters under `CAP_STATS`: received, dropped by the ingress limit, malformed,
-exported, and dropped from the transmit queue.
+sent to the group, and dropped from the transmit queue.
 
 **Virtual radio.** No new identifiers. It declares the existing host-side
 capabilities (raw stream, host filters, auto-ack, inbound queue, saved state)
@@ -588,39 +554,21 @@ committing to an approach.
 
 **`umsh-mac`.**
 
-- **Configuration:** `BearerConfig` per bearer (enabled) beside
-  `RepeaterConfig`.
-- **Export queue:** a bounded queue of exported frames (8 × `FRAME`, about
-  2 KB inside `Mac`), each tagged with its eligible bearers, drained through
-  `poll_bearer_export(cx)`. A full queue drops the oldest frame and counts it.
-- **Entry gate:** `maybe_forward_received` (`coordinator.rs:5233`) runs when
-  the repeater or any bearer is enabled.
-- **Planning:** `plan_forwarding` (`coordinator.rs:5337`) computes the egress
-  set from the matrix, shares one dup-cache insert and one rewrite, enqueues
-  for LoRa when that egress is allowed, and pushes the rewrite to the export
-  queue for the allowed bearers.
-- **Local origination:** the `tx_queue` enqueue sites and the immediate-ACK
-  path export frames from `TxPriority::Application` and `ImmediateAck`, not
-  from `Retry`. A route retry is exported as a new frame. Frames another stack
-  sharing the radio transmits (`LocalTx`) are exported unless the node has
-  already forwarded them.
+- **No bearer state.** The MAC gains no configuration, queue, or export
+  path; ingress arrives through the radio mux and the repeater gate in
+  `maybe_forward_received` applies unchanged.
 - **Contention:** `sample_flood_contention_delay_ms` (`coordinator.rs:5929`)
   draws uniformly over the window for `Bearer`.
 - **Deferral and confirmation:** `defer_pending_forward`
   (`coordinator.rs:5999`) acts only on `Air`; `observe_forwarding_confirmation`
-  (`coordinator.rs:6485`) ignores `Bearer` and keeps `Backhaul`, which a
-  backhaul leaf host depends on (P5).
-- **Counters:** add the bearer counters.
+  accepts every origin.
 
-**Tests in `umsh-mac`.** Cover every cell of the matrix and:
+**Tests in `umsh-mac`.**
 
-- export when the LoRa forward is later suppressed;
-- no export back to the arriving bearer, and export to a different one;
-- two-hop crossing accounting;
+- a bearer reception repeated only with the repeater enabled;
 - a nonzero window for `Bearer` and zero for `Backhaul`;
 - no deferral from `Bearer` or `Backhaul` copies;
-- no confirmation from them;
-- `Retry` not exported.
+- confirmation from a `Bearer` copy.
 
 **Topology test.** Three nodes on two simulated LoRa channels sharing one
 bearer, using the `SimulatedNetwork` harness in
@@ -643,8 +591,8 @@ bearer, using the `SimulatedNetwork` harness in
 
 - `radio_mux_with_bridge` takes a slice of attachments, each with its own
   ingress `RxOrigin`. Hand-off is round-robin among them.
-- `transmitted()` copies go only to attachments that want them. The LAN
-  bearer does not, since its egress is the MAC export.
+- `transmitted()` copies every frame the antenna sends, from any client, to
+  every attachment.
 - An attachment says whether the ULCP session hears it too. The LAN does: it
   is a shared medium the device hears, like the air, so an attached host in
   promiscuous or filtered mode sees bearer receptions as unmeasured frames.
@@ -656,8 +604,8 @@ bearer, using the `SimulatedNetwork` harness in
 #### 1.6 ESP32 firmware
 
 - embassy-net `udp` and `multicast` features in the Wi-Fi images.
-- A LAN bearer task: one UDP socket, group join, ingress limit, transmit from
-  the MAC export queue.
+- A LAN bearer task: one UDP socket, group join, ingress limit, transmit
+  what the mux attachment receives.
 - An mDNS responder publishing P3, updated on LoRa settings changes.
 - The P6 properties and counters.
 - Rejoin the group after a Wi-Fi reconnect.
@@ -753,9 +701,9 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
   than together, and an overheard copy defers the rest. Whether a deferred
   radio later transmits anyway is the ordinary deferral limit's business,
   not the bearer's.
-- A radio that loses LoRa contention still bridges the frame.
-- No frame circulates. Each node forwards a given frame at most once per
-  egress, and bearer input never returns to its bearer.
+- A radio with its repeater disabled forwards nothing between the LAN and
+  LoRa.
+- No frame circulates. Each node forwards a given frame at most once.
 - LAN ingress is rate-limited; bridged LoRa transmissions stay under the duty
   ceiling.
 - `umshctl --lan` reaches a LoRa-only node with no local radio, and
@@ -781,22 +729,13 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 - **D2. SSID acquisition.** The extension runs only on listed networks, and
   reading the current SSID may need location permission. The fallback is
   asking the user to confirm the network when radios are first found.
-- **D3. The bearer switch alone makes a bridge.** *Decided: as the matrix
-  says. Phase 1 implements and specifies it.* The matrix lets a node with
-  the repeater off forward between the LAN and LoRa: one toggle, at a cost.
-  - Such a node never repeats on LoRa what it hears on LoRa, so an upstream
-    repeater whose only downstream listener is that node hears no repeat and
-    retries up to its retry cap.
-  - The `rep` TXT key and the advertisement `REP` bit follow the repeater
-    switch, so they understate what a bearer-only node does.
-  - The alternative is requiring the repeater switch too, with two toggles in
-    the UI.
-- **D4. Integrated internet client parity.** The client exports on
-  transmission and so has the contention-loss weakness described under
-  [A crossing is already defined](#a-crossing-is-already-defined). Moving it
-  to the MAC export path, as another bearer, would make both behave the same.
-  That alters [ulcp-bridge.md](protocol/src/ulcp-bridge.md#integrated-clients)
-  and is out of scope unless chosen.
+- **D3. Who may bridge.** *Decided: the repeater switch.* A node forwards
+  between the LAN and LoRa only with its repeater enabled; a bearer's switch
+  alone makes it a participant on the LAN, carrying its own and its host's
+  traffic, as a repeater-off device is a leaf on the internet bridge.
+- **D4. Integrated internet client parity.** *Decided: both are mux
+  attachments.* The LAN and the internet client receive the same transmitted
+  frames and enter the node the same way.
 - **D5. Bearer identity in `RxOrigin`.** *Decided: a payload,
   `RxOrigin::Bearer(BearerId)`, with up to eight bearers.* A payload on `RxOrigin::Bearer`
   (a small bearer index) versus a separate tag carried beside the reception.
@@ -826,12 +765,6 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 - **Traffic merging.** Bridging meshes puts each mesh's floods on the others'
   airtime. Region policy and the existing exit clamp are the tools. A
   per-bearer region list is a possible follow-up if field use shows the need.
-- **No confirmation for LAN endpoints.** A frame an endpoint sends to the
-  group is never returned to the group by the radios that carry it, so an
-  endpoint's MAC never hears its forward and retries up to its cap. The
-  radios absorb the retries as duplicates; the cost is LAN datagrams, not
-  airtime. Treating a send to a bearer as confirmed on transmission is the
-  fix if the retries matter.
 - **ESP32 RAM.** If the bearer and mDNS do not fit beside the internet client
   on an image, that image ships one or the other, decided per board.
 

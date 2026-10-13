@@ -59,7 +59,7 @@ Code | Name                | Requires                             | Grants
 33   | `CAP_HOST_RX_QUEUE` | `CAP_HOST_FILTER`                    | The inbound queue, its properties, `CMD_QUEUE_DRAIN`, the buffered-frame metadata, and the mute tables
 34   | `CAP_HOST_KEYS`     | `CAP_HOST_FILTER`                    | `PROP_HOST_CHANNEL_KEYS` and `PROP_HOST_PEER_KEYS`
 35   | `CAP_HOST_AUTO_ACK` | `CAP_HOST_KEYS`, `CAP_HOST_RX_QUEUE` | `PROP_HOST_AUTO_ACK` and acknowledgement delegation
-48   | `CAP_MAC_BACKHAUL`  | `CAP_REPEATER`                       | `PROP_MAC_BACKHAUL` and the point-to-point link to the device's node
+48   | `CAP_MAC_BACKHAUL`  | `CAP_DEV_IDENTITY`                   | `PROP_MAC_BACKHAUL` and the point-to-point link to the device's node
 
 A device advertising none of these is a transparent radio: it delivers
 every frame it receives and holds nothing on anyone's behalf.

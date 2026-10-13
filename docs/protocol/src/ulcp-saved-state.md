@@ -21,8 +21,8 @@ persisted succeeds trivially.
 A device advertising `CAP_SAVE` can snapshot its provisioning to
 non-volatile storage so that it can operate autonomously across power
 cycles—the radio can be powered on in the morning with no phone present,
-restore its configuration, enable the PHY, and resume queueing and
-acknowledging on the host's behalf.
+restore its configuration, enable the PHY, and resume operating—forwarding,
+if it is a repeater.
 
 * [`CMD_SAVE`](ulcp-saved-state.md#cmd-save) atomically writes the current **device
   domain** configuration—including the RF configuration and the current
