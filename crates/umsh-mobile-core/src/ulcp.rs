@@ -3927,7 +3927,6 @@ impl UlcpSessionState {
 #[uniffi::export]
 pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, MobileError> {
     let capabilities = decode_capabilities(&capabilities)?;
-    validate_capability_dependencies(&capabilities)?;
     let has = |capability| capabilities.contains(&capability);
 
     let mut properties = vec![
@@ -4037,7 +4036,6 @@ pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, Mob
 
 pub(crate) fn ulcp_refresh_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, MobileError> {
     let decoded = decode_capabilities(&capabilities)?;
-    validate_capability_dependencies(&decoded)?;
     let has = |capability| decoded.contains(&capability);
     let mut properties = Vec::new();
     if has(cap::DEV_IDENTITY) {
@@ -4071,7 +4069,6 @@ pub fn inspect_ulcp_sync(
 ) -> Result<UlcpSyncRecord, MobileError> {
     let value = |key| property_value(&responses, key);
     let capabilities = decode_capabilities(value(prop::CAPS)?)?;
-    validate_capability_dependencies(&capabilities)?;
     let has = |capability| capabilities.contains(&capability);
 
     let interface = decode_exact_pui(value(prop::INTERFACE_TYPE)?)?;
@@ -4607,7 +4604,6 @@ pub fn ulcp_category_properties(
     capabilities: Vec<u8>,
 ) -> Result<Vec<u32>, MobileError> {
     let capabilities = decode_capabilities(&capabilities)?;
-    validate_capability_dependencies(&capabilities)?;
     let has = |capability| capabilities.contains(&capability);
     let mut properties = Vec::new();
     let mut when = |gate: bool, keys: &[u32]| {
@@ -4899,7 +4895,6 @@ pub fn inspect_ulcp_device_card(
 ) -> Result<UlcpDeviceCardRecord, MobileError> {
     let raw = property_value(&responses, prop::CAPS)?.to_vec();
     let capabilities = decode_capabilities(&raw)?;
-    validate_capability_dependencies(&capabilities)?;
     let has = |capability| capabilities.contains(&capability);
     let text = |key| {
         property_value(&responses, key)
@@ -5943,46 +5938,12 @@ pub(crate) fn decode_capabilities(value: &[u8]) -> Result<Vec<u32>, MobileError>
     let mut rest = value;
     while !rest.is_empty() {
         let (capability, used) = pui::decode(rest).map_err(|_| MobileError::InvalidUlcpFrame)?;
-        if capabilities.contains(&capability) {
-            return Err(MobileError::InvalidUlcpFrame);
+        if !capabilities.contains(&capability) {
+            capabilities.push(capability);
         }
-        capabilities.push(capability);
         rest = &rest[used..];
     }
     Ok(capabilities)
-}
-
-fn validate_capability_dependencies(capabilities: &[u32]) -> Result<(), MobileError> {
-    let has = |capability| capabilities.contains(&capability);
-    if has(cap::HOST_RX_QUEUE) && !has(cap::HOST_FILTER)
-        || has(cap::HOST_KEYS) && !has(cap::HOST_FILTER)
-        || has(cap::HOST_AUTO_ACK) && (!has(cap::HOST_KEYS) || !has(cap::HOST_RX_QUEUE))
-        // A device with no identity of its own has nothing to forward for
-        // and nothing to advertise.
-        || has(cap::REPEATER) && !has(cap::DEV_IDENTITY)
-        // MeshCore traffic is forwarded by the same repeater, under its
-        // region list and thresholds.
-        || has(cap::MESHCORE_FORWARDER) && !has(cap::REPEATER)
-        || has(cap::IDENT) && !has(cap::DEV_IDENTITY)
-        // An administrator is authorized against the device identity and
-        // reaches the device domain, so there is nothing to manage without
-        // one.
-        || has(cap::ADMIN) && !has(cap::DEV_IDENTITY)
-        // What a scheduled advertisement carries *is* the device identity.
-        || has(cap::ADVERT) && !has(cap::DEV_IDENTITY)
-        // A receiver that cannot set a clock is still a receiver, but the
-        // device also dates its fixes, so CAP_GNSS implies CAP_TIME.
-        || has(cap::GNSS) && !has(cap::TIME)
-        // A station that can join can always scan, and so can a radio
-        // that can beacon: the requirement is a fact about hardware.
-        || has(cap::WIFI) && !has(cap::WIFI_SCAN)
-        || has(cap::WIFI_AP) && !has(cap::WIFI_SCAN)
-        || has(cap::BRIDGE_CLIENT) && (!has(cap::REPEATER) || !(has(cap::IPV4) || has(cap::IPV6)))
-        || has(cap::LAN_BEARER) && (!has(cap::REPEATER) || !has(cap::IPV4))
-    {
-        return Err(MobileError::InvalidUlcpFrame);
-    }
-    Ok(())
 }
 
 fn decode_exact_pui(value: &[u8]) -> Result<u32, MobileError> {
@@ -7940,11 +7901,19 @@ mod tests {
     }
 
     #[test]
-    fn invalid_capability_dependencies_and_values_fail_closed() {
-        assert_eq!(
-            ulcp_inspection_properties(vec![cap::HOST_RX_QUEUE as u8]),
-            Err(MobileError::InvalidUlcpFrame)
+    fn a_capability_without_its_prerequisites_is_still_described() {
+        assert!(ulcp_inspection_properties(vec![cap::HOST_RX_QUEUE as u8]).is_ok());
+        assert!(ulcp_inspection_properties(encoded_capabilities(&[cap::GNSS])).is_ok());
+        assert!(ulcp_inspection_properties(encoded_capabilities(&[cap::ADMIN])).is_ok());
+        assert!(ulcp_inspection_properties(encoded_capabilities(&[cap::REPEATER])).is_ok());
+        assert!(
+            ulcp_inspection_properties(encoded_capabilities(&[cap::LAN_BEARER, cap::LAN_BEARER]))
+                .is_ok()
         );
+    }
+
+    #[test]
+    fn an_unknown_interface_type_fails_closed() {
         assert_eq!(
             inspect_ulcp_sync(vec![
                 response(prop::CAPS, &[]),
@@ -8309,10 +8278,6 @@ mod tests {
                 "property {property}"
             );
         }
-        assert_eq!(
-            ulcp_inspection_properties(encoded_capabilities(&[cap::REPEATER])),
-            Err(MobileError::InvalidUlcpFrame)
-        );
     }
 
     /// A device that refuses one capability-gated property—firmware
@@ -8669,15 +8634,6 @@ mod tests {
         assert!(
             sync.unreadable_properties
                 .contains(&prop::MESHCORE_REGION_POLICY)
-        );
-
-        // MeshCore forwarding rides on the repeater.
-        assert_eq!(
-            ulcp_inspection_properties(encoded_capabilities(&[
-                cap::DEV_IDENTITY,
-                cap::MESHCORE_FORWARDER
-            ])),
-            Err(MobileError::InvalidUlcpFrame)
         );
     }
 
@@ -9724,14 +9680,6 @@ mod tests {
         );
 
         assert!(session.insert_device_admin(vec![0x33; 32]).is_err());
-    }
-
-    #[test]
-    fn an_administrator_list_needs_a_device_identity_to_authorize_against() {
-        assert!(
-            ulcp_inspection_properties(encoded_capabilities(&[cap::ADMIN])).is_err(),
-            "CAP_ADMIN without CAP_DEV_IDENTITY is not a device this phone can describe"
-        );
     }
 
     fn dev_channel_ids(update: &UlcpSessionUpdateRecord) -> Vec<Vec<u8>> {
@@ -11448,15 +11396,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_without_a_clock_is_not_a_device_this_phone_believes() {
-        // CAP_GNSS requires CAP_TIME: the device dates its own fixes, so a
-        // receiver with no clock to date them against is a malformed
-        // capability set rather than a limited device.
-        assert_eq!(
-            ulcp_inspection_properties(encoded_capabilities(&[cap::GNSS])),
-            Err(MobileError::InvalidUlcpFrame)
-        );
-
+    fn the_clock_is_read_at_attach_with_the_gnss_policy() {
         // The clock is read at attach along with the policy, so a phone
         // that has just connected knows whether the device knows the time
         // rather than waiting for the next announcement to find out.
@@ -11830,17 +11770,6 @@ mod tests {
                 .unwrap()
                 .is_empty(),
         );
-    }
-
-    #[test]
-    fn a_station_that_can_join_must_also_be_able_to_scan() {
-        assert!(validate_capability_dependencies(&[cap::WIFI_SCAN, cap::WIFI]).is_ok());
-        assert!(validate_capability_dependencies(&[cap::WIFI_SCAN]).is_ok());
-        assert!(validate_capability_dependencies(&[cap::WIFI]).is_err());
-        assert!(validate_capability_dependencies(&[cap::WIFI_AP]).is_err());
-        // The two families are peers: either alone is a legal device.
-        assert!(validate_capability_dependencies(&[cap::IPV4]).is_ok());
-        assert!(validate_capability_dependencies(&[cap::IPV6]).is_ok());
     }
 
     #[test]

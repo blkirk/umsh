@@ -221,8 +221,7 @@ decoded in `inspect_ulcp_properties` through the Stage 2 readers:
 `UlcpManagedPropertyIds` gains the sixteen numbers, which is what lets
 `FakeManagedDevice` and the model name them without a second table.
 `UlcpDeviceCardRecord` gains `supports_wifi_scan`, `supports_wifi`,
-`supports_ipv4`, `supports_ipv6`. `validate_capability_dependencies`
-gains `WIFI ⇒ WIFI_SCAN`.
+`supports_ipv4`, `supports_ipv6`.
 
 ### Categories
 
