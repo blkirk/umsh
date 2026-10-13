@@ -5644,6 +5644,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         match result {
             Ok(()) => {
                 self.note_snapshot_saved();
+                // The rejected generation is buried now; what was saved
+                // is what boot will restore.
+                self.snapshot_rejected = false;
                 self.complete(tid, Status::OK, emit);
             }
             Err(()) => self.complete(tid, Status::FAILURE, emit),
@@ -5676,6 +5679,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             Ok(()) => {
                 self.saved = None;
                 self.dev_key_persisted = None;
+                self.snapshot_rejected = false;
                 self.complete(tid, Status::OK, emit);
             }
             Err(()) => self.complete(tid, Status::FAILURE, emit),
@@ -15045,6 +15049,23 @@ mod tests {
         assert_eq!(get(&mut fresh, prop::SAVED), [ids::saved::NONE]);
         fresh.note_snapshot_rejected();
         assert_eq!(get(&mut fresh, prop::SAVED), [ids::saved::UNREADABLE]);
+    }
+
+    /// `CMD_SAVE` replaces the stored snapshot and clears a boot-time
+    /// rejection; so does clearing what is saved.
+    #[test]
+    fn a_host_save_or_clear_ends_a_boot_time_rejection() {
+        let mut session = test_session();
+        session.attach(true);
+        session.note_snapshot_rejected();
+        assert_eq!(get(&mut session, prop::SAVED), [ids::saved::UNREADABLE]);
+        session.respond_save(1, Ok(()), &mut |_| {});
+        assert_eq!(get(&mut session, prop::SAVED), [ids::saved::CURRENT]);
+
+        session.note_snapshot_rejected();
+        assert_eq!(get(&mut session, prop::SAVED), [ids::saved::FALLBACK]);
+        session.respond_clear(2, Ok(()), &mut |_| {});
+        assert_eq!(get(&mut session, prop::SAVED), [ids::saved::NONE]);
     }
 
     /// The receiver comes back up as it was left, and so does the whole

@@ -165,16 +165,24 @@ impl<M: RawMutex + 'static, F: JournalFlash + 'static> ProtoStore<M, F> {
         //
         // A tombstone is authoritative "nothing saved": older records
         // still physically present are void.
+        //
+        // A winner the scan found but that cannot be read back is still a
+        // committed record. It mounts as an empty payload, which every
+        // reader rejects as unreadable, never as `None`: "nothing saved"
+        // would let boot generate an identity over it, or report a
+        // snapshot fault as no snapshot at all.
         let mut slot = None;
         let mut generation = 0;
         let mut payload: Option<BootPayload> = None;
-        if let Some((address, _)) = newest
-            && flash.read_record(address, &mut bytes).is_ok()
-            && let Some((found, bytes)) = proto::payload_bytes(&bytes)
-        {
+        if let Some((address, found)) = newest {
             slot = Some(address);
             generation = found;
-            payload = bytes.and_then(|bytes| BootPayload::from_slice(bytes).ok());
+            payload = Some(BootPayload::new());
+            if flash.read_record(address, &mut bytes).is_ok()
+                && let Some((_, bytes)) = proto::payload_bytes(&bytes)
+            {
+                payload = bytes.and_then(|bytes| BootPayload::from_slice(bytes).ok());
+            }
         }
         drop(flash);
         debug_log(format_args!(
