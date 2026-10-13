@@ -296,8 +296,9 @@ impl DeviceSide {
 
 // ─── The mesh ────────────────────────────────────────────────────────────
 
-/// Requests the device took in, each with the administrator that sent it.
-pub type Arrivals = Rc<RefCell<Vec<(PublicKey, Vec<u8>)>>>;
+/// Requests the device took in, each with the administrator that sent it
+/// and the `ack_mic` its response carries back.
+pub type Arrivals = Rc<RefCell<Vec<(PublicKey, Option<[u8; 4]>, Vec<u8>)>>>;
 
 /// Both nodes, wired to a simulated link and ready to be driven.
 ///
@@ -353,7 +354,7 @@ where
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
         let arrivals: Vec<_> = self.arrivals.borrow_mut().drain(..).collect();
-        for (from, payload) in arrivals {
+        for (from, ack_mic, payload) in arrivals {
             let now_ms = self.now_ms();
             let answer = self.device.borrow_mut().answer(&from, &payload, now_ms);
             let Some(answer) = answer else { continue };
@@ -361,9 +362,12 @@ where
             response.push(PayloadType::NodeManagementResponse as u8);
             response.extend_from_slice(&answer);
             // The device asks for no acknowledgment: the administrator's
-            // token retry is the reliability layer.
+            // token retry is the reliability layer. The response does
+            // acknowledge the request, as the firmware's does.
+            let mut options = SendOptions::default();
+            options.ack_mic = ack_mic;
             self.device_peer
-                .send(&response, &SendOptions::default())
+                .send(&response, &options)
                 .await
                 .expect("the device can answer");
         }
@@ -501,7 +505,7 @@ pub async fn stand_up<'a, R: Radio>(
             };
             arrivals
                 .borrow_mut()
-                .push((from, packet.payload().to_vec()));
+                .push((from, packet.ack_mic(), packet.payload().to_vec()));
             true
         })
     };

@@ -67,8 +67,11 @@ Requests are addressed to the device identity, and Responses return to the
 requesting node on the carriage the Request arrived on (see
 [Response Carriage](payload-format.md#response-carriage)), using whatever
 routing state the exchange has supplied (see
-[Route Learning](beacons.md#route-learning)). A device drops a Node
-Management payload arriving by multicast or broadcast, with accounting.
+[Route Learning](beacons.md#route-learning)). A Response carries the
+[Ack MIC option](packet-options.md#ack-mic-option-8) naming the Request
+it answers, so it confirms the Request's delivery even when the MAC
+acknowledgment is lost. A device drops a Node Management payload
+arriving by multicast or broadcast, with accounting.
 
 ### Token
 

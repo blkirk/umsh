@@ -1928,6 +1928,11 @@ impl<
         if let Some(callsign) = self.operating_policy.operator_callsign {
             builder = builder.option(OptionNumber::OperatorCallsign, callsign.as_trimmed_slice());
         }
+        // Options go in ascending number order: Ack MIC (8) sits between
+        // the operator callsign (4) and the trace signal (10).
+        if let Some(ack_mic) = options.ack_mic {
+            builder = builder.option(OptionNumber::AckMic, &ack_mic);
+        }
         // A trace route goes out with its trace signal: a returned route is
         // weighed by what each hop measured, and the hints alone say only
         // which hops there were.
@@ -1937,7 +1942,15 @@ impl<
         if let Some(region_code) = options.region_code {
             builder = builder.region_code(region_code);
         }
-        let mut packet = builder.payload(payload).build()?;
+        let built = builder.payload(payload).build();
+        if options.ack_mic.is_some() && self.is_oversize(&built) {
+            let without = SendOptions {
+                ack_mic: None,
+                ..options.clone()
+            };
+            return self.queue_unicast(from, peer, payload, &without);
+        }
+        let mut packet = built?;
 
         let receipt = if options.ack_requested {
             Some(self.prepare_pending_ack(from, *peer, &packet, &pairwise_keys, options)?)
@@ -2107,6 +2120,11 @@ impl<
         if let Some(callsign) = self.operating_policy.operator_callsign {
             builder = builder.option(OptionNumber::OperatorCallsign, callsign.as_trimmed_slice());
         }
+        // Options go in ascending number order: Ack MIC (8) sits between
+        // the operator callsign (4) and the trace signal (10).
+        if let Some(ack_mic) = options.ack_mic {
+            builder = builder.option(OptionNumber::AckMic, &ack_mic);
+        }
         // A trace route goes out with its trace signal: a returned route is
         // weighed by what each hop measured, and the hints alone say only
         // which hops there were.
@@ -2116,7 +2134,15 @@ impl<
         if let Some(region_code) = options.region_code {
             builder = builder.region_code(region_code);
         }
-        let mut packet = builder.payload(payload).build()?;
+        let built = builder.payload(payload).build();
+        if options.ack_mic.is_some() && self.is_oversize(&built) {
+            let without = SendOptions {
+                ack_mic: None,
+                ..options.clone()
+            };
+            return self.queue_blind_unicast_with_keys(from, peer, channel_keys, payload, &without);
+        }
+        let mut packet = built?;
 
         let receipt = if options.ack_requested {
             Some(self.prepare_pending_ack(from, *peer, &packet, &blind_keys, options)?)
@@ -2874,8 +2900,8 @@ impl<
         // match against.
         self.cancel_forwards_for_ack_mic(&ack_trailer[..4]);
         if let Some(target_peer) = self.peer_for_ack_trailer(&ack_trailer)
-            && let Some((identity_id, receipt, via_route_retry)) =
-                self.complete_ack_reporting_retry(&target_peer, &ack_trailer)
+            && let Some((identity_id, receipt, via_route_retry, _)) =
+                self.complete_ack_reporting_retry(&target_peer, |pending| *pending == ack_trailer)
         {
             self.remember_completed_ack(ack_trailer, target_peer);
             // The path the ack came back by is evidence like any other
@@ -3039,6 +3065,14 @@ impl<
                     None => continue,
                 }
                 self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
+                // Ahead of delivery, so whoever handles a response finds
+                // the request it answers already confirmed.
+                self.complete_ack_from_option(
+                    &peer_key,
+                    &original[..frame_len],
+                    header,
+                    &mut on_event,
+                );
 
                 if header.ack_requested()
                     && self.should_emit_destination_ack(&buf[..frame_len], header, rx)
@@ -3350,6 +3384,12 @@ impl<
                             None => continue,
                         }
                         self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
+                        self.complete_ack_from_option(
+                            &peer_key,
+                            &original[..frame_len],
+                            header,
+                            &mut on_event,
+                        );
 
                         if header.ack_requested()
                             && self.should_emit_destination_ack(&buf[..frame_len], header, rx)
@@ -3460,31 +3500,34 @@ impl<
         peer: &PublicKey,
         ack_trailer: &[u8; 8],
     ) -> Option<(LocalIdentityId, SendReceipt)> {
-        self.complete_ack_reporting_retry(peer, ack_trailer)
-            .map(|(identity_id, receipt, _)| (identity_id, receipt))
+        self.complete_ack_reporting_retry(peer, |pending| pending == ack_trailer)
+            .map(|(identity_id, receipt, _, _)| (identity_id, receipt))
     }
 
     /// [`Self::complete_ack`], also reporting whether the attempt the ack
-    /// answered was the route-retry flood rather than the original send.
+    /// answered was the route-retry flood rather than the original send,
+    /// and the full trailer of the send it completed.
+    ///
+    /// `matches` is shown each pending send's expected trailer. A standalone
+    /// ack matches all eight octets; a piggy-backed one, authenticated by
+    /// its own packet, matches the `ack_mic` half.
     fn complete_ack_reporting_retry(
         &mut self,
         peer: &PublicKey,
-        ack_trailer: &[u8; 8],
-    ) -> Option<(LocalIdentityId, SendReceipt, bool)> {
+        matches: impl Fn(&[u8; 8]) -> bool,
+    ) -> Option<(LocalIdentityId, SendReceipt, bool, [u8; 8])> {
         let now_ms = self.clock.now_ms();
         for (index, slot) in self.identities.iter_mut().enumerate() {
             let Some(slot) = slot.as_mut() else {
                 continue;
             };
 
-            let receipt = slot.pending_acks.iter().find_map(|(receipt, pending)| {
-                (pending.expects_ack()
-                    && pending.peer == *peer
-                    && pending.ack_trailer == *ack_trailer)
-                    .then_some(*receipt)
+            let found = slot.pending_acks.iter().find_map(|(receipt, pending)| {
+                (pending.expects_ack() && pending.peer == *peer && matches(&pending.ack_trailer))
+                    .then_some((*receipt, pending.ack_trailer))
             });
 
-            if let Some(receipt) = receipt {
+            if let Some((receipt, trailer)) = found {
                 let mut via_route_retry = false;
                 if let Some(pending) = slot.pending_acks.remove(&receipt) {
                     via_route_retry = Self::frame_is_route_retry(pending.resend.frame.as_slice());
@@ -3521,7 +3564,7 @@ impl<
                 {
                     self.post_tx_listen = None;
                 }
-                return Some((identity_id, receipt, via_route_retry));
+                return Some((identity_id, receipt, via_route_retry, trailer));
             }
         }
 
@@ -3860,6 +3903,17 @@ impl<
                     Ok(TransmitAuthority::Unlicensed)
                 }
             }
+        }
+    }
+
+    /// Whether a frame came out too large for the radio, so the
+    /// piggy-backed Ack MIC it carries should be left off and the frame
+    /// built again. The frame counter it consumed is simply skipped.
+    fn is_oversize(&self, built: &Result<UnsealedPacket<'_>, BuildError>) -> bool {
+        match built {
+            Ok(packet) => packet.total_len() > self.radio.max_frame_size(),
+            Err(BuildError::BufferTooSmall) => true,
+            Err(_) => false,
         }
     }
 
@@ -6193,22 +6247,62 @@ impl<
     ///
     /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
     fn cancel_forwards_for_ack_mic_option(&mut self, frame: &[u8], header: &PacketHeader) {
-        if header.options_range.is_empty() {
-            return;
-        }
-        let mut ack_mic = None;
-        for entry in umsh_core::iter_options(frame, header.options_range.clone()) {
-            let Ok((number, value)) = entry else {
-                continue;
-            };
-            if OptionNumber::from(number) == OptionNumber::AckMic && value.len() == 4 {
-                ack_mic = Some([value[0], value[1], value[2], value[3]]);
-                break;
-            }
-        }
-        if let Some(ack_mic) = ack_mic {
+        if let Some(ack_mic) = Self::ack_mic_option(frame, header) {
             self.cancel_forwards_for_ack_mic(&ack_mic);
         }
+    }
+
+    /// The value of a frame's [Ack MIC option], when it carries a
+    /// well-formed one.
+    ///
+    /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
+    fn ack_mic_option(frame: &[u8], header: &PacketHeader) -> Option<[u8; 4]> {
+        if header.options_range.is_empty() {
+            return None;
+        }
+        umsh_core::iter_options(frame, header.options_range.clone())
+            .filter_map(Result::ok)
+            .find_map(|(number, value)| {
+                (OptionNumber::from(number) == OptionNumber::AckMic)
+                    .then(|| <[u8; 4]>::try_from(value).ok())
+                    .flatten()
+            })
+    }
+
+    /// Complete the send a received packet acknowledges through its
+    /// [Ack MIC option].
+    ///
+    /// The packet was accepted from `peer`, so its own MIC already proves
+    /// the acknowledgment genuine; the option only names which outstanding
+    /// send it is for. Whether a standalone ack for the same send arrives
+    /// before or after changes nothing: whichever lands first completes it,
+    /// and the other matches nothing.
+    ///
+    /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
+    fn complete_ack_from_option(
+        &mut self,
+        peer: &PublicKey,
+        frame: &[u8],
+        header: &PacketHeader,
+        on_event: &mut impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
+    ) {
+        let Some(ack_mic) = Self::ack_mic_option(frame, header) else {
+            return;
+        };
+        let Some((identity_id, receipt, via_route_retry, trailer)) =
+            self.complete_ack_reporting_retry(peer, |trailer| trailer[..4] == ack_mic)
+        else {
+            return;
+        };
+        self.remember_completed_ack(trailer, *peer);
+        on_event(
+            identity_id,
+            crate::MacEventRef::AckReceived {
+                peer: *peer,
+                receipt,
+                via_route_retry,
+            },
+        );
     }
 
     async fn service_post_tx_listen(

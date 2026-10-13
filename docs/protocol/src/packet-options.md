@@ -115,11 +115,13 @@ This distinction allows forwarding-related metadata (source routes, trace routes
 
 ### Ack MIC (option 8)
 
-This option represents a piggy-backed MAC ack that, when received, behaves as if it was an ack for the referenced packet, instead of sending both a MAC ack and an application-level response in two separate packets.
+This option is a piggy-backed acknowledgement: a packet carrying it acknowledges the packet whose `ack_mic` it names, exactly as a MAC ack for that packet would. A destination that answers an ack-requested packet with a unicast or blind unicast of its own MAY include the option in the answer, whether or not it also sends the standalone MAC ack. The original sender takes whichever of the two arrives first as the acknowledgement; the other then matches no outstanding packet and is discarded.
 
 - Type: 4-byte ack MIC—the first 4 bytes of the acknowledged packet's on-wire MIC (see [Ack Tag Construction](security.md#ack-tag-construction)).
 
-The option carries only the correlation handle, not a keyed ack tag: the packet carrying the option is itself authenticated to the original sender, so its own MIC already proves the acknowledgement is genuine. The `ack_mic` value simply identifies which outstanding request the reply acknowledges.
+The option carries only the correlation handle, not a keyed ack tag: the packet carrying the option is itself authenticated to the original sender, so its own MIC already proves the acknowledgement is genuine. The `ack_mic` value simply identifies which outstanding request the reply acknowledges. The original sender accepts the option only on a packet authenticated as coming from the destination of the packet it names.
+
+The option is a courtesy to the original sender. A sender that cannot fit it into a frame omits it.
 
 Because the option sits in the plaintext options block, forwarders read it under the same terms as a standalone MAC ack, including for [ack cancellation](repeater-operation.md#ack-cancellation).
 

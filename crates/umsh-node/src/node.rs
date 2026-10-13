@@ -740,10 +740,12 @@ impl<M: MacBackend> LocalNode<M> {
         to: &PublicKey,
         channel: Option<ChannelId>,
         payload: &[u8],
+        options: &SendOptions,
     ) -> Result<SendProgressTicket, crate::MacBackendError<M::SendError, M::CapacityError>> {
         let options = SendOptions {
             track_transmission: true,
-            ..SendOptions::default()
+            ack_requested: false,
+            ..options.clone()
         };
         let receipt = self
             .send_response(to, channel, payload, &options)

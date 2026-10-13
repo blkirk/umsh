@@ -101,6 +101,10 @@ struct Request {
     /// The response follows it back rather than naming both parties in the
     /// clear.
     channel: Option<ChannelId>,
+    /// The request's `ack_mic`, which the response carries back so the
+    /// administrator's MAC can take the response as the acknowledgment
+    /// should the standalone one be lost.
+    ack_mic: Option<[u8; 4]>,
     payload: heapless::Vec<u8, ADMIN_PAYLOAD_MAX>,
 }
 
@@ -226,6 +230,7 @@ pub fn admit(packet: &ReceivedPacketRef<'_>) {
         .try_send(Request {
             from: from.0,
             channel: packet.channel().map(|c| c.id()),
+            ack_mic: packet.ack_mic(),
             payload,
         })
         .is_err()
@@ -281,6 +286,7 @@ pub async fn responder_loop<CS: CounterStore + 'static, M: RawMutex + 'static>(
             &node,
             &request.from,
             request.channel,
+            request.ack_mic,
             &out[..len],
             completion,
         )
@@ -333,14 +339,18 @@ async fn serve<M: RawMutex + 'static>(
 /// No acknowledgment is requested. The administrator's token retry is the
 /// reliability layer for this binding, and it covers a lost response and
 /// a lost request alike—an ack would only tell the device something it
-/// has no use for.
+/// has no use for. The response does carry the request's `ack_mic`, so it
+/// acknowledges the request itself if the standalone ack goes missing.
 async fn respond<CS: CounterStore + 'static>(
     node: &DeviceNode<CS>,
     to: &[u8; 32],
     channel: Option<ChannelId>,
+    ack_mic: Option<[u8; 4]>,
     payload: &[u8],
     completion: Option<ReplyCompletion>,
 ) -> bool {
+    let mut options = SendOptions::default();
+    options.ack_mic = ack_mic;
     let mut wire = heapless::Vec::<u8, { ADMIN_PAYLOAD_MAX + 1 }>::new();
     if wire
         .push(PayloadType::NodeManagementResponse as u8)
@@ -355,7 +365,7 @@ async fn respond<CS: CounterStore + 'static>(
             return false;
         }
         let Ok(ticket) = node
-            .send_response_tracked(&PublicKey(*to), channel, &wire)
+            .send_response_tracked(&PublicKey(*to), channel, &wire, &options)
             .await
         else {
             return false;
@@ -370,7 +380,7 @@ async fn respond<CS: CounterStore + 'static>(
         return sent;
     }
     if node
-        .send_response(&PublicKey(*to), channel, &wire, &SendOptions::default())
+        .send_response(&PublicKey(*to), channel, &wire, &options)
         .await
         .is_err()
     {

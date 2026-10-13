@@ -2685,6 +2685,246 @@ fn receive_one_emits_ack_received_for_matching_blind_unicast_ack() {
     );
 }
 
+/// An administrator and the device it manages, keyed to each other, with
+/// one ack-requested request outstanding from the administrator.
+fn pending_request_to(
+    remote: &DummyIdentity,
+    keys: &PairwiseKeys,
+) -> (TestMac, LocalIdentityId, SendReceipt, [u8; 8]) {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let peer_id = mac.add_peer(*remote.public_key()).unwrap();
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    let receipt = mac
+        .queue_unicast(
+            local_id,
+            remote.public_key(),
+            b"request",
+            &SendOptions::default().with_ack_requested(true).no_flood(),
+        )
+        .unwrap()
+        .unwrap();
+    let trailer = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .ack_trailer;
+    (mac, local_id, receipt, trailer)
+}
+
+#[test]
+fn a_reply_carrying_the_ack_mic_completes_the_request() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.radio_mut().queue_received_reply_acking(
+        &remote,
+        &keys,
+        &dst_hint,
+        trailer[..4].try_into().unwrap(),
+    );
+
+    let mut acked = None;
+    let mut delivered = false;
+    block_on(mac.receive_one(|identity, event| match event {
+        MacEventRef::AckReceived { peer, receipt, .. } => acked = Some((identity, peer, receipt)),
+        MacEventRef::Received(packet) => delivered = packet.payload_bytes() == b"reply",
+        _ => {}
+    }))
+    .unwrap();
+
+    assert_eq!(acked, Some((local_id, *remote.public_key(), receipt)));
+    assert!(delivered, "the reply is still delivered as itself");
+    assert!(
+        mac.identity(local_id)
+            .unwrap()
+            .pending_ack(&receipt)
+            .is_none()
+    );
+
+    // The standalone ack, arriving after, finds nothing left to complete.
+    mac.radio_mut().queue_received_mac_ack(trailer);
+    let mut again = false;
+    block_on(mac.receive_one(|_, event| {
+        again |= matches!(event, MacEventRef::AckReceived { .. });
+    }))
+    .unwrap();
+    assert!(!again);
+}
+
+/// The option names a send; only the peer that send went to can confirm
+/// it. Anyone else's packet carrying the same public `ack_mic` completes
+/// nothing.
+#[test]
+fn an_ack_mic_from_another_peer_completes_nothing() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let stranger = DummyIdentity::new([0xCD; 32]);
+    let stranger_keys = PairwiseKeys {
+        k_enc: [3; 32],
+        k_mic: [4; 32],
+    };
+    let stranger_id = mac.add_peer(*stranger.public_key()).unwrap();
+    mac.install_pairwise_keys(local_id, stranger_id, stranger_keys.clone())
+        .unwrap();
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.radio_mut().queue_received_reply_acking(
+        &stranger,
+        &stranger_keys,
+        &dst_hint,
+        trailer[..4].try_into().unwrap(),
+    );
+
+    let mut acked = false;
+    block_on(mac.receive_one(|_, event| {
+        acked |= matches!(event, MacEventRef::AckReceived { .. });
+    }))
+    .unwrap();
+
+    assert!(!acked);
+    assert!(
+        mac.identity(local_id)
+            .unwrap()
+            .pending_ack(&receipt)
+            .is_some()
+    );
+}
+
+fn ack_mic_option_of(frame: &[u8]) -> Option<Vec<u8>> {
+    let header = PacketHeader::parse(frame).unwrap();
+    iter_options(frame, header.options_range)
+        .map(Result::unwrap)
+        .find(|(number, _)| *number == OptionNumber::AckMic.as_u16())
+        .map(|(_, value)| value.to_vec())
+}
+
+#[test]
+fn a_send_with_an_ack_mic_carries_it_unless_it_would_not_fit() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let peer_key = test_pubkey(0xAB);
+    let peer_id = mac.add_peer(peer_key).unwrap();
+    mac.install_pairwise_keys(
+        local_id,
+        peer_id,
+        PairwiseKeys {
+            k_enc: [1; 32],
+            k_mic: [2; 32],
+        },
+    )
+    .unwrap();
+    let options = SendOptions::default().no_flood();
+    let acking = options.clone().with_ack_mic([9, 8, 7, 6]);
+
+    mac.queue_unicast(local_id, &peer_key, b"reply", &acking)
+        .unwrap();
+    let carried = mac.tx_queue_mut().pop_next().unwrap();
+    assert_eq!(
+        ack_mic_option_of(carried.frame.as_slice()),
+        Some(vec![9, 8, 7, 6])
+    );
+
+    // Among the options a flooded, traced reply carries, in order.
+    mac.queue_unicast(
+        local_id,
+        &peer_key,
+        b"reply",
+        &SendOptions::default()
+            .with_trace_route()
+            .with_region_code([0x78, 0x53])
+            .with_ack_mic([9, 8, 7, 6]),
+    )
+    .unwrap();
+    let traced = mac.tx_queue_mut().pop_next().unwrap();
+    assert_eq!(
+        ack_mic_option_of(traced.frame.as_slice()),
+        Some(vec![9, 8, 7, 6])
+    );
+
+    // A payload that exactly fills the frame without the option leaves no
+    // room for it, and the reply goes out without.
+    mac.queue_unicast(local_id, &peer_key, b"x", &options)
+        .unwrap();
+    let overhead = mac.tx_queue_mut().pop_next().unwrap().frame.len() - 1;
+    let full = vec![0x55; 255 - overhead];
+    mac.queue_unicast(local_id, &peer_key, &full, &acking)
+        .unwrap();
+    let sent = mac.tx_queue_mut().pop_next().unwrap();
+    assert_eq!(sent.frame.len(), 255);
+    assert_eq!(ack_mic_option_of(sent.frame.as_slice()), None);
+}
+
+#[test]
+fn ack_mic_names_only_a_packet_that_asked_for_an_ack() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_id = mac.add_peer(*remote.public_key()).unwrap();
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+
+    for ack_requested in [true, false] {
+        mac.radio_mut().queue_received_unicast_with_counter(
+            &remote,
+            &keys,
+            &dst_hint,
+            b"hello",
+            ack_requested,
+            if ack_requested { 10 } else { 11 },
+        );
+        let mut seen = None;
+        block_on(mac.receive_one(|_, event| {
+            if let MacEventRef::Received(packet) = event {
+                seen = Some((packet.ack_mic(), packet.mic()[..4].to_vec()));
+            }
+        }))
+        .unwrap();
+        let (ack_mic, mic_prefix) = seen.expect("delivered");
+        if ack_requested {
+            assert_eq!(ack_mic.map(|m| m.to_vec()), Some(mic_prefix));
+            // The MAC's own standalone ack names the same packet.
+            let queued = mac.tx_queue_mut().pop_next().unwrap();
+            let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
+            assert_eq!(
+                &queued.frame.as_slice()[header.mic_range][..4],
+                &ack_mic.unwrap()
+            );
+        } else {
+            assert_eq!(ack_mic, None);
+        }
+    }
+}
+
 #[test]
 fn receive_one_delivers_unicast_and_queues_immediate_ack() {
     let mut mac = make_mac();
@@ -11171,6 +11411,31 @@ impl DummyRadio {
             .flood_hops(2)
             .option(OptionNumber::TraceRoute, &hints[..hints_len])
             .option(OptionNumber::TraceSignal, &signal[..signal_len])
+            .payload(b"reply")
+            .build()
+            .unwrap();
+        CryptoEngine::new(DummyAes, DummySha)
+            .seal_packet(&mut packet, keys)
+            .unwrap();
+        self.queue_received_frame(packet.as_bytes());
+    }
+
+    /// A reply from `source` that piggy-backs an acknowledgment of the
+    /// packet whose `ack_mic` this is.
+    fn queue_received_reply_acking(
+        &mut self,
+        source: &DummyIdentity,
+        keys: &PairwiseKeys,
+        dst: &umsh_core::NodeHint,
+        ack_mic: [u8; 4],
+    ) {
+        let mut buf = [0u8; 256];
+        let mut packet = PacketBuilder::new(&mut buf)
+            .unicast(*dst)
+            .source_full(source.public_key())
+            .frame_counter(7)
+            .encrypted()
+            .option(OptionNumber::AckMic, &ack_mic)
             .payload(b"reply")
             .build()
             .unwrap();

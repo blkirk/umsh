@@ -115,6 +115,10 @@ pub struct SendOptions {
     /// all hit the channel together. ACK deadlines start at the first
     /// actual transmit, not at queue time.
     pub tx_delay_ms: Option<u16>,
+    /// The `ack_mic` of a received packet this send answers, carried as a
+    /// piggy-backed acknowledgment (the Ack MIC option). Unicast and blind
+    /// unicast only; left off when it would not fit the frame.
+    pub ack_mic: Option<[u8; 4]>,
 }
 
 impl Default for SendOptions {
@@ -132,6 +136,7 @@ impl Default for SendOptions {
             region_code: None,
             salt: false,
             tx_delay_ms: None,
+            ack_mic: None,
         }
     }
 }
@@ -227,6 +232,15 @@ impl SendOptions {
     /// Hold the frame for `delay_ms` before its first transmit attempt.
     pub fn with_tx_delay_ms(mut self, delay_ms: u16) -> Self {
         self.tx_delay_ms = Some(delay_ms);
+        self
+    }
+
+    /// Acknowledge the received packet whose `ack_mic` this is, alongside
+    /// whatever this send carries. The sender of that packet takes it as
+    /// the acknowledgment, whichever of this and a standalone MAC ack
+    /// reaches it first.
+    pub fn with_ack_mic(mut self, ack_mic: [u8; 4]) -> Self {
+        self.ack_mic = Some(ack_mic);
         self
     }
 }
@@ -1182,6 +1196,17 @@ impl<'a> ReceivedPacketRef<'a> {
 
     pub fn mic_len(&self) -> usize {
         self.mic().len()
+    }
+
+    /// The `ack_mic` that acknowledges this packet—the first four octets of
+    /// its on-wire MIC—for a reply to carry with
+    /// [`SendOptions::with_ack_mic`]. `None` unless the packet asked for an
+    /// acknowledgment, since nothing is waiting on one otherwise.
+    pub fn ack_mic(&self) -> Option<[u8; 4]> {
+        if !self.ack_requested() {
+            return None;
+        }
+        self.mic().get(..4)?.try_into().ok()
     }
 
     pub fn flood_hops(&self) -> Option<FloodHops> {
