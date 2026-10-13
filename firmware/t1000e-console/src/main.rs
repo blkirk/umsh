@@ -720,8 +720,8 @@ mod firmware {
         // ── USB stack ─────────────────────────────────────────────────────────
         let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-        let mut config = Config::new(0x2886, 0x0057);
-        config.manufacturer = Some("Seeed");
+        let mut config = Config::new(umsh_bsp_t1000e::USB.vid, umsh_bsp_t1000e::USB.pid);
+        config.manufacturer = Some("UMSH");
         config.product = Some("T1000-E UMSH CLI");
         config.serial_number = Some("umsh-t1000e");
         config.max_power = 100;

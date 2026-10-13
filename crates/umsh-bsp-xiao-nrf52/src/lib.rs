@@ -135,3 +135,12 @@ pub use power::PowerSignaler;
 
 #[cfg(all(target_os = "none", feature = "ulcp-i2c"))]
 pub mod i2c;
+
+/// Seeed's application IDs for the plain XIAO nRF52840. Retail kits ship
+/// the Sense bootloader (`2886:0045`) on plain hardware; this names the hardware.
+pub const USB: umsh_bsp_nrf52840::usb::UsbIdentity = umsh_bsp_nrf52840::usb::UsbIdentity {
+    vid: 0x2886,
+    pid: 0x8044,
+    product: "XIAO nRF52 UMSH Radio",
+    serial_number: "xiao-nrf52",
+};

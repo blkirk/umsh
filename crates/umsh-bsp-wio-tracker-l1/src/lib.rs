@@ -55,3 +55,11 @@ pub use power::PowerSignaler;
 
 #[cfg(all(target_os = "none", feature = "ulcp-i2c"))]
 pub mod i2c;
+
+/// Seeed's application IDs for the Wio Tracker L1; its bootloader is `2886:1667`.
+pub const USB: umsh_bsp_nrf52840::usb::UsbIdentity = umsh_bsp_nrf52840::usb::UsbIdentity {
+    vid: 0x2886,
+    pid: 0x1668,
+    product: "Wio Tracker UMSH Radio",
+    serial_number: "wio-tracker-l1",
+};

@@ -84,3 +84,11 @@ pub use power::PowerSignaler;
 
 #[cfg(all(target_os = "none", feature = "ulcp-i2c"))]
 pub mod i2c;
+
+/// What the stock Solar P1 application reports; its bootloader is `2886:0044`.
+pub const USB: umsh_bsp_nrf52840::usb::UsbIdentity = umsh_bsp_nrf52840::usb::UsbIdentity {
+    vid: 0x2886,
+    pid: 0x0059,
+    product: "Solar Node UMSH Radio",
+    serial_number: "sensecap-solar",
+};

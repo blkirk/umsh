@@ -7,6 +7,11 @@
 # mirrored from that script's BOARDS dict—it stays authoritative; if they
 # ever disagree, the script is right.
 #
+# `bootloader_usb` lists every "vid:pid" the board's bootloader enumerates
+# as. The web flasher treats a matching port as already in update mode and
+# sends a 1200-baud touch to anything else. The application's own pair lives
+# in the board BSP; see "Adding a board" in docs/firmware-architecture.md.
+#
 # `status` is one of:
 #   proven    — brought up and exercised on real hardware
 #   partial   — bringup verified on hardware, shipping image not yet run
@@ -59,6 +64,7 @@ photo = "t1000e.jpg"
 make_target = "flash-t1000e"
 methods = ["uf2", "serial-dfu"]
 family_id = "0x28860057"
+bootloader_usb = ["2886:0057"]
 app_base = "0x27000"
 softdevice = "S140 7.3.0"
 volume = "T1000-E"
@@ -92,6 +98,7 @@ photo = "techo.jpg"
 make_target = "flash-techo"
 methods = ["uf2", "serial-dfu"]
 family_id = "0xADA52840"
+bootloader_usb = ["239a:0029", "239a:002a"]
 app_base = "0x26000"
 softdevice = "S140 6.1.1"
 volume = "TECHOBOOT"
@@ -124,6 +131,7 @@ photo = "wio-tracker-l1.jpg"
 make_target = "flash-wio-tracker-l1"
 methods = ["uf2", "serial-dfu"]
 family_id = "0x28861667"
+bootloader_usb = ["2886:1667"]
 app_base = "0x27000"
 softdevice = "S140 7.3.0"
 volume = "TRACKER L1"
@@ -186,6 +194,7 @@ photo = "sensecap-solar.jpg"
 make_target = "flash-sensecap-solar"
 methods = ["uf2", "serial-dfu"]
 family_id = "0x28860044"
+bootloader_usb = ["2886:0044"]
 app_base = "0x27000"
 softdevice = "S140 7.3.0"
 volume = "SENSECAP"
@@ -278,6 +287,7 @@ photo = "xiao-nrf52.jpg"
 make_target = "flash-xiao-nrf52"
 methods = ["uf2", "serial-dfu"]
 family_id = "0xADA52840"
+bootloader_usb = ["2886:0045", "2886:0044"]
 app_base = "0x27000"
 softdevice = "S140 7.3.0"
 volume = "XIAO-SENSE"

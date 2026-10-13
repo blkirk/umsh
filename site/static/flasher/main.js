@@ -306,10 +306,17 @@ function appendDownloadLinks(container, { primary = false } = {}) {
 
 /* ── The three flashing routines ────────────────────────────────────────── */
 
-/** A port belonging to a radio that is running UMSH firmware right now. */
-function isUmshAppPort(port) {
+/**
+ * A port belonging to the chosen board's bootloader: a radio already in
+ * update mode. Running firmware, UMSH or stock, reports the vendor's
+ * application IDs instead, so this is the only reliable distinction.
+ */
+function isUpdateModePort(port) {
   const info = port.getInfo?.() ?? {};
-  return info.usbVendorId === 0x16c0 && info.usbProductId === 0x27dd;
+  return (state.board?.flash?.bootloader_usb ?? []).some((pair) => {
+    const [vid, pid] = pair.split(":").map((hex) => parseInt(hex, 16));
+    return info.usbVendorId === vid && info.usbProductId === pid;
+  });
 }
 
 async function flashNrf() {
@@ -319,12 +326,13 @@ async function flashNrf() {
   const port = await requestPort();
   if (!port) return;
 
-  // Anything that is not a running UMSH radio is either already in update
-  // mode—flash it right here, on the port the user just picked—or still
-  // on factory firmware, in which case the attempt times out and the error
-  // explains the button gesture. A second picker helps neither case.
-  if (!isUmshAppPort(port)) {
-    log(`${describePort(port)} is not a running UMSH radio; treating it as already in update mode.`);
+  // A radio already in update mode is flashed right here, on the port the
+  // user just picked. Anything else is running firmware, UMSH or factory,
+  // and gets the touch. Factory firmware that ignores it comes back as
+  // itself, and the attempt on the second pick times out with an error that
+  // explains the button gesture.
+  if (isUpdateModePort(port)) {
+    log(`${describePort(port)} is already in update mode.`);
     await flashPort(port);
     return;
   }
@@ -358,7 +366,7 @@ async function findReenumeratedPort(oldPort) {
     await sleep(500);
     const ports = await navigator.serial.getPorts();
     if (ports.includes(oldPort)) continue; // still re-enumerating, or the touch did nothing
-    const candidates = ports.filter((candidate) => !isUmshAppPort(candidate));
+    const candidates = ports.filter(isUpdateModePort);
     if (candidates.length === 1) return candidates[0];
     if (candidates.length > 1) return null;
   }

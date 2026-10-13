@@ -49,3 +49,13 @@ pub use power::{PowerSignaler, SHUTDOWN_SIGNAL};
 
 #[cfg(all(target_os = "none", feature = "ulcp-i2c"))]
 pub mod i2c;
+
+/// LilyGO has no USB vendor ID, and the T-Echo's stock IDs are Adafruit's.
+/// This is the V-USB shared CDC pair, held until the project's pid.codes
+/// allocation arrives.
+pub const USB: umsh_bsp_nrf52840::usb::UsbIdentity = umsh_bsp_nrf52840::usb::UsbIdentity {
+    vid: 0x16c0,
+    pid: 0x27dd,
+    product: "T-Echo UMSH Radio",
+    serial_number: "techo",
+};

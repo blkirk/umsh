@@ -236,6 +236,17 @@ mod firmware {
     use umsh_bsp_wio_tracker_l1::power as board_power;
     #[cfg(all(feature = "cap-battery-saadc", feature = "board-xiao-nrf52"))]
     use umsh_bsp_xiao_nrf52::power as board_power;
+    // The application's USB identity, owned by each board BSP.
+    #[cfg(feature = "board-sensecap-solar")]
+    use umsh_bsp_sensecap_solar::USB as BOARD_USB;
+    #[cfg(feature = "board-t1000e")]
+    use umsh_bsp_t1000e::USB as BOARD_USB;
+    #[cfg(feature = "board-techo")]
+    use umsh_bsp_techo::USB as BOARD_USB;
+    #[cfg(feature = "board-wio-tracker-l1")]
+    use umsh_bsp_wio_tracker_l1::USB as BOARD_USB;
+    #[cfg(feature = "board-xiao-nrf52")]
+    use umsh_bsp_xiao_nrf52::USB as BOARD_USB;
     // Host I2C capability, selected once through each board BSP.
     #[cfg(all(feature = "ulcp-i2c", feature = "board-sensecap-solar"))]
     use umsh_bsp_sensecap_solar::i2c as board_i2c;
@@ -6589,33 +6600,10 @@ mod firmware {
         let vbus = VBUS.init(SoftwareVbusDetect::new(true, true));
         let driver = Driver::new(p.USBD, Irqs, &*vbus);
 
-        let mut config = Config::new(0x16c0, 0x27dd);
+        let mut config = Config::new(BOARD_USB.vid, BOARD_USB.pid);
         config.manufacturer = Some("UMSH");
-        #[cfg(feature = "board-techo")]
-        {
-            config.product = Some("T-Echo UMSH Radio");
-            config.serial_number = Some("techo");
-        }
-        #[cfg(feature = "t1000e")]
-        {
-            config.product = Some("T-1000E UMSH Radio");
-            config.serial_number = Some("t1000e");
-        }
-        #[cfg(feature = "board-sensecap-solar")]
-        {
-            config.product = Some("Solar Node UMSH Radio");
-            config.serial_number = Some("sensecap-solar");
-        }
-        #[cfg(feature = "board-wio-tracker-l1")]
-        {
-            config.product = Some("Wio Tracker UMSH Radio");
-            config.serial_number = Some("wio-tracker-l1");
-        }
-        #[cfg(feature = "board-xiao-nrf52")]
-        {
-            config.product = Some("XIAO nRF52 UMSH Radio");
-            config.serial_number = Some("xiao-nrf52");
-        }
+        config.product = Some(BOARD_USB.product);
+        config.serial_number = Some(BOARD_USB.serial_number);
         config.max_power = 100;
         config.max_packet_size_0 = 64;
 

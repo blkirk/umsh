@@ -425,8 +425,29 @@ If the chip is new, you also need a chip-BSP. Otherwise just a board-BSP.
 7. **Register it** in root `members` but not `default-members`.
 8. **Add Makefile targets** (`build-<board>`, `flash-<board>`) and a
    `scripts/firmware_image.py` entry for the UF2 family ID and base address.
-9. **Add it to the CI matrix**—both the shipping image and the console
-   harness.
+9. **Set the USB identity** (boards with native USB). Two places, two
+   different pairs:
+   - The board-BSP's `pub const USB: UsbIdentity` (from
+     `umsh_bsp_nrf52840::usb`) carries the **application** pair: the vendor
+     ID and product ID the vendor's stock firmware reports. The shipping
+     image and the console harness both read it. Sources, in order of
+     trust: the running stock firmware (`ioreg -p IOUSB -l` on macOS), the
+     vendor's Arduino core `boards.txt` (`build.vid`/`build.pid`), and the
+     first `hwids` entry in a Meshtastic or MeshCore board JSON. Adafruit-
+     derived bootloaders put the bootloader at `0x00NN` and the application
+     at `0x80NN`.
+   - `site/data/hardware.toml`'s `bootloader_usb` list carries every
+     **bootloader** pair the board can show up as. The web flasher flashes a
+     port that matches it and sends a 1200-baud touch to anything else, so a
+     board missing from this list cannot be flashed in one step. Read it
+     from the board in update mode, or from the bootloader's `board.h`
+     (`USB_DESC_VID`, `USB_DESC_UF2_PID`, `USB_DESC_CDC_ONLY_PID`).
+
+   A vendor's IDs belong on that vendor's boards only. Never use a shared or
+   example pair, or one vendor's IDs on another vendor's board. A board whose vendor has no USB vendor ID of its own takes the
+   project's pid.codes allocation.
+10. **Add it to the CI matrix**—both the shipping image and the console
+    harness.
 
 A board on a new MCU family that cannot share the existing sources needs its
 own `firmware/<family>/src/` (or its own sibling workspace, per the inclusion

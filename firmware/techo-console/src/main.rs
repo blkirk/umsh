@@ -761,7 +761,7 @@ mod firmware {
         let led = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
         let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-        let mut config = Config::new(0x16c0, 0x27dd);
+        let mut config = Config::new(umsh_bsp_techo::USB.vid, umsh_bsp_techo::USB.pid);
         config.manufacturer = Some("UMSH");
         config.product = Some("T-Echo Bringup");
         config.serial_number = Some("techo-console");

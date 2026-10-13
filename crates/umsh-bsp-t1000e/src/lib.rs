@@ -64,3 +64,11 @@ pub use radio::RF_SWITCH;
 
 #[cfg(all(target_os = "none", feature = "ulcp-i2c"))]
 pub mod i2c;
+
+/// Seeed's application IDs for the T1000-E; its bootloader is `2886:0057`.
+pub const USB: umsh_bsp_nrf52840::usb::UsbIdentity = umsh_bsp_nrf52840::usb::UsbIdentity {
+    vid: 0x2886,
+    pid: 0x8057,
+    product: "T-1000E UMSH Radio",
+    serial_number: "t1000e",
+};

@@ -534,7 +534,10 @@ mod firmware {
         let led = Output::new(p.P1_01, Level::Low, OutputDrive::Standard);
         let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-        let mut config = Config::new(0x2886, 0x1667);
+        let mut config = Config::new(
+            umsh_bsp_wio_tracker_l1::USB.vid,
+            umsh_bsp_wio_tracker_l1::USB.pid,
+        );
         config.manufacturer = Some("UMSH");
         config.product = Some("Seeed Wio Tracker L1 Bringup");
         config.serial_number = Some("wio-tracker-l1-console");

@@ -14,6 +14,7 @@
 
 pub mod panic_persist;
 pub mod rescue;
+pub mod usb;
 
 #[cfg(target_os = "none")]
 pub mod cdc_rescue;

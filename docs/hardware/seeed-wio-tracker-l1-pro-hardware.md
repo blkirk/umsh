@@ -56,8 +56,9 @@ The family ID is not registered in <https://github.com/microsoft/uf2/blob/master
 | Field | Value |
 |---|---|
 | VID | `0x2886` (Seeed Studio) |
-| PID | `0x1667` (primary), `0x1668` (variant) |
-| Bootloader product string | "Seeed Wio Tracker L1" |
+| PID (bootloader) | `0x1667` (confirmed on hardware 2026-10-12) |
+| PID (application) | `0x1668` (Meshtastic's first `hwids` entry, which PlatformIO builds into the app) |
+| Bootloader product string | "TRACKER L1", manufacturer "Seeed" (confirmed on hardware) |
 | 1200-baud touch reset | supported (`use_1200bps_touch: true`) |
 
 ### Source references for bootloader / flash layout

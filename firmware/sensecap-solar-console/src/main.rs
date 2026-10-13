@@ -277,7 +277,9 @@ USER_BUTTON (P1.01) and PWR (P1.07) edges auto-report.";
         // ── USB-CDC stack ─────────────────────────────────────────────────────
         let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
-        // USB IDs per the plan: VID 0x2886 / PID 0x0059 (Seeed XIAO family).
+        // Mirrors `umsh_bsp_sensecap_solar::USB`. Referencing it would link
+        // the BSP, which this harness otherwise does not, and that needs an
+        // allocator.
         let mut config = Config::new(0x2886, 0x0059);
         config.manufacturer = Some("UMSH");
         config.product = Some("SenseCAP Solar Node Bringup");
