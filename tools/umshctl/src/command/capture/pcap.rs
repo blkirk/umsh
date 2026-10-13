@@ -49,6 +49,7 @@ pub enum PcapDirection {
 
 const PCAP_LINKTYPE_ETHERNET: u32 = 1;
 const PCAP_LINKTYPE_LORATAP: u32 = 270;
+pub const PCAP_LINKTYPE_IPV4: u32 = 228;
 const RADIO_UDP_PORT: u16 = 15056;
 const ULCP_HOST_UDP_PORT: u16 = 15057;
 const ULCP_DEVICE_UDP_PORT: u16 = 15058;
@@ -63,8 +64,13 @@ const LORATAP_RSSI_BIAS: i32 = 139;
 #[derive(Clone, Copy, Debug)]
 pub enum PcapEncapsulation {
     Ethernet,
-    RawLoRa { linktype: u32 },
+    RawLoRa {
+        linktype: u32,
+    },
     LoRaTap,
+    /// Raw IPv4 (`LINKTYPE_IPV4`), for datagrams recorded with the
+    /// addresses they actually carried.
+    Ipv4,
 }
 
 /// The channel a capture is listening on, read back from the device.
@@ -116,6 +122,7 @@ impl PcapWriter {
             PcapEncapsulation::Ethernet => PCAP_LINKTYPE_ETHERNET,
             PcapEncapsulation::RawLoRa { linktype } => linktype,
             PcapEncapsulation::LoRaTap => PCAP_LINKTYPE_LORATAP,
+            PcapEncapsulation::Ipv4 => PCAP_LINKTYPE_IPV4,
         };
         output.write_all(&linktype.to_le_bytes())?;
         output.flush()?;
@@ -137,6 +144,11 @@ impl PcapWriter {
                     frame,
                 )?,
                 PcapEncapsulation::RawLoRa { .. } => self.write_record(frame)?,
+                PcapEncapsulation::Ipv4 => {
+                    return Err(std::io::Error::other(
+                        "an IPv4 capture records datagrams, not radio frames",
+                    ));
+                }
                 // Without reception metadata the header would be all
                 // zeroes, which reads as a real -139 dBm measurement.
                 PcapEncapsulation::LoRaTap => {
@@ -208,6 +220,24 @@ impl PcapWriter {
         self.write_udp(direction, src_port, dst_port, frame)
     }
 
+    /// Record a UDP datagram as raw IPv4, from `source` to `destination`.
+    pub fn write_datagram(
+        &mut self,
+        source: std::net::SocketAddrV4,
+        destination: std::net::SocketAddrV4,
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        debug_assert!(matches!(self.encapsulation, PcapEncapsulation::Ipv4));
+        let mut packet = Vec::new();
+        self.push_ipv4_udp(
+            &mut packet,
+            (source.ip().octets(), source.port()),
+            (destination.ip().octets(), destination.port()),
+            payload,
+        )?;
+        self.write_record(&packet)
+    }
+
     fn write_udp(
         &mut self,
         direction: PcapDirection,
@@ -215,15 +245,7 @@ impl PcapWriter {
         dst_port: u16,
         payload: &[u8],
     ) -> std::io::Result<()> {
-        let udp_len = 8usize
-            .checked_add(payload.len())
-            .and_then(|len| u16::try_from(len).ok())
-            .ok_or_else(|| std::io::Error::other("capture payload exceeds IPv4 UDP size"))?;
-        let ip_len = 20u16
-            .checked_add(udp_len)
-            .ok_or_else(|| std::io::Error::other("capture packet exceeds IPv4 size"))?;
-        let frame_len = 14usize + usize::from(ip_len);
-        let mut packet = Vec::with_capacity(frame_len);
+        let mut packet = Vec::new();
 
         // Synthetic Ethernet and loopback IPv4 endpoints. Direction remains
         // visible in both endpoint addresses and ULCP UDP ports.
@@ -234,6 +256,26 @@ impl PcapWriter {
             PcapDirection::HostToDevice => ([127, 0, 0, 1], [127, 0, 0, 2]),
             PcapDirection::DeviceToHost => ([127, 0, 0, 2], [127, 0, 0, 1]),
         };
+        self.push_ipv4_udp(&mut packet, (src_ip, src_port), (dst_ip, dst_port), payload)?;
+        self.write_record(&packet)
+    }
+
+    /// Append an IPv4 header, a UDP header, and `payload` to `packet`.
+    fn push_ipv4_udp(
+        &mut self,
+        packet: &mut Vec<u8>,
+        (src_ip, src_port): ([u8; 4], u16),
+        (dst_ip, dst_port): ([u8; 4], u16),
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        let udp_len = 8usize
+            .checked_add(payload.len())
+            .and_then(|len| u16::try_from(len).ok())
+            .ok_or_else(|| std::io::Error::other("capture payload exceeds IPv4 UDP size"))?;
+        let ip_len = 20u16
+            .checked_add(udp_len)
+            .ok_or_else(|| std::io::Error::other("capture packet exceeds IPv4 size"))?;
+        packet.reserve(usize::from(ip_len));
         let ip_start = packet.len();
         packet.extend_from_slice(&[
             0x45,
@@ -265,8 +307,7 @@ impl PcapWriter {
         packet.extend_from_slice(&0u16.to_be_bytes());
         packet.extend_from_slice(payload);
         self.packet_id = self.packet_id.wrapping_add(1);
-
-        self.write_record(&packet)
+        Ok(())
     }
 
     fn write_record(&mut self, packet: &[u8]) -> std::io::Result<()> {

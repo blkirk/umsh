@@ -54,8 +54,18 @@ SNR the radio reported, so the reception metadata survives into the capture.
 
 The [LAN bearer](../docs/protocol/src/lan-bearer.md) carries one raw UMSH
 frame per UDP datagram, with no additional framing, to an IPv4 multicast group
-(by default `239.255.134.121:15056`). Capture on the interface the radios and
-hosts share, with `udp.port == 15056`.
+(by default `239.255.134.121:15056`).
+
+The extcap install adds a **UMSH LAN** interface (`tshark -i umsh-lan`) beside
+**UMSH radio**. It joins the group itself—which a plain interface capture
+does not, so on a switched or Wi-Fi network it may see no multicast at all—and
+records each datagram as raw IPv4 (`LINKTYPE` 228) with the sender's real
+address and port. Its capture options pick the group, empty for the default,
+and the network interface to join on. It never sends.
+
+A point-to-point link names a unicast peer instead of a group, and cannot be
+joined: capture the network interface it runs over, with `udp.port == 15056`.
+The same applies to traffic you would rather see with its link layer intact.
 
 The desktop examples' `UdpMulticastRadio` uses the same datagram format on the
 loopback interface, so the steps below apply to both.

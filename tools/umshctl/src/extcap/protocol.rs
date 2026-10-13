@@ -13,10 +13,17 @@ use crate::connection::Found;
 /// permanent: changing it silently orphans saved capture setups.
 pub const INTERFACE: &str = "umsh";
 
+/// The LAN bearer interface's name, permanent for the same reason.
+pub const LAN_INTERFACE: &str = "umsh-lan";
+
 /// pcap `LINKTYPE_LORATAP`. The radio frame arrives under a header
 /// describing the channel it was heard on, so nothing has to be
 /// invented the way the synthetic Ethernet encapsulation does.
 pub const DLT_LORATAP: u32 = 270;
+
+/// pcap `LINKTYPE_IPV4`. A LAN datagram is recorded with the addresses
+/// it carried, so the sender of each frame is visible.
+pub const DLT_IPV4: u32 = crate::command::capture::pcap::PCAP_LINKTYPE_IPV4;
 
 /// The `{call=}` of the reloadable radio selector.
 pub const CALL_RADIO: &str = "--radio";
@@ -50,23 +57,57 @@ fn sanitize(value: &str) -> String {
 
 /// The reply to `--extcap-interfaces`.
 ///
-/// The display names no radio. Wireshark fetches it once at startup and
-/// shows it for the life of the session, while the radio actually used
-/// is whatever the capture options pick.
+/// The displays name no radio and no group. Wireshark fetches them once
+/// at startup and shows them for the life of the session, while what is
+/// actually captured is whatever the capture options pick.
 pub fn interfaces() -> String {
     format!(
-        "extcap {{version={}}}{{display=UMSH radio}}\n\
-         interface {{value={INTERFACE}}}{{display=UMSH radio}}\n",
+        "extcap {{version={}}}{{display=UMSH}}\n\
+         interface {{value={INTERFACE}}}{{display=UMSH radio}}\n\
+         interface {{value={LAN_INTERFACE}}}{{display=UMSH LAN}}\n",
         env!("CARGO_PKG_VERSION"),
     )
 }
 
-/// The reply to `--extcap-dlts`.
+/// The reply to `--extcap-dlts` for `interface`.
 ///
-/// Exactly one line: Wireshark never passes a chosen DLT back on
+/// Exactly one line each: Wireshark never passes a chosen DLT back on
 /// `--capture`, so a second link type would be unactionable.
-pub fn dlts() -> String {
-    format!("dlt {{number={DLT_LORATAP}}}{{name=LORATAP}}{{display=LoRaTap}}\n")
+pub fn dlts(interface: &str) -> String {
+    if interface == LAN_INTERFACE {
+        format!("dlt {{number={DLT_IPV4}}}{{name=IPV4}}{{display=IPv4}}\n")
+    } else {
+        format!("dlt {{number={DLT_LORATAP}}}{{name=LORATAP}}{{display=LoRaTap}}\n")
+    }
+}
+
+/// The reply to `--extcap-config` for the LAN interface, offering
+/// `interfaces`—each a name and its IPv4 address—to join on.
+pub fn lan_config(interfaces: &[(String, std::net::Ipv4Addr)]) -> String {
+    let mut out = format!(
+        "arg {{number=0}}{{call=--group}}{{display=Group}}\
+         {{tooltip=GROUP[:PORT]. Empty is the default group.}}{{type=string}}\
+         {{placeholder={}:{}}}{{required=false}}\n",
+        std::net::Ipv4Addr::from(umsh_lan_bearer::DEFAULT_GROUP),
+        umsh_lan_bearer::DEFAULT_PORT,
+    );
+    out.push_str(
+        "arg {number=1}{call=--lan-interface}{display=Network interface}\
+         {type=selector}{required=false}\n",
+    );
+    out.push_str("value {arg=1}{value=}{display=Automatic}{default=true}\n");
+    for (name, address) in interfaces {
+        out.push_str(&format!(
+            "value {{arg=1}}{{value={address}}}{{display={} ({address})}}\n",
+            sanitize(name),
+        ));
+    }
+    out.push_str(
+        "arg {number=2}{call=--umsh-only}{display=UMSH frames only}\
+         {tooltip=Drop MeshCore and malformed frames before they reach Wireshark.}\
+         {type=boolflag}{default=false}\n",
+    );
+    out
 }
 
 /// The reply to `--extcap-config`: the capture-options dialog.
@@ -165,22 +206,42 @@ mod tests {
     }
 
     #[test]
-    fn the_interface_names_no_radio() {
-        assert!(interfaces().contains("interface {value=umsh}{display=UMSH radio}\n"));
+    fn the_interfaces_name_no_radio_and_no_group() {
+        let text = interfaces();
+        assert!(text.contains("interface {value=umsh}{display=UMSH radio}\n"));
+        assert!(text.contains("interface {value=umsh-lan}{display=UMSH LAN}\n"));
     }
 
     /// Wireshark cannot tell us which DLT the user picked, so offering a
     /// choice would be a lie.
     #[test]
     fn exactly_one_dlt_is_offered() {
-        let text = dlts();
+        let text = dlts(INTERFACE);
         assert_eq!(text.lines().count(), 1);
         assert!(text.contains("{number=270}"));
+        let text = dlts(LAN_INTERFACE);
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("{number=228}"));
+    }
+
+    #[test]
+    fn the_lan_dialog_offers_every_interface_and_automatic() {
+        let text = lan_config(&[
+            ("en0".into(), std::net::Ipv4Addr::new(192, 168, 1, 5)),
+            ("evil}\nx".into(), std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        ]);
+        assert!(text.contains("{value=}{display=Automatic}{default=true}"));
+        assert!(text.contains("{value=192.168.1.5}{display=en0 (192.168.1.5)}"));
+        assert!(!text.contains("evil}"));
+        assert_numbered(&text);
     }
 
     #[test]
     fn config_numbers_are_contiguous_and_calls_unique() {
-        let text = config();
+        assert_numbered(&config());
+    }
+
+    fn assert_numbered(text: &str) {
         let mut numbers = Vec::new();
         let mut calls = Vec::new();
         for line in text.lines().filter(|line| line.starts_with("arg ")) {

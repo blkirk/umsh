@@ -4592,6 +4592,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hamaddr",
+ "if-addrs",
  "libc",
  "rand 0.10.1",
  "rustyline",

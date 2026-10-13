@@ -233,6 +233,10 @@ changes the PHY for the duration of the capture and is never saved to the device
 arrive as [LoRaTap](https://github.com/eriknl/LoRaTap) (`LINKTYPE` 270), carrying the
 frequency, bandwidth, spreading factor, sync word, RSSI, and SNR the radio reported.
 
+Beside it, **UMSH LAN** (`tshark -i umsh-lan`) joins the LAN bearer group and records every
+datagram sent to it, with the sender's real address. Its gear icon picks the group and the
+network interface to join on.
+
 `install-colorfilters` adds the rule that inverts protocol violations in the packet list; it
 seeds from Wireshark's stock rules rather than replacing them. The dissector decodes and
 annotates UMSH packets from a live capture or a pcap file, and when keys are provided it

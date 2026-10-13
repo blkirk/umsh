@@ -107,6 +107,12 @@ pub struct ExtcapArgs {
     cr: Option<String>,
     #[arg(long, value_name = "N")]
     sync_word: Option<String>,
+
+    // The LAN capture options, mirroring `protocol::lan_config`.
+    #[arg(long, value_name = "GROUP[:PORT]")]
+    group: Option<String>,
+    #[arg(long, value_name = "ADDRESS")]
+    lan_interface: Option<String>,
 }
 
 /// Parse a `type=boolflag` argument.
@@ -166,13 +172,15 @@ pub async fn run() -> Result<()> {
         return reload(&args).await;
     }
     if args.extcap_config {
-        expect_interface(&args)?;
-        print!("{}", protocol::config());
+        if expect_interface(&args)? == protocol::LAN_INTERFACE {
+            print!("{}", protocol::lan_config(&network_interfaces()));
+        } else {
+            print!("{}", protocol::config());
+        }
         return Ok(());
     }
     if args.extcap_dlts {
-        expect_interface(&args)?;
-        print!("{}", protocol::dlts());
+        print!("{}", protocol::dlts(expect_interface(&args)?));
         return Ok(());
     }
     if args.extcap_interfaces {
@@ -180,17 +188,123 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
     if args.capture {
+        if expect_interface(&args)? == protocol::LAN_INTERFACE {
+            return capture_lan(args).await;
+        }
         return capture(args).await;
     }
     bail!("no extcap phase requested")
 }
 
-/// Reject an interface we did not advertise.
-fn expect_interface(args: &ExtcapArgs) -> Result<()> {
+/// The interface named, refusing one we did not advertise.
+fn expect_interface(args: &ExtcapArgs) -> Result<&'static str> {
     match args.extcap_interface.as_deref() {
-        Some(protocol::INTERFACE) => Ok(()),
+        Some(protocol::INTERFACE) => Ok(protocol::INTERFACE),
+        Some(protocol::LAN_INTERFACE) => Ok(protocol::LAN_INTERFACE),
         Some(other) => bail!("unknown interface {other:?}"),
         None => bail!("--extcap-interface is required"),
+    }
+}
+
+/// Every IPv4 interface the host has, for the LAN dialog's dropdown.
+fn network_interfaces() -> Vec<(String, std::net::Ipv4Addr)> {
+    let mut found: Vec<_> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(v4) => Some((interface.name, v4.ip)),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Stream every datagram sent to a LAN bearer group into the FIFO
+/// Wireshark is reading.
+///
+/// The capture joins the group beside whatever else on this host has, and
+/// sends nothing. A unicast peer cannot be listened to this way—only one
+/// socket on a host receives a unicast datagram—so a point-to-point link
+/// is captured on its network interface instead.
+async fn capture_lan(args: ExtcapArgs) -> Result<()> {
+    use umsh_lan_bearer::socket::{LanConfig, LanSocket};
+    use umsh_lan_bearer::{Datagram, MAX_FRAME, classify};
+
+    let fifo = args
+        .fifo
+        .as_deref()
+        .context("--capture requires --fifo=PATH")?;
+    let group = match args.group.as_deref().map(str::trim) {
+        None | Some("") => std::net::SocketAddrV4::new(
+            umsh_lan_bearer::DEFAULT_GROUP.into(),
+            umsh_lan_bearer::DEFAULT_PORT,
+        ),
+        Some(text) => umsh_lan_bearer::parse_group(text).map_err(anyhow::Error::msg)?,
+    };
+    if !group.ip().is_multicast() {
+        bail!(
+            "{} is a point-to-point peer, which cannot be joined; capture its network interface \
+             with the filter `udp port {}`",
+            group.ip(),
+            group.port()
+        );
+    }
+    let interface = match args.lan_interface.as_deref().map(str::trim) {
+        None | Some("") => std::net::Ipv4Addr::UNSPECIFIED,
+        Some(text) => text
+            .parse()
+            .with_context(|| format!("{text:?} is not an interface address"))?,
+    };
+
+    let sink = std::fs::OpenOptions::new()
+        .write(true)
+        .open(fifo)
+        .with_context(|| format!("opening capture FIFO {}", fifo.display()))?;
+    let mut writer = PcapWriter::to_writer(
+        Box::new(sink),
+        CaptureLayers::Radio,
+        PcapEncapsulation::Ipv4,
+    )?;
+    let socket = LanSocket::bind(LanConfig {
+        group,
+        interface,
+        loopback: true,
+    })
+    .with_context(|| format!("joining {group}"))?;
+
+    let mut datagram = [0u8; MAX_FRAME + 1];
+    let receive = async {
+        loop {
+            let (len, source) = socket.recv(&mut datagram).await?;
+            let std::net::SocketAddr::V4(source) = source else {
+                continue;
+            };
+            let frame = &datagram[..len];
+            if args.umsh_only && classify(frame) != Datagram::Umsh {
+                continue;
+            }
+            // A closed FIFO is Wireshark ending the capture.
+            if writer.write_datagram(source, group, frame).is_err() {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        tokio::select! {
+            result = receive => result,
+            _ = terminate.recv() => Ok(()),
+            _ = interrupt.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        receive.await
     }
 }
 

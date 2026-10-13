@@ -39,6 +39,8 @@ tokio-serial = { version = "5", optional = true }
 # Wireshark's error dialog, and reading the host's UTC offset for
 # `time tz sync`.
 libc = "0.2"
+# Lists the network interfaces the Wireshark LAN capture can join on.
+if-addrs = "0.15"
 
 [dev-dependencies]
 umsh = { path = "../../umsh", features = ["test-support"] }
