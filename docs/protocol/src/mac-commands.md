@@ -7,6 +7,8 @@ A MAC command payload consists of:
 
 Support for MAC commands is optional.
 
+A receiver reads the fields a command defines and ignores any bytes that follow them. A command shorter than its defined fields, or with an unrecognized identifier, is ignored.
+
 MAC commands are addressed to a single node. Unless a command's definition provides rules for multicast or broadcast use, as [Identity Request](#identity-request-1) does, a node ignores a command that arrives by multicast or broadcast.
 
 A node answering a command carries its response the way the request was carried, as [Response Carriage](payload-format.md#response-carriage) defines.

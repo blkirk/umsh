@@ -159,6 +159,8 @@ pub enum MacCommand<'a> {
     },
 }
 
+/// Parse a MAC command. A fixed-length command reads the bytes it defines
+/// and ignores any that follow; one shorter than that is an error.
 pub fn parse(payload: &[u8]) -> Result<MacCommand<'_>, AppParseError> {
     let (&command_id, body) = payload
         .split_first()
@@ -174,15 +176,9 @@ pub fn parse(payload: &[u8]) -> Result<MacCommand<'_>, AppParseError> {
             }
             Ok(MacCommand::IdentityRequest { options: body })
         }
-        2 => {
-            if body.is_empty() {
-                Ok(MacCommand::SignalReportRequest)
-            } else {
-                Err(AppParseError::InvalidOptionValue)
-            }
-        }
+        2 => Ok(MacCommand::SignalReportRequest),
         3 => match body {
-            [rssi, snr] => Ok(MacCommand::SignalReportResponse {
+            [rssi, snr, ..] => Ok(MacCommand::SignalReportResponse {
                 rssi: *rssi,
                 snr: *snr as i8,
             }),
@@ -195,15 +191,7 @@ pub fn parse(payload: &[u8]) -> Result<MacCommand<'_>, AppParseError> {
         5 => Ok(MacCommand::EchoResponse { data: body }),
         6 => parse_pfs(body, true),
         7 => parse_pfs(body, false),
-        8 => {
-            if body.is_empty() {
-                Ok(MacCommand::EndPfsSession)
-            } else {
-                Err(AppParseError::InvalidOptionValue)
-            }
-        }
-        // Nothing to read and nothing to do, so a body is nothing to reject
-        // over either.
+        8 => Ok(MacCommand::EndPfsSession),
         9 => Ok(MacCommand::Noop),
         10 => {
             // Structurally well-formed options; values are interpreted
@@ -221,7 +209,7 @@ pub fn parse(payload: &[u8]) -> Result<MacCommand<'_>, AppParseError> {
 }
 
 fn parse_pfs(payload: &[u8], request: bool) -> Result<MacCommand<'_>, AppParseError> {
-    if payload.len() != 34 {
+    if payload.len() < 34 {
         return Err(AppParseError::InvalidLength {
             expected: 34,
             actual: payload.len(),
@@ -1541,18 +1529,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_signal_report_response_wrong_length() {
-        assert!(parse(&[0x03, 0x01]).is_err()); // need exactly 2 body bytes
+    fn parse_signal_report_response_too_short() {
+        assert!(parse(&[0x03, 0x01]).is_err()); // need 2 body bytes
     }
 
     #[test]
-    fn parse_pfs_request_wrong_length() {
-        assert!(parse(&[0x06, 0x00]).is_err()); // need exactly 34 body bytes
+    fn parse_pfs_too_short() {
+        assert!(parse(&[0x06, 0x00]).is_err()); // need 34 body bytes
+        let mut short = [0u8; 34];
+        short[0] = 0x07;
+        assert!(parse(&short).is_err());
     }
 
     #[test]
-    fn parse_end_pfs_nonempty_body() {
-        assert!(parse(&[0x08, 0x00]).is_err());
+    fn fixed_length_commands_ignore_trailing_bytes() {
+        assert_eq!(parse(&[0x08, 0x01]).unwrap(), MacCommand::EndPfsSession);
+        assert_eq!(
+            parse(&[0x02, 0xAA, 0xBB]).unwrap(),
+            MacCommand::SignalReportRequest
+        );
+        assert_eq!(
+            parse(&[0x03, 0xAB, 0xFF, 0x00]).unwrap(),
+            MacCommand::SignalReportResponse {
+                rssi: 0xAB,
+                snr: -1
+            }
+        );
+
+        let mut buf = [0u8; 40];
+        let len = encode(
+            &MacCommand::PfsSessionRequest {
+                ephemeral_key: PublicKey([0x5A; 32]),
+                duration_minutes: 90,
+            },
+            &mut buf,
+        )
+        .unwrap();
+        buf[len..len + 3].copy_from_slice(&[0xDE, 0xAD, 0x00]);
+        for id in [0x06, 0x07] {
+            buf[0] = id;
+            let parsed = parse(&buf[..len + 3]).unwrap();
+            let (MacCommand::PfsSessionRequest {
+                ephemeral_key,
+                duration_minutes,
+            }
+            | MacCommand::PfsSessionResponse {
+                ephemeral_key,
+                duration_minutes,
+            }) = parsed
+            else {
+                panic!("expected a PFS command, got {parsed:?}");
+            };
+            assert_eq!(ephemeral_key, PublicKey([0x5A; 32]));
+            assert_eq!(duration_minutes, 90);
+        }
     }
 
     // --- peer repeaters ---
