@@ -70,6 +70,16 @@ impl Policy {
             .map(|iface| {
                 let (limit, allow_to) = match iface.kind {
                     InterfaceKind::Radio => (None, None),
+                    // Like a host, the group spends no airtime of its own
+                    // on the way in; unlike one, it has a default limit,
+                    // the bearer's own ingress limit.
+                    InterfaceKind::Lan => {
+                        let lan = config.lan.as_ref().expect("the interface exists");
+                        (
+                            Some(RateLimit::per_minute(lan.max_frames_per_minute())),
+                            resolve(crate::config::LAN_INTERFACE, &lan.allow_to)?,
+                        )
+                    }
                     InterfaceKind::Client(index) => {
                         let client = &config.clients[index];
                         (

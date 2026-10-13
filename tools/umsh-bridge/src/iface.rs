@@ -1,5 +1,5 @@
-//! The server's interfaces: its own radio, plus one per configured
-//! client.
+//! The server's interfaces: its own radio and LAN membership, plus one
+//! per configured client and host.
 //!
 //! The set is static—clients are named in the configuration, and a
 //! disconnected client is an interface that is down, not an interface
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::config::{RADIO_INTERFACE, ServerConfig};
+use crate::config::{LAN_INTERFACE, RADIO_INTERFACE, ServerConfig};
 use crate::tunnel::{TunnelFrame, TunnelQueue};
 
 /// Index into [`Interfaces::all`].
@@ -21,6 +21,8 @@ pub type InterfaceId = usize;
 pub enum InterfaceKind {
     /// The server's own radio.
     Radio,
+    /// The server's membership in a LAN bearer group.
+    Lan,
     /// A tunnel client, as an index into `ServerConfig::clients`.
     Client(usize),
     /// A host interface, as an index into `ServerConfig::hosts`: a
@@ -62,6 +64,8 @@ pub struct Interfaces {
     pub all: Vec<Arc<Interface>>,
     /// The server's own radio, when it has one.
     pub radio: Option<InterfaceId>,
+    /// The server's LAN membership, when it has one.
+    pub lan: Option<InterfaceId>,
 }
 
 impl Interfaces {
@@ -84,6 +88,19 @@ impl Interfaces {
             0
         });
 
+        let lan = config.lan.is_some().then(|| {
+            let id = all.len();
+            all.push(Arc::new(Interface {
+                id,
+                name: LAN_INTERFACE.to_string(),
+                egress: Arc::new(TunnelQueue::new(depth, max_age)),
+                kind: InterfaceKind::Lan,
+                // Always up, like the radio: the relay rejoins on its own.
+                connected: AtomicBool::new(true),
+            }));
+            id
+        });
+
         for (index, client) in config.clients.iter().enumerate() {
             all.push(Arc::new(Interface {
                 id: all.len(),
@@ -104,7 +121,7 @@ impl Interfaces {
             }));
         }
 
-        Self { all, radio }
+        Self { all, radio, lan }
     }
 
     pub fn get(&self, id: InterfaceId) -> &Arc<Interface> {

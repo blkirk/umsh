@@ -27,6 +27,7 @@ pub mod hub;
 pub mod identity;
 pub mod iface;
 pub mod keygen;
+pub mod lan;
 pub mod policy;
 pub mod server;
 pub mod tls;

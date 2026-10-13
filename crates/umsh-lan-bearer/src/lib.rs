@@ -42,6 +42,29 @@ pub const MAX_FRAME: usize = 255;
 /// The DNS-SD service type participants advertise under.
 pub const SERVICE_TYPE: &str = "_umsh._udp";
 
+/// A multicast group, or a unicast peer in its place, written as
+/// `GROUP:PORT` or as a bare `GROUP` on [`DEFAULT_PORT`].
+#[cfg(feature = "std")]
+pub fn parse_group(text: &str) -> Result<std::net::SocketAddrV4, String> {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    let group = match text.parse::<Ipv4Addr>() {
+        Ok(address) => SocketAddrV4::new(address, DEFAULT_PORT),
+        Err(_) => text
+            .parse::<SocketAddrV4>()
+            .map_err(|_| format!("{text:?} is not an IPv4 GROUP or GROUP:PORT"))?,
+    };
+    if group.ip().is_unspecified() || group.ip().is_broadcast() {
+        return Err(format!(
+            "{} is neither a multicast group nor a peer",
+            group.ip()
+        ));
+    }
+    if group.port() == 0 {
+        return Err("port 0 is not a destination".into());
+    }
+    Ok(group)
+}
+
 /// The MeshCore v1 version bits, which share the first octet's top two
 /// bits with UMSH's.
 const MESHCORE_V1_VERSION: u8 = 0b00;

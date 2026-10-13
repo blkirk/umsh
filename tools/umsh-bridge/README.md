@@ -80,6 +80,21 @@ Each participant fronts at most one radio: a ULCP device on a serial port or
 over BLE, the UDP-multicast fake radio the workspace examples use, or—for a
 server that only joins clients together—no radio at all.
 
+Beside the radio, or instead of it, a participant can join a
+[LAN bearer](https://darconeous.github.io/umsh/docs/protocol/lan-bearer.html)
+group, so the radios, desktops, and phones on its local network cross the bridge
+too. A server's LAN is one more interface; a client with a radio and a LAN copies
+each frame from any of its radio, its LAN, and the tunnel to the other two. No
+repeater stands between the LAN and the bridge, so each participant carries a
+frame across its LAN at most once in 30 seconds. That is what keeps two
+participants on one LAN, or a participant and its own multicast echo, from
+circulating a frame.
+
+```toml
+[server.lan]                       # or [client.lan]
+group = "239.255.134.121:15056"    # the default; a unicast address is a point-to-point peer
+```
+
 A device needs `CAP_MAC_BACKHAUL` to join a bridge; one that does not advertise
 it is refused, and the interface retries until the firmware is updated. Whether
 that device *repeats* is its own persisted setting, which the bridge reads and
@@ -302,7 +317,20 @@ Selected by `type`; each type accepts only its own keys.
 | `serial` | `port`, `baud` (default 115200) | A ULCP device on a serial port. |
 | `ble` | `selector` (optional) | A ULCP device over BLE. Without a selector the first radio discovered is used, which is only unambiguous where exactly one is in range—name the radio for an unattended deployment. |
 | `udp-multicast` | `group` (default 239.255.134.121), `port` (default 15056), `rssi` (default −40), `snr` (default 10) | The fake radio the workspace examples use. UDP measures no signal quality, so `rssi`/`snr` are synthesized for received frames. |
-| `none` | — | No radio: a server that only joins clients together. Not valid for a client, which would then relay nothing. This is the default when the table is absent. |
+| `none` | — | No radio: a server that only joins clients together, or a client that fronts only a LAN. This is the default when the table is absent. |
+
+### `[server.lan]` / `[client.lan]`
+
+Membership in a LAN bearer group. Absent means no LAN.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `group` | `239.255.134.121:15056` | `GROUP[:PORT]`; a bare address takes port 15056. A unicast address names the one peer of a point-to-point link, which names this host in turn. |
+| `interface` | *(routed)* | The address of the interface to join on. Absent is the one the host routes the group through. |
+| `max_frames_per_minute` | 120 | Server only. Budget for frames arriving from the LAN, where anyone on the network can send. |
+| `allow_to` | *(all)* | Server only. Interfaces the LAN's traffic may be fanned out to. |
+
+The LAN's interface name is `lan`, reserved like `radio`.
 
 ### `[server.limits]`
 
@@ -328,10 +356,10 @@ configured on each device with `umshctl repeater`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `name` | *(required)* | Interface name, used in log lines and in other clients' `allow_to`. `"radio"` is reserved for the server's own radio. |
+| `name` | *(required)* | Interface name, used in log lines and in other clients' `allow_to`. `"radio"` and `"lan"` are reserved for the server's own interfaces. |
 | `address` | *(required)* | This client's identity, as the UMSH address its `keygen identity` printed. An identity names exactly one client. |
 | `max_frames_per_minute` | *(unlimited)* | Budget for frames arriving from this client. `check` warns when absent: an authenticated but misbehaving client is the realistic failure mode. The budget counts everything the client's node transmits—its repeats, its own traffic, its beacons and acks—including the repeats it makes of frames the bridge handed it. |
-| `allow_to` | *(all)* | Interfaces this client's traffic may be fanned out to (client names and/or `"radio"`). The place to stop two clients whose radios share a segment from doubling every frame's airtime. |
+| `allow_to` | *(all)* | Interfaces this client's traffic may be fanned out to (client and host names, `"radio"`, and `"lan"`). The place to stop two clients whose radios share a segment from doubling every frame's airtime. |
 
 ## Command reference
 

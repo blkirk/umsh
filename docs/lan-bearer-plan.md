@@ -534,6 +534,25 @@ with the iOS work because that is its first user.
   `0.0.0.0` and `255.255.255.255`.
 - **Discovery:** unchanged; `grp` reports whatever address is configured.
 
+### P10. LAN interfaces on the internet bridge (`internet-bridging.md`)
+
+- **Interface:** a bridge participant MAY join a bearer group as an
+  interface—the server beside its radio and clients, a client beside or
+  instead of its radio. Datagrams arrive unmeasured; frames leave as
+  datagrams.
+- **Crossing rule:** no repeater stands between the group and the bridge,
+  so a participant carries a frame across a LAN interface at most once, in
+  either direction, within 30 seconds, judged by the frame's octets. This
+  is the one exception to the relay procedure's ban on duplicate
+  suppression; it stops two participants on one LAN, or a participant and
+  its own echo, from circulating a frame, and drops only frames the far
+  side's duplicate caches have already seen.
+- **Limits:** the server MUST rate-limit its LAN interface, as it does a
+  host interface. `umsh-bridge` defaults the limit to the bearer's own
+  ingress limit.
+- **Client:** with a radio and a LAN interface, a client copies each frame
+  from any of the three (radio, LAN, tunnel) to the other two.
+
 ## Implementation
 
 The work splits into two phases. **Phase 1 stands alone:** radios bridge

@@ -35,6 +35,18 @@ pub fn check(path: &Path) -> Result<()> {
             println!("listen:      {address}");
         }
         println!("radio:       {}", server.radio.describe());
+        if let Some(lan) = &server.lan {
+            let fan_out = match &lan.allow_to {
+                Some(names) => names.join(", "),
+                None => other_interfaces(&server.interface_names(), crate::config::LAN_INTERFACE)
+                    .join(", "),
+            };
+            println!(
+                "lan:         {} -> {fan_out} ({}/min)",
+                lan.group(),
+                lan.max_frames_per_minute()
+            );
+        }
         match server.limits.exit_clamp {
             Some(clamp) => println!("exit clamp:  {clamp} hop(s)"),
             None => println!("exit clamp:  off"),
@@ -86,8 +98,8 @@ pub fn check(path: &Path) -> Result<()> {
                 );
             }
         }
-        if server.clients.is_empty() && server.hosts.is_empty() {
-            println!("  warning: no clients configured; the server bridges its radio to nothing");
+        if server.interface_names().len() < 2 {
+            println!("  warning: only one interface; the server bridges it to nothing");
         }
     }
 
@@ -98,6 +110,9 @@ pub fn check(path: &Path) -> Result<()> {
         println!("server:      {}", client.server);
         println!("server pin:  {}", client.server_address);
         println!("radio:       {}", client.radio.describe());
+        if let Some(lan) = &client.lan {
+            println!("lan:         {}", lan.group());
+        }
     }
 
     println!("ok: {}", path.display());

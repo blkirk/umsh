@@ -22,6 +22,7 @@ use crate::device::DeviceRelay;
 use crate::hub::Hub;
 use crate::identity::BridgeIdentity;
 use crate::iface::{Ingress, InterfaceId, Interfaces};
+use crate::lan::LanRelay;
 use crate::policy::Policy;
 use crate::tls::{self, Address, Credential};
 use crate::tunnel::{TunnelQueue, TunnelReader, TunnelWriter, pump_writer};
@@ -82,6 +83,17 @@ pub async fn run(identity: BridgeIdentity, config: Config) -> Result<()> {
         );
         tokio::task::spawn_local(async move { relay.run().await });
         spawn_ingress(inbound, radio, ingress_tx.clone());
+    }
+
+    if let (Some(lan), Some(entry)) = (interfaces.lan, &server.lan) {
+        let iface = interfaces.get(lan).clone();
+        let inbound = Arc::new(TunnelQueue::new(
+            server.tunnel.queue_depth,
+            Duration::from_secs(server.tunnel.max_frame_age_secs),
+        ));
+        let relay = LanRelay::new(entry.socket_config(), inbound.clone(), iface.egress.clone());
+        tokio::task::spawn_local(async move { relay.run().await });
+        spawn_ingress(inbound, lan, ingress_tx.clone());
     }
 
     // Host interfaces need no credential and no radio: each is a socket

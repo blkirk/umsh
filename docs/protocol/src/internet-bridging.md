@@ -28,7 +28,8 @@ segments which are nowhere near each other.
   neighbor of the device's own node.
 - The server's **interfaces** are its own radio, when it has one, plus
   one interface per connected client, plus any
-  [host interfaces](#host-interfaces) it offers. The server's radio is a
+  [host interfaces](#host-interfaces) it offers, plus its
+  [LAN interface](#lan-interfaces), when it has one. The server's radio is a
   participant like any other; nothing distinguishes it but the absence
   of a tunnel.
 - The server copies each frame it receives to its other interfaces. It
@@ -330,6 +331,30 @@ the bridge touches, and a binding that meets
 possession also carries whatever key provisioning and administrative
 authority the device offers.
 
+## LAN Interfaces {#lan-interfaces}
+
+A participant **MAY** join a [LAN bearer](lan-bearer.md) group as an
+interface: the server beside its radio and its clients, a client beside
+or instead of its radio. Each datagram from the group is a frame arriving
+on that interface, carrying no measurements, and each frame sent to the
+interface is one datagram.
+
+No repeater stands between the group and the bridge. A frame from the
+group comes either from a bridging radio, whose node has already forwarded
+it, or from an endpoint, whose frame no repeater has seen; a crossing from
+an endpoint spends one flood hop, as for a host interface. Nothing on the
+bridge's side stops a frame circulating between two participants on one
+LAN, or between a participant and its own multicast echo, so a participant
+**MUST** carry a frame across a LAN interface at most once, in either
+direction, within 30 seconds, judged by the frame's octets. Every frame
+this suppresses is one the receiving nodes have already seen.
+
+The server **MUST** rate-limit its LAN interface, as it does a host
+interface: anyone on the network can send to the group.
+
+A client with both a radio and a LAN interface copies each frame from its
+radio, its LAN interface, or the tunnel to the other two.
+
 ## Relay Procedure {#relay-procedure}
 
 For a frame arriving on interface *I*, the server:
@@ -343,14 +368,16 @@ For a frame arriving on interface *I*, the server:
    per-interface-pair rules.
 
 There is no step that reads what the frame means. The server **MUST NOT**
-suppress duplicates, account for hops, match source routes, prepend trace
+suppress duplicates beyond what [LAN interfaces](#lan-interfaces)
+require, account for hops, match source routes, prepend trace
 entries, or apply signal-quality thresholds; those belong to the
 participants' nodes, which apply them to bridged traffic and local
 traffic alike. A frame the server cannot parse is carried unchanged like
 any other.
 
-Clients apply nothing at all beyond the framing rules above: a client
-relays bytes between its radio and the tunnel.
+Clients apply nothing at all beyond the framing rules above and the
+[LAN interface](#lan-interfaces) rule: a client relays bytes between its
+radio, its LAN interface, and the tunnel.
 
 ## Traffic Limits {#traffic-limits}
 

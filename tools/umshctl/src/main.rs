@@ -395,19 +395,7 @@ async fn resolve(args: &ToolArgs, prefs: &Prefs) -> Result<Option<Target>> {
 /// A multicast group, or a unicast peer in its place, as `GROUP:PORT` or
 /// as a bare `GROUP` on the default port.
 pub fn parse_group(spec: &str) -> Result<std::net::SocketAddrV4> {
-    let group: std::net::SocketAddrV4 = match spec.parse::<std::net::Ipv4Addr>() {
-        Ok(address) => std::net::SocketAddrV4::new(address, umsh_lan_bearer::DEFAULT_PORT),
-        Err(_) => spec
-            .parse()
-            .map_err(|_| anyhow::anyhow!("{spec:?} is not an IPv4 GROUP or GROUP:PORT"))?,
-    };
-    if group.ip().is_unspecified() || group.ip().is_broadcast() {
-        bail!("{} is neither a multicast group nor a peer", group.ip());
-    }
-    if group.port() == 0 {
-        bail!("port 0 is not a destination");
-    }
-    Ok(group)
+    umsh_lan_bearer::parse_group(spec).map_err(anyhow::Error::msg)
 }
 
 async fn run(args: ToolArgs) -> Result<()> {

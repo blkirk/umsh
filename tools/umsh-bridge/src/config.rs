@@ -5,7 +5,7 @@
 //! `umsh-bridge check` validates the exact artifact that will run.
 
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -25,6 +25,10 @@ pub const DEFAULT_HOST_PORT: u16 = 21838;
 /// Interface name of a participant's own radio. Reserved: a client
 /// entry may not take it.
 pub const RADIO_INTERFACE: &str = "radio";
+
+/// Interface name of a participant's LAN bearer membership. Reserved
+/// like [`RADIO_INTERFACE`].
+pub const LAN_INTERFACE: &str = "lan";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +54,8 @@ pub struct ServerConfig {
     pub listen: Vec<SocketAddr>,
     #[serde(default)]
     pub radio: RadioConfig,
+    /// Membership in a LAN bearer group, beside or instead of the radio.
+    pub lan: Option<LanEntry>,
     #[serde(default)]
     pub limits: LimitsConfig,
     #[serde(default)]
@@ -108,6 +114,69 @@ pub struct HostEntry {
     pub allow_remote: bool,
 }
 
+/// Membership in a [LAN bearer] group: the participant sends what it
+/// relays to the group and relays what the group sends. No repeater
+/// stands between the group and the bridge, so the interface carries a
+/// frame across at most once, in either direction, within
+/// [`crate::lan::CROSSING_WINDOW`].
+///
+/// [LAN bearer]: https://darconeous.github.io/umsh/docs/protocol/lan-bearer.html
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanEntry {
+    /// `GROUP[:PORT]`. A unicast address names the one peer of a
+    /// point-to-point link. Absent is the bearer's default group.
+    #[serde(default, deserialize_with = "deserialize_group")]
+    pub group: Option<SocketAddrV4>,
+    /// The interface to join on, by its address. Absent is the one the
+    /// host routes the group through.
+    pub interface: Option<Ipv4Addr>,
+    /// Forwarding budget for frames arriving from the group. Absent is
+    /// the bearer's default ingress limit. Server only: a client's
+    /// traffic is limited by the server.
+    pub max_frames_per_minute: Option<u32>,
+    /// Interfaces the group's traffic may be fanned out to. Absent means
+    /// all of them. Server only.
+    pub allow_to: Option<Vec<String>>,
+}
+
+impl LanEntry {
+    pub fn group(&self) -> SocketAddrV4 {
+        self.group.unwrap_or_else(|| {
+            SocketAddrV4::new(
+                umsh_lan_bearer::DEFAULT_GROUP.into(),
+                umsh_lan_bearer::DEFAULT_PORT,
+            )
+        })
+    }
+
+    pub fn max_frames_per_minute(&self) -> u32 {
+        self.max_frames_per_minute
+            .unwrap_or(u32::from(umsh_ulcp::lan::DEFAULT_INGRESS_LIMIT))
+    }
+
+    pub fn socket_config(&self) -> umsh_lan_bearer::socket::LanConfig {
+        umsh_lan_bearer::socket::LanConfig {
+            group: self.group(),
+            interface: self.interface.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            loopback: true,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!("lan {}", self.group())
+    }
+}
+
+fn deserialize_group<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SocketAddrV4>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    umsh_lan_bearer::parse_group(&text)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
@@ -124,6 +193,8 @@ pub struct ClientConfig {
     pub server_name: Option<String>,
     #[serde(default)]
     pub radio: RadioConfig,
+    /// Membership in a LAN bearer group, beside or instead of the radio.
+    pub lan: Option<LanEntry>,
     #[serde(default)]
     pub tunnel: TunnelConfig,
 }
@@ -422,8 +493,20 @@ impl ServerConfig {
         if self.listen.is_empty() {
             bail!("[server] listen is empty; the server would accept nothing");
         }
-        if self.clients.is_empty() && self.hosts.is_empty() && self.radio.is_none() {
-            bail!("[server] has no clients, no hosts, and no radio; there is nothing to bridge");
+        if self.clients.is_empty()
+            && self.hosts.is_empty()
+            && self.radio.is_none()
+            && self.lan.is_none()
+        {
+            bail!(
+                "[server] has no clients, no hosts, no radio, and no LAN; there is nothing to \
+                 bridge"
+            );
+        }
+        if let Some(lan) = &self.lan
+            && lan.max_frames_per_minute == Some(0)
+        {
+            bail!("[server.lan] max_frames_per_minute is 0; nothing from the LAN would cross");
         }
         if let Some(clamp) = self.limits.exit_clamp
             && clamp > 15
@@ -447,8 +530,11 @@ impl ServerConfig {
         let mut names = HashSet::new();
         let mut addresses = HashSet::new();
         for client in &self.clients {
-            if client.name == RADIO_INTERFACE {
-                bail!("client name \"{RADIO_INTERFACE}\" is reserved for the server's own radio");
+            if client.name == RADIO_INTERFACE || client.name == LAN_INTERFACE {
+                bail!(
+                    "client name \"{}\" is reserved for the server's own interface",
+                    client.name
+                );
             }
             if client.name.trim().is_empty() {
                 bail!("every [[server.clients]] needs a name; it is how policy refers to it");
@@ -467,8 +553,11 @@ impl ServerConfig {
 
         let mut listens = HashSet::new();
         for host in &self.hosts {
-            if host.name == RADIO_INTERFACE {
-                bail!("host name \"{RADIO_INTERFACE}\" is reserved for the server's own radio");
+            if host.name == RADIO_INTERFACE || host.name == LAN_INTERFACE {
+                bail!(
+                    "host name \"{}\" is reserved for the server's own interface",
+                    host.name
+                );
             }
             if host.name.trim().is_empty() {
                 bail!("every [[server.hosts]] needs a name; it is how policy refers to it");
@@ -505,7 +594,8 @@ impl ServerConfig {
                 self.hosts
                     .iter()
                     .map(|host| (host.name.as_str(), &host.allow_to)),
-            );
+            )
+            .chain(self.lan.iter().map(|lan| (LAN_INTERFACE, &lan.allow_to)));
         for (name, allow_to) in allowlists {
             let Some(allow_to) = allow_to else {
                 continue;
@@ -516,6 +606,15 @@ impl ServerConfig {
                         bail!(
                             "\"{name}\" allows forwarding to \"{RADIO_INTERFACE}\", but \
                              [server.radio] is none"
+                        );
+                    }
+                    continue;
+                }
+                if target == LAN_INTERFACE {
+                    if self.lan.is_none() {
+                        bail!(
+                            "\"{name}\" allows forwarding to \"{LAN_INTERFACE}\", but there is \
+                             no [server.lan]"
                         );
                     }
                     continue;
@@ -537,6 +636,9 @@ impl ServerConfig {
         if !self.radio.is_none() {
             names.push(RADIO_INTERFACE.to_string());
         }
+        if self.lan.is_some() {
+            names.push(LAN_INTERFACE.to_string());
+        }
         names.extend(self.clients.iter().map(|client| client.name.clone()));
         names.extend(self.hosts.iter().map(|host| host.name.clone()));
         names
@@ -545,8 +647,19 @@ impl ServerConfig {
 
 impl ClientConfig {
     fn validate(&self) -> Result<()> {
-        if self.radio.is_none() {
-            bail!("[client.radio] is none; a client with no radio relays nothing");
+        if self.radio.is_none() && self.lan.is_none() {
+            bail!("[client] has no radio and no LAN; a client with neither relays nothing");
+        }
+        if let Some(lan) = &self.lan {
+            if lan.max_frames_per_minute.is_some() {
+                bail!(
+                    "[client.lan] max_frames_per_minute has no meaning for a client; the server \
+                     limits what each client sends"
+                );
+            }
+            if lan.allow_to.is_some() {
+                bail!("[client.lan] allow_to has no meaning for a client; it relays everything");
+            }
         }
         if self.tunnel.queue_depth == 0 {
             bail!("[client.tunnel] queue_depth must be at least 1");
@@ -935,5 +1048,79 @@ mod tests {
             let text = server_config(&format!("[server.radio]\ntype = \"ble\"\n{table}"));
             assert!(parse(&text).is_err(), "{table}");
         }
+    }
+
+    fn client_config(extra: &str) -> String {
+        format!(
+            "[identity]\nkey_file = \"k\"\n\
+             [client]\nserver = \"h:21837\"\nserver_address = \"{}\"\n{extra}",
+            address(1)
+        )
+    }
+
+    #[test]
+    fn a_lan_takes_the_bearers_defaults_and_a_bare_group_its_port() {
+        let server = parse(&server_config("[server.lan]\n"))
+            .unwrap()
+            .server
+            .unwrap();
+        let lan = server.lan.unwrap();
+        assert_eq!(
+            lan.group(),
+            SocketAddrV4::new(
+                umsh_lan_bearer::DEFAULT_GROUP.into(),
+                umsh_lan_bearer::DEFAULT_PORT
+            )
+        );
+        assert_eq!(
+            lan.max_frames_per_minute(),
+            u32::from(umsh_ulcp::lan::DEFAULT_INGRESS_LIMIT)
+        );
+
+        let server = parse(&server_config("[server.lan]\ngroup = \"192.168.1.20\"\n"))
+            .unwrap()
+            .server
+            .unwrap();
+        assert_eq!(
+            server.lan.unwrap().group().port(),
+            umsh_lan_bearer::DEFAULT_PORT
+        );
+        assert!(parse(&server_config("[server.lan]\ngroup = \"0.0.0.0\"\n")).is_err());
+        assert!(parse(&server_config("[server.lan]\nmax_frames_per_minute = 0\n")).is_err());
+    }
+
+    #[test]
+    fn a_lan_is_an_interface_the_server_can_name() {
+        let text = server_config(&format!(
+            "[server.lan]\nallow_to = [\"far\"]\n\
+             [[server.clients]]\nname = \"far\"\naddress = \"{}\"\nallow_to = [\"lan\"]\n",
+            address(2)
+        ));
+        let server = parse(&text).unwrap().server.unwrap();
+        assert_eq!(server.interface_names(), ["lan", "far"]);
+
+        let reserved = server_config(&format!(
+            "[server.lan]\n[[server.clients]]\nname = \"lan\"\naddress = \"{}\"\n",
+            address(2)
+        ));
+        assert!(parse(&reserved).is_err());
+        let dangling = server_config(&format!(
+            "[server.radio]\ntype = \"ble\"\n\
+             [[server.clients]]\nname = \"far\"\naddress = \"{}\"\nallow_to = [\"lan\"]\n",
+            address(2)
+        ));
+        assert!(parse(&dangling).is_err());
+    }
+
+    #[test]
+    fn a_client_may_front_a_lan_instead_of_a_radio_but_not_police_it() {
+        parse(&client_config("[client.lan]\n")).unwrap();
+        parse(&client_config(
+            "[client.radio]\ntype = \"ble\"\n[client.lan]\ngroup = \"239.1.2.3:7000\"\n",
+        ))
+        .unwrap();
+        assert!(parse(&client_config("")).is_err());
+        assert!(parse(&client_config("[client.lan]\nmax_frames_per_minute = 60\n")).is_err());
+        assert!(parse(&client_config("[client.lan]\nallow_to = []\n")).is_err());
     }
 }

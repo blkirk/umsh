@@ -4059,6 +4059,7 @@ dependencies = [
  "umsh-core",
  "umsh-crypto",
  "umsh-hal",
+ "umsh-lan-bearer",
  "umsh-ulcp",
  "umsh-ulcp-simdev",
 ]

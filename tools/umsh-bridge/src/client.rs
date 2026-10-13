@@ -1,5 +1,6 @@
-//! The bridge client: a byte-faithful relay between one radio and the
-//! server.
+//! The bridge client: a byte-faithful relay between the server and its
+//! radio, its LAN bearer group, or both. With both, each frame from one
+//! of the three is copied to the other two.
 //!
 //! There is no forwarding logic here, deliberately—nor anywhere else
 //! in the bridge. A client does not parse what it carries, does not
@@ -16,8 +17,9 @@ use tokio::net::TcpStream;
 use crate::config::ClientConfig;
 use crate::device::DeviceRelay;
 use crate::identity::BridgeIdentity;
+use crate::lan::LanRelay;
 use crate::tls::{self, Credential};
-use crate::tunnel::{TunnelQueue, TunnelReader, TunnelWriter, pump_writer};
+use crate::tunnel::{Dequeued, TunnelQueue, TunnelReader, TunnelWriter, pump_writer};
 
 pub async fn run(identity: BridgeIdentity, mut config: ClientConfig) -> Result<()> {
     let credential =
@@ -26,15 +28,40 @@ pub async fn run(identity: BridgeIdentity, mut config: ClientConfig) -> Result<(
     let connector = tokio_rustls::TlsConnector::from(tls_config);
 
     let max_age = Duration::from_secs(config.tunnel.max_frame_age_secs);
-    let to_server = Arc::new(TunnelQueue::new(config.tunnel.queue_depth, max_age));
-    let to_device = Arc::new(TunnelQueue::new(config.tunnel.queue_depth, max_age));
+    let queue = || Arc::new(TunnelQueue::new(config.tunnel.queue_depth, max_age));
+    let to_server = queue();
 
-    let relay = DeviceRelay::new(
-        std::mem::take(&mut config.radio),
-        to_server.clone(),
-        to_device.clone(),
-    );
-    tokio::task::spawn_local(async move { relay.run().await });
+    // Each local side's inbound and outbound queues, for whichever are
+    // configured.
+    let radio = (!config.radio.is_none()).then(|| (queue(), queue()));
+    let lan = config.lan.as_ref().map(|_| (queue(), queue()));
+    if let Some((inbound, outbound)) = &radio {
+        let relay = DeviceRelay::new(
+            std::mem::take(&mut config.radio),
+            inbound.clone(),
+            outbound.clone(),
+        );
+        tokio::task::spawn_local(async move { relay.run().await });
+    }
+    if let (Some((inbound, outbound)), Some(entry)) = (&lan, &config.lan) {
+        let relay = LanRelay::new(entry.socket_config(), inbound.clone(), outbound.clone());
+        tokio::task::spawn_local(async move { relay.run().await });
+    }
+    if let Some((inbound, _)) = &radio {
+        let mut targets = vec![to_server.clone()];
+        targets.extend(lan.as_ref().map(|(_, outbound)| outbound.clone()));
+        spawn_fan_out(inbound.clone(), targets);
+    }
+    if let Some((inbound, _)) = &lan {
+        let mut targets = vec![to_server.clone()];
+        targets.extend(radio.as_ref().map(|(_, outbound)| outbound.clone()));
+        spawn_fan_out(inbound.clone(), targets);
+    }
+    let to_local: Vec<Arc<TunnelQueue>> = radio
+        .iter()
+        .chain(&lan)
+        .map(|(_, outbound)| outbound.clone())
+        .collect();
 
     tracing::info!(
         server = %config.server,
@@ -47,7 +74,7 @@ pub async fn run(identity: BridgeIdentity, mut config: ClientConfig) -> Result<(
     let mut backoff = min;
     loop {
         let started = tokio::time::Instant::now();
-        match session(&connector, &config, &to_server, &to_device).await {
+        match session(&connector, &config, &to_server, &to_local).await {
             Ok(()) => tracing::info!("tunnel closed by the server"),
             Err(error) => tracing::warn!("tunnel: {error:#}"),
         }
@@ -69,7 +96,7 @@ async fn session(
     connector: &tokio_rustls::TlsConnector,
     config: &ClientConfig,
     to_server: &Arc<TunnelQueue>,
-    to_device: &Arc<TunnelQueue>,
+    to_local: &[Arc<TunnelQueue>],
 ) -> Result<()> {
     let stream = connect_any(&config.server).await?;
     stream.set_nodelay(true).ok();
@@ -110,11 +137,13 @@ async fn session(
     let outcome = loop {
         match reader.read_frame().await {
             Ok(frame) => {
-                // Passed to the device unmodified, as the body of a
+                // Passed on unmodified—to the device as the body of a
                 // CMD_STR_SEND: the server composed it and the client
                 // has no business editing it.
-                if to_device.push(frame) {
-                    tracing::warn!("the radio is not keeping up; dropped the oldest frame");
+                for queue in to_local {
+                    if queue.push(frame.clone()) {
+                        tracing::warn!("a local side is not keeping up; dropped the oldest frame");
+                    }
                 }
             }
             Err(error) => break Err(anyhow!("{error}")),
@@ -132,6 +161,24 @@ async fn session(
         );
     }
     outcome
+}
+
+/// Copy each frame from `source` to every queue in `targets`.
+fn spawn_fan_out(source: Arc<TunnelQueue>, targets: Vec<Arc<TunnelQueue>>) {
+    tokio::task::spawn_local(async move {
+        loop {
+            // Nothing clears a local side's inbound queue, so a session
+            // ending here is only ever a spurious wake.
+            let Dequeued::Frame(frame) = source.pop().await else {
+                continue;
+            };
+            for target in &targets {
+                if target.push(frame.clone()) {
+                    tracing::warn!("a queue is not keeping up; dropped the oldest frame");
+                }
+            }
+        }
+    });
 }
 
 /// Try every address the name resolves to, in the order the resolver
