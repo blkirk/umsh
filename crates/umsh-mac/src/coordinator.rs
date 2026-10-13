@@ -2000,6 +2000,9 @@ impl<
             }
             return Err(err);
         }
+        if let Some(ack_mic) = options.ack_mic {
+            self.retire_ack_carried_onward(from, peer, &ack_mic);
+        }
         Ok(if options.track_transmission {
             tracked_receipt
         } else {
@@ -2193,6 +2196,9 @@ impl<
                     .and_then(|slot| slot.remove_pending_ack(&tracked_receipt));
             }
             return Err(err);
+        }
+        if let Some(ack_mic) = options.ack_mic {
+            self.retire_ack_carried_onward(from, peer, &ack_mic);
         }
         Ok(if options.track_transmission {
             tracked_receipt
@@ -2898,7 +2904,7 @@ impl<
         // be the origin of one exchange and a repeater for another, and the
         // queued forward it may be holding is not this ack's business to
         // match against.
-        self.cancel_forwards_for_ack_mic(&ack_trailer[..4]);
+        self.cancel_forwards_for_ack_mic(&ack_trailer[..4], false);
         if let Some(target_peer) = self.peer_for_ack_trailer(&ack_trailer)
             && let Some((identity_id, receipt, via_route_retry, _)) =
                 self.complete_ack_reporting_retry(&target_peer, |pending| *pending == ack_trailer)
@@ -3904,6 +3910,57 @@ impl<
                 }
             }
         }
+    }
+
+    /// Stop retrying a standalone ack whose acknowledgment a new send now
+    /// carries as an [Ack MIC option].
+    ///
+    /// A routed ack retries until it hears a repeater carry it, and a
+    /// repeater that overhears the option drops its queued forward of that
+    /// ack, because the option's packet takes the acknowledgment the rest
+    /// of the way. Left running, the ladder would read that silence as a
+    /// lost ack and send it again. The new send is tracked in its own right,
+    /// so its retries now cover the acknowledgment too.
+    ///
+    /// An ack still waiting for its first transmission is left alone: it
+    /// goes out as it would have, and only what follows it is retired.
+    ///
+    /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
+    fn retire_ack_carried_onward(
+        &mut self,
+        from: LocalIdentityId,
+        peer: &PublicKey,
+        ack_mic: &[u8; 4],
+    ) {
+        let Some(slot) = self.identity(from) else {
+            return;
+        };
+        let carried: Vec<SendReceipt, ACKS> = slot
+            .pending_acks
+            .iter()
+            .filter(|(_, pending)| {
+                !pending.expects_ack()
+                    && pending.peer == *peer
+                    && !matches!(pending.state, crate::AckState::Queued { .. })
+                    && Self::is_mac_ack_for(pending.resend.frame.as_slice(), ack_mic)
+            })
+            .map(|(receipt, _)| *receipt)
+            .collect();
+        for receipt in carried {
+            self.cancel_pending_ack(from, receipt);
+        }
+    }
+
+    /// Whether `frame` is a MAC ack acknowledging the packet `ack_mic` names.
+    fn is_mac_ack_for(frame: &[u8], ack_mic: &[u8; 4]) -> bool {
+        let Ok(header) = PacketHeader::parse(frame) else {
+            return false;
+        };
+        header.packet_type() == PacketType::MacAck
+            && frame
+                .get(header.mic_range.clone())
+                .and_then(|trailer| trailer.get(..4))
+                .is_some_and(|prefix| prefix == ack_mic)
     }
 
     /// Whether a frame came out too large for the radio, so the
@@ -6215,9 +6272,17 @@ impl<
     /// authenticated `ack_tag` in [`Mac::complete_ack`], never by a four-byte
     /// public prefix.
     ///
+    /// `acks_too` widens this to queued forwards of MAC acks carrying the
+    /// same `ack_mic`, for an acknowledgment that arrived as an [Ack MIC
+    /// option]: the packet carrying the option takes the acknowledgment the
+    /// rest of the way, so the standalone ack has nothing left to deliver. A
+    /// standalone ack never passes it—a MAC ack's own trailer opens with the
+    /// four bytes it echoes, so a second copy would cancel the first.
+    ///
     /// [ACK protection interval]: https://darconeous.github.io/umsh/docs/protocol/channel-access.html#ack-protection-interval
     /// [route-retry]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#route-retry-option-6
-    fn cancel_forwards_for_ack_mic(&mut self, ack_mic: &[u8]) -> usize {
+    /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
+    fn cancel_forwards_for_ack_mic(&mut self, ack_mic: &[u8], acks_too: bool) -> usize {
         if ack_mic.len() != 4 {
             return 0;
         }
@@ -6233,10 +6298,12 @@ impl<
             // the subject of one. Without this, a forwarded ack awaiting
             // transmission would be cancelled by a second copy of itself: a
             // MAC ack's own trailer opens with the same four bytes it echoes.
-            if !matches!(
-                header.packet_type(),
-                PacketType::UnicastAckReq | PacketType::BlindUnicastAckReq
-            ) {
+            let eligible = match header.packet_type() {
+                PacketType::UnicastAckReq | PacketType::BlindUnicastAckReq => true,
+                PacketType::MacAck => acks_too,
+                _ => false,
+            };
+            if !eligible {
                 return false;
             }
             frame
@@ -6256,12 +6323,14 @@ impl<
     /// The option carries the same correlation handle as a standalone ack, on
     /// an ordinary authenticated packet travelling the other way. It sits in
     /// the options block, which is not encrypted, so a forwarder reads it
-    /// under the same terms as the standalone form.
+    /// under the same terms as the standalone form. Because it carries the
+    /// acknowledgment onward itself, it also retires any queued forward of
+    /// the standalone ack it duplicates.
     ///
     /// [Ack MIC option]: https://darconeous.github.io/umsh/docs/protocol/packet-options.html#ack-mic-option-8
     fn cancel_forwards_for_ack_mic_option(&mut self, frame: &[u8], header: &PacketHeader) {
         if let Some(ack_mic) = Self::ack_mic_option(frame, header) {
-            self.cancel_forwards_for_ack_mic(&ack_mic);
+            self.cancel_forwards_for_ack_mic(&ack_mic, true);
         }
     }
 

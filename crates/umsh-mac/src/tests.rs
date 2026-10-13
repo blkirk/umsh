@@ -10181,6 +10181,123 @@ fn ack_mic_option_cancels_matching_queued_forward() {
     assert_eq!(mac.counters().forward_cancelled, 1);
 }
 
+/// The reply that carries an acknowledgment onward also retires the
+/// standalone ack it duplicates: a forwarder holding that ack drops it
+/// rather than spend airtime delivering what the reply already carries.
+#[test]
+fn ack_mic_option_cancels_a_queued_forward_of_the_ack_it_carries() {
+    let mut mac = make_repeater_mac();
+    let trailer = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    let mut buf = [0u8; 256];
+    let ack = PacketBuilder::new(&mut buf)
+        .mac_ack(trailer)
+        .flood_hops(1)
+        .build()
+        .unwrap();
+    let ack: heapless::Vec<u8, 256> = ack.iter().copied().collect();
+    mac.radio_mut().queue_received_frame(ack.as_slice());
+    assert!(block_on(mac.receive_one(|_, _| {})).unwrap());
+    assert_eq!(mac.tx_queue().len(), 1);
+
+    let replier = DummyIdentity::new([0xCD; 32]);
+    let reply_keys = PairwiseKeys {
+        k_enc: [5; 32],
+        k_mic: [6; 32],
+    };
+    let mut buf = [0u8; 256];
+    let mut reply = PacketBuilder::new(&mut buf)
+        .unicast(NodeHint([0x44, 0x33, 0x22]))
+        .source_full(replier.public_key())
+        .frame_counter(2)
+        .encrypted()
+        .option(OptionNumber::AckMic, &trailer[..4])
+        .payload(b"reply")
+        .build()
+        .unwrap();
+    CryptoEngine::new(DummyAes, DummySha)
+        .seal_packet(&mut reply, &reply_keys)
+        .unwrap();
+    mac.radio_mut().queue_received_frame(reply.as_bytes());
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+
+    let ack_forwards = core::iter::from_fn(|| mac.tx_queue_mut().pop_next())
+        .filter(|queued| {
+            PacketHeader::parse(queued.frame.as_slice())
+                .is_ok_and(|header| header.packet_type() == PacketType::MacAck)
+        })
+        .count();
+    assert_eq!(ack_forwards, 0, "the standalone ack is withdrawn");
+    assert_eq!(mac.counters().forward_cancelled, 1);
+}
+
+/// The destination's own half of the same rule. A routed ack retries until
+/// it hears a repeater carry it, and repeaters now drop it once the reply
+/// carrying the option goes by—so sending that reply ends the ack's
+/// ladder. An ack that has not aired yet still goes out.
+#[test]
+fn sending_the_ack_mic_ends_the_standalone_acks_retries() {
+    for ack_aired in [true, false] {
+        let mut mac = make_mac();
+        let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+        let remote = DummyIdentity::new([0xAB; 32]);
+        let peer_key = *remote.public_key();
+        let peer_id = mac.add_peer(peer_key).unwrap();
+        let keys = PairwiseKeys {
+            k_enc: [1; 32],
+            k_mic: [2; 32],
+        };
+        mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+            .unwrap();
+        let dst_hint = mac
+            .identity(local_id)
+            .unwrap()
+            .identity()
+            .public_key()
+            .hint();
+
+        // Heard directly, so the ack goes out with the one-hop backstop
+        // and is tracked until a repeater is heard carrying it.
+        mac.radio_mut().queue_received_unicast_with_route(
+            &remote,
+            &keys,
+            &dst_hint,
+            b"request",
+            true,
+            7,
+            Some((0, 1)),
+            None,
+            None,
+        );
+        let mut ack_mic = None;
+        block_on(mac.receive_one(|_, event| {
+            if let MacEventRef::Received(packet) = event {
+                ack_mic = packet.ack_mic();
+            }
+        }))
+        .unwrap();
+        let ack_mic = ack_mic.expect("the request asked for an ack");
+        let tracked_ack = sole_tracked_receipt(&mac, local_id);
+        if ack_aired {
+            block_on(mac.drain_tx_queue(&mut |_, _| {})).unwrap();
+        }
+
+        mac.queue_unicast(
+            local_id,
+            &peer_key,
+            b"response",
+            &SendOptions::default().with_ack_mic(ack_mic),
+        )
+        .unwrap();
+
+        let still_tracked = mac
+            .identity(local_id)
+            .unwrap()
+            .pending_ack(&tracked_ack)
+            .is_some();
+        assert_eq!(still_tracked, !ack_aired, "ack aired: {ack_aired}");
+    }
+}
+
 /// Install identity + peer + pairwise keys; the boilerplate every sender-side
 /// tracking test starts from.
 fn make_sender_mac() -> (TestMac, LocalIdentityId, PublicKey) {
