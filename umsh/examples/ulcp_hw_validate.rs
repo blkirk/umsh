@@ -109,7 +109,7 @@ fn print_sync(sync: &DeviceSync) {
     println!("  capabilities={:?}", sync.capabilities);
     println!("  ownership={:?}", sync.ownership);
     println!(
-        "  phy_enabled={} freq_khz={}",
+        "  phy_enabled={:?} freq_khz={:?}",
         sync.phy_enabled, sync.freq_khz
     );
     println!("  device_name={:?}", sync.device_name);
@@ -209,7 +209,7 @@ async fn phase_a(port: &str) -> Result<(), Box<dyn std::error::Error>> {
     print_sync(&sync);
     expect(sync.ownership == HostOwnership::Ours, "ownership is ours")?;
     expect(sync.saved == Some(SavedSnapshot::Current), "snapshot saved")?;
-    expect(sync.phy_enabled, "PHY enabled")?;
+    expect(sync.phy_enabled == Some(true), "PHY enabled")?;
     expect(sync.dev_key == Some(dev_key), "device key reported")?;
     println!("DEV_KEY={}", PublicKey(dev_key));
     println!("PHASE A OK—power-cycle (or DFU-reboot) the board, then run phase-b");
@@ -235,9 +235,12 @@ async fn phase_b(port: &str, expected_dev_key: [u8; 32]) -> Result<(), Box<dyn s
         sync.saved == Some(SavedSnapshot::Current),
         "snapshot still saved, newest generation",
     )?;
-    expect(sync.phy_enabled, "boot restore re-enabled the PHY")?;
     expect(
-        sync.freq_khz == config().freq_khz,
+        sync.phy_enabled == Some(true),
+        "boot restore re-enabled the PHY",
+    )?;
+    expect(
+        sync.freq_khz == Some(config().freq_khz),
         "boot restore applied the saved frequency",
     )?;
     expect(
@@ -310,7 +313,7 @@ async fn phase_d(port: &str) -> Result<(), Box<dyn std::error::Error>> {
         "factory: nothing saved",
     )?;
     expect(sync.dev_key.is_none(), "factory: device identity erased")?;
-    expect(!sync.phy_enabled, "factory: PHY disabled")?;
+    expect(sync.phy_enabled == Some(false), "factory: PHY disabled")?;
 
     // Leave the board provisioned and armed for autonomous operation.
     let dev_key = radio.ensure_device_identity().await?;

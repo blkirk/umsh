@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 
 use umsh::core::PublicKey;
-use umsh::ulcp::{FrameLink, UlcpDevice};
+use umsh::ulcp::{FrameLink, ReportedAlert, UlcpDevice};
 use umsh::ulcp_wire::alert::AlertState;
 use umsh::ulcp_wire::ids::prop;
 
@@ -333,20 +333,24 @@ pub async fn alert<L: FrameLink>(device: &mut UlcpDevice<L>, op: Option<AlertOp>
         AlertOp::None => AlertState::None,
     };
     match device.set_alert(desired).await? {
-        AlertState::Locate => println!(
+        ReportedAlert::Known(AlertState::Locate) => println!(
             "locate alert started. It stops when you send `alert none`, when someone \
              cancels it at the radio, or when the radio's own deadline expires—\
              re-send `alert locate` to keep it going."
         ),
-        AlertState::None => println!("locate alert stopped"),
+        ReportedAlert::Known(AlertState::None) => println!("locate alert stopped"),
+        ReportedAlert::Unknown(code) => println!("alert unknown ({code})"),
     }
     Ok(())
 }
 
 /// Human-readable rendering of a `PROP_ALERT` state.
-fn display(state: AlertState) -> &'static str {
+fn display(state: ReportedAlert) -> String {
     match state {
-        AlertState::None => "none",
-        AlertState::Locate => "locate (the radio is making itself conspicuous)",
+        ReportedAlert::Known(AlertState::None) => "none".into(),
+        ReportedAlert::Known(AlertState::Locate) => {
+            "locate (the radio is making itself conspicuous)".into()
+        }
+        ReportedAlert::Unknown(code) => format!("unknown ({code})"),
     }
 }

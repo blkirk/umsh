@@ -13,7 +13,7 @@ use umsh::ulcp_wire::gnss::FixKind;
 
 use super::persist;
 use crate::App;
-use crate::output::{field, note, subfield};
+use crate::output::{UNAVAILABLE, field, note, or_unavailable, subfield};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum GnssOp {
@@ -100,14 +100,25 @@ pub async fn run(app: &mut App, op: Option<GnssOp>) -> Result<()> {
 }
 
 fn report(status: &GnssStatus) {
-    field("gnss", if status.enabled { "on" } else { "off" });
+    field(
+        "gnss",
+        match status.enabled {
+            Some(true) => "on",
+            Some(false) => "off",
+            None => UNAVAILABLE,
+        },
+    );
     subfield(
         "fix",
         match status.fix.fix {
-            FixKind::None if status.enabled => "none (searching)",
-            FixKind::None => "none (receiver off)",
-            FixKind::TwoD => "2D",
-            FixKind::ThreeD => "3D",
+            FixKind::None => match status.enabled {
+                Some(true) => "none (searching)".into(),
+                Some(false) => "none (receiver off)".into(),
+                None => "none".into(),
+            },
+            FixKind::TwoD => "2D".into(),
+            FixKind::ThreeD => "3D".into(),
+            FixKind::Other(code) => format!("unknown ({code})"),
         },
     );
     match status.fix.sats_in_view {
@@ -138,22 +149,23 @@ fn report(status: &GnssStatus) {
         ),
         None => subfield("precision", "unknown"),
     }
+    let precision = or_unavailable(status.ident_precision, |bytes| {
+        format!("{bytes} bytes ({})", precision_cell(bytes))
+    });
     subfield(
         "identity update",
         match status.ident_update {
-            true => format!(
-                "on, clamped to {} bytes ({})",
-                status.ident_precision,
-                precision_cell(status.ident_precision)
-            ),
-            false => format!("off (would clamp to {} bytes)", status.ident_precision),
+            Some(true) => format!("on, clamped to {precision}"),
+            Some(false) => format!("off (would clamp to {precision})"),
+            None => format!("{UNAVAILABLE} (clamp {precision})"),
         },
     );
     subfield(
         "time trust",
         match status.time_trust {
-            true => "on (fixes set the clock)",
-            false => "off (fixes never set the clock)",
+            Some(true) => "on (fixes set the clock)",
+            Some(false) => "off (fixes never set the clock)",
+            None => UNAVAILABLE,
         },
     );
 }

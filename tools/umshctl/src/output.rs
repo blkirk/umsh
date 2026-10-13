@@ -71,6 +71,16 @@ pub fn subfield(label: &str, value: impl std::fmt::Display) {
     println!("  {:<width$}{value}", format!("{label}:"), width = 14);
 }
 
+/// What a report shows for a value the device did not report: refused
+/// it, or answered with something this tool cannot read.
+pub const UNAVAILABLE: &str = "unavailable";
+
+/// A value of a report, or [`UNAVAILABLE`] where the device did not
+/// report it.
+pub fn or_unavailable<T>(value: Option<T>, render: impl FnOnce(T) -> String) -> String {
+    value.map_or_else(|| UNAVAILABLE.to_string(), render)
+}
+
 /// A note about what the tool just did, or declined to do. Stays on
 /// stdout with the rest of the report; failures go through `Err`.
 pub fn note(text: impl std::fmt::Display) {

@@ -12,7 +12,7 @@ use umsh_gnss::DateTime;
 
 use super::persist;
 use crate::App;
-use crate::output::{field, note, subfield};
+use crate::output::{UNAVAILABLE, field, note, or_unavailable, subfield};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum TimeOp {
@@ -111,21 +111,28 @@ pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
                 bail!("device does not advertise CAP_TIME");
             };
             match time.epoch {
-                Some(epoch) => {
+                Some(Some(epoch)) => {
                     field("time", format_utc(epoch));
                     subfield("epoch", epoch);
-                    match DateTime::from_unix(epoch).shifted(time.tz_offset_min) {
-                        Some(local) => subfield(
-                            "local",
-                            format!("{} {}", format_civil(local), format_tz(time.tz_offset_min)),
-                        ),
-                        None => subfield("local", "outside the representable range"),
+                    match time.tz_offset_min {
+                        Some(offset) => match DateTime::from_unix(epoch).shifted(offset) {
+                            Some(local) => subfield(
+                                "local",
+                                format!("{} {}", format_civil(local), format_tz(offset)),
+                            ),
+                            None => subfield("local", "outside the representable range"),
+                        },
+                        None => subfield("local", UNAVAILABLE),
                     }
                 }
-                None => {
+                Some(None) => {
                     field("time", "not set");
                     note("the device does not know what time it is and shows no clock");
-                    subfield("zone", format_tz(time.tz_offset_min));
+                    subfield("zone", or_unavailable(time.tz_offset_min, format_tz));
+                }
+                None => {
+                    field("time", UNAVAILABLE);
+                    subfield("zone", or_unavailable(time.tz_offset_min, format_tz));
                 }
             }
             return Ok(());
@@ -148,7 +155,10 @@ pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
                 let Some(time) = device.time().await? else {
                     bail!("device does not advertise CAP_TIME");
                 };
-                println!("time zone {}", format_tz(time.tz_offset_min));
+                println!(
+                    "time zone {}",
+                    or_unavailable(time.tz_offset_min, format_tz)
+                );
                 return Ok(());
             }
             TzOp::Set { offset } => {

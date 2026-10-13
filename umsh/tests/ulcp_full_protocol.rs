@@ -647,9 +647,9 @@ async fn full_lifecycle_provision_save_power_cycle_autonomy_reattach_drain() {
     }
     assert_eq!(sync.saved, Some(SavedSnapshot::None));
     assert_eq!(sync.queue_count, Some(0));
-    assert!(!sync.phy_enabled);
+    assert_eq!(sync.phy_enabled, Some(false));
     assert_eq!(sync.dev_key, None);
-    assert_eq!(sync.device_name, "Simulated Device");
+    assert_eq!(sync.device_name.as_deref(), Some("Simulated Device"));
 
     // Device identity: generated on-device once, then stable.
     let dev_key = radio.ensure_device_identity().await.unwrap();
@@ -673,7 +673,7 @@ async fn full_lifecycle_provision_save_power_cycle_autonomy_reattach_drain() {
     let sync = radio.sync(Some(&HOST_KEY)).await.unwrap();
     assert_eq!(sync.ownership, HostOwnership::Ours);
     assert_eq!(sync.saved, Some(SavedSnapshot::Current));
-    assert!(sync.phy_enabled);
+    assert_eq!(sync.phy_enabled, Some(true));
     assert_eq!(sync.dev_key, Some(dev_key));
 
     // Autonomous detached operation while still powered: the host
@@ -709,8 +709,12 @@ async fn full_lifecycle_provision_save_power_cycle_autonomy_reattach_drain() {
         Some(dev_key),
         "identity survives the power cycle"
     );
-    assert!(sync.phy_enabled, "snapshot re-enabled the PHY at boot");
-    assert_eq!(sync.freq_khz, host_config().freq_khz);
+    assert_eq!(
+        sync.phy_enabled,
+        Some(true),
+        "snapshot re-enabled the PHY at boot"
+    );
+    assert_eq!(sync.freq_khz, Some(host_config().freq_khz));
 
     // Re-provisioning is unconditional and complete: every table is
     // written again whether or not the device already agreed.
@@ -949,8 +953,12 @@ async fn the_wall_clock_starts_unset_and_survives_a_round_trip() {
         .await
         .unwrap()
         .expect("simulator advertises CAP_TIME");
-    assert_eq!(time.epoch, None, "a device starts not knowing the time");
-    assert_eq!(time.tz_offset_min, 0);
+    assert_eq!(
+        time.epoch,
+        Some(None),
+        "a device starts not knowing the time"
+    );
+    assert_eq!(time.tz_offset_min, Some(0));
 
     assert_eq!(
         radio.set_time(Some(1_780_000_000)).await.unwrap(),
@@ -958,15 +966,18 @@ async fn the_wall_clock_starts_unset_and_survives_a_round_trip() {
     );
     assert_eq!(radio.set_tz_offset(-480).await.unwrap(), -480);
     let time = radio.time().await.unwrap().unwrap();
-    assert_eq!(time.epoch, Some(1_780_000_000));
-    assert_eq!(time.tz_offset_min, -480);
+    assert_eq!(time.epoch, Some(Some(1_780_000_000)));
+    assert_eq!(time.tz_offset_min, Some(-480));
 
     // Clearing is a legitimate operation, not an error: it returns the
     // device to not knowing.
     assert_eq!(radio.set_time(None).await.unwrap(), None);
-    assert_eq!(radio.time().await.unwrap().unwrap().epoch, None);
+    assert_eq!(radio.time().await.unwrap().unwrap().epoch, Some(None));
     // The zone is configuration and is unaffected by the clock.
-    assert_eq!(radio.time().await.unwrap().unwrap().tz_offset_min, -480);
+    assert_eq!(
+        radio.time().await.unwrap().unwrap().tz_offset_min,
+        Some(-480)
+    );
 }
 
 /// The two announcement schedules are independent knobs, and both are
@@ -981,9 +992,9 @@ async fn advertisement_policy_is_two_independent_schedules_that_persist() {
         .await
         .unwrap()
         .expect("simulator advertises CAP_ADVERT");
-    assert_eq!(policy.advert_interval_s, 4 * 60 * 60);
-    assert_eq!(policy.beacon_interval_s, 60 * 60);
-    assert!(policy.startup_beacon);
+    assert_eq!(policy.advert_interval_s, Some(4 * 60 * 60));
+    assert_eq!(policy.beacon_interval_s, Some(60 * 60));
+    assert_eq!(policy.startup_beacon, Some(true));
 
     // Each moves without disturbing the other, and zero is the off
     // switch rather than a rejected value.
@@ -991,9 +1002,9 @@ async fn advertisement_policy_is_two_independent_schedules_that_persist() {
     assert_eq!(radio.set_beacon_interval(1800).await.unwrap(), 1800);
     assert!(!radio.set_startup_beacon(false).await.unwrap());
     let policy = radio.advert_policy().await.unwrap().unwrap();
-    assert_eq!(policy.advert_interval_s, 0);
-    assert_eq!(policy.beacon_interval_s, 1800);
-    assert!(!policy.startup_beacon);
+    assert_eq!(policy.advert_interval_s, Some(0));
+    assert_eq!(policy.beacon_interval_s, Some(1800));
+    assert_eq!(policy.startup_beacon, Some(false));
 
     // Outside the bounds at either end is a mistake, not a schedule.
     assert!(radio.set_beacon_interval(30).await.is_err());
@@ -1005,9 +1016,9 @@ async fn advertisement_policy_is_two_independent_schedules_that_persist() {
     power_cycle(&sim);
     let mut radio = attached_host(&sim).await;
     let policy = radio.advert_policy().await.unwrap().unwrap();
-    assert_eq!(policy.advert_interval_s, 0);
-    assert_eq!(policy.beacon_interval_s, 1800);
-    assert!(!policy.startup_beacon);
+    assert_eq!(policy.advert_interval_s, Some(0));
+    assert_eq!(policy.beacon_interval_s, Some(1800));
+    assert_eq!(policy.startup_beacon, Some(false));
 }
 
 /// An on-demand announcement reaches the node with the host's options
@@ -1205,19 +1216,19 @@ async fn positioning_reports_the_receiver_state_and_the_fix() {
         .await
         .unwrap()
         .expect("simulator advertises CAP_GNSS");
-    assert!(!status.enabled, "the receiver starts off");
+    assert_eq!(status.enabled, Some(false), "the receiver starts off");
     assert_eq!(status.fix.fix, umsh::ulcp_wire::gnss::FixKind::None);
     assert_eq!(status.fix.sats_used, 0);
     assert_eq!(status.fix.location(), &[] as &[u8]);
     assert_eq!(status.fix.altitude_m, None);
     assert_eq!(status.fix.accuracy_dm, None);
-    assert!(status.time_trust, "time trust is on by default");
-    assert!(!status.ident_update);
-    assert_eq!(status.ident_precision, 5);
+    assert_eq!(status.time_trust, Some(true), "time trust is on by default");
+    assert_eq!(status.ident_update, Some(false));
+    assert_eq!(status.ident_precision, Some(5));
 
     assert!(radio.set_gnss_enabled(true).await.unwrap());
     let status = radio.gnss_status().await.unwrap().unwrap();
-    assert!(status.enabled);
+    assert_eq!(status.enabled, Some(true));
     assert_eq!(status.fix.fix, umsh::ulcp_wire::gnss::FixKind::ThreeD);
     assert_eq!(status.fix.location(), &[0x8a, 0x1f, 0x4c, 0x00, 0xd3]);
     assert_eq!(status.fix.altitude_m, Some(31));
@@ -1230,9 +1241,9 @@ async fn positioning_reports_the_receiver_state_and_the_fix() {
     assert_eq!(radio.set_gnss_ident_precision(3).await.unwrap(), 3);
     assert!(!radio.set_gnss_time_trust(false).await.unwrap());
     let status = radio.gnss_status().await.unwrap().unwrap();
-    assert!(status.ident_update);
-    assert_eq!(status.ident_precision, 3);
-    assert!(!status.time_trust);
+    assert_eq!(status.ident_update, Some(true));
+    assert_eq!(status.ident_precision, Some(3));
+    assert_eq!(status.time_trust, Some(false));
 }
 
 /// Several properties in one exchange, against the real session: values
@@ -1431,9 +1442,13 @@ async fn a_reboot_restarts_the_device_and_keeps_what_was_saved() {
     assert!(sync.reset_since_last_contact);
     assert_eq!(sync.last_status, Status::RESET_POWER_ON);
     assert_eq!(sync.saved, Some(SavedSnapshot::Current));
-    assert_eq!(sync.device_name, "named before the reboot");
-    assert!(sync.phy_enabled, "the snapshot re-enabled the PHY at boot");
-    assert_eq!(sync.freq_khz, host_config().freq_khz);
+    assert_eq!(sync.device_name.as_deref(), Some("named before the reboot"));
+    assert_eq!(
+        sync.phy_enabled,
+        Some(true),
+        "the snapshot re-enabled the PHY at boot"
+    );
+    assert_eq!(sync.freq_khz, Some(host_config().freq_khz));
 }
 
 /// A whole scan against the real session: the write defers to the

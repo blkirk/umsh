@@ -19,7 +19,7 @@ use super::values::{
     RegionListArg,
 };
 use crate::App;
-use crate::output::{subfield, warn};
+use crate::output::{UNAVAILABLE, or_unavailable, subfield, warn};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum RepeaterOp {
@@ -139,43 +139,58 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
             let Some(policy) = device.repeater_policy().await? else {
                 bail!("device does not advertise CAP_REPEATER");
             };
-            print_enabled(Some(policy.enabled as u8));
-            subfield("regions", format_regions(&policy.regions));
-            match policy.default_region {
-                Some(code) => subfield("default", code),
-                None => subfield("default", "none (forwards untagged floods untagged)"),
-            }
-            match policy.min_rssi {
-                Some(dbm) => subfield("min rssi", format!("{dbm} dBm")),
-                None => subfield("min rssi", "any"),
-            }
-            match policy.min_snr {
-                Some(db) => subfield("min snr", format!("{db} dB")),
-                None => subfield("min snr", "any"),
-            }
+            print_enabled(policy.enabled.map(u8::from));
+            subfield(
+                "regions",
+                or_unavailable(policy.regions.as_deref(), format_regions),
+            );
+            subfield(
+                "default",
+                or_unavailable(policy.default_region, |code| match code {
+                    Some(code) => code.to_string(),
+                    None => "none (forwards untagged floods untagged)".into(),
+                }),
+            );
+            subfield(
+                "min rssi",
+                or_unavailable(policy.min_rssi, |dbm| match dbm {
+                    Some(dbm) => format!("{dbm} dBm"),
+                    None => "any".into(),
+                }),
+            );
+            subfield(
+                "min snr",
+                or_unavailable(policy.min_snr, |db| match db {
+                    Some(db) => format!("{db} dB"),
+                    None => "any".into(),
+                }),
+            );
             if let Some(meshcore) = device.meshcore_forwarding().await? {
                 subfield(
                     "meshcore",
                     format!(
                         "{}, policy {}",
-                        if meshcore.enabled { "on" } else { "off" },
-                        meshcore.region_policy.name()
+                        or_unavailable(meshcore.enabled, |enabled| match enabled {
+                            true => "on".into(),
+                            false => "off".into(),
+                        }),
+                        or_unavailable(meshcore.region_policy, |policy| policy.to_string()),
                     ),
                 );
                 subfield(
                     "meshcore regions",
-                    format_meshcore_regions(&meshcore.regions),
+                    or_unavailable(meshcore.regions.as_deref(), format_meshcore_regions),
                 );
-                if meshcore.enabled && !identity_allowed(device).await? {
+                if meshcore.enabled == Some(true) && !identity_allowed(device).await? {
                     warn(format!(
                         "MeshCore forwarding is inactive: {RESERVED_IDENTITY}"
                     ));
                 }
             }
-            if policy.enabled
-                && policy.default_region.is_some_and(|code| {
-                    !policy.regions.is_empty() && !region_codes(&policy.regions).contains(&code)
-                })
+            if policy.enabled == Some(true)
+                && let (Some(Some(code)), Some(regions)) = (policy.default_region, &policy.regions)
+                && !regions.is_empty()
+                && !region_codes(regions).contains(&code)
             {
                 // Legal, and not enforced by the device: the two
                 // properties are written independently. Still almost
@@ -246,7 +261,7 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
             }
             MeshCoreOp::Policy { policy } => {
                 let stored = device.set_meshcore_region_policy(policy).await?;
-                println!("repeater meshcore policy {}", stored.name());
+                println!("repeater meshcore policy {stored}");
             }
             MeshCoreOp::Regions { op } => match op.unwrap_or(MeshCoreRegionOp::List) {
                 MeshCoreRegionOp::List => {
@@ -255,7 +270,7 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
                     };
                     println!(
                         "repeater meshcore regions {}",
-                        format_meshcore_regions(&meshcore.regions)
+                        or_unavailable(meshcore.regions.as_deref(), format_meshcore_regions)
                     );
                     return Ok(());
                 }
@@ -288,11 +303,16 @@ pub async fn run(app: &mut App, op: Option<RepeaterOp>) -> Result<()> {
 }
 
 /// Whether the device identity's key is one MeshCore lets a repeater
-/// run under.
+/// run under. An identity the device will not report is given the
+/// benefit of the doubt: this only decides whether to warn.
 async fn identity_allowed(
     device: &mut umsh::ulcp::UlcpDevice<crate::connection::SessionLink>,
 ) -> Result<bool> {
-    let key = device.get_prop(prop::DEV_KEY).await?;
+    let key = match device.get_prop(prop::DEV_KEY).await {
+        Ok(key) => key,
+        Err(UlcpError::Status(_)) => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
     Ok(<[u8; 32]>::try_from(key.as_slice()).map_or(true, |key| meshcore_identity_allowed(&key)))
 }
 
@@ -311,7 +331,7 @@ fn print_enabled(byte: Option<u8>) {
     match byte {
         Some(0) => println!("repeater off"),
         Some(_) => println!("repeater on (on-board node forwards overheard frames)"),
-        None => println!("repeater state unknown (empty value)"),
+        None => println!("repeater state {UNAVAILABLE}"),
     }
 }
 

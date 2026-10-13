@@ -21,7 +21,7 @@ use umsh::ulcp_wire::ids::{
 use super::values::ChannelIdentifierArg;
 use super::{format_duration, persist};
 use crate::App;
-use crate::output::{field, hex, subfield};
+use crate::output::{field, hex, or_unavailable, subfield};
 
 #[derive(Debug, clap::Subcommand)]
 pub enum AdvertOp {
@@ -205,15 +205,24 @@ fn reach(request: &Announcement) -> String {
 }
 
 fn report(policy: &AdvertPolicy) {
-    field("advert", format_interval(policy.advert_interval_s));
-    subfield("beacon", format_interval(policy.beacon_interval_s));
+    field(
+        "advert",
+        or_unavailable(policy.advert_interval_s, format_interval),
+    );
+    subfield(
+        "beacon",
+        or_unavailable(policy.beacon_interval_s, format_interval),
+    );
     subfield(
         "startup beacon",
-        if policy.startup_beacon { "on" } else { "off" },
+        or_unavailable(policy.startup_beacon, |on| match on {
+            true => "on".into(),
+            false => "off".into(),
+        }),
     );
     // An interval is a floor, not a period. Said once here rather than
     // hedged into every reading above.
-    if policy.advert_interval_s > 0 || policy.beacon_interval_s > 0 {
+    if policy.advert_interval_s.unwrap_or(0) > 0 || policy.beacon_interval_s.unwrap_or(0) > 0 {
         subfield("scatter", "each period runs up to 25% longer");
     }
 }

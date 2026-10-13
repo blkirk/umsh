@@ -249,6 +249,21 @@ pub(crate) async fn run_with_writer(
     outcome
 }
 
+/// Session resets survived in a row, with no frame received between
+/// them, before the capture gives up on the device.
+const MAX_SILENT_RESYNCS: usize = 8;
+
+/// Whether an error is the device discarding its session or rebooting,
+/// as opposed to the link or the tool failing.
+fn is_session_loss(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<UlcpError>(),
+            Some(UlcpError::SessionReset(_) | UlcpError::UnexpectedReset(_))
+        )
+    })
+}
+
 /// Run the capture, recovering a dropped link when allowed to.
 ///
 /// The session owns the link, and a capture is one thing the session is
@@ -266,6 +281,11 @@ async fn capture_with_recovery(app: &mut App, args: &CaptureArgs, tapped: bool) 
             ..policy
         })
     };
+    // Resynchronizations in a row with no frame between them. A device
+    // that does nothing but announce resets is not one to keep capturing
+    // from.
+    let mut resyncs = 0;
+    let mut sequence_at_resync = stats.sequence;
     loop {
         stats.sessions += 1;
         let failure = match capture_once(app, args, &mut stats).await {
@@ -276,6 +296,26 @@ async fn capture_with_recovery(app: &mut App, args: &CaptureArgs, tapped: bool) 
         // would leave a process holding the link with nowhere to write.
         if is_broken_pipe(&failure) {
             return Ok(());
+        }
+        // The device discarded the session under a link that is still
+        // up—it rebooted, or something reset it. What the capture set up
+        // there (promiscuous mode, any RF override) went with it, so the
+        // recovery is to set the capture up again, which the next pass
+        // does; nothing about the link needs replacing.
+        if is_session_loss(&failure) && !app.session()?.device.link_lost() {
+            if stats.sequence != sequence_at_resync {
+                resyncs = 0;
+                sequence_at_resync = stats.sequence;
+            }
+            resyncs += 1;
+            if resyncs <= MAX_SILENT_RESYNCS {
+                eprintln!(
+                    "session reset +{:.3}s after {} packets: {failure}; setting the capture up again",
+                    stats.started.elapsed().as_secs_f64(),
+                    stats.sequence,
+                );
+                continue;
+            }
         }
         let Some(policy) = &policy else {
             return Err(failure);
@@ -382,13 +422,10 @@ async fn dump(
                 // Any answer proves the link, a refusal included: a device
                 // with no receiver to sample, such as a LAN virtual radio,
                 // refuses the read.
+                // An INT8; whatever follows it is the sender's business, and
+                // an empty answer is still an answer.
                 let rssi = match session.device.get_prop(prop::PHY_RSSI).await {
-                    Ok(value) => match value.as_slice() {
-                        [rssi] => Some(*rssi as i8),
-                        _ => bail!(
-                            "idle health probe returned malformed PHY_RSSI value: {value:02x?}"
-                        ),
-                    },
+                    Ok(value) => value.first().map(|&rssi| rssi as i8),
                     Err(umsh::ulcp::UlcpError::Status(_)) => None,
                     Err(error) => return Err(error.into()),
                 };

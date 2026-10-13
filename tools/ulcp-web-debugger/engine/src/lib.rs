@@ -158,10 +158,10 @@ pub enum Event {
     Attached {
         protocol_major: u8,
         protocol_minor: u8,
-        dev_version: String,
+        dev_version: Option<String>,
         boot_status: String,
         capabilities: Vec<Capability>,
-        phy_mtu: u16,
+        phy_mtu: Option<u16>,
     },
     ProtocolError {
         message: String,
@@ -1035,9 +1035,9 @@ struct AttachState {
     requested: bool,
     boot_status: Option<String>,
     protocol: Option<(u8, u8)>,
-    dev_version: Option<String>,
+    dev_version: Option<Option<String>>,
     capabilities: Option<Vec<u32>>,
-    phy_mtu: Option<u16>,
+    phy_mtu: Option<Option<u16>>,
     announced: bool,
 }
 
@@ -1370,8 +1370,9 @@ impl DebuggerEngine {
             self.protocol_error("malformed ULCP frame".into());
             return;
         };
+        // A command newer than this debugger is the device's business; the
+        // trace above already shows it, and nothing here is wrong.
         let Some(command) = frame.command() else {
-            self.protocol_error(format!("unknown ULCP command {}", frame.cmd));
             return;
         };
         if command == Cmd::StrRecv {
@@ -1435,6 +1436,11 @@ impl DebuggerEngine {
                 name: property_name(requested),
                 status,
             });
+            // A refusal answers an attach read as surely as a value does.
+            if self.attach.requested {
+                self.capture_attach_refusal(requested);
+                self.maybe_announce_attached();
+            }
             self.pump_gets();
             return;
         }
@@ -1527,45 +1533,59 @@ impl DebuggerEngine {
     fn capture_attach_property(&mut self, key: u32, value: &[u8]) {
         match key {
             prop::LAST_STATUS => {
+                // A PUI, optionally followed by a diagnostic string.
                 self.attach.boot_status = Some(match pui::decode(value) {
-                    Ok((status, consumed)) if consumed == value.len() => {
-                        format!("{:?}", umsh_ulcp::Status(status))
-                    }
-                    _ => "MALFORMED".into(),
+                    Ok((status, _)) => format!("{:?}", umsh_ulcp::Status(status)),
+                    Err(_) => "MALFORMED".into(),
                 });
             }
-            prop::PROTOCOL_VERSION if value.len() == 2 => {
-                self.attach.protocol = Some((value[0], value[1]));
-                if value[0] != PROTOCOL_MAJOR_VERSION {
-                    self.protocol_error(format!(
-                        "unsupported protocol major version {}; expected {PROTOCOL_MAJOR_VERSION}",
-                        value[0]
-                    ));
+            // Only the major version decides whether this is a device to
+            // talk to; a minor mismatch SHOULD NOT be fatal, and octets
+            // past the two the property defines are the sender's business.
+            prop::PROTOCOL_VERSION => match value {
+                [major, minor, ..] if *major == PROTOCOL_MAJOR_VERSION => {
+                    self.attach.protocol = Some((*major, *minor));
                 }
-            }
+                [major, _, ..] => self.protocol_error(format!(
+                    "unsupported protocol major version {major}; expected {PROTOCOL_MAJOR_VERSION}"
+                )),
+                _ => self.protocol_error("malformed PROP_PROTOCOL_VERSION".into()),
+            },
             prop::DEV_VERSION => {
                 let value = value.strip_suffix(&[0]).unwrap_or(value);
-                self.attach.dev_version = Some(String::from_utf8_lossy(value).into_owned());
+                self.attach.dev_version = Some(Some(String::from_utf8_lossy(value).into_owned()));
             }
             prop::CAPS => {
+                // A malformed code ends the list; the ones before it stand.
                 let mut rest = value;
                 let mut caps = Vec::new();
-                while !rest.is_empty() {
-                    match pui::decode(rest) {
-                        Ok((cap, used)) => {
-                            caps.push(cap);
-                            rest = &rest[used..];
-                        }
-                        Err(_) => {
-                            self.protocol_error("malformed PROP_CAPS".into());
-                            return;
-                        }
-                    }
+                while let Ok((cap, used)) = pui::decode(rest) {
+                    caps.push(cap);
+                    rest = &rest[used..];
                 }
                 self.attach.capabilities = Some(caps);
             }
-            prop::PHY_MTU if value.len() == 2 => {
-                self.attach.phy_mtu = Some(u16::from_le_bytes([value[0], value[1]]));
+            prop::PHY_MTU => {
+                self.attach.phy_mtu = Some(match value {
+                    [lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi])),
+                    _ => None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Record an attach read the device refused. Everything but the
+    /// protocol version describes the device, and a device that does not
+    /// describe itself fully is still attached; the version is what says
+    /// it speaks this protocol at all.
+    fn capture_attach_refusal(&mut self, key: u32) {
+        match key {
+            prop::DEV_VERSION => self.attach.dev_version = Some(None),
+            prop::CAPS => self.attach.capabilities = Some(Vec::new()),
+            prop::PHY_MTU => self.attach.phy_mtu = Some(None),
+            prop::PROTOCOL_VERSION => {
+                self.protocol_error("the device refused PROP_PROTOCOL_VERSION".into());
             }
             _ => {}
         }
@@ -1662,15 +1682,13 @@ fn decode_property(key: u32, value: &[u8]) -> Option<DecodedValue> {
             ("enum", display)
         }
         prop::ALERT => {
-            let (code, used) = pui::decode(value).ok()?;
-            if used != value.len() {
-                return None;
-            }
-            let display = match umsh_ulcp::alert::AlertState::from_code(code)? {
-                umsh_ulcp::alert::AlertState::None => "ALERT_NONE",
-                umsh_ulcp::alert::AlertState::Locate => "ALERT_LOCATE",
+            let (code, _) = pui::decode(value).ok()?;
+            let display = match umsh_ulcp::alert::AlertState::from_code(code) {
+                Some(umsh_ulcp::alert::AlertState::None) => "ALERT_NONE".to_string(),
+                Some(umsh_ulcp::alert::AlertState::Locate) => "ALERT_LOCATE".to_string(),
+                None => format!("unknown ({code})"),
             };
-            ("enum", display.to_string())
+            ("enum", display)
         }
         prop::CAPS => {
             let mut rest = value;
@@ -1738,14 +1756,14 @@ fn decode_property(key: u32, value: &[u8]) -> Option<DecodedValue> {
                 ),
             )
         }
-        prop::GNSS_FIX if value.len() == 1 => (
+        prop::GNSS_FIX if !value.is_empty() => (
             "enum",
-            match umsh_ulcp::gnss::FixKind::from_code(value[0])? {
-                umsh_ulcp::gnss::FixKind::None => "no fix",
-                umsh_ulcp::gnss::FixKind::TwoD => "2D",
-                umsh_ulcp::gnss::FixKind::ThreeD => "3D",
-            }
-            .to_string(),
+            match umsh_ulcp::gnss::FixKind::from_wire(value[0]) {
+                umsh_ulcp::gnss::FixKind::None => "no fix".to_string(),
+                umsh_ulcp::gnss::FixKind::TwoD => "2D".to_string(),
+                umsh_ulcp::gnss::FixKind::ThreeD => "3D".to_string(),
+                umsh_ulcp::gnss::FixKind::Other(code) => format!("unknown ({code})"),
+            },
         ),
         prop::GNSS_LOCATION if value.is_empty() => ("location", "no fix".into()),
         prop::GNSS_LOCATION if value.len() <= 7 => (
@@ -2343,11 +2361,58 @@ mod tests {
         assert!(events.iter().any(|event| matches!(event, Event::Attached {
             protocol_major: PROTOCOL_MAJOR_VERSION,
             dev_version,
-            phy_mtu: 255,
+            phy_mtu: Some(255),
             capabilities,
             ..
-        } if dev_version == "test-dev"
+        } if dev_version.as_deref() == Some("test-dev")
             && capabilities.iter().map(|cap| cap.code).collect::<Vec<_>>() == [8, 515])));
+    }
+
+    /// A newer minor version, octets past a field's width, a refused
+    /// description, and a command newer than this debugger: none of them
+    /// keeps the dashboard from attaching, and none is a protocol error.
+    #[test]
+    fn attach_tolerates_what_binds_the_sender() {
+        let mut engine = DebuggerEngine::default();
+        engine.attach().unwrap();
+        let values: [Option<&[u8]>; 5] = [
+            Some(&[1, b'!']),
+            Some(&[PROTOCOL_MAJOR_VERSION, 7, 9]),
+            None,
+            Some(&[8]),
+            Some(&[255, 0, 0xEE]),
+        ];
+        for value in values {
+            let request = drain_serial_frame(&mut engine);
+            match value {
+                Some(value) => send_property(&mut engine, &request, value),
+                None => {
+                    let tid = Frame::parse(&request).unwrap().header.tid();
+                    let mut response = [0; FRAME_CAPACITY];
+                    let len =
+                        frame::last_status(&mut response, tid, umsh_ulcp::Status::PROP_NOT_FOUND)
+                            .unwrap();
+                    ingest_serial_frame(&mut engine, &response[..len]);
+                }
+            }
+        }
+        ingest_serial_frame(&mut engine, &[0x80, 0x7E]);
+        let events: Vec<_> = std::iter::from_fn(|| engine.take_event()).collect();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::ProtocolError { .. })),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Attached {
+                protocol_minor: 7,
+                dev_version: None,
+                phy_mtu: Some(255),
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -2450,10 +2515,11 @@ mod tests {
             decode_property(prop::BATTERY, &[0b100, 3]).unwrap().display,
             "voltage unsupported, level unsupported, not charging"
         );
-        // Malformed: reserved bit, bad length, unassigned charge code.
+        // Malformed: reserved bit, bad length. An unassigned charge code
+        // is an unknown charge state, not a malformed snapshot.
         assert!(decode_property(prop::BATTERY, &[0b1000, 1]).is_none());
         assert!(decode_property(prop::BATTERY, &[0b001, 0x74]).is_none());
-        assert!(decode_property(prop::BATTERY, &[0b100, 4]).is_none());
+        assert!(decode_property(prop::BATTERY, &[0b100, 4]).is_some());
         // Battery is read-only: no typed editor.
         assert!(
             decode_property(prop::BATTERY, &[0b100, 2])
@@ -2674,9 +2740,9 @@ mod tests {
             Event::Attached {
                 protocol_major: PROTOCOL_MAJOR_VERSION,
                 dev_version,
-                phy_mtu: 255,
+                phy_mtu: Some(255),
                 ..
-            } if dev_version == "umsh-web-sim/0.1"
+            } if dev_version.as_deref() == Some("umsh-web-sim/0.1")
         )));
         assert!(events.iter().any(|event| matches!(
             event,

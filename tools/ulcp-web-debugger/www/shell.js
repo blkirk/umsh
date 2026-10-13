@@ -122,7 +122,9 @@ function handleEvent(event) {
       updatePropertyAvailability();
       updateCommandAvailability();
       elements.protocolVersion.textContent = `${event.protocol_major}.${event.protocol_minor}`;
-      elements.deviceVersion.textContent = event.dev_version || "(empty)";
+      elements.deviceVersion.textContent = event.dev_version === null
+        ? "(unavailable)"
+        : event.dev_version || "(empty)";
       elements.bootStatus.textContent = event.boot_status;
       elements.capabilities.textContent = event.capabilities.length
         ? event.capabilities.map(({ code, name }) => name ? `${name} (${code})` : String(code)).join(", ")

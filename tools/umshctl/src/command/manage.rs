@@ -28,7 +28,7 @@ use super::values::{AssignArg, BytesArg, KeyArg};
 use crate::App;
 use crate::connection::confirm;
 use crate::mesh::{self, CtlHandle, CtlMac, NodeStack, OPERATION_TIMEOUT, StackContext, describe};
-use crate::output::{address, field, hex, note, subfield};
+use crate::output::{address, field, hex, note, subfield, warn};
 
 // ─── Command surface ─────────────────────────────────────────────────────────
 
@@ -719,6 +719,11 @@ type Answer = (u32, Result<Vec<u8>, Status>);
 
 /// Split a `CMD_PROP_ARE` into per-position outcomes, in the order asked
 /// for.
+///
+/// A position that names the wrong property, or will not parse, ends the
+/// reading there; what came before it is still the device's answer, and
+/// is kept. The positions after it read as unanswered, exactly as for a
+/// reply that ran out of room.
 fn zip_answers(keys: &[u32], reply: &[u8]) -> Result<Vec<Answer>> {
     let entries = reply::entries(keys, reply).map_err(|error| match error {
         // A device without `CAP_CMD_MULTI` answers the unrecognized
@@ -729,25 +734,32 @@ fn zip_answers(keys: &[u32], reply: &[u8]) -> Result<Vec<Answer>> {
         },
         reply::EntriesError::Unreadable(error) => anyhow!("unreadable reply: {error:?}"),
     })?;
-    entries
-        .map(|entry| {
-            let (key, answer) = entry.map_err(|error| match error {
-                reply::EntryError::Misplaced {
-                    requested,
-                    answered,
-                } => anyhow!(
+    let mut answers = Vec::new();
+    for entry in entries {
+        let (key, answer) = match entry {
+            Ok(entry) => entry,
+            Err(reply::EntryError::Misplaced {
+                requested,
+                answered,
+            }) => {
+                warn(format!(
                     "the device answered {} where {} was asked for",
                     label(answered),
                     label(requested)
-                ),
-                reply::EntryError::Unreadable(error) => anyhow!("malformed entry: {error:?}"),
-            })?;
-            Ok(match answer {
-                reply::Answer::Value(value) => (key, Ok(value.to_vec())),
-                reply::Answer::Refused(status) => (key, Err(status)),
-            })
-        })
-        .collect()
+                ));
+                break;
+            }
+            Err(reply::EntryError::Unreadable(error)) => {
+                warn(format!("malformed entry: {error:?}"));
+                break;
+            }
+        };
+        answers.push(match answer {
+            reply::Answer::Value(value) => (key, Ok(value.to_vec())),
+            reply::Answer::Refused(status) => (key, Err(status)),
+        });
+    }
+    Ok(answers)
 }
 
 fn report_entries(keys: &[u32], reply: &[u8], short_advice: &str) -> Result<()> {

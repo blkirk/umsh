@@ -8,7 +8,7 @@
 
 use umsh::core::{PublicKey, RegionCode};
 use umsh::node::location::NodeLocation;
-use umsh::ulcp::{decode_filter_table, decode_status};
+use umsh::ulcp::{ReportedFilter, decode_filter_table, decode_status};
 use umsh::ulcp_wire::Status;
 use umsh::ulcp_wire::battery::BatteryStatus;
 use umsh::ulcp_wire::ids::{DUTY_LIMIT_DISABLED, cap, prop, saved};
@@ -18,7 +18,7 @@ use super::props::PropSet;
 use super::{battery_display, format_millilux};
 use crate::command::values::FilterArg;
 use crate::command::{duty_percent, format_duration};
-use crate::output::hex;
+use crate::output::{UNAVAILABLE, hex, or_unavailable};
 
 /// What the renderers know beyond the properties themselves.
 pub struct Context {
@@ -815,7 +815,9 @@ fn precision_cell(bytes: u8) -> &'static str {
 fn render_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
     let enabled = set.bool(prop::MAC_REPEATER_ENABLED).unwrap_or(false);
     let meshcore = meshcore(set);
-    let meshcore_enabled = meshcore.as_ref().is_some_and(|meshcore| meshcore.enabled);
+    let meshcore_enabled = meshcore
+        .as_ref()
+        .is_some_and(|meshcore| meshcore.enabled == Some(true));
     let mut lines = vec![("forwarding".into(), on_off(enabled).into())];
     // Each protocol's gates are inert while it is off, and printing
     // settings that do nothing invites reading them as if they did.
@@ -839,15 +841,22 @@ fn render_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
         lines.push((
             "meshcore".into(),
             match (meshcore.enabled, meshcore_identity_allowed(set)) {
-                (false, _) => "off".to_string(),
-                (true, false) => "inactive (identity key begins 00 or FF)".to_string(),
-                (true, true) => format!("on, policy {}", meshcore.region_policy.name()),
+                (Some(false), _) => "off".to_string(),
+                (None, _) => UNAVAILABLE.to_string(),
+                (Some(true), false) => "inactive (identity key begins 00 or FF)".to_string(),
+                (Some(true), true) => format!(
+                    "on, policy {}",
+                    or_unavailable(meshcore.region_policy, |policy| policy.to_string())
+                ),
             },
         ));
-        if meshcore.enabled {
+        if meshcore.enabled == Some(true) {
             lines.push((
                 "meshcore regions".into(),
-                crate::command::repeater::format_meshcore_regions(&meshcore.regions),
+                or_unavailable(
+                    meshcore.regions.as_deref(),
+                    crate::command::repeater::format_meshcore_regions,
+                ),
             ));
         }
     }
@@ -879,14 +888,12 @@ fn meshcore(set: &PropSet) -> Option<umsh::ulcp::MeshCoreForwarding> {
     let region_policy = set
         .non_empty(prop::MESHCORE_REGION_POLICY)
         .and_then(|value| value.first().copied())
-        .and_then(umsh::ulcp::MeshCoreRegionPolicy::from_u8)
-        .unwrap_or_default();
+        .map(umsh::ulcp::MeshCoreRegionPolicy::from_wire);
     let regions = set
         .bytes(prop::MESHCORE_REGIONS)
-        .and_then(|value| umsh::ulcp::decode_meshcore_regions(value).ok())
-        .unwrap_or_default();
+        .map(umsh::ulcp::decode_meshcore_regions);
     Some(umsh::ulcp::MeshCoreForwarding {
-        enabled,
+        enabled: Some(enabled),
         region_policy,
         regions,
     })
@@ -909,13 +916,12 @@ fn env_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
         env.push(("DEFAULT_REGION".into(), code.to_string()));
     }
     if let Some(meshcore) = meshcore(set) {
-        env.push(("MESHCORE".into(), bit(meshcore.enabled)));
-        env.push((
-            "MESHCORE_POLICY".into(),
-            meshcore.region_policy.name().into(),
-        ));
-        if !meshcore.regions.is_empty() {
-            env.push(("MESHCORE_REGIONS".into(), meshcore.regions.join(" ")));
+        env.push(("MESHCORE".into(), bit(meshcore.enabled == Some(true))));
+        if let Some(policy) = meshcore.region_policy {
+            env.push(("MESHCORE_POLICY".into(), policy.name().into()));
+        }
+        if let Some(regions) = meshcore.regions.filter(|regions| !regions.is_empty()) {
+            env.push(("MESHCORE_REGIONS".into(), regions.join(" ")));
         }
     }
     env
@@ -923,7 +929,7 @@ fn env_repeater(set: &PropSet, _ctx: &Context) -> Vec<Line> {
 
 fn regions(set: &PropSet) -> Vec<String> {
     set.bytes(prop::MAC_REPEATER_REGIONS)
-        .and_then(|value| umsh::ulcp::decode_region_list(value).ok())
+        .map(umsh::ulcp::decode_region_list)
         .unwrap_or_default()
 }
 
@@ -1431,17 +1437,24 @@ fn ownership(set: &PropSet, ctx: &Context) -> String {
     }
 }
 
-fn filters(set: &PropSet) -> Option<Vec<items::Filter>> {
-    decode_filter_table(set.bytes(prop::HOST_RX_FILTERS)?).ok()
+fn filters(set: &PropSet) -> Option<Vec<ReportedFilter>> {
+    Some(decode_filter_table(set.bytes(prop::HOST_RX_FILTERS)?))
 }
 
-fn filter_list(filters: &[items::Filter]) -> String {
+/// The filter table, an entry this tool cannot interpret included: it is
+/// still one the device filters on.
+fn filter_list(filters: &[ReportedFilter]) -> String {
     if filters.is_empty() {
         return "none".to_string();
     }
     filters
         .iter()
-        .map(|filter| FilterArg(*filter).to_string())
+        .map(|filter| match filter {
+            ReportedFilter::Known(filter) => FilterArg(*filter).to_string(),
+            ReportedFilter::Unknown { filter_type, value } => {
+                format!("unknown type {filter_type} ({})", hex(value))
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

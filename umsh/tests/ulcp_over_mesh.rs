@@ -219,10 +219,10 @@ async fn the_synchronization_procedure_reads_the_host_domain_too() {
     assert_eq!(sync.queue_dropped, Some(0));
 
     // The device domain and radio configuration alike.
-    assert_eq!(sync.device_name, "Simulated Device");
+    assert_eq!(sync.device_name.as_deref(), Some("Simulated Device"));
     assert_eq!(sync.last_status, Status::RESET_POWER_ON);
-    assert_eq!(sync.freq_khz, 910_525);
-    assert!(!sync.phy_enabled);
+    assert_eq!(sync.freq_khz, Some(910_525));
+    assert_eq!(sync.phy_enabled, Some(false));
     assert!(!sync.capabilities.is_empty());
 }
 

@@ -30,8 +30,7 @@ use umsh_ulcp::alert::AlertState;
 use umsh_ulcp::announce::Announcement;
 use umsh_ulcp::battery::BatteryStatus;
 use umsh_ulcp::frame::{
-    self, Cmd, Frame, MultiEntries, SessionResetReason, StreamPayload, TID_UNSOLICITED,
-    parse_session_reset,
+    self, Cmd, Frame, SessionResetReason, StreamPayload, TID_UNSOLICITED, parse_session_reset,
 };
 use umsh_ulcp::gnss::GnssSnapshot;
 use umsh_ulcp::hdlc;
@@ -59,6 +58,55 @@ const RESPONSE_QUEUE_DEPTH: usize = 8;
 const PROP_EVENT_DEPTH: usize = 16;
 /// Delay between transmit retries while CCA reports a busy channel.
 const CCA_RETRY_DELAY: Duration = Duration::from_millis(10);
+/// Loss-of-state notices one attach exchange absorbs before giving up on
+/// the device: a boot and an attach are one or two each, and a device
+/// announcing resets without end is not one to attach to.
+const ATTACH_NOTICE_LIMIT: usize = 4;
+/// The frame ceiling assumed when a device does not report a usable
+/// `PROP_PHY_MTU`: the largest LoRa payload there is. A frame over the
+/// device's real ceiling is refused per transmit, which costs that frame
+/// and nothing else.
+const FALLBACK_MTU: usize = 255;
+
+/// The frame airtime assumed when the device's cannot be learned and
+/// nothing better is cached: the slowest LoRa settings there are (SF12,
+/// 125 kHz, CR 4/8) carrying a whole frame behind the 32-symbol preamble
+/// UMSH firmware sends. A transmit deadline built on it is long rather
+/// than short, and a long deadline only waits; a short one fails a frame
+/// that is still on the air.
+fn conservative_t_frame_ms(max_frame_size: usize) -> u32 {
+    let frame = if max_frame_size == 0 {
+        FALLBACK_MTU
+    } else {
+        max_frame_size
+    };
+    umsh_ulcp::airtime::lora_airtime_ms_with_preamble(12, 125_000, 8, frame, 32).max(1)
+}
+
+/// Run one attach exchange, absorbing the loss-of-state notices a device
+/// sends while it is booting or being attached to.
+///
+/// Spec §`CMD_SESSION_RESET`: the reason is diagnostic and a host's
+/// obligation is the same for every value—resynchronize—which is what
+/// an attach is about to do anyway. A reset notice says the device
+/// booted, which is what the boot status records. Neither means this
+/// attach failed; the exchange the notice cut short is simply asked
+/// again.
+macro_rules! absorbing_attach_notices {
+    ($device:expr, $exchange:expr) => {{
+        let mut absorbed = 0;
+        loop {
+            match $exchange.await {
+                Err(error)
+                    if absorbed < ATTACH_NOTICE_LIMIT && $device.absorb_attach_notice(&error) =>
+                {
+                    absorbed += 1;
+                }
+                result => break result,
+            }
+        }
+    }};
+}
 
 #[derive(Debug)]
 pub enum UlcpError {
@@ -298,6 +346,10 @@ pub enum HostOwnership {
     /// ours without deliberately replacing it (see
     /// [`UlcpDevice::provision`]).
     OtherHost([u8; 32]),
+    /// The device implements host filtering, but its `PROP_HOST_KEY`
+    /// could not be read: refused, or not a key this host can compare.
+    /// Nothing here is known to be ours, so treat it as another host's.
+    Unknown,
     /// The device does not implement host filtering (minimal protocol
     /// only).
     Unsupported,
@@ -322,30 +374,98 @@ pub enum SavedSnapshot {
     /// A snapshot exists but no generation could be read; the device
     /// booted with post-reset defaults.
     Unreadable,
+    /// A code this host does not assign, kept as reported.
+    Other(u8),
 }
 
 impl SavedSnapshot {
-    fn from_octet(value: &[u8]) -> Result<Self, UlcpError> {
-        match value {
-            [ids::saved::NONE] => Ok(Self::None),
-            [ids::saved::CURRENT] => Ok(Self::Current),
-            [ids::saved::FALLBACK] => Ok(Self::Fallback),
-            [ids::saved::UNREADABLE] => Ok(Self::Unreadable),
-            _ => Err(UlcpError::Protocol("malformed PROP_SAVED")),
-        }
+    /// Read the value's first octet; anything after it is the sender's
+    /// business. `None` only for an empty value.
+    fn from_octet(value: &[u8]) -> Option<Self> {
+        Some(match *value.first()? {
+            ids::saved::NONE => Self::None,
+            ids::saved::CURRENT => Self::Current,
+            ids::saved::FALLBACK => Self::Fallback,
+            ids::saved::UNREADABLE => Self::Unreadable,
+            other => Self::Other(other),
+        })
     }
 
-    /// Whether a saved snapshot is in effect at all, in either
-    /// generation.
+    /// Whether a saved snapshot is known to be in effect, in either
+    /// generation. An unassigned code does not say so.
     pub fn is_saved(self) -> bool {
         matches!(self, Self::Current | Self::Fallback)
     }
 }
 
+/// One `PROP_HOST_RX_FILTERS` entry as a device reported it.
+///
+/// [`items::Filter`] is the strict form a device validates writes
+/// against, and stays strict. A host reading the table back has no such
+/// job: an entry it cannot interpret is still an entry the device holds,
+/// and dropping it—or refusing the whole table over it—would misreport
+/// what the device filters on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReportedFilter {
+    /// An entry this host understands.
+    Known(items::Filter),
+    /// An entry with a `FILTER_TYPE` this host does not assign, or a
+    /// value whose length does not match its type, kept as reported.
+    Unknown { filter_type: u8, value: Vec<u8> },
+}
+
+impl ReportedFilter {
+    /// Read one filter item (without its length prefix). `None` only for
+    /// an empty item, which names no type at all.
+    pub fn decode(item: &[u8]) -> Option<Self> {
+        let [filter_type, value @ ..] = item else {
+            return None;
+        };
+        Some(match items::Filter::decode(item) {
+            Ok(filter) => Self::Known(filter),
+            Err(_) => Self::Unknown {
+                filter_type: *filter_type,
+                value: value.to_vec(),
+            },
+        })
+    }
+
+    /// The strict filter, when this host understands the entry.
+    pub fn known(&self) -> Option<&items::Filter> {
+        match self {
+            Self::Known(filter) => Some(filter),
+            Self::Unknown { .. } => None,
+        }
+    }
+}
+
+/// `PROP_ALERT` as a device reported it.
+///
+/// [`AlertState`] names the codes this host knows. A device newer than it
+/// may report one it does not, which is still an answer—the device is
+/// doing *something* conspicuous—and is kept rather than refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportedAlert {
+    Known(AlertState),
+    /// An unassigned alert code, as reported.
+    Unknown(u32),
+}
+
+impl ReportedAlert {
+    fn from_code(code: u32) -> Self {
+        match AlertState::from_code(code) {
+            Some(state) => Self::Known(state),
+            None => Self::Unknown(code),
+        }
+    }
+}
+
 /// Device state gathered by [`UlcpDevice::sync`]: the spec's
 /// post-attach synchronization procedure. Fields whose capability the
-/// device does not advertise are `None`; multi-value properties are the
-/// digest forms and never contain key material.
+/// device does not advertise are `None`, and so is any field the device
+/// refused or answered with a value this host could not read—one
+/// property is never a reason to lose the rest. Multi-value properties
+/// are the digest forms and never contain key material.
 #[derive(Clone, Debug)]
 pub struct DeviceSync {
     /// Retained `PROP_LAST_STATUS`.
@@ -362,11 +482,11 @@ pub struct DeviceSync {
     pub host_key: Option<[u8; 32]>,
     /// `PROP_PHY_ENABLED`—with a restored snapshot the PHY may
     /// already be up.
-    pub phy_enabled: bool,
+    pub phy_enabled: Option<bool>,
     /// `PROP_PHY_FREQ` in kHz.
-    pub freq_khz: u32,
+    pub freq_khz: Option<u32>,
     /// `PROP_DEV_NAME`.
-    pub device_name: String,
+    pub device_name: Option<String>,
     /// `PROP_SAVED` (`CAP_SAVE`).
     pub saved: Option<SavedSnapshot>,
     /// `PROP_HOST_RX_QUEUE_COUNT` (`CAP_HOST_RX_QUEUE`).
@@ -374,7 +494,7 @@ pub struct DeviceSync {
     /// `PROP_HOST_RX_QUEUE_DROPPED` (`CAP_HOST_RX_QUEUE`).
     pub queue_dropped: Option<u32>,
     /// `PROP_HOST_RX_FILTERS` (`CAP_HOST_FILTER`).
-    pub filters: Option<Vec<items::Filter>>,
+    pub filters: Option<Vec<ReportedFilter>>,
     /// Derived channel identifiers of `PROP_HOST_CHANNEL_KEYS`
     /// (`CAP_HOST_KEYS`).
     pub host_channel_ids: Option<Vec<[u8; items::CHANNEL_IDENTIFIER_LEN]>>,
@@ -400,25 +520,34 @@ impl DeviceSync {
 /// The four gates are independent and are written separately, so this is
 /// a report rather than a transaction: reading it back after a partial
 /// write shows exactly what the device holds.
+///
+/// Like every multi-property report here ([`MeshCoreForwarding`],
+/// [`DeviceTime`], [`GnssStatus`], [`AdvertPolicy`]), each field is
+/// `None` when the device did not report that member—refused it, or
+/// answered with a value this host cannot read—and the rest stand. A
+/// member that is optional in its own right is `Option<Option<T>>`: the
+/// outer level says whether it was reported, the inner one what it is,
+/// the same shape [`decode_opt_i16`] returns.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepeaterPolicy {
     /// `PROP_MAC_REPEATER_ENABLED`: whether the on-board node forwards at
     /// all. The remaining fields are inert while this is false.
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     /// `PROP_MAC_REPEATER_REGIONS`: which region-tagged floods to forward,
     /// as the strings an operator wrote—a short code, a name, or a
     /// literal `0x1234`. Empty imposes no regional restriction. The
     /// device derives the 2-octet codes the filter actually compares;
     /// pass a name through [`RegionCode::from_str`] to see them.
-    pub regions: Vec<String>,
+    pub regions: Option<Vec<String>>,
     /// `PROP_MAC_REPEATER_DEFAULT_REGION`: the tag inserted into an
-    /// untagged flood before forwarding it. `None` forwards untagged.
-    pub default_region: Option<RegionCode>,
+    /// untagged flood before forwarding it. `Some(None)` forwards
+    /// untagged.
+    pub default_region: Option<Option<RegionCode>>,
     /// `PROP_MAC_REPEATER_MIN_RSSI` in dBm: floor below which a frame is
-    /// not worth relaying. `None` accepts any.
-    pub min_rssi: Option<i16>,
-    /// `PROP_MAC_REPEATER_MIN_SNR` in dB. `None` accepts any.
-    pub min_snr: Option<i8>,
+    /// not worth relaying. `Some(None)` accepts any.
+    pub min_rssi: Option<Option<i16>>,
+    /// `PROP_MAC_REPEATER_MIN_SNR` in dB. `Some(None)` accepts any.
+    pub min_snr: Option<Option<i8>>,
 }
 
 /// How MeshCore transport codes gate flood forwarding
@@ -432,6 +561,9 @@ pub enum MeshCoreRegionPolicy {
     ScopedOnly,
     /// Every flood, whatever its scope.
     Ignore,
+    /// A code this host does not assign, kept as reported. Never parsed
+    /// from a name: a host writes only the policies it knows.
+    Other(u8),
 }
 
 impl MeshCoreRegionPolicy {
@@ -445,21 +577,42 @@ impl MeshCoreRegionPolicy {
         }
     }
 
+    /// Tolerant conversion, for a reader: an unassigned code is
+    /// [`Self::Other`] rather than an error.
+    pub const fn from_wire(value: u8) -> Self {
+        match Self::from_u8(value) {
+            Some(policy) => policy,
+            None => Self::Other(value),
+        }
+    }
+
     /// The wire value.
     pub const fn as_u8(self) -> u8 {
         match self {
             Self::Open => ids::meshcore_region_policy::OPEN,
             Self::ScopedOnly => ids::meshcore_region_policy::SCOPED_ONLY,
             Self::Ignore => ids::meshcore_region_policy::IGNORE,
+            Self::Other(code) => code,
         }
     }
 
-    /// The name the CLI reads and prints.
+    /// The name the CLI reads and prints; `unknown` for an unassigned
+    /// code, whose number [`Display`](core::fmt::Display) adds.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Open => "open",
             Self::ScopedOnly => "scoped",
             Self::Ignore => "ignore",
+            Self::Other(_) => "unknown",
+        }
+    }
+}
+
+impl core::fmt::Display for MeshCoreRegionPolicy {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Other(code) => write!(formatter, "unknown ({code})"),
+            policy => formatter.write_str(policy.name()),
         }
     }
 }
@@ -475,17 +628,18 @@ impl core::str::FromStr for MeshCoreRegionPolicy {
     }
 }
 
-/// A `CAP_MESHCORE_FORWARDER` device's MeshCore settings.
+/// A `CAP_MESHCORE_FORWARDER` device's MeshCore settings. A field is
+/// `None` when the device did not report it (see [`RepeaterPolicy`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeshCoreForwarding {
     /// `PROP_MESHCORE_FORWARDING_ENABLED`. Independent of
     /// [`RepeaterPolicy::enabled`].
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     /// `PROP_MESHCORE_REGION_POLICY`.
-    pub region_policy: MeshCoreRegionPolicy,
+    pub region_policy: Option<MeshCoreRegionPolicy>,
     /// `PROP_MESHCORE_REGIONS`: MeshCore region names, without the `#`
     /// their keys derive under.
-    pub regions: Vec<String>,
+    pub regions: Option<Vec<String>>,
 }
 
 /// Whether a device identity whose public key is `dev_key` can forward
@@ -494,15 +648,17 @@ pub fn meshcore_identity_allowed(dev_key: &[u8; 32]) -> bool {
     ids::meshcore_identity_allowed(dev_key[0])
 }
 
-/// The wall clock of a `CAP_TIME` device.
+/// The wall clock of a `CAP_TIME` device. A field is `None` when the
+/// device did not report it (see [`RepeaterPolicy`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceTime {
-    /// `PROP_TIME`: Unix seconds, or `None` when the device does not know
-    /// what time it is. Unsigned, so the encoding is wrap-free into 2106.
-    pub epoch: Option<u32>,
-    /// `PROP_TZ_OFFSET`: minutes east of UTC. Always present—where the
-    /// device is meant to be is known even when the time is not.
-    pub tz_offset_min: i16,
+    /// `PROP_TIME`: Unix seconds, or `Some(None)` when the device does not
+    /// know what time it is. Unsigned, so the encoding is wrap-free into
+    /// 2106.
+    pub epoch: Option<Option<u32>>,
+    /// `PROP_TZ_OFFSET`: minutes east of UTC. Always set—where the device
+    /// is meant to be is known even when the time is not.
+    pub tz_offset_min: Option<i16>,
 }
 
 /// Everything a `CAP_GNSS` device reports about positioning: the switch,
@@ -510,35 +666,40 @@ pub struct DeviceTime {
 ///
 /// A report rather than a transaction, like [`RepeaterPolicy`]: the
 /// properties are written separately, and reading this back after a
-/// partial write shows exactly what the device holds.
+/// partial write shows exactly what the device holds. A field is `None`
+/// when the device did not report it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GnssStatus {
     /// `PROP_GNSS_ENABLED`: whether the receiver is powered. Everything in
     /// `fix` reads as searching while this is false.
-    pub enabled: bool,
+    pub enabled: Option<bool>,
     /// The five positioning telemetry properties, folded into one value.
+    /// A member the device did not report keeps its
+    /// [`GnssSnapshot::SEARCHING`] reading—nothing is known about it,
+    /// which is what searching says.
     pub fix: GnssSnapshot,
     /// `PROP_GNSS_IDENT_UPDATE`: whether fixes refresh the advertised
     /// node identity's location.
-    pub ident_update: bool,
+    pub ident_update: Option<bool>,
     /// `PROP_GNSS_IDENT_PRECISION`: location bytes the advertised
     /// position is clamped to.
-    pub ident_precision: u8,
+    pub ident_precision: Option<u8>,
     /// `PROP_GNSS_TIME_TRUST`: whether receiver-derived time may set the
     /// wall clock.
-    pub time_trust: bool,
+    pub time_trust: Option<bool>,
 }
 
-/// What a device announces without being asked.
+/// What a device announces without being asked. A field is `None` when
+/// the device did not report it (see [`RepeaterPolicy`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvertPolicy {
     /// `PROP_ADVERT_INTERVAL`: seconds between signed identity
     /// advertisements, 0 for none.
-    pub advert_interval_s: u32,
+    pub advert_interval_s: Option<u32>,
     /// `PROP_BEACON_INTERVAL`: seconds between empty beacons, 0 for none.
-    pub beacon_interval_s: u32,
+    pub beacon_interval_s: Option<u32>,
     /// `PROP_STARTUP_BEACON`: whether one beacon goes out at bring-up.
-    pub startup_beacon: bool,
+    pub startup_beacon: Option<bool>,
 }
 
 /// The host-domain state [`UlcpDevice::provision`] establishes on
@@ -1505,41 +1666,53 @@ where
             prop::DEV_MODEL,
             prop::PHY_MTU,
         ];
-        let answers = self.read_each(&REST).await?;
+        let answers = absorbing_attach_notices!(self, self.read_each(&REST))?;
         let [version, dev_version, dev_model, mtu] = answers.as_slice() else {
             return Err(UlcpError::Protocol("short answer to the attach handshake"));
         };
-        let required = |answer: &Result<Vec<u8>, Status>| match answer {
-            Ok(value) => Ok(value.clone()),
-            Err(status) => Err(UlcpError::Status(*status)),
-        };
 
-        let version = required(version)?;
-        if version.first().copied() != Some(ids::PROTOCOL_MAJOR_VERSION) {
-            return Err(UlcpError::Protocol("protocol major version mismatch"));
-        }
-        self.dev_version = String::from_utf8_lossy(&required(dev_version)?)
-            .trim_end_matches('\0')
-            .to_owned();
-        // `PROP_DEV_MODEL` is OPTIONAL, so a refusal is an answer—it
-        // means "this device does not name its hardware"—and must not
-        // fail the attach the way a missing DEV_VERSION would.
-        self.dev_model = dev_model.as_ref().ok().map(|value| {
-            String::from_utf8_lossy(value)
-                .trim_end_matches('\0')
-                .to_owned()
-        });
+        // The one answer that can end an attach: it is what says the far
+        // end speaks this protocol at all.
+        let version = version
+            .as_ref()
+            .map_err(|status| UlcpError::Status(*status))?;
+        check_protocol_version(version)?;
+        // Everything else is a description of the device, and a device
+        // that describes itself badly is still one to attach to.
+        // `PROP_DEV_MODEL` is OPTIONAL besides, so its refusal means only
+        // "this device does not name its hardware".
+        self.dev_version = dev_version
+            .as_ref()
+            .map(|value| decode_string(value))
+            .unwrap_or_default();
+        self.dev_model = dev_model.as_ref().ok().map(|value| decode_string(value));
+        self.max_frame_size = decode_mtu(mtu.as_ref().ok());
 
-        let mtu = required(mtu)?;
-        let [mtu_lo, mtu_hi, ..] = mtu[..] else {
-            return Err(UlcpError::Protocol("malformed PROP_PHY_MTU"));
-        };
-        self.max_frame_size = usize::from(u16::from_le_bytes([mtu_lo, mtu_hi]));
-        if self.max_frame_size == 0 {
-            return Err(UlcpError::Protocol("device advertised zero MTU"));
-        }
-        self.refresh_t_frame().await?;
+        absorbing_attach_notices!(self, self.refresh_t_frame_or_keep())?;
+        self.absorb_latched_attach_notices();
         Ok(())
+    }
+
+    /// Absorb a loss-of-state notice an attach exchange failed on (see
+    /// [`absorbing_attach_notices`]), returning whether it was one.
+    fn absorb_attach_notice(&mut self, error: &UlcpError) -> bool {
+        match error {
+            UlcpError::UnexpectedReset(status) => {
+                self.boot_status = *status;
+                true
+            }
+            UlcpError::SessionReset(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Absorb whatever notice is still latched once the attach exchanges
+    /// are done. One that arrived in the same read as the last answer was
+    /// never reported, and belongs to the attach as much as the rest.
+    fn absorb_latched_attach_notices(&mut self) {
+        if let Some(error) = self.take_reset_notice() {
+            self.absorb_attach_notice(&error);
+        }
     }
 
     /// Give this handle a new transport to the same device.
@@ -1584,7 +1757,9 @@ where
         // capabilities are what a new build changes. Asking again costs
         // one read down a wire.
         self.caps = None;
-        self.read_boot_status().await
+        self.read_boot_status().await?;
+        self.absorb_latched_attach_notices();
+        Ok(())
     }
 
     /// Learn whether the device rebooted, without touching anything.
@@ -1597,8 +1772,12 @@ where
     /// so a status that *is* the answer and a status standing in for
     /// one are the same bytes. Asking for it alone is what tells them
     /// apart.
+    ///
+    /// A device that booted as the link came up announces it, ahead of
+    /// or alongside this answer; that announcement is the boot status
+    /// too, not a failure of the read (see [`absorbing_attach_notices`]).
     async fn read_boot_status(&mut self) -> Result<(), UlcpError> {
-        let boot_status = self.get_prop(prop::LAST_STATUS).await?;
+        let boot_status = absorbing_attach_notices!(self, self.get_prop(prop::LAST_STATUS))?;
         self.boot_status = decode_status(&boot_status);
         Ok(())
     }
@@ -1670,14 +1849,13 @@ where
     }
 
     /// Fetch the device's human-readable `PROP_DEV_NAME`.
+    ///
+    /// Read as the device reports it. The length and content rules bind
+    /// the writer—[`Self::set_device_name`] keeps to them—and a name
+    /// that breaks them is still the device's name, shown as best it can
+    /// be.
     pub async fn device_name(&mut self) -> Result<String, UlcpError> {
-        let value = self.get_prop(prop::DEV_NAME).await?;
-        let name = core::str::from_utf8(&value)
-            .map_err(|_| UlcpError::Protocol("malformed PROP_DEV_NAME"))?;
-        if name.is_empty() || value.len() > 64 || value.contains(&0) {
-            return Err(UlcpError::Protocol("malformed PROP_DEV_NAME"));
-        }
-        Ok(name.to_owned())
+        Ok(decode_string(&self.get_prop(prop::DEV_NAME).await?))
     }
 
     /// Set the device's human-readable `PROP_DEV_NAME`.
@@ -1731,19 +1909,16 @@ where
         else {
             return Ok(None);
         };
-        let [value] = required_answers(answers)?;
-        match value.len() {
-            0 => Ok(None),
-            4 => Ok(Some(u32::from_le_bytes(value[..4].try_into().unwrap()))),
-            _ => Err(UlcpError::Protocol("malformed PROP_ILLUMINANCE")),
-        }
+        // A refusal is the device saying it has no reading either.
+        let [answer] = positions(answers)?;
+        Ok(answer.ok().and_then(|value| decode_u32_prefix(&value)))
     }
 
     /// Read the device's locate-alert state (`PROP_ALERT`).
     ///
     /// `Ok(None)` means the device does not advertise `CAP_ALERT`—it has
     /// no way to make itself conspicuous.
-    pub async fn alert(&mut self) -> Result<Option<AlertState>, UlcpError> {
+    pub async fn alert(&mut self) -> Result<Option<ReportedAlert>, UlcpError> {
         let Some(answers) = self.read_gated(cap::ALERT, &[prop::ALERT]).await? else {
             return Ok(None);
         };
@@ -1763,7 +1938,7 @@ where
     /// update rather than as a response to this call.
     ///
     /// A device without `CAP_ALERT` answers `STATUS_PROP_NOT_FOUND`.
-    pub async fn set_alert(&mut self, state: AlertState) -> Result<AlertState, UlcpError> {
+    pub async fn set_alert(&mut self, state: AlertState) -> Result<ReportedAlert, UlcpError> {
         let mut value = [0u8; pui::MAX_LEN];
         let len = pui::encode(state.code(), &mut value)
             .map_err(|_| UlcpError::Protocol("PROP_ALERT encode"))?;
@@ -1790,29 +1965,21 @@ where
         let Some(answers) = self.read_gated(cap::REPEATER, &KEYS).await? else {
             return Ok(None);
         };
-        let [enabled, regions, default_region, min_rssi, min_snr] = required_answers(answers)?;
-        let enabled = match enabled.first() {
-            Some(&byte) => byte != 0,
-            None => return Err(UlcpError::Protocol("malformed PROP_MAC_REPEATER_ENABLED")),
-        };
-        let regions = decode_region_list(&regions)?;
-        let default_region = decode_region_code(&default_region)?;
-        let min_rssi = decode_opt_i16(&min_rssi)
-            .ok_or(UlcpError::Protocol("malformed PROP_MAC_REPEATER_MIN_RSSI"))?;
-        let min_snr = decode_opt_i8(&min_snr)
-            .ok_or(UlcpError::Protocol("malformed PROP_MAC_REPEATER_MIN_SNR"))?;
+        let [enabled, regions, default_region, min_rssi, min_snr] = positions(answers)?;
         Ok(Some(RepeaterPolicy {
-            enabled,
-            regions,
-            default_region,
-            min_rssi,
-            min_snr,
+            enabled: reported(&enabled, decode_bool),
+            regions: reported(&regions, |value| Some(decode_region_list(value))),
+            default_region: reported(&default_region, |value| decode_region_code(value).ok()),
+            min_rssi: reported(&min_rssi, decode_opt_i16),
+            min_snr: reported(&min_snr, decode_opt_i8),
         }))
     }
 
     /// Read the forwarding filter's region strings on their own.
     pub async fn repeater_regions(&mut self) -> Result<Vec<String>, UlcpError> {
-        decode_region_list(&self.get_prop(prop::MAC_REPEATER_REGIONS).await?)
+        Ok(decode_region_list(
+            &self.get_prop(prop::MAC_REPEATER_REGIONS).await?,
+        ))
     }
 
     /// Set which region-tagged floods the device forwards
@@ -1836,7 +2003,7 @@ where
             value.extend_from_slice(&item[..len]);
         }
         let authoritative = self.set_prop(prop::MAC_REPEATER_REGIONS, &value).await?;
-        decode_region_list(&authoritative)
+        Ok(decode_region_list(&authoritative))
     }
 
     /// Add one region to the forwarding filter without resending the rest
@@ -1924,11 +2091,11 @@ where
         let Some(answers) = self.read_gated(cap::MESHCORE_FORWARDER, &KEYS).await? else {
             return Ok(None);
         };
-        let [enabled, region_policy, regions] = required_answers(answers)?;
+        let [enabled, region_policy, regions] = positions(answers)?;
         Ok(Some(MeshCoreForwarding {
-            enabled: decode_bool(&enabled, "PROP_MESHCORE_FORWARDING_ENABLED")?,
-            region_policy: decode_meshcore_region_policy(&region_policy)?,
-            regions: decode_meshcore_regions(&regions)?,
+            enabled: reported(&enabled, decode_bool),
+            region_policy: reported(&region_policy, decode_meshcore_region_policy),
+            regions: reported(&regions, |value| Some(decode_meshcore_regions(value))),
         }))
     }
 
@@ -1950,7 +2117,7 @@ where
             value.extend_from_slice(&item[..len]);
         }
         let authoritative = self.set_prop(prop::MESHCORE_REGIONS, &value).await?;
-        decode_meshcore_regions(&authoritative)
+        Ok(decode_meshcore_regions(&authoritative))
     }
 
     /// Add one MeshCore region. A region already present fails with
@@ -1981,7 +2148,7 @@ where
         let authoritative = self
             .set_prop(prop::MESHCORE_FORWARDING_ENABLED, &[enabled as u8])
             .await?;
-        decode_bool(&authoritative, "PROP_MESHCORE_FORWARDING_ENABLED")
+        bool_echo(&authoritative, "PROP_MESHCORE_FORWARDING_ENABLED")
     }
 
     /// Set how MeshCore transport codes gate flood forwarding
@@ -1994,15 +2161,16 @@ where
             .set_prop(prop::MESHCORE_REGION_POLICY, &[policy.as_u8()])
             .await?;
         decode_meshcore_region_policy(&authoritative)
+            .ok_or(UlcpError::Protocol("empty PROP_MESHCORE_REGION_POLICY"))
     }
 
     /// Read the device's wall clock and time zone (`PROP_TIME`,
     /// `PROP_TZ_OFFSET`).
     ///
     /// `Ok(None)` means the device does not advertise `CAP_TIME`.
-    /// `Ok(Some(time))` with `time.epoch == None` means it has one and
-    /// does not know what time it is—the state in which a device with a
-    /// screen must show no clock at all.
+    /// `Ok(Some(time))` with `time.epoch == Some(None)` means it has one
+    /// and does not know what time it is—the state in which a device with
+    /// a screen must show no clock at all.
     pub async fn time(&mut self) -> Result<Option<DeviceTime>, UlcpError> {
         let Some(answers) = self
             .read_gated(cap::TIME, &[prop::TIME, prop::TZ_OFFSET])
@@ -2010,12 +2178,10 @@ where
         else {
             return Ok(None);
         };
-        let [epoch, tz_offset_min] = required_answers(answers)?;
-        let epoch = decode_epoch(&epoch)?;
-        let tz_offset_min = decode_tz_offset(&tz_offset_min)?;
+        let [epoch, tz_offset_min] = positions(answers)?;
         Ok(Some(DeviceTime {
-            epoch,
-            tz_offset_min,
+            epoch: reported(&epoch, |value| decode_epoch(value).ok()),
+            tz_offset_min: reported(&tz_offset_min, |value| decode_tz_offset(value).ok()),
         }))
     }
 
@@ -2077,27 +2243,26 @@ where
             ident_update,
             ident_precision,
             time_trust,
-        ] = required_answers::<9>(answers)?;
-        let enabled = decode_bool(&enabled, "PROP_GNSS_ENABLED")?;
+        ] = positions::<9>(answers)?;
         // One reading of the receiver, all five fields of it from the
-        // same moment, which a property-at-a-time read never promised.
+        // same moment, which a property-at-a-time read never promised. A
+        // member the device refused or that will not decode leaves its
+        // field as searching, and the others still land.
         let mut fix = GnssSnapshot::SEARCHING;
         for (key, value) in FIX_KEYS.into_iter().zip(&fix_values) {
-            fix.absorb(key, value)
-                .map_err(|_| UlcpError::Protocol("malformed PROP_GNSS_* value"))?;
+            if let Ok(value) = value {
+                let mut absorbed = fix;
+                if absorbed.absorb(key, value).is_ok() {
+                    fix = absorbed;
+                }
+            }
         }
-        let ident_update = decode_bool(&ident_update, "PROP_GNSS_IDENT_UPDATE")?;
-        let ident_precision = match ident_precision[..] {
-            [precision] => precision,
-            _ => return Err(UlcpError::Protocol("malformed PROP_GNSS_IDENT_PRECISION")),
-        };
-        let time_trust = decode_bool(&time_trust, "PROP_GNSS_TIME_TRUST")?;
         Ok(Some(GnssStatus {
-            enabled,
+            enabled: reported(&enabled, decode_bool),
             fix,
-            ident_update,
-            ident_precision,
-            time_trust,
+            ident_update: reported(&ident_update, decode_bool),
+            ident_precision: reported(&ident_precision, |value| value.first().copied()),
+            time_trust: reported(&time_trust, decode_bool),
         }))
     }
 
@@ -2112,11 +2277,11 @@ where
         let Some(answers) = self.read_gated(cap::ADVERT, &KEYS).await? else {
             return Ok(None);
         };
-        let [advert_interval_s, beacon_interval_s, startup_beacon] = required_answers(answers)?;
+        let [advert_interval_s, beacon_interval_s, startup_beacon] = positions(answers)?;
         Ok(Some(AdvertPolicy {
-            advert_interval_s: decode_interval(&advert_interval_s)?,
-            beacon_interval_s: decode_interval(&beacon_interval_s)?,
-            startup_beacon: decode_bool(&startup_beacon, "PROP_STARTUP_BEACON")?,
+            advert_interval_s: reported(&advert_interval_s, |value| decode_interval(value).ok()),
+            beacon_interval_s: reported(&beacon_interval_s, |value| decode_interval(value).ok()),
+            startup_beacon: reported(&startup_beacon, decode_bool),
         }))
     }
 
@@ -2143,13 +2308,13 @@ where
         let authoritative = self
             .set_prop(prop::STARTUP_BEACON, &[enabled as u8])
             .await?;
-        decode_bool(&authoritative, "PROP_STARTUP_BEACON")
+        bool_echo(&authoritative, "PROP_STARTUP_BEACON")
     }
 
     /// Power the GNSS receiver on or off (`PROP_GNSS_ENABLED`).
     pub async fn set_gnss_enabled(&mut self, enabled: bool) -> Result<bool, UlcpError> {
         let authoritative = self.set_prop(prop::GNSS_ENABLED, &[enabled as u8]).await?;
-        decode_bool(&authoritative, "PROP_GNSS_ENABLED")
+        bool_echo(&authoritative, "PROP_GNSS_ENABLED")
     }
 
     /// Set whether fixes refresh the advertised node identity's location
@@ -2158,7 +2323,7 @@ where
         let authoritative = self
             .set_prop(prop::GNSS_IDENT_UPDATE, &[enabled as u8])
             .await?;
-        decode_bool(&authoritative, "PROP_GNSS_IDENT_UPDATE")
+        bool_echo(&authoritative, "PROP_GNSS_IDENT_UPDATE")
     }
 
     /// Set the precision the advertised location is clamped to, in
@@ -2167,10 +2332,10 @@ where
         let authoritative = self
             .set_prop(prop::GNSS_IDENT_PRECISION, &[precision])
             .await?;
-        match authoritative[..] {
-            [stored] => Ok(stored),
-            _ => Err(UlcpError::Protocol("malformed PROP_GNSS_IDENT_PRECISION")),
-        }
+        authoritative
+            .first()
+            .copied()
+            .ok_or(UlcpError::Protocol("empty PROP_GNSS_IDENT_PRECISION"))
     }
 
     /// Set whether receiver-derived time may set the wall clock
@@ -2180,7 +2345,7 @@ where
     /// spoofed sky; position reporting is unaffected.
     pub async fn set_gnss_time_trust(&mut self, trust: bool) -> Result<bool, UlcpError> {
         let authoritative = self.set_prop(prop::GNSS_TIME_TRUST, &[trust as u8]).await?;
-        decode_bool(&authoritative, "PROP_GNSS_TIME_TRUST")
+        bool_echo(&authoritative, "PROP_GNSS_TIME_TRUST")
     }
 
     async fn initialize(&mut self) -> Result<(), UlcpError> {
@@ -2190,8 +2355,10 @@ where
         // The reset-status property is deliberately read before CMD_RST. The
         // protocol requires the device to retain its hardware boot cause for this
         // first query; CMD_RST would replace it with RESET_SOFTWARE.
-        let boot_status = self.get_prop(prop::LAST_STATUS).await?;
-        self.boot_status = decode_status(&boot_status);
+        self.read_boot_status().await?;
+        // A boot announcement still latched would otherwise be taken for
+        // the answer to the CMD_RST below.
+        self.absorb_latched_attach_notices();
 
         // Reset and wait for the reset notification. The TID is
         // ignored for CMD_RST; the notification is unsolicited.
@@ -2199,25 +2366,23 @@ where
         self.send_reset(deadline).await?;
 
         // Reject devices speaking an incompatible protocol revision.
-        let version = self.get_prop(prop::PROTOCOL_VERSION).await?;
-        if version.first().copied() != Some(ids::PROTOCOL_MAJOR_VERSION) {
-            return Err(UlcpError::Protocol("protocol major version mismatch"));
-        }
+        let version = absorbing_attach_notices!(self, self.get_prop(prop::PROTOCOL_VERSION))?;
+        check_protocol_version(&version)?;
 
-        let dev_version = self.get_prop(prop::DEV_VERSION).await?;
-        self.dev_version = String::from_utf8_lossy(&dev_version)
-            .trim_end_matches('\0')
-            .to_owned();
+        // The rest describes the device, and a device that describes
+        // itself badly is still one to attach to.
+        self.dev_version = absorbent(absorbing_attach_notices!(
+            self,
+            self.get_prop(prop::DEV_VERSION)
+        ))?
+        .map(|value| decode_string(&value))
+        .unwrap_or_default();
         self.dev_model = self.get_prop_string_opt(prop::DEV_MODEL).await;
-
-        let mtu = self.get_prop(prop::PHY_MTU).await?;
-        let [mtu_lo, mtu_hi, ..] = mtu[..] else {
-            return Err(UlcpError::Protocol("malformed PROP_PHY_MTU"));
-        };
-        self.max_frame_size = usize::from(u16::from_le_bytes([mtu_lo, mtu_hi]));
-        if self.max_frame_size == 0 {
-            return Err(UlcpError::Protocol("device advertised zero MTU"));
-        }
+        let mtu = absorbent(absorbing_attach_notices!(
+            self,
+            self.get_prop(prop::PHY_MTU)
+        ))?;
+        self.max_frame_size = decode_mtu(mtu.as_ref());
 
         let config = self.config.clone();
         self.set_prop(prop::PHY_FREQ, &config.freq_khz.to_le_bytes())
@@ -2234,44 +2399,39 @@ where
             .await?;
         self.set_prop(prop::PHY_ENABLED, &[1]).await?;
 
-        self.refresh_t_frame().await?;
+        self.refresh_t_frame_or_keep().await?;
+        self.absorb_latched_attach_notices();
         Ok(())
     }
 
     /// Refresh the PHY-independent airtime bound. Older devices lack the
     /// property, so read their live LoRa parameters rather than assuming the
     /// host's constructor configuration still describes the radio.
+    ///
+    /// Fails when the device would not say, or said something unusable;
+    /// the handle's own transmits do not depend on that (see
+    /// [`Self::refresh_t_frame_or_keep`]).
     pub async fn refresh_t_frame(&mut self) -> Result<u32, UlcpError> {
+        const MALFORMED: UlcpError = UlcpError::Protocol("malformed PHY timing");
         let duration = match self.get_prop(prop::PHY_T_FRAME).await {
-            Ok(value) => decode_u32(&value, "PROP_PHY_T_FRAME")?,
+            Ok(value) => decode_u32_prefix(&value).ok_or(MALFORMED)?,
             Err(UlcpError::Status(Status::PROP_NOT_FOUND | Status::UNIMPLEMENTED)) => {
                 let bw = self.get_prop(prop::PHY_LORA_BW).await?;
                 let sf = self.get_prop(prop::PHY_LORA_SF).await?;
                 let cr = self.get_prop(prop::PHY_LORA_CR).await?;
                 let mtu = self.get_prop(prop::PHY_MTU).await?;
-                let bw = decode_u32(&bw, "PROP_PHY_LORA_BW")?;
-                let [sf] = sf.as_slice() else {
-                    return Err(UlcpError::Protocol("malformed PROP_PHY_LORA_SF"));
-                };
-                let [cr] = cr.as_slice() else {
-                    return Err(UlcpError::Protocol("malformed PROP_PHY_LORA_CR"));
-                };
-                let [lo, hi] = mtu.as_slice() else {
-                    return Err(UlcpError::Protocol("malformed PROP_PHY_MTU"));
+                let bw = decode_u32_prefix(&bw).ok_or(MALFORMED)?;
+                let (Some(&sf), Some(&cr), [lo, hi, ..]) = (sf.first(), cr.first(), &mtu[..])
+                else {
+                    return Err(MALFORMED);
                 };
                 let mtu = u16::from_le_bytes([*lo, *hi]);
-                if bw == 0 || mtu == 0 || !(5..=12).contains(sf) || !(5..=8).contains(cr) {
+                if bw == 0 || mtu == 0 || !(5..=12).contains(&sf) || !(5..=8).contains(&cr) {
                     return Err(UlcpError::Protocol("invalid legacy PHY parameters"));
                 }
                 // Existing UMSH firmware uses a fixed 32-symbol TX preamble.
                 // This compatibility estimate is only needed before T_FRAME.
-                umsh_ulcp::airtime::lora_airtime_ms_with_preamble(
-                    *sf,
-                    bw,
-                    *cr,
-                    usize::from(mtu),
-                    32,
-                )
+                umsh_ulcp::airtime::lora_airtime_ms_with_preamble(sf, bw, cr, usize::from(mtu), 32)
             }
             Err(error) => return Err(error),
         };
@@ -2280,6 +2440,35 @@ where
         }
         self.t_frame_ms = duration;
         Ok(duration)
+    }
+
+    /// Refresh the frame airtime, or keep the one in hand when the device
+    /// cannot supply a usable one: the last good reading, or
+    /// [`conservative_t_frame_ms`] before there has been one.
+    ///
+    /// What this feeds is a transmit deadline, and a stale or pessimistic
+    /// one costs only waiting. Refusing to transmit because a timing read
+    /// failed would cost the frame—and, for a caller that treats a
+    /// transmit error as fatal, the whole session. Only what says the
+    /// link or the session itself is in trouble still fails, because the
+    /// transmit could not succeed past it either and a swallowed reset
+    /// notice is a lost one.
+    async fn refresh_t_frame_or_keep(&mut self) -> Result<u32, UlcpError> {
+        let refreshed = match self.refresh_t_frame().await {
+            // Slow to answer is not gone: the transmit itself says which,
+            // and the late answer is dropped as stale.
+            Err(UlcpError::Timeout) => None,
+            result => absorbent(result)?,
+        };
+        match refreshed {
+            Some(duration) => Ok(duration),
+            None => {
+                if self.t_frame_ms == 0 {
+                    self.t_frame_ms = conservative_t_frame_ms(self.max_frame_size);
+                }
+                Ok(self.t_frame_ms)
+            }
+        }
     }
 
     fn transmit_timeout(&self) -> Duration {
@@ -2327,11 +2516,15 @@ where
     /// refuses is a real fault and should stay an `Err`.
     async fn get_prop_string_opt(&mut self, key: u32) -> Option<String> {
         let value = self.get_prop(key).await.ok()?;
-        Some(
-            String::from_utf8_lossy(&value)
-                .trim_end_matches('\0')
-                .to_owned(),
-        )
+        Some(decode_string(&value))
+    }
+
+    /// Fetch one property for a reader that can do without it: `None`
+    /// when the device refused it or answered with something else (see
+    /// [`absorbent`]). The link failing, or the session, is still an
+    /// error.
+    async fn get_optional(&mut self, key: u32) -> Result<Option<Vec<u8>>, UlcpError> {
+        absorbent(self.get_prop(key).await)
     }
 
     /// Set a property via `CMD_PROP_SET`, returning the authoritative
@@ -2372,24 +2565,29 @@ where
             let remaining = self.keys_that_fit(&keys[answers.len()..]);
             let entries = self.get_props(remaining).await?;
             if entries.is_empty() {
-                // Nothing answered and nothing refused; continuing would
-                // ask the same question forever.
-                return Err(UlcpError::Protocol("empty multi-property answer"));
-            }
-            for (offset, entry) in entries.into_iter().enumerate() {
-                answers.push(match entry {
-                    // Positional: the answer names its key, and it has to
-                    // be the one asked for at that position. `get` rather
-                    // than an index because a device answering more
-                    // entries than it was asked for is a wire fault, not
-                    // grounds for a panic here.
-                    Ok((key, value)) if remaining.get(offset) == Some(&key) => Ok(value),
-                    Ok(_) => {
-                        return Err(UlcpError::Protocol("multi-property answer out of order"));
-                    }
-                    Err(status) => Err(status),
+                // Nothing usable came back—not even a first position—so
+                // asking the same question again would get the same
+                // answer forever. Break the batch up instead, as the mesh
+                // path does: one property on its own still makes progress.
+                let key = remaining[0];
+                answers.push(match self.get_prop(key).await {
+                    Ok(value) => Ok(value),
+                    Err(UlcpError::Status(status)) => Err(status),
+                    // An answer that does not fit the question is no
+                    // value, from a device that could not say why.
+                    Err(UlcpError::Protocol(_)) => Err(Status::FAILURE),
+                    Err(error) => return Err(error),
                 });
+                continue;
             }
+            // Every entry is the answer to the key at its position (see
+            // `finish_multi_transaction`); whatever the reply did not reach
+            // is asked for again.
+            answers.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| entry.map(|(_, value)| value)),
+            );
         }
         Ok(answers)
     }
@@ -2451,7 +2649,7 @@ where
             .map_err(|_| UlcpError::Protocol("frame encode"))?;
         self.send(&buf[..len]).await?;
         let timeout = self.property_timeout(keys.contains(&prop::BATTERY_GAUGE_CONFIG));
-        self.finish_multi_transaction(tid, timeout).await
+        self.finish_multi_transaction(tid, keys, timeout).await
     }
 
     /// Write several properties in order in one exchange via
@@ -2481,15 +2679,25 @@ where
         let len = frame::prop_multi_set(&mut buf, tid, &borrowed)
             .map_err(|_| UlcpError::Protocol("frame encode"))?;
         self.send(&buf[..len]).await?;
-        self.finish_multi_transaction(tid, self.config.response_timeout)
+        let keys: Vec<u32> = entries.iter().map(|(key, _)| *key).collect();
+        self.finish_multi_transaction(tid, &keys, self.config.response_timeout)
             .await
     }
 
     /// Await the `CMD_PROP_ARE` answering a multi-property command and
-    /// split it into per-position outcomes.
+    /// split it into per-position outcomes against the keys `requested`.
+    ///
+    /// The reading is [`umsh_ulcp::reply::entries`], shared with every
+    /// other reader of a reply: an entry is attributed only to the key it
+    /// names. One that names a different property, or will not parse,
+    /// ends the reading there—what came before it stands, and the rest
+    /// reads as unanswered, exactly as for a reply that ran out of room.
+    /// One bad position costs the positions after it a second asking,
+    /// never the whole batch.
     async fn finish_multi_transaction(
         &mut self,
         tid: u8,
+        requested: &[u32],
         timeout: Duration,
     ) -> Result<Vec<MultiValue>, UlcpError> {
         let deadline = Instant::now() + timeout;
@@ -2507,16 +2715,17 @@ where
                 ));
             }
         }
-        let mut values = Vec::new();
-        for entry in MultiEntries::new(&response.value) {
-            let entry = entry.map_err(|_| UlcpError::Protocol("malformed multi-property entry"))?;
-            values.push(if entry.key == prop::LAST_STATUS {
-                Err(decode_status(entry.value))
-            } else {
-                Ok((entry.key, entry.value.to_vec()))
-            });
-        }
-        Ok(values)
+        let entries = umsh_ulcp::reply::entries(requested, &response.value)
+            .map_err(|_| UlcpError::Protocol("malformed multi-property answer"))?;
+        Ok(entries
+            .map_while(Result::ok)
+            // More answers than questions name nothing this caller asked.
+            .take(requested.len())
+            .map(|(key, answer)| match answer {
+                umsh_ulcp::reply::Answer::Value(value) => Ok((key, value.to_vec())),
+                umsh_ulcp::reply::Answer::Refused(status) => Err(status),
+            })
+            .collect())
     }
 
     /// Insert one item into a multi-value property via
@@ -2734,18 +2943,19 @@ where
             Err(UlcpError::Status(Status::PROP_NOT_FOUND)) => return Ok(None),
             result => result?,
         };
+        // An item this host cannot read is skipped and the rest kept; a
+        // broken length prefix ends the list, since nothing after it can
+        // be located (see `items::prefixed_items`).
         let buses = i2c::buses(&value)
-            .map(|bus| {
-                bus.map(|bus| I2cBus {
-                    bus: bus.bus,
-                    speed_khz: bus.speed_khz,
-                    max_data: bus.max_data,
-                    max_ops: bus.max_ops,
-                    name: bus.name.to_owned(),
-                })
+            .filter_map(Result::ok)
+            .map(|bus| I2cBus {
+                bus: bus.bus,
+                speed_khz: bus.speed_khz,
+                max_data: bus.max_data,
+                max_ops: bus.max_ops,
+                name: bus.name.to_owned(),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| UlcpError::Protocol("malformed PROP_I2C_BUSES item"))?;
+            .collect();
         Ok(Some(buses))
     }
 
@@ -2758,16 +2968,15 @@ where
             Err(UlcpError::Status(Status::PROP_NOT_FOUND)) => return Ok(None),
             result => result?,
         };
+        // Skipping what will not read, as for the bus table.
         let devices = i2c::devices(&value)
-            .map(|device| {
-                device.map(|device| I2cPeripheral {
-                    bus: device.bus,
-                    addr: device.addr,
-                    name: device.name.to_owned(),
-                })
+            .filter_map(Result::ok)
+            .map(|device| I2cPeripheral {
+                bus: device.bus,
+                addr: device.addr,
+                name: device.name.to_owned(),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| UlcpError::Protocol("malformed PROP_I2C_DEVICES item"))?;
+            .collect();
         Ok(Some(devices))
     }
 
@@ -2885,7 +3094,7 @@ where
             return Ok(None);
         }
         let value = self.set_prop(prop::BLE_PAIRING, &[open as u8]).await?;
-        Ok(Some(value.first().copied() == Some(1)))
+        Ok(Some(decode_bool(&value).unwrap_or(false)))
     }
 
     /// Revert the device to its saved snapshot (`CMD_RESTORE`; requires
@@ -2960,7 +3169,7 @@ where
         if let Some(caps) = &self.caps {
             return Ok(caps.clone());
         }
-        let caps = decode_capabilities(&self.get_prop(prop::CAPS).await?)?;
+        let caps = decode_capabilities(&self.get_prop(prop::CAPS).await?);
         self.caps = Some(caps.clone());
         Ok(caps)
     }
@@ -3002,7 +3211,7 @@ where
             .pop()
             .ok_or(UlcpError::Protocol("short multi-property answer"))?
             .map_err(UlcpError::Status)?;
-        let caps = decode_capabilities(&raw)?;
+        let caps = decode_capabilities(&raw);
         self.caps = Some(caps.clone());
         Ok((caps, answers))
     }
@@ -3045,19 +3254,28 @@ where
         let capabilities = self.capabilities().await?;
         let has = |capability: u32| capabilities.contains(&capability);
 
-        // Step 2: ownership.
+        // Everything after the capability list is one property apiece,
+        // and none of them is worth the rest: a property the device
+        // refuses, or answers in a form this host cannot read, is `None`
+        // in the report and the procedure carries on. Only the link or
+        // the session failing ends it.
+
+        // Step 2: ownership. A key this host cannot compare is not known
+        // to be ours, which is all ownership needs to say.
         let (host_key, ownership) = if has(cap::HOST_FILTER) {
-            let value = self.get_prop(prop::HOST_KEY).await?;
-            match <[u8; 32]>::try_from(value.as_slice()) {
-                Ok(key) => {
-                    let ownership = match expected_host_key {
-                        Some(expected) if *expected == key => HostOwnership::Ours,
-                        _ => HostOwnership::OtherHost(key),
-                    };
-                    (Some(key), ownership)
-                }
-                Err(_) if value.is_empty() => (None, HostOwnership::Unclaimed),
-                Err(_) => return Err(UlcpError::Protocol("malformed PROP_HOST_KEY")),
+            match self.get_optional(prop::HOST_KEY).await? {
+                Some(value) if value.is_empty() => (None, HostOwnership::Unclaimed),
+                Some(value) => match <[u8; 32]>::try_from(value.as_slice()) {
+                    Ok(key) => {
+                        let ownership = match expected_host_key {
+                            Some(expected) if *expected == key => HostOwnership::Ours,
+                            _ => HostOwnership::OtherHost(key),
+                        };
+                        (Some(key), ownership)
+                    }
+                    Err(_) => (None, HostOwnership::Unknown),
+                },
+                None => (None, HostOwnership::Unknown),
             }
         } else {
             (None, HostOwnership::Unsupported)
@@ -3065,67 +3283,68 @@ where
 
         // Step 3: the device-domain and host-domain state we depend
         // on, gated by the advertised capabilities.
-        let phy_enabled = self.get_prop(prop::PHY_ENABLED).await? == [1];
-        let freq = self.get_prop(prop::PHY_FREQ).await?;
-        let freq_khz = u32::from_le_bytes(
-            freq.as_slice()
-                .try_into()
-                .map_err(|_| UlcpError::Protocol("malformed PROP_PHY_FREQ"))?,
-        );
-        let device_name = self.device_name().await?;
+        let phy_enabled = self
+            .get_optional(prop::PHY_ENABLED)
+            .await?
+            .and_then(|value| decode_bool(&value));
+        let freq_khz = self
+            .get_optional(prop::PHY_FREQ)
+            .await?
+            .and_then(|value| decode_u32_prefix(&value));
+        let device_name = self
+            .get_optional(prop::DEV_NAME)
+            .await?
+            .map(|value| decode_string(&value));
         let saved = match has(cap::SAVE) {
-            true => Some(SavedSnapshot::from_octet(
-                &self.get_prop(prop::SAVED).await?,
-            )?),
+            true => self
+                .get_optional(prop::SAVED)
+                .await?
+                .and_then(|value| SavedSnapshot::from_octet(&value)),
             false => None,
         };
         let (queue_count, queue_dropped) = if has(cap::HOST_RX_QUEUE) {
-            let count = self.get_prop(prop::HOST_RX_QUEUE_COUNT).await?;
-            let dropped = self.get_prop(prop::HOST_RX_QUEUE_DROPPED).await?;
+            let count = self.get_optional(prop::HOST_RX_QUEUE_COUNT).await?;
+            let dropped = self.get_optional(prop::HOST_RX_QUEUE_DROPPED).await?;
             (
-                Some(u16::from_le_bytes(count.as_slice().try_into().map_err(
-                    |_| UlcpError::Protocol("malformed PROP_HOST_RX_QUEUE_COUNT"),
-                )?)),
-                Some(u32::from_le_bytes(dropped.as_slice().try_into().map_err(
-                    |_| UlcpError::Protocol("malformed PROP_HOST_RX_QUEUE_DROPPED"),
-                )?)),
+                count.and_then(|value| Some(u16::from_le_bytes(*value.first_chunk()?))),
+                dropped.and_then(|value| decode_u32_prefix(&value)),
             )
         } else {
             (None, None)
         };
         let filters = match has(cap::HOST_FILTER) {
-            true => Some(decode_filter_table(
-                &self.get_prop(prop::HOST_RX_FILTERS).await?,
-            )?),
+            true => self
+                .get_optional(prop::HOST_RX_FILTERS)
+                .await?
+                .map(|value| decode_filter_table(&value)),
             false => None,
         };
         let (host_channel_ids, host_peer_keys) = if has(cap::HOST_KEYS) {
             (
-                Some(decode_fixed_list::<{ items::CHANNEL_IDENTIFIER_LEN }>(
-                    &self.get_prop(prop::HOST_CHANNEL_KEYS).await?,
-                    "malformed PROP_HOST_CHANNEL_KEYS listing",
-                )?),
-                Some(decode_fixed_list::<{ items::PUBLIC_KEY_LEN }>(
-                    &self.get_prop(prop::HOST_PEER_KEYS).await?,
-                    "malformed PROP_HOST_PEER_KEYS listing",
-                )?),
+                self.get_optional(prop::HOST_CHANNEL_KEYS)
+                    .await?
+                    .map(|value| decode_fixed_list::<{ items::CHANNEL_IDENTIFIER_LEN }>(&value)),
+                self.get_optional(prop::HOST_PEER_KEYS)
+                    .await?
+                    .map(|value| decode_fixed_list::<{ items::PUBLIC_KEY_LEN }>(&value)),
             )
         } else {
             (None, None)
         };
         let auto_ack = match has(cap::HOST_AUTO_ACK) {
-            true => Some(self.get_prop(prop::HOST_AUTO_ACK).await? == [1]),
+            true => self
+                .get_optional(prop::HOST_AUTO_ACK)
+                .await?
+                .and_then(|value| decode_bool(&value)),
             false => None,
         };
-        let dev_key = if has(cap::DEV_IDENTITY) {
-            let value = self.get_prop(prop::DEV_KEY).await?;
-            match <[u8; 32]>::try_from(value.as_slice()) {
-                Ok(key) => Some(key),
-                Err(_) if value.is_empty() => None,
-                Err(_) => return Err(UlcpError::Protocol("malformed PROP_DEV_KEY")),
-            }
-        } else {
-            None
+        // An unreadable identity reads as none known, as an empty one does.
+        let dev_key = match has(cap::DEV_IDENTITY) {
+            true => self
+                .get_optional(prop::DEV_KEY)
+                .await?
+                .and_then(|value| <[u8; 32]>::try_from(value.as_slice()).ok()),
+            false => None,
         };
 
         Ok(DeviceSync {
@@ -3224,15 +3443,19 @@ where
             .iter()
             .map(|key| engine.derive_channel_tag(&ChannelKey(*key)).0)
             .collect();
-        let current_ids = if report.host_replaced {
-            Vec::new()
+        // A listing with a ragged tail holds something this host cannot
+        // name, which is as good a reason to replace the table as an
+        // identifier it does not want.
+        let (current_ids, ragged) = if report.host_replaced {
+            (Vec::new(), false)
         } else {
-            decode_fixed_list::<{ items::CHANNEL_IDENTIFIER_LEN }>(
-                &self.get_prop(prop::HOST_CHANNEL_KEYS).await?,
-                "malformed PROP_HOST_CHANNEL_KEYS listing",
-            )?
+            let listing = self.get_prop(prop::HOST_CHANNEL_KEYS).await?;
+            (
+                decode_fixed_list::<{ items::CHANNEL_IDENTIFIER_LEN }>(&listing),
+                listing.len() % items::CHANNEL_IDENTIFIER_LEN != 0,
+            )
         };
-        if current_ids.iter().any(|id| !desired_ids.contains(id)) {
+        if ragged || current_ids.iter().any(|id| !desired_ids.contains(id)) {
             let table: Vec<u8> = desired.channel_keys.concat();
             self.set_prop(prop::HOST_CHANNEL_KEYS, &table).await?;
             report.channels_replaced = true;
@@ -3260,10 +3483,11 @@ where
         let current_peers = if report.host_replaced {
             Vec::new()
         } else {
+            // Only whole keys can be removed by name; a ragged tail is
+            // nothing a selector could match.
             decode_fixed_list::<{ items::PUBLIC_KEY_LEN }>(
                 &self.get_prop(prop::HOST_PEER_KEYS).await?,
-                "malformed PROP_HOST_PEER_KEYS digest",
-            )?
+            )
         };
         for existing in &current_peers {
             if !desired
@@ -3436,7 +3660,8 @@ where
             }
             Some(Cmd::PropRemoved) => self.ingest_prop_notification(ResponseKind::Removed, &frame),
             // `CMD_PROP_ARE` carries entries rather than one key and
-            // value, so it is queued whole and decoded by whichever
+            // value, so it is queued whole—the frame itself, which is
+            // what the shared reply reader takes—and decoded by whichever
             // multi-property transaction is waiting on the TID. It is
             // never unsolicited, so a TID-0 one is dropped.
             Some(Cmd::PropAre) => {
@@ -3449,7 +3674,7 @@ where
                         tid,
                         kind: ResponseKind::Are,
                         key: prop::LAST_STATUS,
-                        value: frame.payload.to_vec(),
+                        value: frame_bytes.to_vec(),
                     });
                 }
             }
@@ -3688,8 +3913,10 @@ where
         // The PHY may have changed through local controls or another admin
         // since attachment. Remote management handles already have an explicit
         // timing budget; avoid adding radio exchanges to those operations.
+        // A timing read that fails keeps the deadline in hand rather than
+        // costing the frame.
         if self.mode != AttachMode::Remote {
-            self.refresh_t_frame().await.map_err(TxError::Io)?;
+            self.refresh_t_frame_or_keep().await.map_err(TxError::Io)?;
         }
         loop {
             let tid = self.alloc_tid();
@@ -3959,11 +4186,76 @@ fn required_answers<const N: usize>(
         .map_err(|_| UlcpError::Protocol("short multi-property answer"))
 }
 
-fn decode_u32(value: &[u8], property: &'static str) -> Result<u32, UlcpError> {
-    let bytes = value
+/// The answers to a batch, one per position in the order asked, for a
+/// reader that takes each member on its own merits: a refusal stays in
+/// its position rather than failing the read.
+fn positions<const N: usize>(
+    answers: Vec<Result<Vec<u8>, Status>>,
+) -> Result<[Result<Vec<u8>, Status>; N], UlcpError> {
+    answers
         .try_into()
-        .map_err(|_| UlcpError::Protocol(property))?;
-    Ok(u32::from_le_bytes(bytes))
+        .map_err(|_| UlcpError::Protocol("short multi-property answer"))
+}
+
+/// One member of a multi-property report: `decode` applied to its value,
+/// or `None` when the device refused it or `decode` cannot read it.
+fn reported<T>(
+    answer: &Result<Vec<u8>, Status>,
+    decode: impl FnOnce(&[u8]) -> Option<T>,
+) -> Option<T> {
+    answer.as_ref().ok().and_then(|value| decode(value))
+}
+
+/// The value of an exchange whose failure costs only that value. A
+/// refusal, or an answer that does not fit the question, is `None`;
+/// anything that says the link or the session is in trouble is still an
+/// error, because nothing after it can succeed either and a reset notice
+/// swallowed here would be one the caller never hears about.
+fn absorbent<T>(result: Result<T, UlcpError>) -> Result<Option<T>, UlcpError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(UlcpError::Status(_) | UlcpError::Protocol(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuse a device that does not speak this protocol's major version,
+/// which is the one thing about an attach that can make it pointless.
+/// The minor version is not compared—a mismatch there SHOULD NOT be
+/// fatal (ulcp-minimal.md § `PROP_PROTOCOL_VERSION`)—and octets past the
+/// two the property defines are the sender's business.
+fn check_protocol_version(value: &[u8]) -> Result<(), UlcpError> {
+    match value {
+        [major, _minor, ..] if *major == ids::PROTOCOL_MAJOR_VERSION => Ok(()),
+        [_, _, ..] => Err(UlcpError::Protocol("protocol major version mismatch")),
+        _ => Err(UlcpError::Protocol("malformed PROP_PROTOCOL_VERSION")),
+    }
+}
+
+/// The frame ceiling a `PROP_PHY_MTU` answer gives: its first two octets,
+/// or [`FALLBACK_MTU`] when there is no usable answer—refused, short, or
+/// zero, none of which is a reason to give up on the device.
+fn decode_mtu(value: Option<&Vec<u8>>) -> usize {
+    match value.map(Vec::as_slice) {
+        Some([lo, hi, ..]) if u16::from_le_bytes([*lo, *hi]) != 0 => {
+            usize::from(u16::from_le_bytes([*lo, *hi]))
+        }
+        _ => FALLBACK_MTU,
+    }
+}
+
+/// A string property as text: invalid UTF-8 replaced, and the trailing
+/// NUL some firmware sends dropped.
+fn decode_string(value: &[u8]) -> String {
+    String::from_utf8_lossy(value)
+        .trim_end_matches('\0')
+        .to_owned()
+}
+
+/// The leading `UINT32_LE` of a value; longer is the sender's business,
+/// shorter is no value.
+fn decode_u32_prefix(value: &[u8]) -> Option<u32> {
+    value.first_chunk().copied().map(u32::from_le_bytes)
 }
 
 /// Decode a `PROP_LAST_STATUS` value. Anything malformed reads as
@@ -3975,44 +4267,45 @@ pub fn decode_status(value: &[u8]) -> Status {
     }
 }
 
-/// Decode a `PROP_CAPS` value: capability codes as consecutive PUIs.
-pub fn decode_capabilities(value: &[u8]) -> Result<Vec<u32>, UlcpError> {
+/// Decode a `PROP_CAPS` value: capability codes as consecutive PUIs. A
+/// malformed one ends the list; the codes before it stand.
+pub fn decode_capabilities(value: &[u8]) -> Vec<u32> {
     let mut caps = Vec::new();
-    let mut offset = 0;
-    while offset < value.len() {
-        let (code, used) = pui::decode(&value[offset..])
-            .map_err(|_| UlcpError::Protocol("malformed PROP_CAPS"))?;
+    let mut rest = value;
+    while let Ok((code, used)) = pui::decode(rest) {
         caps.push(code);
-        offset += used;
+        rest = &rest[used..];
     }
-    Ok(caps)
+    caps
 }
 
 /// Decode a `PROP_HOST_RX_FILTERS` digest table (PUI-length-prefixed
-/// filter items).
-pub fn decode_filter_table(value: &[u8]) -> Result<Vec<items::Filter>, UlcpError> {
-    let mut filters = Vec::new();
-    for item in items::prefixed_items(value) {
-        let item = item.map_err(|_| UlcpError::Protocol("malformed PROP_HOST_RX_FILTERS"))?;
-        filters.push(
-            items::Filter::decode(item)
-                .map_err(|_| UlcpError::Protocol("malformed PROP_HOST_RX_FILTERS"))?,
-        );
-    }
-    Ok(filters)
+/// filter items). An entry this host cannot interpret is kept as
+/// [`ReportedFilter::Unknown`]; a broken length prefix ends the table,
+/// since nothing after it can be located, and the entries before it
+/// stand.
+pub fn decode_filter_table(value: &[u8]) -> Vec<ReportedFilter> {
+    items::prefixed_items(value)
+        .map_while(Result::ok)
+        .filter_map(ReportedFilter::decode)
+        .collect()
 }
 
 /// Decode `PROP_MAC_REPEATER_REGIONS`: length-prefixed UTF-8 region
-/// strings, in the order they were written.
-pub fn decode_region_list(value: &[u8]) -> Result<Vec<String>, UlcpError> {
-    let mut regions = Vec::new();
-    for item in items::prefixed_items(value) {
-        let item = item.map_err(|_| UlcpError::Protocol("malformed PROP_MAC_REPEATER_REGIONS"))?;
-        let text = core::str::from_utf8(item)
-            .map_err(|_| UlcpError::Protocol("malformed PROP_MAC_REPEATER_REGIONS"))?;
-        regions.push(text.to_owned());
-    }
-    Ok(regions)
+/// strings, in the order they were written. A string that is not UTF-8
+/// is skipped and the rest kept; a broken length prefix ends the list.
+pub fn decode_region_list(value: &[u8]) -> Vec<String> {
+    decode_string_items(value)
+}
+
+/// The UTF-8 items of a length-prefixed list, skipping any that are not
+/// text and stopping where the framing breaks.
+fn decode_string_items(value: &[u8]) -> Vec<String> {
+    items::prefixed_items(value)
+        .map_while(Result::ok)
+        .filter_map(|item| core::str::from_utf8(item).ok())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Reject a region string the device is bound to refuse, so a malformed
@@ -4028,17 +4321,10 @@ fn check_region(region: &str) -> Result<(), UlcpError> {
 }
 
 /// Decode `PROP_MESHCORE_REGIONS`: length-prefixed UTF-8 MeshCore region
-/// names, without their `#`.
-pub fn decode_meshcore_regions(value: &[u8]) -> Result<Vec<String>, UlcpError> {
-    let mut regions = Vec::new();
-    for item in items::prefixed_items(value) {
-        let text = item
-            .ok()
-            .and_then(|item| core::str::from_utf8(item).ok())
-            .ok_or(UlcpError::Protocol("malformed PROP_MESHCORE_REGIONS"))?;
-        regions.push(text.to_owned());
-    }
-    Ok(regions)
+/// names, without their `#`. Read as tolerantly as
+/// [`decode_region_list`].
+pub fn decode_meshcore_regions(value: &[u8]) -> Vec<String> {
+    decode_string_items(value)
 }
 
 /// A MeshCore region name as `PROP_MESHCORE_REGIONS` stores it: `input`
@@ -4064,11 +4350,12 @@ pub fn meshcore_region_name(input: &str) -> Result<&str, UlcpError> {
     Ok(name)
 }
 
-/// Decode a single optional region code. Empty means unset.
+/// Decode a single optional region code. Empty means unset; octets past
+/// the two a code takes are ignored.
 pub fn decode_region_code(value: &[u8]) -> Result<Option<RegionCode>, UlcpError> {
     match value {
         [] => Ok(None),
-        [high, low] => Ok(Some(RegionCode::from_bytes([*high, *low]))),
+        [high, low, ..] => Ok(Some(RegionCode::from_bytes([*high, *low]))),
         _ => Err(UlcpError::Protocol(
             "malformed PROP_MAC_REPEATER_DEFAULT_REGION",
         )),
@@ -4079,28 +4366,22 @@ pub fn decode_region_code(value: &[u8]) -> Result<Option<RegionCode>, UlcpError>
 pub fn decode_opt_i16(value: &[u8]) -> Option<Option<i16>> {
     match value {
         [] => Some(None),
-        [low, high] => Some(Some(i16::from_le_bytes([*low, *high]))),
+        [low, high, ..] => Some(Some(i16::from_le_bytes([*low, *high]))),
         _ => None,
     }
 }
 
-/// Decode an optional INT8 gate. Empty means unset; `None` is malformed.
+/// Decode an optional INT8 gate. Empty means unset.
 pub fn decode_opt_i8(value: &[u8]) -> Option<Option<i8>> {
-    match value {
-        [] => Some(None),
-        [byte] => Some(Some(*byte as i8)),
-        _ => None,
-    }
+    Some(value.first().map(|byte| *byte as i8))
 }
 
-/// Decode a `PROP_ALERT` value: exactly one PUI naming a known state.
-pub fn decode_alert(value: &[u8]) -> Result<AlertState, UlcpError> {
-    const MALFORMED: &str = "malformed PROP_ALERT";
-    let (code, consumed) = pui::decode(value).map_err(|_| UlcpError::Protocol(MALFORMED))?;
-    if consumed != value.len() {
-        return Err(UlcpError::Protocol(MALFORMED));
-    }
-    AlertState::from_code(code).ok_or(UlcpError::Protocol(MALFORMED))
+/// Decode a `PROP_ALERT` value: one PUI naming a state, kept as reported
+/// when it names one this host does not know. Only a value with no
+/// readable PUI at all is malformed.
+pub fn decode_alert(value: &[u8]) -> Result<ReportedAlert, UlcpError> {
+    let (code, _) = pui::decode(value).map_err(|_| UlcpError::Protocol("malformed PROP_ALERT"))?;
+    Ok(ReportedAlert::from_code(code))
 }
 
 /// Decode a `PROP_TIME` value. Empty means the device does not know what
@@ -4108,54 +4389,50 @@ pub fn decode_alert(value: &[u8]) -> Result<AlertState, UlcpError> {
 fn decode_epoch(value: &[u8]) -> Result<Option<u32>, UlcpError> {
     match value {
         [] => Ok(None),
-        [a, b, c, d] => Ok(Some(u32::from_le_bytes([*a, *b, *c, *d]))),
-        _ => Err(UlcpError::Protocol("malformed PROP_TIME")),
+        value => decode_u32_prefix(value)
+            .map(Some)
+            .ok_or(UlcpError::Protocol("malformed PROP_TIME")),
     }
 }
 
 /// Decode a `PROP_TZ_OFFSET` value: minutes east of UTC, always present.
 fn decode_tz_offset(value: &[u8]) -> Result<i16, UlcpError> {
     match value {
-        [low, high] => Ok(i16::from_le_bytes([*low, *high])),
+        [low, high, ..] => Ok(i16::from_le_bytes([*low, *high])),
         _ => Err(UlcpError::Protocol("malformed PROP_TZ_OFFSET")),
     }
 }
 
-/// Decode a single-octet boolean property, naming the property in the
-/// error so a malformed one is attributable.
-fn decode_bool(value: &[u8], what: &'static str) -> Result<bool, UlcpError> {
-    match value {
-        [0] => Ok(false),
-        [1] => Ok(true),
-        _ => Err(UlcpError::Protocol(what)),
-    }
+/// Decode a boolean property: any nonzero first octet is true. `None`
+/// only for an empty value.
+fn decode_bool(value: &[u8]) -> Option<bool> {
+    value.first().map(|byte| *byte != 0)
 }
 
-/// Decode a `PROP_MESHCORE_REGION_POLICY` value.
-fn decode_meshcore_region_policy(value: &[u8]) -> Result<MeshCoreRegionPolicy, UlcpError> {
-    match value {
-        [value] => MeshCoreRegionPolicy::from_u8(*value),
-        _ => None,
-    }
-    .ok_or(UlcpError::Protocol("malformed PROP_MESHCORE_REGION_POLICY"))
+/// The boolean a device echoed for a write, naming the property in the
+/// error when there was none to read.
+fn bool_echo(value: &[u8], what: &'static str) -> Result<bool, UlcpError> {
+    decode_bool(value).ok_or(UlcpError::Protocol(what))
+}
+
+/// Decode a `PROP_MESHCORE_REGION_POLICY` value, an unassigned code
+/// included. `None` only for an empty value.
+fn decode_meshcore_region_policy(value: &[u8]) -> Option<MeshCoreRegionPolicy> {
+    value.first().copied().map(MeshCoreRegionPolicy::from_wire)
 }
 
 /// Decode a `UINT32_LE` announcement interval in seconds.
 fn decode_interval(value: &[u8]) -> Result<u32, UlcpError> {
-    match value {
-        [a, b, c, d] => Ok(u32::from_le_bytes([*a, *b, *c, *d])),
-        _ => Err(UlcpError::Protocol("malformed announcement interval")),
-    }
+    decode_u32_prefix(value).ok_or(UlcpError::Protocol("malformed announcement interval"))
 }
 
-/// Decode a digest table of fixed-size items.
-fn decode_fixed_list<const N: usize>(
-    value: &[u8],
-    what: &'static str,
-) -> Result<Vec<[u8; N]>, UlcpError> {
-    items::fixed_items::<N>(value)
-        .map(|iterator| iterator.copied().collect())
-        .map_err(|_| UlcpError::Protocol(what))
+/// Decode a digest table of fixed-size items. A ragged tail is not an
+/// item and is left out; every whole item before it stands.
+fn decode_fixed_list<const N: usize>(value: &[u8]) -> Vec<[u8; N]> {
+    value
+        .chunks_exact(N)
+        .map(|chunk| chunk.try_into().expect("chunks_exact yields N-byte chunks"))
+        .collect()
 }
 
 /// Render one ULCP frame as a one-line human-readable summary:
@@ -4509,8 +4786,15 @@ mod tests {
             }
         }
         assert_eq!("Scoped".parse(), Ok(MeshCoreRegionPolicy::ScopedOnly));
-        assert!(decode_meshcore_region_policy(&[3]).is_err());
-        assert!(decode_meshcore_region_policy(&[]).is_err());
+        // An unassigned code is reported, not refused, and never parsed.
+        assert_eq!(
+            decode_meshcore_region_policy(&[3, 0xEE]),
+            Some(MeshCoreRegionPolicy::Other(3))
+        );
+        assert_eq!(MeshCoreRegionPolicy::Other(3).to_string(), "unknown (3)");
+        assert_eq!(MeshCoreRegionPolicy::Other(3).as_u8(), 3);
+        assert!("unknown".parse::<MeshCoreRegionPolicy>().is_err());
+        assert_eq!(decode_meshcore_region_policy(&[]), None);
         assert!(!meshcore_identity_allowed(&[0xFF; 32]));
         assert!(meshcore_identity_allowed(&[0x01; 32]));
     }
@@ -4524,10 +4808,79 @@ mod tests {
         }
         assert!(meshcore_region_name(&format!("#{}", "x".repeat(30))).is_ok());
         assert_eq!(
-            decode_meshcore_regions(&[2, b'a', b'b', 1, b'C']).unwrap(),
+            decode_meshcore_regions(&[2, b'a', b'b', 1, b'C']),
             ["ab", "C"]
         );
-        assert!(decode_meshcore_regions(&[2, 0xFF, 0xFE]).is_err());
+    }
+
+    /// One bad item costs that item. A string that is not text is skipped
+    /// and the rest kept; a length prefix running off the end of the
+    /// value ends the list, and what came before it stands.
+    #[test]
+    fn a_bad_list_item_costs_only_itself() {
+        assert_eq!(decode_meshcore_regions(&[2, 0xFF, 0xFE, 1, b'C']), ["C"]);
+        assert_eq!(decode_region_list(&[3, b'S', b'J', b'C', 9, b'x']), ["SJC"]);
+        assert_eq!(decode_capabilities(&[cap::SAVE as u8, 0xFF]), [cap::SAVE]);
+        assert_eq!(decode_fixed_list::<2>(&[1, 2, 3, 4, 5]), [[1, 2], [3, 4]]);
+    }
+
+    /// An unknown filter type is an entry the device holds, so it is kept
+    /// as reported rather than refusing the table.
+    #[test]
+    fn an_unknown_filter_type_is_preserved() {
+        let table = [
+            2,
+            items::FILTER_PKT_TYPE,
+            0,
+            3,
+            0x7F,
+            0xAB,
+            0xCD,
+            3,
+            1,
+            0x12,
+            0x34,
+        ];
+        assert_eq!(
+            decode_filter_table(&table),
+            [
+                ReportedFilter::Known(items::Filter::PktType(0)),
+                ReportedFilter::Unknown {
+                    filter_type: 0x7F,
+                    value: vec![0xAB, 0xCD],
+                },
+                ReportedFilter::Known(items::Filter::ChannelId([0x12, 0x34])),
+            ]
+        );
+    }
+
+    #[test]
+    fn unassigned_codes_are_reported_rather_than_refused() {
+        assert_eq!(
+            SavedSnapshot::from_octet(&[9, 9]),
+            Some(SavedSnapshot::Other(9))
+        );
+        assert!(!SavedSnapshot::Other(9).is_saved());
+        assert_eq!(SavedSnapshot::from_octet(&[]), None);
+        assert_eq!(
+            decode_alert(&[200, 1]).unwrap(),
+            ReportedAlert::Unknown(200)
+        );
+        assert_eq!(
+            decode_alert(&[AlertState::Locate.code() as u8]).unwrap(),
+            ReportedAlert::Known(AlertState::Locate)
+        );
+        assert_eq!(decode_bool(&[2]), Some(true));
+        assert_eq!(decode_bool(&[]), None);
+    }
+
+    #[test]
+    fn the_protocol_version_check_reads_only_the_major() {
+        let major = ids::PROTOCOL_MAJOR_VERSION;
+        assert!(check_protocol_version(&[major, 0]).is_ok());
+        assert!(check_protocol_version(&[major, 99, 7]).is_ok());
+        assert!(check_protocol_version(&[major.wrapping_add(1), 0]).is_err());
+        assert!(check_protocol_version(&[major]).is_err());
     }
 
     fn test_config() -> UlcpDeviceConfig {
@@ -4932,21 +5285,41 @@ mod tests {
         }
     }
 
+    /// A timing read that fails costs nothing but freshness: the frame
+    /// still goes out, under the last good deadline or, before there has
+    /// been one, the slowest the radio could possibly be.
     #[tokio::test]
-    async fn malformed_or_failed_timing_does_not_transmit_with_a_guessed_deadline() {
+    async fn malformed_or_failed_timing_still_transmits_on_a_conservative_deadline() {
         for value in [
             Ok(vec![]),
             Ok(vec![1]),
             Ok(0u32.to_le_bytes().to_vec()),
             Err(Status::FAILURE),
         ] {
-            let mut radio = timing_radio(value);
+            let mut radio = timing_radio(value.clone());
             assert!(matches!(
                 radio.send_confirmed(&[1], &[], None).await,
-                Err(TxError::Io(_))
+                Err(TxError::CadTimeout)
             ));
-            assert_eq!(radio.link.sends, 0);
+            assert_eq!(radio.link.sends, 1, "{value:?}");
+            assert_eq!(radio.t_frame_ms(), conservative_t_frame_ms(0));
+            assert!(radio.transmit_timeout() >= Duration::from_secs(10));
+
+            // With a good reading in hand, a bad one keeps it.
+            radio.t_frame_ms = 624;
+            assert!(matches!(
+                radio.send_confirmed(&[1], &[], None).await,
+                Err(TxError::CadTimeout)
+            ));
+            assert_eq!(radio.link.sends, 2);
+            assert_eq!(radio.t_frame_ms(), 624);
         }
+
+        // Octets past the four the property defines are the sender's.
+        let mut long = 700u32.to_le_bytes().to_vec();
+        long.push(0xEE);
+        let mut radio = timing_radio(Ok(long));
+        assert_eq!(radio.refresh_t_frame().await.unwrap(), 700);
     }
 
     #[tokio::test]
@@ -5049,6 +5422,303 @@ mod tests {
         // The session is usable, so nothing was left latched to fire on
         // the next exchange either.
         assert_eq!(radio.get_prop(prop::PHY_FREQ).await.unwrap().len(), 4);
+    }
+
+    /// A link to the fake device that slips extra device frames in ahead
+    /// of the real answers: the first batch on the first frame sent, the
+    /// second on the first multi-property read.
+    struct NoisyLink {
+        inner: SerialFrameLink<DuplexStream>,
+        on_first: Vec<Vec<u8>>,
+        on_multi_get: Vec<Vec<u8>>,
+        pending: VecDeque<Vec<u8>>,
+    }
+
+    impl FrameLink for NoisyLink {
+        async fn send_frame(&mut self, bytes: &[u8]) -> Result<(), UlcpError> {
+            self.pending.extend(self.on_first.drain(..));
+            if Frame::parse(bytes).unwrap().command() == Some(Cmd::PropMultiGet) {
+                self.pending.extend(self.on_multi_get.drain(..));
+            }
+            self.inner.send_frame(bytes).await
+        }
+
+        fn poll_recv_frame(
+            &mut self,
+            cx: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<Vec<u8>, UlcpError>> {
+            match self.pending.pop_front() {
+                Some(frame) => core::task::Poll::Ready(Ok(frame)),
+                None => self.inner.poll_recv_frame(cx),
+            }
+        }
+    }
+
+    fn reset_notice(status: Status) -> Vec<u8> {
+        let mut buf = [0u8; 16];
+        let len = frame::last_status(&mut buf, TID_UNSOLICITED, status).unwrap();
+        buf[..len].to_vec()
+    }
+
+    fn session_notice(reason: SessionResetReason) -> Vec<u8> {
+        let mut buf = [0u8; 16];
+        let len = frame::session_reset(&mut buf, reason).unwrap();
+        buf[..len].to_vec()
+    }
+
+    /// A device that boots as the port opens announces the boot and the
+    /// session it discarded, whatever it calls the reason. None of that
+    /// is the attach failing: the boot is the boot status, and the
+    /// session is the one the attach is about to establish anyway.
+    #[tokio::test]
+    async fn an_attach_survives_a_device_booting_under_it() {
+        let (client, server) = tokio::io::duplex(4096);
+        tokio::spawn(fake_multi_device(server));
+        let link = NoisyLink {
+            inner: SerialFrameLink::new(client),
+            on_first: vec![
+                reset_notice(Status::RESET_POWER_ON),
+                session_notice(SessionResetReason::Reset),
+            ],
+            on_multi_get: vec![
+                session_notice(SessionResetReason::Restored),
+                session_notice(SessionResetReason::Other(9)),
+                reset_notice(Status::RESET_WATCHDOG),
+            ],
+            pending: VecDeque::new(),
+        };
+        let mut radio = UlcpDevice::attach_existing(link, test_config())
+            .await
+            .expect("the attach absorbs every notice the boot produced");
+        // The latest announcement is the boot status.
+        assert_eq!(radio.boot_status(), Status::RESET_WATCHDOG);
+        assert_eq!(radio.dev_version(), "fake-dev/0.1");
+        assert_eq!(radio.max_frame_size(), 255);
+        // Nothing was left latched to fail the first exchange after it.
+        assert_eq!(radio.get_prop(prop::PHY_FREQ).await.unwrap(), b"");
+        radio.set_prop(prop::PHY_TX_POWER, &[3]).await.unwrap();
+    }
+
+    /// A stand-in device whose answers a test writes: each request frame
+    /// goes to `answer`, which returns the frames to reply with.
+    struct ScriptLink {
+        answer: Box<dyn FnMut(&Frame<'_>) -> Vec<Vec<u8>> + Send>,
+        replies: VecDeque<Vec<u8>>,
+    }
+
+    impl FrameLink for ScriptLink {
+        async fn send_frame(&mut self, bytes: &[u8]) -> Result<(), UlcpError> {
+            let request = Frame::parse(bytes).unwrap();
+            let replies = (self.answer)(&request);
+            self.replies.extend(replies);
+            Ok(())
+        }
+
+        fn poll_recv_frame(
+            &mut self,
+            _: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<Vec<u8>, UlcpError>> {
+            self.replies
+                .pop_front()
+                .map_or(core::task::Poll::Pending, |reply| {
+                    core::task::Poll::Ready(Ok(reply))
+                })
+        }
+    }
+
+    /// Answer single and multi-property reads from `value`: a value, or
+    /// the status refusing that property.
+    fn answering(
+        value: fn(u32) -> Result<Vec<u8>, Status>,
+    ) -> Box<dyn FnMut(&Frame<'_>) -> Vec<Vec<u8>> + Send> {
+        Box::new(move |request| {
+            let tid = request.header.tid();
+            let mut buf = vec![0u8; 512];
+            let len = match request.command() {
+                Some(Cmd::PropGet) => {
+                    let key = PropPayload::parse(request.payload).unwrap().key;
+                    match value(key) {
+                        Ok(value) => frame::prop_is(&mut buf, tid, key, &value).unwrap(),
+                        Err(status) => frame::last_status(&mut buf, tid, status).unwrap(),
+                    }
+                }
+                Some(Cmd::PropMultiGet) => {
+                    let mut writer = frame::prop_are(&mut buf, tid).unwrap();
+                    for key in umsh_ulcp::frame::MultiGetKeys::new(request.payload) {
+                        let key = key.unwrap();
+                        match value(key) {
+                            Ok(value) => writer.write_entry(key, &value).unwrap(),
+                            Err(status) => writer.write_status_entry(status).unwrap(),
+                        }
+                    }
+                    writer.finish()
+                }
+                other => panic!("unexpected request {other:?}"),
+            };
+            vec![buf[..len].to_vec()]
+        })
+    }
+
+    fn scripted(
+        answer: Box<dyn FnMut(&Frame<'_>) -> Vec<Vec<u8>> + Send>,
+        caps: &[u32],
+    ) -> UlcpDevice<ScriptLink> {
+        let mut radio = UlcpDevice::bare(
+            ScriptLink {
+                answer,
+                replies: VecDeque::new(),
+            },
+            test_config(),
+        );
+        radio.max_frame_size = 255;
+        radio.caps = Some(caps.to_vec());
+        radio
+    }
+
+    /// One member refused, one malformed, one longer than it should be:
+    /// the report keeps everything it can read and marks the rest as not
+    /// reported, rather than failing the whole policy.
+    #[tokio::test]
+    async fn a_policy_with_a_refused_member_reports_the_rest() {
+        let mut radio = scripted(
+            answering(|key| match key {
+                prop::MAC_REPEATER_ENABLED => Ok(vec![2]),
+                prop::MAC_REPEATER_REGIONS => Err(Status::PROP_NOT_FOUND),
+                prop::MAC_REPEATER_DEFAULT_REGION => Ok(vec![0x12, 0x34, 0xEE]),
+                prop::MAC_REPEATER_MIN_RSSI => Ok(vec![0xFF]),
+                prop::MAC_REPEATER_MIN_SNR => Ok(vec![]),
+                _ => panic!("unexpected property {key}"),
+            }),
+            &[cap::REPEATER],
+        );
+        let policy = radio.repeater_policy().await.unwrap().unwrap();
+        assert_eq!(
+            policy,
+            RepeaterPolicy {
+                enabled: Some(true),
+                regions: None,
+                default_region: Some(Some(RegionCode::from_bytes([0x12, 0x34]))),
+                min_rssi: None,
+                min_snr: Some(None),
+            }
+        );
+    }
+
+    /// The synchronization procedure is a report too: an unknown filter
+    /// type, an unassigned snapshot code, a refused host key and a refused
+    /// counter each cost only themselves.
+    #[tokio::test]
+    async fn sync_reports_around_what_it_cannot_read() {
+        let mut radio = scripted(
+            answering(|key| match key {
+                prop::LAST_STATUS => Ok(vec![Status::OK.0 as u8]),
+                prop::HOST_KEY => Err(Status::FAILURE),
+                prop::PHY_ENABLED => Ok(vec![1]),
+                prop::PHY_FREQ => Ok(vec![0x10, 0x27, 0, 0, 0xEE]),
+                prop::DEV_NAME => Ok(b"Ridge\0".to_vec()),
+                prop::SAVED => Ok(vec![7]),
+                prop::HOST_RX_QUEUE_COUNT => Err(Status::PROP_NOT_FOUND),
+                prop::HOST_RX_QUEUE_DROPPED => Ok(3u32.to_le_bytes().to_vec()),
+                prop::HOST_RX_FILTERS => Ok(vec![2, items::FILTER_PKT_TYPE, 0, 2, 0x55, 9]),
+                _ => panic!("unexpected property {key}"),
+            }),
+            &[cap::HOST_FILTER, cap::SAVE, cap::HOST_RX_QUEUE],
+        );
+        let sync = radio.sync(None).await.expect("sync completes");
+        assert_eq!(sync.ownership, HostOwnership::Unknown);
+        assert_eq!(sync.host_key, None);
+        assert_eq!(sync.phy_enabled, Some(true));
+        assert_eq!(sync.freq_khz, Some(10_000));
+        assert_eq!(sync.device_name.as_deref(), Some("Ridge"));
+        assert_eq!(sync.saved, Some(SavedSnapshot::Other(7)));
+        assert_eq!(sync.queue_count, None);
+        assert_eq!(sync.queue_dropped, Some(3));
+        assert_eq!(
+            sync.filters,
+            Some(vec![
+                ReportedFilter::Known(items::Filter::PktType(0)),
+                ReportedFilter::Unknown {
+                    filter_type: 0x55,
+                    value: vec![9],
+                },
+            ])
+        );
+    }
+
+    /// An answer that skips a position ends the reading there: what came
+    /// before it stands, and the rest is asked for again rather than the
+    /// whole batch failing.
+    #[tokio::test]
+    async fn a_multi_get_answer_out_of_order_keeps_what_matched() {
+        let mut first = true;
+        let mut radio = scripted(
+            Box::new(move |request| {
+                let tid = request.header.tid();
+                let keys: Vec<u32> = umsh_ulcp::frame::MultiGetKeys::new(request.payload)
+                    .map(Result::unwrap)
+                    .collect();
+                let mut buf = vec![0u8; 128];
+                let mut writer = frame::prop_are(&mut buf, tid).unwrap();
+                if std::mem::take(&mut first) {
+                    // Asked for three; skips the second.
+                    assert_eq!(keys.len(), 3);
+                    writer.write_entry(keys[0], b"a").unwrap();
+                    writer.write_entry(keys[2], b"c").unwrap();
+                } else {
+                    for key in keys {
+                        writer.write_entry(key, &key.to_le_bytes()).unwrap();
+                    }
+                }
+                let len = writer.finish();
+                vec![buf[..len].to_vec()]
+            }),
+            &[],
+        );
+        let keys = [prop::PHY_FREQ, prop::PHY_TX_POWER, prop::DEV_NAME];
+        let answers = radio.read_each(&keys).await.unwrap();
+        assert_eq!(
+            answers,
+            vec![
+                Ok(b"a".to_vec()),
+                Ok(prop::PHY_TX_POWER.to_le_bytes().to_vec()),
+                Ok(prop::DEV_NAME.to_le_bytes().to_vec()),
+            ]
+        );
+    }
+
+    /// An answer whose very first position is wrong makes no progress at
+    /// all, so the batch is broken up rather than asked again forever.
+    #[tokio::test]
+    async fn a_multi_get_that_answers_nothing_usable_falls_back_to_single_reads() {
+        let mut radio = scripted(
+            Box::new(|request| {
+                let tid = request.header.tid();
+                let mut buf = vec![0u8; 128];
+                let len = match request.command() {
+                    Some(Cmd::PropMultiGet) => {
+                        let mut writer = frame::prop_are(&mut buf, tid).unwrap();
+                        writer.write_entry(60_000, b"?").unwrap();
+                        writer.finish()
+                    }
+                    Some(Cmd::PropGet) => {
+                        let key = PropPayload::parse(request.payload).unwrap().key;
+                        frame::prop_is(&mut buf, tid, key, &[key as u8]).unwrap()
+                    }
+                    other => panic!("unexpected request {other:?}"),
+                };
+                vec![buf[..len].to_vec()]
+            }),
+            &[],
+        );
+        let keys = [prop::PHY_FREQ, prop::PHY_TX_POWER];
+        let answers = radio.read_each(&keys).await.unwrap();
+        assert_eq!(
+            answers,
+            vec![
+                Ok(vec![prop::PHY_FREQ as u8]),
+                Ok(vec![prop::PHY_TX_POWER as u8]),
+            ]
+        );
     }
 
     /// A session reset this host did not cause is an error, from the
