@@ -735,17 +735,23 @@ impl<M: MacBackend> LocalNode<M> {
     }
 
     /// Observe local transmission of a response without adding a wire ACK.
+    ///
+    /// `ack_mic`, from the request's [`ReceivedPacketRef::ack_mic`], lets
+    /// the response acknowledge that request too. It is taken on its own
+    /// rather than as a whole [`SendOptions`]: a device awaits this from a
+    /// task whose future lives in a static, and on the smaller boards the
+    /// stack is whatever the statics leave.
     pub async fn send_response_tracked(
         &self,
         to: &PublicKey,
         channel: Option<ChannelId>,
         payload: &[u8],
-        options: &SendOptions,
+        ack_mic: Option<[u8; 4]>,
     ) -> Result<SendProgressTicket, crate::MacBackendError<M::SendError, M::CapacityError>> {
         let options = SendOptions {
             track_transmission: true,
-            ack_requested: false,
-            ..options.clone()
+            ack_mic,
+            ..SendOptions::default()
         };
         let receipt = self
             .send_response(to, channel, payload, &options)

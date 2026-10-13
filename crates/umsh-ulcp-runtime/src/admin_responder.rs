@@ -349,8 +349,6 @@ async fn respond<CS: CounterStore + 'static>(
     payload: &[u8],
     completion: Option<ReplyCompletion>,
 ) -> bool {
-    let mut options = SendOptions::default();
-    options.ack_mic = ack_mic;
     let mut wire = heapless::Vec::<u8, { ADMIN_PAYLOAD_MAX + 1 }>::new();
     if wire
         .push(PayloadType::NodeManagementResponse as u8)
@@ -365,7 +363,7 @@ async fn respond<CS: CounterStore + 'static>(
             return false;
         }
         let Ok(ticket) = node
-            .send_response_tracked(&PublicKey(*to), channel, &wire, &options)
+            .send_response_tracked(&PublicKey(*to), channel, &wire, ack_mic)
             .await
         else {
             return false;
@@ -379,6 +377,13 @@ async fn respond<CS: CounterStore + 'static>(
         }
         return sent;
     }
+    // Built in the call rather than held across this function's awaits:
+    // this task's future is a static, and every octet it keeps is one
+    // fewer for the stack on the boards whose stack is what statics leave.
+    let options = SendOptions {
+        ack_mic,
+        ..SendOptions::default()
+    };
     if node
         .send_response(&PublicKey(*to), channel, &wire, &options)
         .await
