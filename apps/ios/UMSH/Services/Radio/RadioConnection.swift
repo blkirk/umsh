@@ -192,10 +192,10 @@ protocol RadioConnection: AnyObject, Sendable {
     /// metadata; completion leaves the radio's queue empty. Callers drain
     /// once per attach, after the host tables are reconciled.
     func drainOfflineQueue() async throws
-    /// Send one traced Echo Request. An empty `route` pings the usual way;
-    /// a non-empty one sends it down exactly those router hints, in send
-    /// order, to test a path without installing it.
-    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult
+    /// Send one traced Echo Request. Without a `path` it pings the usual
+    /// way; with one it goes down exactly that path, to test it without
+    /// installing it.
+    func ping(peerAddress: String, path: MobileMeshExplicitPath?) async throws -> RadioPingResult
     /// This phone's own node public key—what a device lists to let this
     /// phone manage it from a distance. Nil before a mesh session exists.
     func nodePublicKey() async -> Data?
@@ -362,10 +362,14 @@ protocol RadioConnection: AnyObject, Sendable {
     /// Discard this peer's learned route, returning whether one was held.
     /// Keys and counters are untouched.
     func clearPeerRoute(peerAddress: String) async throws -> Bool
-    /// Install `hints` (in send order) as this peer's route and hold it for
+    /// Install `path` as this peer's route and hold it for
     /// `holdMilliseconds` against learning and failure. Returns whether the
     /// MAC took it. `clearPeerRoute` ends the hold.
-    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool
+    func holdPeerRoute(
+        peerAddress: String,
+        path: MobileMeshExplicitPath,
+        holdMilliseconds: UInt64
+    ) async throws -> Bool
     /// End a hold by switching to the path learned while it was held.
     /// Returns whether there was one to switch to.
     func adoptLearnedPeerRoute(peerAddress: String) async throws -> Bool
@@ -511,7 +515,7 @@ enum RadioPingResult: Equatable, Sendable {
 
 extension RadioConnection {
     func ping(peerAddress: String) async throws -> RadioPingResult {
-        try await ping(peerAddress: peerAddress, route: [])
+        try await ping(peerAddress: peerAddress, path: nil)
     }
 
     func requestPeerRepeaters(
@@ -544,6 +548,8 @@ struct RadioPeerRoute: Equatable, Sendable {
     let floodRegions: [Data]
     /// How much longer the route is held; `nil` when it is not.
     let holdRemainingMilliseconds: UInt64?
+    /// The held route's flood allowance past its end; `nil` when not held.
+    let holdFloodHops: UInt8?
     /// Consecutive sends on the held route that missed and were then
     /// acknowledged through the flood fallback.
     let fallbackAcks: UInt8
@@ -563,6 +569,7 @@ struct RadioPeerRoute: Equatable, Sendable {
         floodHops: UInt8?,
         floodRegions: [Data],
         holdRemainingMilliseconds: UInt64? = nil,
+        holdFloodHops: UInt8? = nil,
         fallbackAcks: UInt8 = 0,
         confirmedAgeMilliseconds: UInt64? = nil,
         candidate: Candidate? = nil
@@ -573,6 +580,7 @@ struct RadioPeerRoute: Equatable, Sendable {
         self.floodHops = floodHops
         self.floodRegions = floodRegions
         self.holdRemainingMilliseconds = holdRemainingMilliseconds
+        self.holdFloodHops = holdFloodHops
         self.fallbackAcks = fallbackAcks
         self.confirmedAgeMilliseconds = confirmedAgeMilliseconds
         self.candidate = candidate
@@ -586,6 +594,7 @@ struct RadioPeerRoute: Equatable, Sendable {
             floodHops: record.floodHops,
             floodRegions: record.floodRegions,
             holdRemainingMilliseconds: record.holdRemainingMs,
+            holdFloodHops: record.holdFloodHops,
             fallbackAcks: record.fallbackAcks,
             confirmedAgeMilliseconds: record.confirmedAgeMs,
             candidate: record.candidateKind.map {

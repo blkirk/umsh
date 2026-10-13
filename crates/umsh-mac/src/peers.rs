@@ -170,6 +170,11 @@ impl PeerInfo {
 pub struct RouteHold {
     /// When the hold ends, on the MAC's clock.
     pub until_ms: u64,
+    /// Flood budget past the end of the held route: what a send on it
+    /// spends once its hints are consumed, or from the start for a direct
+    /// route. Replaces [`crate::ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`] while
+    /// the hold lasts; zero floods nothing.
+    pub flood_hops: u8,
     /// Consecutive sends on the held route that missed their acknowledgment
     /// and were then acknowledged through the flood fallback.
     pub fallback_acks: u8,
@@ -184,6 +189,8 @@ pub struct PeerRouteStatus {
     pub route: Option<CachedRoute>,
     /// How much longer the route is held; `None` when it is not.
     pub hold_remaining_ms: Option<u64>,
+    /// See [`RouteHold::flood_hops`]; `None` when nothing is held.
+    pub hold_flood_hops: Option<u8>,
     /// See [`RouteHold::fallback_acks`]; zero when nothing is held.
     pub fallback_acks: u8,
     /// See [`RouteHold::candidate`].
@@ -452,7 +459,8 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         self.drop_hold(id);
     }
 
-    /// Install `route` and hold it until `until_ms`.
+    /// Install `route` and hold it until `until_ms`, spending `flood_hops`
+    /// past its end (see [`RouteHold::flood_hops`]).
     ///
     /// Until then no learned path replaces it and no missed acknowledgment
     /// retires it; a send that misses still falls back to a flood. After the
@@ -465,6 +473,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         &mut self,
         id: PeerId,
         route: CachedRoute,
+        flood_hops: u8,
         until_ms: u64,
         now_ms: u64,
     ) -> bool {
@@ -473,6 +482,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         }
         let hold = RouteHold {
             until_ms,
+            flood_hops,
             fallback_acks: 0,
             candidate: None,
         };

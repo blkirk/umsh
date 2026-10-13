@@ -458,7 +458,7 @@ final class AppRuntime {
             adoptLearnedPath: adoptLearnedPath,
             keepManualPath: keepManualPath,
             learnedPathOffer: learnedPathOffer,
-            pingAlongPath: { peer, route in await self.pingPeer(peer, along: route) },
+            pingAlongPath: { peer, path in await self.pingPeer(peer, along: path) },
             parseRouterHint: { text, format in
                 await self.meshEngine.parseRouterHintInput(text, format: format)
             },
@@ -3080,12 +3080,12 @@ final class AppRuntime {
     }
 
     private func pingPeer(_ peer: PeerSummary) async -> PeerPingResult {
-        await pingPeer(peer, along: [])
+        await pingPeer(peer, along: nil)
     }
 
-    /// Ping `peer`, down `route` when it names any repeaters: a test of a
-    /// path that installs nothing.
-    private func pingPeer(_ peer: PeerSummary, along route: [MeshRouterHint]) async -> PeerPingResult {
+    /// Ping `peer`, down `path` when one is given: a test of a path that
+    /// installs nothing.
+    private func pingPeer(_ peer: PeerSummary, along path: ManualPath?) async -> PeerPingResult {
         guard radioSnapshot.linkState == .attached || radioSnapshot.linkState == .ready else {
             return .unavailable(reason: "Connect a configured companion radio to ping this peer.")
         }
@@ -3095,7 +3095,7 @@ final class AppRuntime {
         do {
             switch try await radioConnection.ping(
                 peerAddress: peer.identity.canonicalAddress,
-                route: route.map(\.bytes)
+                path: path?.explicitPath
             ) {
             case let .reply(reply):
                 // A pong is evidence we heard from the peer; a timeout is not.
@@ -3142,6 +3142,7 @@ final class AppRuntime {
             hopCount: route.hopCount,
             floodHops: route.floodHops,
             floodRegions: route.floodRegions,
+            heldFloodHops: route.holdFloodHops,
             holdUntil: route.holdRemainingMilliseconds.map {
                 now.addingTimeInterval(Double($0) / 1000)
             },
@@ -3171,14 +3172,13 @@ final class AppRuntime {
     /// later move is measured from. Saving a path never asks for location.
     private func setManualPath(
         _ peer: PeerSummary,
-        route: [MeshRouterHint],
+        path: ManualPath,
         hold: ManualPathHold
     ) async -> Bool {
-        guard !route.isEmpty else { return false }
         let holdUntil = Date().addingTimeInterval(hold.duration)
         let held = (try? await radioConnection.holdPeerRoute(
             peerAddress: peer.identity.canonicalAddress,
-            hints: route.map(\.bytes),
+            path: path.explicitPath,
             holdMilliseconds: UInt64(hold.duration * 1000)
         )) ?? false
         guard held else { return false }
@@ -3187,7 +3187,8 @@ final class AppRuntime {
             try? await applicationStore.saveManualRoute(
                 ownerIdentityID: localIdentity.id,
                 publicAddress: peer.identity.canonicalAddress,
-                hints: route.map(\.bytes),
+                hints: path.hops.map(\.bytes),
+                floodHops: path.floodHops,
                 holdUntil: holdUntil,
                 latitude: position?.coordinate.latitude,
                 longitude: position?.coordinate.longitude,
@@ -3273,7 +3274,7 @@ final class AppRuntime {
             guard remaining > 0 else { continue }
             _ = try? await radioConnection.holdPeerRoute(
                 peerAddress: route.publicAddress,
-                hints: route.hints,
+                path: MobileMeshExplicitPath(hints: route.hints, floodHops: route.floodHops),
                 holdMilliseconds: UInt64(remaining * 1000)
             )
         }
@@ -4278,4 +4279,11 @@ private struct SynchronizedRadioPeer: Equatable {
     let publicAddress: String
     let advertisedName: String?
     let radioIdentifier: String
+}
+
+extension ManualPath {
+    /// The path as the mesh session takes it.
+    var explicitPath: MobileMeshExplicitPath {
+        MobileMeshExplicitPath(hints: hops.map(\.bytes), floodHops: floodHops)
+    }
 }

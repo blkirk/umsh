@@ -25,7 +25,7 @@ actor FakeRadioConnection: RadioConnection {
     /// then reads as forgotten, as a real one would.
     private var routeCleared = false
     /// A manual route set through `holdPeerRoute`, by peer address.
-    private var heldRoutes: [String: (hints: [Data], until: Date)] = [:]
+    private var heldRoutes: [String: (path: MobileMeshExplicitPath, until: Date)] = [:]
     /// Stands in for the phone MAC's channel table.
     /// What the app registered, by key, so a late-built session gets the
     /// same set—and the same ceilings—the app believes it registered.
@@ -424,12 +424,13 @@ actor FakeRadioConnection: RadioConnection {
         publish(updated)
     }
 
-    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult {
-        .reply(
+    func ping(peerAddress: String, path: MobileMeshExplicitPath?) async throws -> RadioPingResult {
+        let route = path?.hints ?? [Data([0x12, 0x34])]
+        return .reply(
             RadioPingReply(
                 roundTripMilliseconds: 42,
-                hopCount: UInt8(clamping: (route.isEmpty ? 1 : route.count) + 1),
-                routeHints: route.isEmpty ? [Data([0x12, 0x34])] : route,
+                hopCount: UInt8(clamping: route.count + 1),
+                routeHints: route,
                 rssiDBm: -72,
                 signalToNoiseCentibels: 650,
                 linkQuality: 180
@@ -900,24 +901,27 @@ actor FakeRadioConnection: RadioConnection {
     /// switch paths.
     func peerRoute(peerAddress: String) async throws -> RadioPeerRoute {
         if let held = heldRoutes[peerAddress] {
+            let hints = held.path.hints
+            let kind: MobileMeshRouteKind = hints.isEmpty ? .direct : .source
             let remaining = held.until.timeIntervalSinceNow
             if remaining > 0 {
                 return RadioPeerRoute(
-                    kind: .source,
-                    hints: held.hints,
-                    hopCount: UInt8(clamping: held.hints.count + 1),
+                    kind: kind,
+                    hints: hints,
+                    hopCount: UInt8(clamping: hints.count + 1),
                     floodHops: nil,
                     floodRegions: [],
                     holdRemainingMilliseconds: UInt64(remaining * 1000),
+                    holdFloodHops: held.path.floodHops,
                     fallbackAcks: 2,
                     confirmedAgeMilliseconds: 120_000,
                     candidate: .init(kind: .source, hints: [Data([0x12, 0x34])], hopCount: 2)
                 )
             }
             return RadioPeerRoute(
-                kind: .source,
-                hints: held.hints,
-                hopCount: UInt8(clamping: held.hints.count + 1),
+                kind: kind,
+                hints: hints,
+                hopCount: UInt8(clamping: hints.count + 1),
                 floodHops: nil,
                 floodRegions: []
             )
@@ -942,12 +946,16 @@ actor FakeRadioConnection: RadioConnection {
         return !routeCleared
     }
 
-    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool {
-        guard !hints.isEmpty, hints.count <= 15, hints.allSatisfy({ $0.count == 2 }) else {
-            return false
-        }
+    func holdPeerRoute(
+        peerAddress: String,
+        path: MobileMeshExplicitPath,
+        holdMilliseconds: UInt64
+    ) async throws -> Bool {
+        guard path.hints.count <= 15, path.hints.allSatisfy({ $0.count == 2 }),
+              path.floodHops <= 15
+        else { return false }
         heldRoutes[peerAddress] = (
-            hints, Date().addingTimeInterval(Double(holdMilliseconds) / 1000)
+            path, Date().addingTimeInterval(Double(holdMilliseconds) / 1000)
         )
         return true
     }

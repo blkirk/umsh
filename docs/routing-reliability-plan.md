@@ -97,7 +97,10 @@ overwrites it—which, if the peer's replies are dying on that very route,
 may be never.
 
 **Held routes.** An application may hold a route for a peer until a
-deadline (`PeerRegistry::hold_route`). Holds sit beside the peer table,
+deadline (`PeerRegistry::hold_route`), as a source route or as direct, with
+its own flood allowance past the route's end that stands in for
+`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS` while held; `SendOptions::route_slack`
+sets the same allowance for one send. Holds sit beside the peer table,
 bounded by the MAC's `HOLDS` parameter, which defaults to zero; the phone
 sets it for manual paths and devices hold nothing. While a route is held,
 no offer replaces it: the best path offered is kept as a candidate the

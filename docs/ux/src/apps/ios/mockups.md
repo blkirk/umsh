@@ -316,170 +316,51 @@ this example. Its two-byte router hint would be **Router hint HJ\***.
 Discovery is a bounded listening session. **Announce my identity** opens a
 separate metadata-and-scope preview before transmission; it is not automatic.
 
-## D3. Peer detail: manual path held
+## D3–D7. Manual path
 
-```text
-┌─────────────────────────────────────┐
-│ ‹ Peers            [⌁ ◫]            │
-│ Ridge Medic                         │
-│                                     │
-│ ROUTE                               │
-│ Next send          Manual · 4 hops  │
-│ Held until                3:40 PM   │
-│ Last ack                2 min ago   │
-│ ▯ This phone                        │
-│ ▲ Spencer Butte                     │
-│   Router hint BtC                   │
-│ ▲ Skinner Ridge                     │
-│   Router hint 55*                   │
-│ ⬡ Router hint 7N*                   │
-│   Entered by hand                   │
-│ ● Ridge Medic                       │
-│ [Edit Path…]                        │
-│ [Clear Manual Path]                 │
-│ Learned paths can replace it once   │
-│ the hold ends.                      │
-│                                     │
-│ ACTIONS                             │
-│ [Ping]                              │
-│ [Fetch Identity]                    │
-└─────────────────────────────────────┘
-```
+[![Manual path override mockups: peer detail with a held path, the editor with repeaters and as a direct path, Add Hop, router hint entry, an ambiguous hint, and the learned-path prompt](mockups/manual-path.svg)](mockups/manual-path.svg)
 
-The Route section of Peer Detail, scrolled into view. Hop glyphs are the
-avatar shapes: `▲` a repeater, `●` a chat peer, `⬡` gray for a hop known only
-by its hint. The summary row at the top of Peer Detail carries a **Manual**
-badge beside the hop count. With no manual path held, the section shows the
-learned route as it does today and offers **Set Manual Path…** in place of
-the two buttons.
+### D3. Peer detail: manual path held
 
-## D4. Manual path editor
+Board 1 is the Route section of Peer Detail, scrolled into view. Hop glyphs are
+the avatar shapes: a triangle for a repeater, a circle for a chat peer, a gray
+hexagon for a hop known only by its hint. The summary row at the top of Peer
+Detail carries a **Manual** badge beside the hop count. With no manual path
+held, the section shows the learned route as it does today and offers **Set
+Manual Path…** in place of the two buttons. A held direct path reads **Manual ·
+Direct**, its flood row reads **Flood**, and the hop list is only the two
+endpoints.
 
-```text
-┌─────────────────────────────────────┐
-│ [Cancel]    Manual Path     [Save]  │
-│ PATH TO RIDGE MEDIC        4 hops   │
-│   ▯ This phone                      │
-│ ⊖ ▲ Spencer Butte               ≡   │
-│     Router hint BtC · −84 dBm       │
-│ ⊖ ▲ Skinner Ridge               ≡   │
-│     Router hint 55* · −96 dBm       │
-│ ⊖ ⬡ Router hint 7N*             ≡   │
-│     Entered by hand · 5EBD          │
-│ ⊕   [Add Hop…]                      │
-│   ● Ridge Medic                     │
-│                                     │
-│ TEST                                │
-│ [Ping Along Path]                   │
-│ ✓ Replied in 3.8 s                  │
-│   −101 dBm, 1.5 dB at Ridge Medic   │
-│                                     │
-│ HOLD                                │
-│ Hold for               [1 Hour ⇕]   │
-│ Until                     3:40 PM   │
-│ Then a learned path can replace it. │
-└─────────────────────────────────────┘
-```
+### D4. Manual path editor
 
-A modal sheet in permanent edit mode: `⊖` removes a hop, `≡` reorders it, and
-the endpoints are fixed. A new path starts from the current learned route.
-**Ping Along Path** sends a traced ping down the unsaved draft. **Hold for**
-is a menu: 30 Minutes, 1 Hour (the default), 4 Hours, 12 Hours, 1 Day.
+Board 2 is a modal sheet in permanent edit mode: the red control removes a hop,
+the grip reorders it, and the endpoints are fixed. A new path starts from the
+current learned route. **Then flood** is the flood allowance past the last
+repeater, Off to 15 hops. **Ping Along Path** sends a traced ping down the
+unsaved draft. **Hold for** is a menu: 30 Minutes, 1 Hour (the default), 4
+Hours, 12 Hours, 1 Day.
 
-## D5. Add hop
+Board 3 is the same editor with every hop removed: the path is direct, the flood
+row reads **Flood**, and **Save** stays enabled.
 
-```text
-┌─────────────────────────────────────┐
-│ [Cancel]    Add Hop 3       [Done]  │
-│ (This phone › Spencer Butte ›       │
-│  Skinner Ridge › ?)                 │
-│ [ Name or router hint           ]   │
-│ [Neighbors] [Known Repeaters]       │
-│                                     │
-│ HEARD BY SKINNER RIDGE  [Refresh]   │
-│ ▲ Mt. Pisgah                    ›   │
-│   −88 dBm, 7.5 dB · 4 min ago       │
-│ ⬡ Router hint 8C*               ›   │
-│   −95 dBm, 3.0 dB · 20 min ago      │
-│ ▲ Coburg Hills (faded)          ›   │
-│   −104 dBm, −3.5 dB · yesterday     │
-│ ▲ Spencer Butte           In path   │
-│ [Load More]                4 of 9   │
-│ Read 12 min ago through Spencer     │
-│ Butte.                              │
-│                                     │
-│ [Enter Router Hint…]                │
-└─────────────────────────────────────┘
-```
+### D5. Add hop
 
-Choosing a row appends it and advances to the next hop with that node's
-neighbors; **Done** returns to the editor. Signal figures are the previous
-hop's reception of each neighbor. The footer names the path the listing was
-asked through.
+Board 4. Choosing a row appends it and advances to the next hop with that
+node's neighbors; **Done** returns to the editor. Signal figures are the
+previous hop's reception of each neighbor. The footer names the path the
+listing was asked through.
 
-## D6. Router hint entry
+### D6. Router hint entry
 
-```text
-┌─────────────────────────────────────┐
-│ ‹ Hop 3      Router Hint     [Add]  │
-│ [Base58 Prefix] [Hex]               │
-│ [ 7Nq4                       ⓧ ]    │
-│ The first 4 or more characters of   │
-│ the address.                        │
-│                                     │
-│ HOP                                 │
-│ Router hint                   7N*   │
-│ Hex                          5EBD   │
-│ Known node                   None   │
-└─────────────────────────────────────┘
-```
+Boards 5 and 6. When a Base58 prefix spans two router hints, the result section
+lists both and **Add** waits for a choice. Both examples are real: `7Nq4` fixes
+the hint `5EBD`, and `H12n` straddles `EDBC` and `EDBD`, which both render as
+`H1*`.
 
-When a Base58 prefix spans two router hints, the result section lists both
-and **Add** waits for a choice:
+### D7. Learned path beat the manual one
 
-```text
-┌─────────────────────────────────────┐
-│ ‹ Hop 3      Router Hint      Add   │
-│ [Base58 Prefix] [Hex]               │
-│ [ H12n                       ⓧ ]    │
-│ The first 4 or more characters of   │
-│ the address.                        │
-│                                     │
-│ TWO HINTS FIT                       │
-│ [▲ Fern Ridge                    ]  │
-│ [  Router hint H1* · EDBC        ]  │
-│ [⬡ Unknown node                  ]  │
-│ [  Router hint H1* · EDBD        ]  │
-│ Type another character, or pick     │
-│ one.                                │
-└─────────────────────────────────────┘
-```
-
-Both examples are real: `7Nq4` fixes the hint `5EBD`, and `H12n` straddles
-`EDBC` and `EDBD`, which both render as `H1*`.
-
-## D7. Learned path beat the manual one
-
-```text
-┌─────────────────────────────────────┐
-│ Switch to the learned path?         │
-│                                     │
-│ MANUAL                     4 hops   │
-│ Spencer Butte › Skinner Ridge ›     │
-│ 7N*                                 │
-│ ✕ No ack on the last 3 sends        │
-│                                     │
-│ LEARNED                    3 hops   │
-│ Spencer Butte › Mt. Pisgah          │
-│ ✓ Acked 3 of 3                      │
-│                                     │
-│ [Use Learned Path]                  │
-│ [Keep Manual Path]                  │
-└─────────────────────────────────────┘
-```
-
-A half-height sheet over the conversation, whose sends read **Delivered ·
-flooded** while the manual path is failing.
+Board 7 is a half-height sheet over the conversation, whose sends read
+**Delivered · flooded** while the manual path is failing.
 
 ## E. Scanned private channel preview
 

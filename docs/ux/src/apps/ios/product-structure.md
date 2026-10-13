@@ -492,8 +492,8 @@ chosen time ahead of anything the phone learns. Wireframes D3–D7 in
 
 **Route section.** Peer Detail's Route section offers **Set Manual Path…**
 whenever no manual path is held. While one is held, the section shows
-**Next send** as **Manual** with the hop count, **Held until**, **Last ack**,
-one row per hop, **Edit Path…**, and **Clear Manual Path**. The summary row at
+**Next send** as **Manual** with the hop count (or **Direct**), the flood
+allowance, **Held until**, **Last ack**, one row per hop, **Edit Path…**, and **Clear Manual Path**. The summary row at
 the top of Peer Detail carries a **Manual** badge. Clearing returns the peer
 to its learned route, or to flooding when none is held, without a
 confirmation, since nothing is lost that cannot be re-entered.
@@ -506,7 +506,9 @@ disappears at 15 repeaters, the most a source route carries. Each hop row uses
 the Peer Repeaters row form: the node's name and avatar when this phone knows
 it, otherwise **Router hint** and a gray hexagon. **Ping Along Path** sends a
 traced Echo Request down the unsaved draft and reports the reply as the Ping
-result does. **Save** is enabled once the path has at least one repeater.
+result does. **Then flood** sets how many hops the frame may flood past the
+last repeater, from Off to 15; with no repeaters the row reads **Flood** and the
+path is direct. A path with no repeaters saves as a direct path.
 
 **Hold.** **Hold for** is a menu of 30 Minutes, 1 Hour, 4 Hours, 12 Hours, and
 1 Day, defaulting to 1 Hour; there is no indefinite hold. **Until** shows the

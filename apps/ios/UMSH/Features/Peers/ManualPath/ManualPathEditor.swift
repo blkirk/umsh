@@ -60,6 +60,7 @@ struct ManualPathEditor: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var hops: [ManualPathHop]
+    @State private var floodHops: UInt8
     @State private var hold = ManualPathHold.standard
     @State private var isAddingHop = false
     @State private var isPinging = false
@@ -79,6 +80,7 @@ struct ManualPathEditor: View {
         self.radioName = radioName
         self.onSaved = onSaved
         _hops = State(initialValue: (route?.hints ?? []).map { ManualPathHop(hint: $0) })
+        _floodHops = State(initialValue: route?.heldFloodHops ?? ManualPath.standardFloodHops)
     }
 
     var body: some View {
@@ -106,14 +108,14 @@ struct ManualPathEditor: View {
                         ProgressView()
                     } else {
                         Button("Save") { Task { await save() } }
-                            .disabled(hops.isEmpty || actions.setManualPath == nil)
+                            .disabled(actions.setManualPath == nil)
                     }
                 }
             }
             .sheet(isPresented: $isAddingHop) {
                 AddHopScreen(destination: peer, actions: actions, hops: $hops)
             }
-            .onChange(of: hops) { _, _ in pingResult = nil }
+            .onChange(of: path) { _, _ in pingResult = nil }
         }
     }
 
@@ -147,6 +149,11 @@ struct ManualPathEditor: View {
                 .moveDisabled(true)
                 .deleteDisabled(true)
             }
+            Stepper(value: $floodHops, in: 0...ManualPath.maximumFloodHops) {
+                LabeledContent(hops.isEmpty ? "Flood" : "Then flood", value: Self.floodText(floodHops))
+            }
+            .moveDisabled(true)
+            .deleteDisabled(true)
             PeerRow(peer: peer, size: .compact)
                 .moveDisabled(true)
                 .deleteDisabled(true)
@@ -168,7 +175,7 @@ struct ManualPathEditor: View {
                 } label: {
                     Label(isPinging ? "Pinging…" : "Ping Along Path", systemImage: "wave.3.right")
                 }
-                .disabled(isPinging || hops.isEmpty)
+                .disabled(isPinging)
                 if let pingResult {
                     pingResultRows(pingResult)
                 }
@@ -219,7 +226,7 @@ struct ManualPathEditor: View {
         guard let pingAlongPath = actions.pingAlongPath, !isPinging else { return }
         isPinging = true
         defer { isPinging = false }
-        pingResult = await pingAlongPath(peer, hops.map(\.hint))
+        pingResult = await pingAlongPath(peer, path)
     }
 
     private func save() async {
@@ -227,7 +234,7 @@ struct ManualPathEditor: View {
         isSaving = true
         defer { isSaving = false }
         saveFailed = false
-        if await setManualPath(peer, hops.map(\.hint), hold) {
+        if await setManualPath(peer, path, hold) {
             onSaved()
             dismiss()
         } else {
@@ -235,7 +242,16 @@ struct ManualPathEditor: View {
         }
     }
 
+    private var path: ManualPath {
+        ManualPath(hops: hops.map(\.hint), floodHops: floodHops)
+    }
+
     static func hopsText(_ hops: Int) -> String {
         "\(hops) hop\(hops == 1 ? "" : "s")"
+    }
+
+    /// A flood allowance as a row value: none, or how many hops.
+    static func floodText(_ hops: UInt8) -> String {
+        hops == 0 ? "Off" : hopsText(Int(hops))
     }
 }

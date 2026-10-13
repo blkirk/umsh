@@ -618,6 +618,9 @@ struct PeerRoute: Equatable, Sendable {
     let floodHops: UInt8?
     /// Two-octet region codes learned alongside a flood route.
     let floodRegions: [Data]
+    /// Flood hops a held route spends past its last repeater, or from the
+    /// start for a direct one; `nil` when the route is not held.
+    var heldFloodHops: UInt8? = nil
     /// When the hold on a manual route ends; `nil` when the route is not
     /// held. While held, nothing the mesh teaches replaces it.
     var holdUntil: Date? = nil
@@ -651,6 +654,19 @@ struct PeerRoute: Equatable, Sendable {
     var isDirect: Bool {
         kind == .direct || (kind == .source && hints.isEmpty)
     }
+}
+
+/// A path chosen by hand: the repeaters in send order, then how far the
+/// frame may flood past the last of them. No repeaters is a direct path.
+struct ManualPath: Equatable, Sendable {
+    var hops: [MeshRouterHint]
+    var floodHops: UInt8
+
+    /// The flood allowance a new path starts with: the one hop of slack the
+    /// phone's routing allows past a learned route's end.
+    static let standardFloodHops: UInt8 = 1
+    /// The most flood hops a frame can carry.
+    static let maximumFloodHops: UInt8 = 15
 }
 
 /// How long a manual path is held before a learned path may replace it.
@@ -942,7 +958,7 @@ struct PeerActions {
     var radioIdentityPeer: PeerSummary? = nil
     /// Hold a path for the node until the hold ends, reporting whether the
     /// phone's routing took it.
-    var setManualPath: ((PeerSummary, [MeshRouterHint], ManualPathHold) async -> Bool)? = nil
+    var setManualPath: ((PeerSummary, ManualPath, ManualPathHold) async -> Bool)? = nil
     /// Drop a held path. The node goes back to what the mesh teaches.
     var clearManualPath: ((PeerSummary) async -> Bool)? = nil
     /// Replace a held path with the one learned while it was held.
@@ -954,7 +970,7 @@ struct PeerActions {
     /// was held instead. `nil` otherwise.
     var learnedPathOffer: ((PeerSummary) async -> PeerRoute?)? = nil
     /// Ping the node down an explicit path without installing it.
-    var pingAlongPath: ((PeerSummary, [MeshRouterHint]) async -> PeerPingResult)? = nil
+    var pingAlongPath: ((PeerSummary, ManualPath) async -> PeerPingResult)? = nil
     /// Read a router hint typed by a person.
     var parseRouterHint: ((String, RouterHintFormat) async -> RouterHintInput)? = nil
     /// Render two key bytes as a router hint.

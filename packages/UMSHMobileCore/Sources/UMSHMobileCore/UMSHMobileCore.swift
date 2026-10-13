@@ -1587,8 +1587,9 @@ public protocol MobileMeshSessionProtocol: AnyObject, Sendable {
     func failOutboundTransmissions() throws
 
     /**
-     * Install `hints` (in send order) as the route to `peer` and hold it
-     * for `hold_ms`, registering the peer if needed.
+     * Install `path` as the route to `peer` and hold it for `hold_ms`,
+     * registering the peer if needed. A path naming no repeaters is a
+     * direct one.
      *
      * While held, no learned path replaces the route and no missed
      * acknowledgment retires it; a send that misses still falls back to a
@@ -1596,7 +1597,7 @@ public protocol MobileMeshSessionProtocol: AnyObject, Sendable {
      * candidate. When the hold ends the route stays as an ordinary one.
      * `clear_peer_route` ends the hold.
      */
-    func holdPeerRoute(peerAddress: String, hints: [Data], holdMs: UInt64) async throws  -> Bool
+    func holdPeerRoute(peerAddress: String, path: MobileMeshExplicitPath, holdMs: UInt64) async throws  -> Bool
 
     /**
      * Pairwise key entries for the radio's host peer-key table
@@ -1628,11 +1629,11 @@ public protocol MobileMeshSessionProtocol: AnyObject, Sendable {
     func peerRoute(peerAddress: String) async throws  -> MobileMeshRouteRecord
 
     /**
-     * Send one traced Echo Request to `peer`. An empty `source_route`
-     * pings the usual way; a non-empty one sends the ping down exactly that
-     * path, in send order, to test it without installing it.
+     * Send one traced Echo Request to `peer`. Without a `path` it pings
+     * the usual way; with one it sends the ping down exactly that path, to
+     * test it without installing it.
      */
-    func ping(peerAddress: String, timeoutMs: UInt64, sourceRoute: [Data]) throws  -> UInt64
+    func ping(peerAddress: String, timeoutMs: UInt64, path: MobileMeshExplicitPath?) throws  -> UInt64
 
     func pollUpdate()  -> MobileMeshSessionUpdateRecord
 
@@ -2450,8 +2451,9 @@ open func failOutboundTransmissions()throws   {try rustCallWithError(FfiConverte
 }
 
     /**
-     * Install `hints` (in send order) as the route to `peer` and hold it
-     * for `hold_ms`, registering the peer if needed.
+     * Install `path` as the route to `peer` and hold it for `hold_ms`,
+     * registering the peer if needed. A path naming no repeaters is a
+     * direct one.
      *
      * While held, no learned path replaces the route and no missed
      * acknowledgment retires it; a send that misses still falls back to a
@@ -2459,12 +2461,12 @@ open func failOutboundTransmissions()throws   {try rustCallWithError(FfiConverte
      * candidate. When the hold ends the route stays as an ordinary one.
      * `clear_peer_route` ends the hold.
      */
-open func holdPeerRoute(peerAddress: String, hints: [Data], holdMs: UInt64)async throws  -> Bool  {
+open func holdPeerRoute(peerAddress: String, path: MobileMeshExplicitPath, holdMs: UInt64)async throws  -> Bool  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_umsh_mobile_core_fn_method_mobilemeshsession_hold_peer_route(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(peerAddress),FfiConverterSequenceData.lower(hints),FfiConverterUInt64.lower(holdMs)
+                        self.uniffiCloneHandle(),FfiConverterString.lower(peerAddress),FfiConverterTypeMobileMeshExplicitPath_lower(path),FfiConverterUInt64.lower(holdMs)
                 )
             },
             pollFunc: ffi_umsh_mobile_core_rust_future_poll_i8,
@@ -2540,18 +2542,18 @@ open func peerRoute(peerAddress: String)async throws  -> MobileMeshRouteRecord  
 }
 
     /**
-     * Send one traced Echo Request to `peer`. An empty `source_route`
-     * pings the usual way; a non-empty one sends the ping down exactly that
-     * path, in send order, to test it without installing it.
+     * Send one traced Echo Request to `peer`. Without a `path` it pings
+     * the usual way; with one it sends the ping down exactly that path, to
+     * test it without installing it.
      */
-open func ping(peerAddress: String, timeoutMs: UInt64, sourceRoute: [Data])throws  -> UInt64  {
+open func ping(peerAddress: String, timeoutMs: UInt64, path: MobileMeshExplicitPath?)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMobileMeshError_lift) {
         uniffiCallStatus in
     uniffi_umsh_mobile_core_fn_method_mobilemeshsession_ping(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerAddress),
         FfiConverterUInt64.lower(timeoutMs),
-        FfiConverterSequenceData.lower(sourceRoute),uniffiCallStatus
+        FfiConverterOptionTypeMobileMeshExplicitPath.lower(path),uniffiCallStatus
     )
 })
 }
@@ -6246,6 +6248,64 @@ public func FfiConverterTypeMobileMeshAdvertisementRecord_lower(_ value: MobileM
 
 
 /**
+ * A path chosen by hand: repeaters in send order, then a flood allowance
+ * past the last of them. No repeaters is a direct path.
+ */
+public struct MobileMeshExplicitPath: Equatable, Hashable {
+    public var hints: [Data]
+    public var floodHops: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(hints: [Data], floodHops: UInt8) {
+        self.hints = hints
+        self.floodHops = floodHops
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileMeshExplicitPath: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileMeshExplicitPath: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileMeshExplicitPath {
+        return
+            try MobileMeshExplicitPath(
+                hints: FfiConverterSequenceData.read(from: &buf),
+                floodHops: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileMeshExplicitPath, into buf: inout [UInt8]) {
+        FfiConverterSequenceData.write(value.hints, into: &buf)
+        FfiConverterUInt8.write(value.floodHops, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileMeshExplicitPath_lift(_ buf: RustBuffer) throws -> MobileMeshExplicitPath {
+    return try FfiConverterTypeMobileMeshExplicitPath.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileMeshExplicitPath_lower(_ value: MobileMeshExplicitPath) -> RustBuffer {
+    return FfiConverterTypeMobileMeshExplicitPath.lower(value)
+}
+
+
+/**
  * What occupied one position of a management answer.
  */
 public struct MobileMeshManagementAnswerRecord: Equatable, Hashable {
@@ -7019,6 +7079,11 @@ public struct MobileMeshRouteRecord: Equatable, Hashable {
      */
     public var holdRemainingMs: UInt64?
     /**
+     * The held route's flood allowance past its end; `None` when nothing
+     * is held.
+     */
+    public var holdFloodHops: UInt8?
+    /**
      * Consecutive sends on the held route that missed and were then
      * acknowledged through the flood fallback. Zero when nothing is held.
      */
@@ -7061,6 +7126,10 @@ public struct MobileMeshRouteRecord: Equatable, Hashable {
          * `None` when it is not held.
          */holdRemainingMs: UInt64?,
         /**
+         * The held route's flood allowance past its end; `None` when nothing
+         * is held.
+         */holdFloodHops: UInt8?,
+        /**
          * Consecutive sends on the held route that missed and were then
          * acknowledged through the flood fallback. Zero when nothing is held.
          */fallbackAcks: UInt8,
@@ -7079,6 +7148,7 @@ public struct MobileMeshRouteRecord: Equatable, Hashable {
         self.floodHops = floodHops
         self.floodRegions = floodRegions
         self.holdRemainingMs = holdRemainingMs
+        self.holdFloodHops = holdFloodHops
         self.fallbackAcks = fallbackAcks
         self.confirmedAgeMs = confirmedAgeMs
         self.candidateKind = candidateKind
@@ -7108,6 +7178,7 @@ public struct FfiConverterTypeMobileMeshRouteRecord: FfiConverterRustBuffer {
                 floodHops: FfiConverterOptionUInt8.read(from: &buf),
                 floodRegions: FfiConverterSequenceData.read(from: &buf),
                 holdRemainingMs: FfiConverterOptionUInt64.read(from: &buf),
+                holdFloodHops: FfiConverterOptionUInt8.read(from: &buf),
                 fallbackAcks: FfiConverterUInt8.read(from: &buf),
                 confirmedAgeMs: FfiConverterOptionUInt64.read(from: &buf),
                 candidateKind: FfiConverterOptionTypeMobileMeshRouteKind.read(from: &buf),
@@ -7123,6 +7194,7 @@ public struct FfiConverterTypeMobileMeshRouteRecord: FfiConverterRustBuffer {
         FfiConverterOptionUInt8.write(value.floodHops, into: &buf)
         FfiConverterSequenceData.write(value.floodRegions, into: &buf)
         FfiConverterOptionUInt64.write(value.holdRemainingMs, into: &buf)
+        FfiConverterOptionUInt8.write(value.holdFloodHops, into: &buf)
         FfiConverterUInt8.write(value.fallbackAcks, into: &buf)
         FfiConverterOptionUInt64.write(value.confirmedAgeMs, into: &buf)
         FfiConverterOptionTypeMobileMeshRouteKind.write(value.candidateKind, into: &buf)
@@ -16681,6 +16753,30 @@ fileprivate struct FfiConverterOptionTypeMobileChatRxMetadataRecord: FfiConverte
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMobileMeshExplicitPath: FfiConverterRustBuffer {
+    typealias SwiftType = MobileMeshExplicitPath?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileMeshExplicitPath.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileMeshExplicitPath.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMobileMeshSharedLocationRecord: FfiConverterRustBuffer {
     typealias SwiftType = MobileMeshSharedLocationRecord?
 
@@ -19557,7 +19653,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_fail_outbound_transmissions() != 10556) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_hold_peer_route() != 878) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_hold_peer_route() != 19045) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_host_peer_key_entries() != 45963) {
@@ -19569,7 +19665,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_peer_route() != 15956) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_ping() != 57601) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_ping() != 19101) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_poll_update() != 43386) {

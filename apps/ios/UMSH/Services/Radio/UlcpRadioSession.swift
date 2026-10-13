@@ -455,11 +455,15 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
         return try await session.clearPeerRoute(peerAddress: peerAddress)
     }
 
-    func holdPeerRoute(peerAddress: String, hints: [Data], holdMilliseconds: UInt64) async throws -> Bool {
+    func holdPeerRoute(
+        peerAddress: String,
+        path: MobileMeshExplicitPath,
+        holdMilliseconds: UInt64
+    ) async throws -> Bool {
         let session = try await currentMeshSession()
         return try await session.holdPeerRoute(
             peerAddress: peerAddress,
-            hints: hints,
+            path: path,
             holdMs: holdMilliseconds
         )
     }
@@ -937,7 +941,7 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
         }
     }
 
-    func ping(peerAddress: String, route: [Data]) async throws -> RadioPingResult {
+    func ping(peerAddress: String, path: MobileMeshExplicitPath?) async throws -> RadioPingResult {
         try await withCheckedThrowingContinuation {
             (result: CheckedContinuation<RadioPingResult, any Error>) in
             sessionQueue.async { [self] in
@@ -953,7 +957,7 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                     let operation = try meshSession.ping(
                         peerAddress: peerAddress,
                         timeoutMs: Self.peerPingTimeoutMilliseconds,
-                        sourceRoute: route
+                        path: path
                     )
                     pingWaiters[operation] = result
                 } catch {

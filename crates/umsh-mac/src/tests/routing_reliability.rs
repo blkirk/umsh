@@ -1095,7 +1095,7 @@ fn held_route_mac(hold_ms: u64) -> (TestMac, LocalIdentityId, PublicKey, PeerId,
     let now = mac.clock().now_ms();
     assert!(
         mac.peer_registry_mut()
-            .hold_route(peer_id, route.clone(), now + hold_ms, now)
+            .hold_route(peer_id, route.clone(), 1, now + hold_ms, now)
     );
     (mac, local_id, key, peer_id, route)
 }
@@ -1266,7 +1266,7 @@ fn adopting_or_clearing_ends_the_hold() {
     assert!(mac.peer_registry().route_hold(peer_id, now).is_none());
 
     mac.peer_registry_mut()
-        .hold_route(peer_id, route, now + 60_000, now);
+        .hold_route(peer_id, route, 1, now + 60_000, now);
     assert!(mac.peer_registry_mut().clear_route(peer_id));
     let info = mac.peer_registry().get(peer_id).unwrap();
     assert!(info.route.is_none());
@@ -1280,9 +1280,9 @@ fn holds_are_bounded_and_follow_their_peer() {
     let first = registry.try_insert_or_update(PublicKey([1; 32])).unwrap();
     let second = registry.try_insert_or_update(PublicKey([2; 32])).unwrap();
     let third = registry.try_insert_or_update(PublicKey([3; 32])).unwrap();
-    assert!(registry.hold_route(third, route.clone(), 1_000, 0));
+    assert!(registry.hold_route(third, route.clone(), 1, 1_000, 0));
     // One slot, taken until the hold runs out.
-    assert!(!registry.hold_route(second, route.clone(), 1_000, 0));
+    assert!(!registry.hold_route(second, route.clone(), 1, 1_000, 0));
     assert!(registry.get(second).unwrap().route.is_none());
 
     // Removing a peer moves the last one into its slot, hold and all.
@@ -1292,11 +1292,64 @@ fn holds_are_bounded_and_follow_their_peer() {
     assert!(registry.route_hold(second, 0).is_none());
 
     // A lapsed hold frees its slot.
-    assert!(registry.hold_route(second, route.clone(), 2_000, 1_000));
+    assert!(registry.hold_route(second, route.clone(), 1, 2_000, 1_000));
     assert!(registry.route_hold(first, 1_000).is_none());
 
     // A registry with no room for holds never holds.
     let mut none = PeerRegistry::<4>::new();
     let id = none.try_insert_or_update(PublicKey([1; 32])).unwrap();
-    assert!(!none.hold_route(id, route, 1_000, 0));
+    assert!(!none.hold_route(id, route, 1, 1_000, 0));
+}
+
+/// The flood budget and source route a queued frame carries.
+fn queued_shape(mac: &mut TestMac) -> (Option<u8>, Option<Vec<RouterHint>>) {
+    let frame = mac.tx_queue_mut().pop_next().unwrap().frame;
+    let header = PacketHeader::parse(&frame).unwrap();
+    let options = ParsedOptions::extract(&frame, header.options_range.clone()).unwrap();
+    (
+        header.flood_hops.map(|hops| hops.remaining()),
+        options.source_route.map(|route| {
+            frame[route]
+                .chunks_exact(2)
+                .map(|hint| RouterHint([hint[0], hint[1]]))
+                .collect::<std::vec::Vec<_>>()
+        }),
+    )
+}
+
+#[test]
+fn a_held_route_floods_its_own_allowance_past_its_end() {
+    let (mut mac, local_id, key, peer_id) = mac_with_keyed_peer();
+    let hint = RouterHint([1, 2]);
+    let now = mac.clock().now_ms();
+    let options = SendOptions::default().with_flood_hops(10);
+    assert!(mac.peer_registry_mut().hold_route(
+        peer_id,
+        CachedRoute::source(&[hint]).unwrap(),
+        3,
+        now + 60_000,
+        now,
+    ));
+    mac.queue_unicast(local_id, &key, b"routed", &options)
+        .unwrap();
+    assert_eq!(queued_shape(&mut mac), (Some(3), Some(vec![hint])));
+
+    // A held direct route with no allowance is a single direct transmission.
+    assert!(
+        mac.peer_registry_mut()
+            .hold_route(peer_id, CachedRoute::Direct, 0, now + 60_000, now,)
+    );
+    mac.queue_unicast(local_id, &key, b"direct", &options)
+        .unwrap();
+    assert_eq!(queued_shape(&mut mac), (None, None));
+
+    // A send's own allowance wins over the hold's.
+    mac.queue_unicast(
+        local_id,
+        &key,
+        b"wider",
+        &options.clone().with_route_slack(4),
+    )
+    .unwrap();
+    assert_eq!(queued_shape(&mut mac), (Some(4), None));
 }

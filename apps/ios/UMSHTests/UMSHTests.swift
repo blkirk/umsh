@@ -326,23 +326,27 @@ struct ManualPathTests {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let hints = [Data([0x5E, 0xBD]), Data([0xED, 0xBC])]
         try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
-            hints: hints, holdUntil: now.addingTimeInterval(3600),
+            hints: hints, floodHops: 3, holdUntil: now.addingTimeInterval(3600),
             latitude: 44.05, longitude: -123.09, accuracy: 12)
         try await fixture.store.settleManualRoutePrompt(ownerIdentityID: owner, publicAddress: address)
 
         let stored = try #require(try await fixture.store.manualRoute(
             ownerIdentityID: owner, publicAddress: address, now: now))
         #expect(stored.hints == hints)
+        #expect(stored.floodHops == 3)
         #expect(stored.promptSettled)
         #expect(stored.savedLatitude == 44.05)
         #expect(try await fixture.store.manualRoutes(ownerIdentityID: owner, now: now).count == 1)
 
         // Saving again is a new choice: the declined offer does not carry over.
         try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
-            hints: hints, holdUntil: now.addingTimeInterval(3600),
+            hints: [], floodHops: 0, holdUntil: now.addingTimeInterval(3600),
             latitude: nil, longitude: nil, accuracy: nil)
-        #expect(try await fixture.store.manualRoute(
-            ownerIdentityID: owner, publicAddress: address, now: now)?.promptSettled == false)
+        let direct = try #require(try await fixture.store.manualRoute(
+            ownerIdentityID: owner, publicAddress: address, now: now))
+        #expect(direct.promptSettled == false)
+        #expect(direct.hints.isEmpty)
+        #expect(direct.floodHops == 0)
 
         let later = now.addingTimeInterval(3601)
         #expect(try await fixture.store.manualRoutes(ownerIdentityID: owner, now: later).isEmpty)
@@ -358,7 +362,7 @@ struct ManualPathTests {
         try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
             alias: "Peer", isSaved: true)
         try await fixture.store.saveManualRoute(ownerIdentityID: owner, publicAddress: address,
-            hints: [Data([1, 2])], holdUntil: .now.addingTimeInterval(60),
+            hints: [Data([1, 2])], floodHops: 1, holdUntil: .now.addingTimeInterval(60),
             latitude: nil, longitude: nil, accuracy: nil)
         try await fixture.store.clearManualRoute(ownerIdentityID: owner, publicAddress: address)
         #expect(try await fixture.store.manualRoute(ownerIdentityID: owner, publicAddress: address) == nil)

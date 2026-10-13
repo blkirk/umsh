@@ -84,6 +84,9 @@ pub struct SendReceipt(pub u32);
 ///   frame along a known path rather than relying on flood forwarding. Routed hops cost no
 ///   flood budget, so an attached source route narrows `flood_hops` to the slack that would
 ///   backstop the route's far end rather than to the route's length.
+/// - **`route_slack`**—the flood budget past the end of the route this send takes, in
+///   place of what the MAC would allow: the slack after a source route, or the whole
+///   budget of a send with none. Still capped by `flood_hops`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendOptions {
     /// Requested MIC size.
@@ -105,6 +108,8 @@ pub struct SendOptions {
     pub trace_signal: bool,
     /// Optional explicit source route.
     pub source_route: Option<Vec<RouterHint, MAX_SOURCE_ROUTE_HINTS>>,
+    /// Flood budget past the end of the route, overriding the MAC's own.
+    pub route_slack: Option<u8>,
     /// Optional region-code option.
     pub region_code: Option<[u8; 2]>,
     /// Whether to include a random salt in SECINFO.
@@ -135,6 +140,7 @@ impl Default for SendOptions {
             trace_route: false,
             trace_signal: false,
             source_route: None,
+            route_slack: None,
             region_code: None,
             salt: false,
             tx_delay_ms: None,
@@ -158,6 +164,15 @@ impl SendOptions {
 
     /// Set the flood-hop budget.
     pub fn with_flood_hops(mut self, hops: u8) -> Self {
+        self.flood_hops = Some(hops);
+        self
+    }
+
+    /// Spend exactly `hops` of flood budget past the end of this send's
+    /// route (see the type's `route_slack`). Also raises the requested
+    /// budget to match, since that remains a ceiling.
+    pub fn with_route_slack(mut self, hops: u8) -> Self {
+        self.route_slack = Some(hops);
         self.flood_hops = Some(hops);
         self
     }

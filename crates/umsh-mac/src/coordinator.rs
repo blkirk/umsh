@@ -1748,12 +1748,22 @@ impl<
             .peer_registry
             .get(peer_id)
             .and_then(|peer| peer.route.as_ref());
+        // A held route's own allowance past its end can widen an ack's reach,
+        // never narrow it below the usual slack.
+        let held_slack = self
+            .peer_registry
+            .route_hold(peer_id, self.clock.now_ms())
+            .map(|hold| hold.flood_hops)
+            .filter(|&hops| hops > ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS);
         let (source_route, flood_hops, requires_forwarding) = match cached {
             Some(CachedRoute::Source(route)) if !route.is_empty() => (
                 Some(route.as_slice()),
-                ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS,
+                held_slack.unwrap_or(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
                 true,
             ),
+            Some(CachedRoute::Direct | CachedRoute::Source(_)) if held_slack.is_some() => {
+                (None, held_slack.unwrap(), true)
+            }
             Some(CachedRoute::Flood { flood_hops, .. }) if *flood_hops > 0 => (
                 None,
                 flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
@@ -4282,23 +4292,38 @@ impl<
         // no hop, so it costs nothing.
         let source_route = source_route.filter(|route| !route.is_empty());
 
-        let ceiling = match (source_route, cached) {
-            // A source route costs no flood budget at all—routed hops do not
-            // touch `FHOPS`—so the whole budget is slack past the route's
-            // end. Heard directly is the same shape: our own transmission is
-            // the delivery, and any slack only buys a repeater backstop.
-            (Some(_), _) | (None, Some(CachedRoute::Direct)) => ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS,
-            // Flooding has to cover the distance the peer was last heard from.
-            (None, Some(CachedRoute::Flood { flood_hops, .. })) => {
-                flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
+        // A hold applies to the cached route, so it gives way to a route the
+        // caller attached; the caller's own slack wins over both.
+        let held_slack = options
+            .source_route
+            .is_none()
+            .then(|| self.peer_registry.route_hold(peer_id, self.clock.now_ms()))
+            .flatten()
+            .filter(|_| matches!(cached, Some(CachedRoute::Direct | CachedRoute::Source(_))))
+            .map(|hold| hold.flood_hops);
+        let ceiling = if let Some(slack) = options.route_slack.or(held_slack) {
+            slack
+        } else {
+            match (source_route, cached) {
+                // A source route costs no flood budget at all—routed hops do not
+                // touch `FHOPS`—so the whole budget is slack past the route's
+                // end. Heard directly is the same shape: our own transmission is
+                // the delivery, and any slack only buys a repeater backstop.
+                (Some(_), _) | (None, Some(CachedRoute::Direct)) => {
+                    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS
+                }
+                // Flooding has to cover the distance the peer was last heard from.
+                (None, Some(CachedRoute::Flood { flood_hops, .. })) => {
+                    flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
+                }
+                // A cached source route not attached to this send (the caller
+                // suppressed it) has to be flooded end to end instead.
+                (None, Some(CachedRoute::Source(route))) => u8::try_from(route.len())
+                    .unwrap_or(u8::MAX)
+                    .saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
+                // Nothing known about the peer: first contact floods as asked.
+                (None, None) => MAX_FLOOD_HOPS,
             }
-            // A cached source route not attached to this send (the caller
-            // suppressed it) has to be flooded end to end instead.
-            (None, Some(CachedRoute::Source(route))) => u8::try_from(route.len())
-                .unwrap_or(u8::MAX)
-                .saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
-            // Nothing known about the peer: first contact floods as asked.
-            (None, None) => MAX_FLOOD_HOPS,
         };
 
         // The ceiling arithmetic can exceed what the nibble holds (a cached

@@ -614,10 +614,14 @@ impl<
     /// [`Self::peer_route_status`] and [`Self::adopt_learned_peer_route`]).
     /// When the hold ends the route stays as an ordinary one. Clearing the
     /// route ends the hold.
+    ///
+    /// `flood_hops` is the flood budget past the route's end, which a direct
+    /// route spends from the start; see [`crate::RouteHold::flood_hops`].
     pub async fn hold_peer_route(
         &self,
         peer: &umsh_core::PublicKey,
         route: crate::CachedRoute,
+        flood_hops: u8,
         hold_ms: u64,
     ) -> bool {
         let mut mac = self.mac.borrow_mut().await;
@@ -625,8 +629,13 @@ impl<
         let Some((peer_id, _)) = mac.peer_registry().lookup_by_key(peer) else {
             return false;
         };
-        mac.peer_registry_mut()
-            .hold_route(peer_id, route, now_ms.saturating_add(hold_ms), now_ms)
+        mac.peer_registry_mut().hold_route(
+            peer_id,
+            route,
+            flood_hops,
+            now_ms.saturating_add(hold_ms),
+            now_ms,
+        )
     }
 
     /// End the hold on `peer`'s route by switching to the best path learned
@@ -654,6 +663,7 @@ impl<
         Some(crate::PeerRouteStatus {
             route: info.route.clone(),
             hold_remaining_ms: hold.map(|hold| hold.until_ms - now_ms),
+            hold_flood_hops: hold.map(|hold| hold.flood_hops),
             fallback_acks: hold.map_or(0, |hold| hold.fallback_acks),
             candidate: hold
                 .and_then(|hold| hold.candidate.as_ref().map(|(route, _)| route.clone())),

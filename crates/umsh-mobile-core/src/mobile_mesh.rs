@@ -328,6 +328,9 @@ pub struct MobileMeshRouteRecord {
     /// How much longer the route is held against learning and failure;
     /// `None` when it is not held.
     pub hold_remaining_ms: Option<u64>,
+    /// The held route's flood allowance past its end; `None` when nothing
+    /// is held.
+    pub hold_flood_hops: Option<u8>,
     /// Consecutive sends on the held route that missed and were then
     /// acknowledged through the flood fallback. Zero when nothing is held.
     pub fallback_acks: u8,
@@ -351,6 +354,7 @@ impl MobileMeshRouteRecord {
             flood_hops: None,
             flood_regions: Vec::new(),
             hold_remaining_ms: None,
+            hold_flood_hops: None,
             fallback_acks: 0,
             confirmed_age_ms: None,
             candidate_kind: None,
@@ -368,6 +372,7 @@ impl From<Option<umsh_mac::PeerRouteStatus>> for MobileMeshRouteRecord {
         let candidate = status.candidate.map(|route| Self::from(Some(route)));
         Self {
             hold_remaining_ms: status.hold_remaining_ms,
+            hold_flood_hops: status.hold_flood_hops,
             fallback_acks: status.fallback_acks,
             confirmed_age_ms: status.confirmed_age_ms,
             candidate_kind: candidate.as_ref().map(|route| route.kind),
@@ -394,20 +399,42 @@ fn router_hints(hints: &[Vec<u8>]) -> Result<Vec<umsh_core::RouterHint>, MobileM
         .collect()
 }
 
-/// Options for an ask aimed down an explicit path rather than whatever
-/// route the MAC holds: it travels the path or not at all, and traces it
-/// so the answer has a way home.
+/// Options for a send aimed down an explicit path rather than whatever
+/// route the MAC holds: it travels the path, then floods exactly
+/// `flood_hops` past its end, and traces it so the answer has a way home.
+/// An empty path is a direct send.
 fn explicit_route_options(
     options: SendOptions,
     route: &[umsh_core::RouterHint],
+    flood_hops: u8,
 ) -> Result<SendOptions, MobileMeshError> {
-    Ok(options
-        .try_with_source_route(route)
-        .map_err(|_| MobileMeshError::InvalidRoute)?
-        .with_trace_route()
-        // Last: try_with_source_route back-fills a flood budget, and a
-        // path that does not work should say so rather than flood.
-        .no_flood())
+    let options = if route.is_empty() {
+        options
+    } else {
+        options
+            .try_with_source_route(route)
+            .map_err(|_| MobileMeshError::InvalidRoute)?
+    };
+    // Last: try_with_source_route back-fills a flood budget, and a path that
+    // does not work should say so rather than flood further than asked.
+    Ok(options.with_trace_route().with_route_slack(flood_hops))
+}
+
+/// A path chosen by hand: repeaters in send order, then a flood allowance
+/// past the last of them. No repeaters is a direct path.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MobileMeshExplicitPath {
+    pub hints: Vec<Vec<u8>>,
+    pub flood_hops: u8,
+}
+
+impl MobileMeshExplicitPath {
+    fn checked(&self) -> Result<(Vec<umsh_core::RouterHint>, u8), MobileMeshError> {
+        if self.flood_hops > umsh_mac::MAX_FLOOD_HOPS {
+            return Err(MobileMeshError::InvalidRoute);
+        }
+        Ok((router_hints(&self.hints)?, self.flood_hops))
+    }
 }
 
 impl From<Option<umsh_mac::CachedRoute>> for MobileMeshRouteRecord {
@@ -745,9 +772,9 @@ enum WorkerCommand {
         operation_id: u64,
         peer: PublicKey,
         timeout_ms: u64,
-        /// An explicit path to test, in send order; empty for the usual
-        /// flood-reach ping.
-        source_route: Vec<umsh_core::RouterHint>,
+        /// An explicit path to test, with its flood allowance past the end;
+        /// `None` for the usual flood-reach ping.
+        path: Option<(Vec<umsh_core::RouterHint>, u8)>,
     },
     Manage {
         operation_id: u64,
@@ -851,7 +878,8 @@ enum WorkerCommand {
     },
     HoldPeerRoute {
         peer: PublicKey,
-        route: Vec<umsh_core::RouterHint>,
+        route: umsh_mac::CachedRoute,
+        flood_hops: u8,
         hold_ms: u64,
         response: oneshot::Sender<bool>,
     },
@@ -1339,24 +1367,27 @@ impl MobileMeshSession {
         Self::build(identity, counter_store, false).await
     }
 
-    /// Send one traced Echo Request to `peer`. An empty `source_route`
-    /// pings the usual way; a non-empty one sends the ping down exactly that
-    /// path, in send order, to test it without installing it.
+    /// Send one traced Echo Request to `peer`. Without a `path` it pings
+    /// the usual way; with one it sends the ping down exactly that path, to
+    /// test it without installing it.
     pub fn ping(
         &self,
         peer_address: String,
         timeout_ms: u64,
-        source_route: Vec<Vec<u8>>,
+        path: Option<MobileMeshExplicitPath>,
     ) -> Result<u64, MobileMeshError> {
         let peer = decode_peer(&peer_address).map_err(|_| MobileMeshError::InvalidPeer)?;
-        let source_route = router_hints(&source_route)?;
+        let path = path
+            .as_ref()
+            .map(MobileMeshExplicitPath::checked)
+            .transpose()?;
         let operation_id = self.next_operation_id()?;
         self.commands
             .send(WorkerCommand::Ping {
                 operation_id,
                 peer,
                 timeout_ms,
-                source_route,
+                path,
             })
             .map_err(|_| MobileMeshError::SessionUnavailable)?;
         Ok(operation_id)
@@ -2023,8 +2054,9 @@ impl MobileMeshSession {
             .map_err(|_| MobileMeshError::SessionUnavailable)
     }
 
-    /// Install `hints` (in send order) as the route to `peer` and hold it
-    /// for `hold_ms`, registering the peer if needed.
+    /// Install `path` as the route to `peer` and hold it for `hold_ms`,
+    /// registering the peer if needed. A path naming no repeaters is a
+    /// direct one.
     ///
     /// While held, no learned path replaces the route and no missed
     /// acknowledgment retires it; a send that misses still falls back to a
@@ -2034,19 +2066,22 @@ impl MobileMeshSession {
     pub async fn hold_peer_route(
         &self,
         peer_address: String,
-        hints: Vec<Vec<u8>>,
+        path: MobileMeshExplicitPath,
         hold_ms: u64,
     ) -> Result<bool, MobileMeshError> {
         let peer = decode_peer(&peer_address).map_err(|_| MobileMeshError::InvalidPeer)?;
-        let route = router_hints(&hints)?;
-        if route.is_empty() {
-            return Err(MobileMeshError::InvalidRoute);
-        }
+        let (hints, flood_hops) = path.checked()?;
+        let route = if hints.is_empty() {
+            umsh_mac::CachedRoute::Direct
+        } else {
+            umsh_mac::CachedRoute::source(&hints).ok_or(MobileMeshError::InvalidRoute)?
+        };
         let (response, result) = oneshot::channel();
         self.commands
             .send(WorkerCommand::HoldPeerRoute {
                 peer,
                 route,
+                flood_hops,
                 hold_ms,
                 response,
             })
@@ -3567,7 +3602,7 @@ async fn run_worker(
                             }
                             let _ = response.send(Ok(()));
                         }
-                        Some(WorkerCommand::Ping { operation_id, peer, timeout_ms, source_route }) => {
+                        Some(WorkerCommand::Ping { operation_id, peer, timeout_ms, path }) => {
                             if pending.borrow().contains_key(&peer.0) {
                                 emit_ping_failure(&events, operation_id);
                                 continue;
@@ -3576,11 +3611,12 @@ async fn run_worker(
                             // what each hop of it cost. A ping that reports
                             // only a round-trip time says a link is bad
                             // without saying where.
-                            let options = if source_route.is_empty() {
-                                Ok(with_flood_reach(SendOptions::default(), flood_hops.default_hops)
-                                    .with_trace_route())
-                            } else {
-                                explicit_route_options(SendOptions::default(), &source_route)
+                            let options = match &path {
+                                None => Ok(with_flood_reach(SendOptions::default(), flood_hops.default_hops)
+                                    .with_trace_route()),
+                                Some((route, slack)) => {
+                                    explicit_route_options(SendOptions::default(), route, *slack)
+                                }
                             }
                             .map(|options| {
                                 options
@@ -3818,7 +3854,7 @@ async fn run_worker(
                             let options = if source_route.is_empty() {
                                 Ok(SendOptions::default())
                             } else {
-                                explicit_route_options(SendOptions::default(), &source_route)
+                                explicit_route_options(SendOptions::default(), &source_route, 0)
                             };
                             let options = match options {
                                 Ok(options) => options,
@@ -3990,13 +4026,11 @@ async fn run_worker(
                         Some(WorkerCommand::ClearPeerRoute { peer, response }) => {
                             let _ = response.send(node.clear_peer_route(&peer).await);
                         }
-                        Some(WorkerCommand::HoldPeerRoute { peer, route, hold_ms, response }) => {
+                        Some(WorkerCommand::HoldPeerRoute { peer, route, flood_hops, hold_ms, response }) => {
                             // A route chosen for a peer is a reason to keep
                             // it registered, the way a conversation is.
-                            let held = match (node.peer(peer).await, umsh_mac::CachedRoute::source(&route)) {
-                                (Ok(_), Some(route)) => node.hold_peer_route(&peer, route, hold_ms).await,
-                                _ => false,
-                            };
+                            let held = node.peer(peer).await.is_ok()
+                                && node.hold_peer_route(&peer, route, flood_hops, hold_ms).await;
                             let _ = response.send(held);
                         }
                         Some(WorkerCommand::AdoptLearnedPeerRoute { peer, response }) => {
@@ -5448,12 +5482,8 @@ mod tests {
         // Each endpoint knows the other peer, as it would from its durable peer
         // registry in the application. Starting both pings registers both keys
         // through the same public Rust API without test-only MAC access.
-        let operation = alice
-            .ping(address(&bob_identity), 2_000, Vec::new())
-            .unwrap();
-        let _ = bob
-            .ping(address(&alice_identity), 2_000, Vec::new())
-            .unwrap();
+        let operation = alice.ping(address(&bob_identity), 2_000, None).unwrap();
+        let _ = bob.ping(address(&alice_identity), 2_000, None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let alice_update = alice.poll_update();
@@ -5513,7 +5543,7 @@ mod tests {
     /// Drive one authenticated ping between the two sessions to completion,
     /// shuttling frames both ways.
     async fn complete_ping(alice: &MobileMeshSession, bob: &MobileMeshSession, target: String) {
-        let operation = alice.ping(target, 2_000, Vec::new()).unwrap();
+        let operation = alice.ping(target, 2_000, None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let alice_update = alice.poll_update();
@@ -6178,20 +6208,34 @@ mod tests {
             .unwrap();
         let bob = address(&identity(13));
 
-        assert_eq!(
-            alice.hold_peer_route(bob.clone(), Vec::new(), 60_000).await,
-            Err(MobileMeshError::InvalidRoute)
-        );
+        let path = |hints: Vec<Vec<u8>>, flood_hops| MobileMeshExplicitPath { hints, flood_hops };
         assert_eq!(
             alice
-                .hold_peer_route(bob.clone(), vec![vec![1, 2, 3]], 60_000)
+                .hold_peer_route(bob.clone(), path(vec![vec![1, 2, 3]], 1), 60_000)
                 .await,
             Err(MobileMeshError::InvalidRoute)
         );
-        // Holding registers a peer nothing had registered yet.
+        assert_eq!(
+            alice
+                .hold_peer_route(bob.clone(), path(Vec::new(), 16), 60_000)
+                .await,
+            Err(MobileMeshError::InvalidRoute)
+        );
+        // Holding registers a peer nothing had registered yet, and a path
+        // naming no repeaters is a direct one.
         assert!(
             alice
-                .hold_peer_route(bob.clone(), vec![vec![1, 2], vec![3, 4]], 60_000)
+                .hold_peer_route(bob.clone(), path(Vec::new(), 0), 60_000)
+                .await
+                .unwrap()
+        );
+        let route = alice.peer_route(bob.clone()).await.unwrap();
+        assert_eq!(route.kind, MobileMeshRouteKind::Direct);
+        assert_eq!(route.hold_flood_hops, Some(0));
+
+        assert!(
+            alice
+                .hold_peer_route(bob.clone(), path(vec![vec![1, 2], vec![3, 4]], 3), 60_000)
                 .await
                 .unwrap()
         );
@@ -6199,6 +6243,7 @@ mod tests {
         assert_eq!(route.kind, MobileMeshRouteKind::Source);
         assert_eq!(route.hints, vec![vec![1, 2], vec![3, 4]]);
         assert_eq!(route.hop_count, Some(3));
+        assert_eq!(route.hold_flood_hops, Some(3));
         assert!(
             route
                 .hold_remaining_ms
@@ -6255,12 +6300,8 @@ mod tests {
                 .unwrap()
         );
 
-        let operation = alice
-            .ping(address(&bob_identity), 2_000, Vec::new())
-            .unwrap();
-        let _ = bob
-            .ping(address(&alice_identity), 2_000, Vec::new())
-            .unwrap();
+        let operation = alice.ping(address(&bob_identity), 2_000, None).unwrap();
+        let _ = bob.ping(address(&alice_identity), 2_000, None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let alice_update = alice.poll_update();
@@ -6332,9 +6373,7 @@ mod tests {
 
         // Clearing a route must not disturb the peer's crypto state: the next
         // ping still completes, and teaches the route again.
-        let operation = alice
-            .ping(address(&bob_identity), 2_000, Vec::new())
-            .unwrap();
+        let operation = alice.ping(address(&bob_identity), 2_000, None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let alice_update = alice.poll_update();
@@ -6708,9 +6747,7 @@ mod tests {
             .await
             .unwrap();
         let started = Instant::now();
-        let operation = session
-            .ping(address(&silent_peer), 30_000, Vec::new())
-            .unwrap();
+        let operation = session.ping(address(&silent_peer), 30_000, None).unwrap();
 
         let deadline = started + Duration::from_secs(5);
         loop {
@@ -6743,9 +6780,7 @@ mod tests {
         let store =
             MobileCounterStore::new(directory.path().join("local").display().to_string()).unwrap();
         let session = MobileMeshSession::new(local_identity, store).await.unwrap();
-        let operation = session
-            .ping(address(&silent_peer), 100, Vec::new())
-            .unwrap();
+        let operation = session.ping(address(&silent_peer), 100, None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
 
         loop {
@@ -6792,9 +6827,7 @@ mod tests {
         session.set_wake_listener(Arc::new(TestWakeListener { signal }));
 
         // The ping's outbound frame must announce itself with no polling.
-        let operation = session
-            .ping(address(&silent_peer), 100, Vec::new())
-            .unwrap();
+        let operation = session.ping(address(&silent_peer), 100, None).unwrap();
         wakes
             .recv_timeout(Duration::from_secs(5))
             .expect("no wake for the outbound ping frame");
@@ -6838,9 +6871,7 @@ mod tests {
                 .unwrap();
         let session = MobileMeshSession::new(local_identity, store).await.unwrap();
 
-        session
-            .ping(address(&silent_peer), 5_000, Vec::new())
-            .unwrap();
+        session.ping(address(&silent_peer), 5_000, None).unwrap();
         // Give the worker time to enqueue the outbound frame first; even if
         // it loses this race, the enqueue itself fires the listener, so the
         // assertion below holds either way.

@@ -148,8 +148,10 @@ struct StoredPeerRepeaterListing: Equatable, Sendable {
 /// A path the person chose for one node, held until `holdUntil`.
 struct StoredManualRoute: Equatable, Sendable {
     let publicAddress: String
-    /// Two-byte router hints, in send order.
+    /// Two-byte router hints, in send order. None is a direct path.
     let hints: [Data]
+    /// How far the path floods past its last repeater.
+    let floodHops: UInt8
     let holdUntil: Date
     /// Where the phone stood when the path was saved, if it knew.
     let savedLatitude: Double?
@@ -494,7 +496,7 @@ actor SQLiteApplicationStore {
     /// store refuses to open any database above this constant, so a stale value
     /// lets the new schema apply once and then locks the user out of their own
     /// data on the next launch. ``migrate(_:)`` checks the two agree.
-    static let currentSchemaVersion: Int32 = 23
+    static let currentSchemaVersion: Int32 = 24
 
     nonisolated(unsafe) private let database: OpaquePointer
 
@@ -1628,7 +1630,7 @@ actor SQLiteApplicationStore {
 
     private static let manualRouteColumns = """
         n.public_address, r.hints, r.hold_until_ms, r.saved_latitude,
-        r.saved_longitude, r.saved_accuracy, r.prompt_settled
+        r.saved_longitude, r.saved_accuracy, r.prompt_settled, r.flood_hops
         """
 
     private static func manualRoute(_ statement: OpaquePointer) -> StoredManualRoute {
@@ -1639,6 +1641,7 @@ actor SQLiteApplicationStore {
         return StoredManualRoute(
             publicAddress: stringColumn(statement, at: 0),
             hints: hints,
+            floodHops: UInt8(clamping: sqlite3_column_int(statement, 7)),
             holdUntil: Date(timeIntervalSince1970: Double(sqlite3_column_int64(statement, 2)) / 1000),
             savedLatitude: optionalDoubleColumn(statement, at: 3),
             savedLongitude: optionalDoubleColumn(statement, at: 4),
@@ -1708,6 +1711,7 @@ actor SQLiteApplicationStore {
         ownerIdentityID: String,
         publicAddress: String,
         hints: [Data],
+        floodHops: UInt8,
         holdUntil: Date,
         latitude: Double?,
         longitude: Double?,
@@ -1722,17 +1726,23 @@ actor SQLiteApplicationStore {
                 """
                 INSERT OR REPLACE INTO node_manual_route (
                     node_id, hints, hold_until_ms, saved_latitude, saved_longitude,
-                    saved_accuracy, prompt_settled
-                ) VALUES (?, ?, ?, ?, ?, ?, 0)
+                    saved_accuracy, prompt_settled, flood_hops
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
                 """
             )
             defer { sqlite3_finalize(statement) }
             try check(sqlite3_bind_int64(statement, 1, nodeID))
-            try bind(hints.reduce(Data(), +), to: statement, at: 2)
+            // A direct path is an empty blob, which empty data would bind as NULL.
+            if hints.isEmpty {
+                try check(sqlite3_bind_zeroblob(statement, 2, 0))
+            } else {
+                try bind(hints.reduce(Data(), +), to: statement, at: 2)
+            }
             try check(sqlite3_bind_int64(statement, 3, Self.milliseconds(holdUntil)))
             try bindOptionalDouble(latitude, to: statement, at: 4)
             try bindOptionalDouble(longitude, to: statement, at: 5)
             try bindOptionalDouble(accuracy, to: statement, at: 6)
+            try check(sqlite3_bind_int(statement, 7, Int32(floodHops)))
             try stepDone(statement)
         }
     }
@@ -4980,6 +4990,27 @@ actor SQLiteApplicationStore {
                         ADD COLUMN delivered_flooded INTEGER NOT NULL DEFAULT 0;
 
                     PRAGMA user_version = 23;
+                    """
+                )
+                try execute(database, sql: "COMMIT")
+            } catch {
+                try? execute(database, sql: "ROLLBACK")
+                throw error
+            }
+        }
+
+        if version < 24 {
+            try execute(database, sql: "BEGIN IMMEDIATE")
+            do {
+                // How far a held path floods past its last repeater. Paths
+                // saved before this had the routing layer's one hop of slack.
+                try execute(
+                    database,
+                    sql: """
+                    ALTER TABLE node_manual_route
+                        ADD COLUMN flood_hops INTEGER NOT NULL DEFAULT 1;
+
+                    PRAGMA user_version = 24;
                     """
                 )
                 try execute(database, sql: "COMMIT")

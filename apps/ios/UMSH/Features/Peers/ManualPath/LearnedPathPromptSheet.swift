@@ -17,7 +17,7 @@ struct LearnedPathPromptSheet: View {
         NavigationStack {
             List {
                 Section {
-                    Text(pathText(route.hints))
+                    Text(route.hints.isEmpty ? "Direct" : pathText(route.hints))
                     Label(
                         "No ack on the last \(route.fallbackAcks) send\(route.fallbackAcks == 1 ? "" : "s")",
                         systemImage: "xmark.circle"

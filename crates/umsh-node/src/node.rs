@@ -536,9 +536,12 @@ impl<M: MacBackend> LocalNode<M> {
         &self,
         peer: &PublicKey,
         route: CachedRoute,
+        flood_hops: u8,
         hold_ms: u64,
     ) -> bool {
-        self.mac.hold_peer_route(peer, route, hold_ms).await
+        self.mac
+            .hold_peer_route(peer, route, flood_hops, hold_ms)
+            .await
     }
 
     /// Switch a held route to the best path learned while it was held; see

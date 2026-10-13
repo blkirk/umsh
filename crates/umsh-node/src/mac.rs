@@ -192,9 +192,16 @@ pub trait MacBackend: Clone {
     }
 
     /// Install `route` for `peer` and hold it for `hold_ms` against learning
-    /// and failure, returning whether `peer` was registered to receive it.
-    async fn hold_peer_route(&self, peer: &PublicKey, route: CachedRoute, hold_ms: u64) -> bool {
-        let _ = (peer, route, hold_ms);
+    /// and failure, spending `flood_hops` past its end, returning whether it
+    /// took.
+    async fn hold_peer_route(
+        &self,
+        peer: &PublicKey,
+        route: CachedRoute,
+        flood_hops: u8,
+        hold_ms: u64,
+    ) -> bool {
+        let _ = (peer, route, flood_hops, hold_ms);
         false
     }
 
@@ -418,8 +425,14 @@ impl<
         self.restore_peer_route(peer, route).await
     }
 
-    async fn hold_peer_route(&self, peer: &PublicKey, route: CachedRoute, hold_ms: u64) -> bool {
-        self.hold_peer_route(peer, route, hold_ms).await
+    async fn hold_peer_route(
+        &self,
+        peer: &PublicKey,
+        route: CachedRoute,
+        flood_hops: u8,
+        hold_ms: u64,
+    ) -> bool {
+        self.hold_peer_route(peer, route, flood_hops, hold_ms).await
     }
 
     async fn adopt_learned_peer_route(&self, peer: &PublicKey) -> bool {
