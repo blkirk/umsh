@@ -1325,7 +1325,12 @@ final class AppRuntime {
             // Best effort, for the same reason as in `startConversation`: the
             // peer and any conversation are already on disk, and an unattached
             // radio must not turn that into a failed import.
-            try? await radioConnection.registerChatPeers([identity.canonicalAddress])
+            try? await radioConnection.registerChatPeers([
+                MobilePeerRegistrationRecord(
+                    address: identity.canonicalAddress,
+                    mobile: preview.identity?.capabilityBits.contains(.mobile) == true
+                )
+            ])
             await reconcileHostPeers()
             return conversations.first { $0.peer.identity.canonicalAddress == identity.canonicalAddress }
         } catch {
@@ -3069,7 +3074,7 @@ final class AppRuntime {
             // conversation peer on the next attach anyway. Letting it fail the
             // whole operation would leave a conversation that exists on disk
             // but that nothing ever opens.
-            try? await radioConnection.registerChatPeers([peer.identity.canonicalAddress])
+            try? await radioConnection.registerChatPeers([peer.meshRegistration])
             await reconcileHostPeers()
             return conversations.first {
                 $0.peer.identity.canonicalAddress == peer.identity.canonicalAddress
@@ -3518,8 +3523,18 @@ final class AppRuntime {
                     + checkpoints.map(\.conversationAddress)
                         .filter { !Self.isChannelAddress($0) }
             )
+            // Each carries what the peer's stored advertisement says about
+            // whether it moves; a checkpointed stream with no stored peer
+            // has said nothing.
+            let known = Dictionary(
+                peers.map { ($0.identity.canonicalAddress, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
             try await radioConnection.prepareChat(
-                peerAddresses: addresses.sorted(),
+                peers: addresses.sorted().map {
+                    known[$0]?.meshRegistration
+                        ?? MobilePeerRegistrationRecord(address: $0, mobile: false)
+                },
                 checkpoints: checkpoints
             )
         } catch {

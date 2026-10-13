@@ -1650,7 +1650,7 @@ public protocol MobileMeshSessionProtocol: AnyObject, Sendable {
      */
     func registerChannels(channels: [MobileChannelRegistrationRecord]) async throws
 
-    func registerPeers(peerAddresses: [String]) async throws
+    func registerPeers(peers: [MobilePeerRegistrationRecord]) async throws
 
     func rejectChatBatch(batchId: UInt64, checkpoints: [MobileChatCheckpointRecord]) async throws
 
@@ -2601,12 +2601,12 @@ open func registerChannels(channels: [MobileChannelRegistrationRecord])async thr
         )
 }
 
-open func registerPeers(peerAddresses: [String])async throws   {
+open func registerPeers(peers: [MobilePeerRegistrationRecord])async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_umsh_mobile_core_fn_method_mobilemeshsession_register_peers(
-                        self.uniffiCloneHandle(),FfiConverterSequenceString.lower(peerAddresses)
+                        self.uniffiCloneHandle(),FfiConverterSequenceTypeMobilePeerRegistrationRecord.lower(peers)
                 )
             },
             pollFunc: ffi_umsh_mobile_core_rust_future_poll_void,
@@ -7512,6 +7512,77 @@ public func FfiConverterTypeMobileMeshSharedLocationRecord_lift(_ buf: RustBuffe
 #endif
 public func FfiConverterTypeMobileMeshSharedLocationRecord_lower(_ value: MobileMeshSharedLocationRecord) -> RustBuffer {
     return FfiConverterTypeMobileMeshSharedLocationRecord.lower(value)
+}
+
+
+/**
+ * One peer the platform hands the session at registration.
+ */
+public struct MobilePeerRegistrationRecord: Equatable, Hashable {
+    /**
+     * The peer's canonical Base58 address.
+     */
+    public var address: String
+    /**
+     * Whether the peer's stored advertisement says it is mobile. A live
+     * advertisement heard afterwards supersedes this.
+     */
+    public var mobile: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The peer's canonical Base58 address.
+         */address: String,
+        /**
+         * Whether the peer's stored advertisement says it is mobile. A live
+         * advertisement heard afterwards supersedes this.
+         */mobile: Bool) {
+        self.address = address
+        self.mobile = mobile
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobilePeerRegistrationRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobilePeerRegistrationRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobilePeerRegistrationRecord {
+        return
+            try MobilePeerRegistrationRecord(
+                address: FfiConverterString.read(from: &buf),
+                mobile: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobilePeerRegistrationRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterBool.write(value.mobile, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobilePeerRegistrationRecord_lift(_ buf: RustBuffer) throws -> MobilePeerRegistrationRecord {
+    return try FfiConverterTypeMobilePeerRegistrationRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobilePeerRegistrationRecord_lower(_ value: MobilePeerRegistrationRecord) -> RustBuffer {
+    return FfiConverterTypeMobilePeerRegistrationRecord.lower(value)
 }
 
 
@@ -18070,6 +18141,31 @@ fileprivate struct FfiConverterSequenceTypeMobileMeshPropertyWriteRecord: FfiCon
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeMobilePeerRegistrationRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [MobilePeerRegistrationRecord]
+
+    public static func write(_ value: [MobilePeerRegistrationRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMobilePeerRegistrationRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MobilePeerRegistrationRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MobilePeerRegistrationRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMobilePeerRegistrationRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeMobileRegionMatchRecord: FfiConverterRustBuffer {
     typealias SwiftType = [MobileRegionMatchRecord]
 
@@ -19677,7 +19773,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_register_channels() != 59948) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_register_peers() != 30662) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_register_peers() != 13638) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilemeshsession_reject_chat_batch() != 19006) {

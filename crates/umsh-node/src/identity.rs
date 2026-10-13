@@ -118,6 +118,38 @@ pub struct NodeIdentityPayload {
     pub signature: Option<[u8; 64]>,
 }
 
+/// What an identity payload's signature says about its claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentitySignature {
+    /// No signature was attached; the claims are only as good as the frame
+    /// that carried them.
+    Unsigned,
+    /// The attached signature verifies against the node's public key.
+    Valid,
+    /// The attached signature does not verify; the claims must not be
+    /// trusted.
+    Invalid,
+}
+
+impl NodeIdentityPayload {
+    /// Check the signature `self` carries against `key`, the node the
+    /// payload claims to describe. `payload` is the encoding `self` was
+    /// parsed from: the signed range is everything before the trailing
+    /// signature.
+    #[cfg(feature = "software-crypto")]
+    pub fn signature_state(&self, key: &umsh_core::PublicKey, payload: &[u8]) -> IdentitySignature {
+        let Some(signature) = &self.signature else {
+            return IdentitySignature::Unsigned;
+        };
+        let signed = &payload[..payload.len().saturating_sub(signature.len())];
+        if umsh_crypto::verify_ed25519_signature(key, signed, signature) {
+            IdentitySignature::Valid
+        } else {
+            IdentitySignature::Invalid
+        }
+    }
+}
+
 impl NodeIdentityPayload {
     pub fn from_bytes(payload: &[u8]) -> Result<NodeIdentityPayload, AppParseError> {
         if payload.len() < 2 {
@@ -321,7 +353,7 @@ impl NodeIdentityPayload {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn round_trip(id: &NodeIdentityPayload) -> bool {
@@ -583,6 +615,72 @@ mod tests {
         manual[3] = 0xAA;
         manual[4] = 0xBB;
         assert!(NodeIdentityPayload::from_bytes(&manual[..5]).is_err());
+    }
+
+    /// A payload signed by `seed`'s key, with its public key.
+    #[cfg(feature = "software-crypto")]
+    pub(crate) fn signed_payload(
+        seed: u8,
+        capabilities: NodeCapabilities,
+    ) -> (umsh_core::PublicKey, Vec<u8>) {
+        use umsh_crypto::NodeIdentity as _;
+        let signer = umsh_crypto::software::SoftwareIdentity::from_secret_bytes(&[seed; 32]);
+        let id = NodeIdentityPayload {
+            role: NodeRole::Chat,
+            capabilities,
+            name: None,
+            location: None,
+            altitude_m: None,
+            timestamp: None,
+            supported_regions: None,
+            nonce: None,
+            signature: None,
+        };
+        let mut buf = [0u8; 128];
+        let len = id.encode_for_signing(&mut buf).unwrap();
+        let signature = {
+            let mut sign = core::pin::pin!(signer.sign(&buf[..len]));
+            let core::task::Poll::Ready(Ok(signature)) = sign.as_mut().poll(
+                &mut core::task::Context::from_waker(core::task::Waker::noop()),
+            ) else {
+                panic!("software signing completes at once");
+            };
+            signature
+        };
+        buf[len..len + 64].copy_from_slice(&signature);
+        (*signer.public_key(), buf[..len + 64].to_vec())
+    }
+
+    #[cfg(feature = "software-crypto")]
+    #[test]
+    fn a_signature_is_checked_against_the_key_the_payload_describes() {
+        let (key, payload) = signed_payload(0x31, NodeCapabilities::MOBILE);
+        let parsed = NodeIdentityPayload::from_bytes(&payload).unwrap();
+        assert_eq!(
+            parsed.signature_state(&key, &payload),
+            IdentitySignature::Valid
+        );
+
+        let other = umsh_core::PublicKey([0x55; 32]);
+        assert_eq!(
+            parsed.signature_state(&other, &payload),
+            IdentitySignature::Invalid
+        );
+
+        let mut tampered = payload.clone();
+        tampered[1] ^= NodeCapabilities::MOBILE.bits();
+        let parsed = NodeIdentityPayload::from_bytes(&tampered).unwrap();
+        assert_eq!(
+            parsed.signature_state(&key, &tampered),
+            IdentitySignature::Invalid
+        );
+
+        let unsigned = [NodeRole::Chat.as_byte(), 0];
+        let parsed = NodeIdentityPayload::from_bytes(&unsigned).unwrap();
+        assert_eq!(
+            parsed.signature_state(&key, &unsigned),
+            IdentitySignature::Unsigned
+        );
     }
 
     #[test]

@@ -74,12 +74,12 @@ take. It becomes the wrong call the moment there is more than one slot.
 
 `effective_source_route` uses an explicit route or a cached `Source`;
 `Direct` and `Flood` never produce one. `effective_flood_hops` narrows the
-application's budget to what the cached route costs plus
-`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`, which has been 0 since 35f08f078: a
-source-routed send, or a send to a `Direct` peer, leaves the FHOPS field
-off entirely. A trace is attached to any repeatable send that has no source
-route unless the peer is cached `Direct`, and to a source-routed send only
-when it asks for an ack.
+application's budget to what the cached route costs plus the slack
+`established_route_slack` grants: one hop or none, by the rules under M5.
+A source-routed send, or a send to a `Direct` peer, whose slack is zero
+leaves the FHOPS field off entirely. A trace is attached to any repeatable
+send that has no source route, and to a source-routed send only when it
+asks for an ack.
 
 ### Failure
 
@@ -98,8 +98,8 @@ may be never.
 
 **Held routes.** An application may hold a route for a peer until a
 deadline (`PeerRegistry::hold_route`), as a source route or as direct, with
-its own flood allowance past the route's end that stands in for
-`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS` while held; `SendOptions::route_slack`
+its own flood allowance past the route's end that stands in for the
+slack M5 grants while held; `SendOptions::route_slack`
 sets the same allowance for one send. Holds sit beside the peer table,
 bounded by the MAC's `HOLDS` parameter, which defaults to zero; the phone
 sets it for manual paths and devices hold nothing. While a route is held,
@@ -207,8 +207,8 @@ on its own.
    of any path involving a person are the ones most likely to be one-way.
 
 4. **A direct route carries no recovery.** A packet with no flood budget and
-   no source route is transmitted exactly once and confirms nothing. Since
-   the established-route slack was set to zero, a peer cached as direct is
+   no source route is transmitted exactly once and confirms nothing. Where
+   the established-route slack is zero, a peer cached as direct is
    answered with a frame that has no repeater permission and no retry. The
    full end-to-end retry ladder has to run before anything changes, and when
    it does run, the destination re-acknowledges over the same dead link.
@@ -466,8 +466,31 @@ us.
 
 ### M5. Slack as a function of confidence *(local policy)*
 
-The established-route extra flood hop currently sits at zero. Instead of a
-constant, derive it:
+**Implemented in a narrower form.** `umsh_core::established_route_slack`
+derives the slack from the route's *last hop*—the link between the peer and
+whoever hears it first—and the peer's advertised mobility, evaluated in
+order:
+
+| # | Condition | Extra flood hops |
+|---|---|---:|
+| 1 | Send along a route chosen by hand (a held route, or a source route attached to the send) | its own allowance, else 0 |
+| 2 | An ack for a retransmission of a frame already acknowledged | 1 |
+| 3 | Direct, and the last hop bridged or stronger than −75 dBm | 0 |
+| 4 | Peer advertises the mobile bit | 1 |
+| 5 | Last hop never measured | 1 |
+| 6 | Last hop measured at −96 dBm or weaker | 1 |
+| 7 | Otherwise | 0 |
+
+Rule 2 is what rescues a link that is strong one way and dead the other:
+the first ack dies, the sender retries, and the re-ack carries a hop a
+repeater can use. Rule 1 governs what this node sends: an ack along a
+route chosen by hand skips it, and a held route's allowance can only
+widen the ack's slack. A later frame whose path ends at the same last hop
+refreshes the reading even when it does not displace the route. Delegated
+acks on a ULCP device apply rules 2, 3 and 5–7 from the acknowledged frame
+alone. Confirmation,
+failure history, this node's own mobility and mobile repeaters are not
+inputs; the table below is the fuller design they would extend toward:
 
 | Route state | Extra flood hops |
 |---|---:|

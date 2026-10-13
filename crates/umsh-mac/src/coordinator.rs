@@ -6,8 +6,8 @@ use heapless::{Deque, LinearMap, Vec};
 use rand::{Rng, RngExt as _};
 use umsh_core::{
     BuildError, ChannelId, ChannelKey, FloodHops, NodeHint, OptionNumber, PacketBuilder,
-    PacketHeader, PacketType, ParseError, ParsedOptions, PayloadType, PublicKey, RouterHint,
-    SourceAddrRef, UnsealedPacket, feed_aad,
+    PacketHeader, PacketType, ParseError, ParsedOptions, PayloadType, PublicKey, RouteEvidence,
+    RouterHint, SourceAddrRef, UnsealedPacket, established_route_slack, feed_aad,
     options::{OptionEncoder, TraceSignalEntry},
 };
 use umsh_crypto::{CryptoEngine, CryptoError, DerivedChannelKeys, NodeIdentity, PairwiseKeys};
@@ -16,13 +16,13 @@ use umsh_hal::{Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, Tx
 use crate::{
     AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
     DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS,
-    DEFAULT_TX, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS,
-    MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform,
-    ReplayVerdict, ReplayWindow, TRACE_ROUTE_REFRESH_MS,
+    DEFAULT_TX, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES,
+    MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict, ReplayWindow,
+    TRACE_ROUTE_REFRESH_MS,
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
     peers::{
-        ChannelTable, HeldRouteOutcome, PeerCryptoMap, PeerId, PeerRegistry, RouteFailure,
+        ChannelTable, FarHop, HeldRouteOutcome, PeerCryptoMap, PeerId, PeerRegistry, RouteFailure,
         RouteOffer,
     },
     route_score::{Hop, path_score},
@@ -72,6 +72,18 @@ const COUNTER_RESYNC_GAP_THRESHOLD: u32 = 1024;
 pub(crate) enum ReplyCarriage<'a> {
     Unicast,
     Blind(&'a DerivedChannelKeys),
+}
+
+/// What a frame along a peer's route is, as far as the flood slack past the
+/// route's end is concerned ([`Mac::route_slack`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteTraffic {
+    /// Traffic this node originates.
+    Send,
+    /// A MAC ack of a frame not acknowledged before.
+    Ack,
+    /// A MAC ack of a retransmission: the peer missed the earlier ack.
+    Reack,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1723,8 +1735,8 @@ impl<
         self.queue_multicast(from, channel_id, payload, options)
     }
 
-    /// Enqueue an ACK using the cached route plus one optional flood hop.
-    /// A direct observation is not evidence that the reverse radio link works.
+    /// Enqueue an ACK using the cached route plus whatever flood slack the
+    /// route's far end earns (see [`established_route_slack`]).
     pub fn queue_mac_ack_for_peer(
         &mut self,
         from: LocalIdentityId,
@@ -1732,9 +1744,11 @@ impl<
         ack_trailer: [u8; 8],
         trace_route: bool,
     ) -> Result<(), SendError> {
-        self.queue_routed_mac_ack(from, peer_id, ack_trailer, trace_route, &[], None)
+        self.queue_routed_mac_ack(from, peer_id, ack_trailer, trace_route, &[], None, false)
     }
 
+    /// `retransmission`: the frame acknowledged is a copy of one already
+    /// acknowledged, so the earlier ack did not arrive.
     fn queue_routed_mac_ack(
         &mut self,
         from: LocalIdentityId,
@@ -1743,7 +1757,16 @@ impl<
         trace_route: bool,
         request_regions: &[[u8; 2]],
         unknown_route_budget: Option<u8>,
+        retransmission: bool,
     ) -> Result<(), SendError> {
+        let slack = self.route_slack(
+            peer_id,
+            if retransmission {
+                RouteTraffic::Reack
+            } else {
+                RouteTraffic::Ack
+            },
+        );
         let cached = self
             .peer_registry
             .get(peer_id)
@@ -1754,26 +1777,27 @@ impl<
             .peer_registry
             .route_hold(peer_id, self.clock.now_ms())
             .map(|hold| hold.flood_hops)
-            .filter(|&hops| hops > ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS);
+            .filter(|&hops| hops > slack);
         let (source_route, flood_hops, requires_forwarding) = match cached {
-            Some(CachedRoute::Source(route)) if !route.is_empty() => (
-                Some(route.as_slice()),
-                held_slack.unwrap_or(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
-                true,
-            ),
+            Some(CachedRoute::Source(route)) if !route.is_empty() => {
+                (Some(route.as_slice()), held_slack.unwrap_or(slack), true)
+            }
             Some(CachedRoute::Direct | CachedRoute::Source(_)) if held_slack.is_some() => {
                 (None, held_slack.unwrap(), true)
             }
-            Some(CachedRoute::Flood { flood_hops, .. }) if *flood_hops > 0 => (
-                None,
-                flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
-                true,
-            ),
+            Some(CachedRoute::Flood { flood_hops, .. }) if *flood_hops > 0 => {
+                (None, flood_hops.saturating_add(slack), true)
+            }
             // A cached direct observation cannot bound the return distance of
             // a consumed source route whose trace is missing or malformed.
             _ if unknown_route_budget.is_some() => (None, unknown_route_budget.unwrap(), true),
-            _ => (None, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, false),
+            _ => (None, slack, false),
         };
+        // Zero is no field at all, as on any send: an ack no repeater may
+        // carry, and one whose trace would only arrive empty.
+        let flood_hops = flood_hops.min(MAX_FLOOD_HOPS);
+        let trace_route = trace_route
+            && Self::frame_is_repeatable((flood_hops > 0).then_some(flood_hops), source_route);
         let regions = if !request_regions.is_empty() {
             request_regions
         } else if let Some(CachedRoute::Flood { regions, .. }) = cached {
@@ -1782,9 +1806,10 @@ impl<
             &[]
         };
         let mut buf = [0u8; FRAME];
-        let mut builder = PacketBuilder::new(&mut buf)
-            .mac_ack(ack_trailer)
-            .flood_hops(flood_hops.clamp(1, MAX_FLOOD_HOPS));
+        let mut builder = PacketBuilder::new(&mut buf).mac_ack(ack_trailer);
+        if flood_hops > 0 {
+            builder = builder.flood_hops(flood_hops);
+        }
         if trace_route {
             builder = builder.trace_route();
         }
@@ -3008,6 +3033,7 @@ impl<
                         ack_trailer,
                         &buf[..frame_len],
                         header,
+                        true,
                     );
                     handled = true;
                     break;
@@ -3103,6 +3129,7 @@ impl<
                         ack_trailer,
                         &buf[..frame_len],
                         header,
+                        false,
                     );
                 }
 
@@ -3332,6 +3359,7 @@ impl<
                                 ack_trailer,
                                 &buf[..frame_len],
                                 header,
+                                true,
                             );
                             handled = true;
                             break;
@@ -3420,6 +3448,7 @@ impl<
                                 ack_trailer,
                                 &buf[..frame_len],
                                 header,
+                                false,
                             );
                         }
 
@@ -4265,9 +4294,12 @@ impl<
     ///
     /// `options.flood_hops` is a ceiling, not a target: a learned route only
     /// lowers it, and `no_flood()` still emits no flood-hop field at all. Each
-    /// route form keeps [`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`] of slack beyond the
+    /// route form keeps the slack [`Self::route_slack`] grants beyond the
     /// flood distance it already covers. A source route covers that distance
-    /// without spending flood budget, so its slack is the entire budget.
+    /// without spending flood budget, so its slack is the entire budget. A
+    /// source route the caller attached is one chosen by hand, and gets no
+    /// slack at all. The caller's own `route_slack`, or else a held route's
+    /// allowance, replaces all of this.
     ///
     /// A budget of zero is returned as `None` rather than `Some(0)`. The two
     /// say the same thing to every reader—no repeater may carry this frame—
@@ -4291,7 +4323,6 @@ impl<
         // An empty source route is carried for provenance only; it constrains
         // no hop, so it costs nothing.
         let source_route = source_route.filter(|route| !route.is_empty());
-
         // A hold applies to the cached route, so it gives way to a route the
         // caller attached; the caller's own slack wins over both.
         let held_slack = options
@@ -4304,23 +4335,30 @@ impl<
         let ceiling = if let Some(slack) = options.route_slack.or(held_slack) {
             slack
         } else {
+            let slack = if options
+                .source_route
+                .as_ref()
+                .is_some_and(|route| !route.is_empty())
+            {
+                0
+            } else {
+                self.route_slack(peer_id, RouteTraffic::Send)
+            };
             match (source_route, cached) {
                 // A source route costs no flood budget at all—routed hops do not
                 // touch `FHOPS`—so the whole budget is slack past the route's
                 // end. Heard directly is the same shape: our own transmission is
                 // the delivery, and any slack only buys a repeater backstop.
-                (Some(_), _) | (None, Some(CachedRoute::Direct)) => {
-                    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS
-                }
+                (Some(_), _) | (None, Some(CachedRoute::Direct)) => slack,
                 // Flooding has to cover the distance the peer was last heard from.
                 (None, Some(CachedRoute::Flood { flood_hops, .. })) => {
-                    flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
+                    flood_hops.saturating_add(slack)
                 }
                 // A cached source route not attached to this send (the caller
                 // suppressed it) has to be flooded end to end instead.
                 (None, Some(CachedRoute::Source(route))) => u8::try_from(route.len())
                     .unwrap_or(u8::MAX)
-                    .saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS),
+                    .saturating_add(slack),
                 // Nothing known about the peer: first contact floods as asked.
                 (None, None) => MAX_FLOOD_HOPS,
             }
@@ -4332,6 +4370,32 @@ impl<
         // hops at all.
         let hops = requested.min(ceiling).min(MAX_FLOOD_HOPS);
         (hops > 0).then_some(hops)
+    }
+
+    /// Flood hops of slack past the end of `peer_id`'s cached route, from
+    /// what is known about the route's far end; see
+    /// [`established_route_slack`]. A peer with no route, or none
+    /// registered, gets the slack an unmeasured route would.
+    ///
+    /// Only what this node originates follows a route chosen by hand to the
+    /// letter; an ack's reach is never the application's choice, so a
+    /// hand-set route leaves it to the route's evidence.
+    fn route_slack(&self, peer_id: PeerId, traffic: RouteTraffic) -> u8 {
+        let peer_retransmitted = traffic == RouteTraffic::Reack;
+        let evidence = match self.peer_registry.get(peer_id) {
+            Some(peer) => RouteEvidence {
+                hand_set: traffic == RouteTraffic::Send && peer.route_hand_set,
+                direct: peer.route.as_ref().and_then(CachedRoute::far_hop) == Some(FarHop::Peer),
+                last_hop: peer.route_last_hop,
+                peer_mobile: peer.mobile,
+                peer_retransmitted,
+            },
+            None => RouteEvidence {
+                peer_retransmitted,
+                ..RouteEvidence::default()
+            },
+        };
+        established_route_slack(evidence)
     }
 
     fn cache_peer_crypto(
@@ -4519,6 +4583,12 @@ impl<
     }
 
     /// Record acknowledgement only after a frame was actually queued.
+    ///
+    /// `retransmission`: `frame` is a copy of one already accepted, arriving
+    /// after the duplicate holdoff. The sender is retrying because no ack
+    /// reached it, so this one keeps the slack whatever the route's
+    /// evidence says. (A copy whose original was overheard early and never
+    /// acknowledged reaches here too, and spends one hop it did not need.)
     fn queue_received_mac_ack(
         &mut self,
         local_id: LocalIdentityId,
@@ -4526,6 +4596,7 @@ impl<
         ack_trailer: [u8; 8],
         frame: &[u8],
         header: &PacketHeader,
+        retransmission: bool,
     ) {
         let Ok(options) = ParsedOptions::extract(frame, header.options_range.clone()) else {
             return;
@@ -4541,11 +4612,13 @@ impl<
             .and_then(|range| frame.get(range.clone()))
             .and_then(|trace| self.source_route_from_trace(trace))
             .is_some();
+        // Nothing measured the way back, so it earns the slack an unmeasured
+        // route does.
         let unknown_budget = (options.source_route.is_some() && !usable_trace).then(|| {
             header
                 .flood_hops
                 .map_or(0, |hops| hops.accumulated())
-                .saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
+                .saturating_add(established_route_slack(RouteEvidence::default()))
                 .max(5)
         });
         if self
@@ -4556,6 +4629,7 @@ impl<
                 options.trace_route.is_some() || flooded,
                 &regions,
                 unknown_budget,
+                retransmission,
             )
             .is_ok()
             && let Some((counter, mic)) = Self::replay_metadata(header, frame)
@@ -5171,6 +5245,7 @@ impl<
                     )])),
                     supersedes,
                     acknowledgment,
+                    last_hop: Some(trace_signal_entry(rx)),
                 },
                 Some(flood_hops) => RouteOffer {
                     route: CachedRoute::Flood {
@@ -5183,6 +5258,10 @@ impl<
                     score: None,
                     supersedes,
                     acknowledgment,
+                    // A flood nobody forwarded came off the peer's own
+                    // transmitter, so this reception is its last hop. Past
+                    // that, which repeater heard the peer is unknown.
+                    last_hop: (flood_hops.accumulated() == 0).then(|| trace_signal_entry(rx)),
                 },
             });
         };
@@ -5235,6 +5314,22 @@ impl<
         let untraveled = core::iter::repeat_n(Hop::Unmeasured, remaining.len() / 2);
         let score = path_score(core::iter::once(first).chain(untraveled).chain(traveled));
 
+        // The route's last hop is the one into whoever heard the peer first.
+        // With nothing traveled that is this reception, unless hints remain:
+        // then the peer was overheard on its way to a repeater nothing has
+        // measured it against. Otherwise the earliest trace entry, at the
+        // end of the list, is how the first repeater heard the peer.
+        let last_hop = if hints.is_empty() {
+            Some(trace_signal_entry(rx))
+        } else if trace.is_empty() {
+            None
+        } else {
+            signal.map(|signal| {
+                let at = signal.len() - 2;
+                TraceSignalEntry::from_bytes([signal[at], signal[at + 1]])
+            })
+        };
+
         Some(RouteOffer {
             route: if hints.is_empty() {
                 CachedRoute::Direct
@@ -5244,6 +5339,7 @@ impl<
             score: Some(score),
             supersedes,
             acknowledgment,
+            last_hop,
         })
     }
 
@@ -6579,8 +6675,8 @@ impl<
     /// An attached source route is the obvious case: the named path did not
     /// deliver. The subtler one is a flood budget the MAC narrowed on the
     /// sender's behalf. A peer cached as [`CachedRoute::Direct`] transmits at
-    /// [`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`] however wide a flood the application
-    /// asked for, so a peer that has since moved out of direct range cannot be
+    /// one flood hop at most, and often none, however wide a flood the
+    /// application asked for, so a peer that has since moved out of direct range cannot be
     /// reached by repeating the same frame—and nothing in the options records
     /// that a route was ever assumed. That is the same staleness as a dead
     /// source-route hint, kept in `FHOPS` instead of in an option.

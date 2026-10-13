@@ -1422,17 +1422,17 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
     }
 
     func prepareChat(
-        peerAddresses: [String],
+        peers: [MobilePeerRegistrationRecord],
         checkpoints: [MobileChatCheckpointRecord]
     ) async throws {
         let session = try await currentMeshSession()
-        try await session.registerPeers(peerAddresses: peerAddresses)
+        try await session.registerPeers(peers: peers)
         try await session.restoreChat(checkpoints: checkpoints)
     }
 
-    func registerChatPeers(_ peerAddresses: [String]) async throws {
+    func registerChatPeers(_ peers: [MobilePeerRegistrationRecord]) async throws {
         let session = try await currentMeshSession()
-        try await session.registerPeers(peerAddresses: peerAddresses)
+        try await session.registerPeers(peers: peers)
     }
 
     func removeChatPeers(_ peerAddresses: [String]) async throws {

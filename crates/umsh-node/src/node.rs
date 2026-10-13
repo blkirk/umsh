@@ -530,6 +530,14 @@ impl<M: MacBackend> LocalNode<M> {
         self.mac.restore_peer_route(peer, route).await
     }
 
+    /// Record whether `peer` advertises itself as mobile; see
+    /// [`umsh_mac::MacHandle::set_peer_mobile`]. For a host that remembers
+    /// an advertisement across the lifetime of the stack underneath it;
+    /// one heard live is recorded without being asked.
+    pub async fn set_peer_mobile(&self, peer: &PublicKey, mobile: bool) -> bool {
+        self.mac.set_peer_mobile(peer, mobile).await
+    }
+
     /// Install `route` for `peer` and hold it for `hold_ms`; see
     /// [`umsh_mac::MacHandle::hold_peer_route`].
     pub async fn hold_peer_route(

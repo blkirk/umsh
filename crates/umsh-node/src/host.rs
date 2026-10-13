@@ -152,6 +152,8 @@ impl<M: MacBackend> Host<M> {
             Vec<u8>,
         )>::new()));
         let pending_peer_repeaters_ref = pending_peer_repeaters.clone();
+        let pending_mobility = Rc::new(RefCell::new(Vec::<(umsh_core::PublicKey, bool)>::new()));
+        let pending_mobility_ref = pending_mobility.clone();
         let dispatcher = self.dispatcher.clone();
         let nodes = self.nodes.clone();
         self.mac
@@ -179,6 +181,7 @@ impl<M: MacBackend> Host<M> {
                                 &pending_pfs_ref,
                                 &pending_identity_ref,
                                 &pending_peer_repeaters_ref,
+                                &pending_mobility_ref,
                                 now_ms,
                             );
                         }
@@ -234,6 +237,12 @@ impl<M: MacBackend> Host<M> {
         for (node, from, channel, request) in peer_repeater_requests {
             node.answer_peer_repeaters_request(from, channel, &request)
                 .await;
+        }
+
+        let mobility: Vec<(umsh_core::PublicKey, bool)> =
+            pending_mobility.borrow_mut().drain(..).collect();
+        for (peer, mobile) in mobility {
+            self.mac.set_peer_mobile(&peer, mobile).await;
         }
 
         self.service_protocol_timeouts().await;
@@ -361,6 +370,32 @@ fn route_node<M: MacBackend>(
         })
 }
 
+/// Whether an identity payload's claims are its sender's own: a signature
+/// that verifies, or none on a frame whose source authenticated.
+#[cfg(feature = "software-crypto")]
+fn identity_is_trustworthy(
+    packet: &ReceivedPacketRef<'_>,
+    from: &umsh_core::PublicKey,
+    identity: &NodeIdentityPayload,
+) -> bool {
+    match identity.signature_state(from, packet.payload()) {
+        crate::IdentitySignature::Valid => true,
+        crate::IdentitySignature::Unsigned => packet.source_authenticated(),
+        crate::IdentitySignature::Invalid => false,
+    }
+}
+
+/// Without the crypto to check a signature, only an unsigned payload on a
+/// frame whose source authenticated can be trusted.
+#[cfg(not(feature = "software-crypto"))]
+fn identity_is_trustworthy(
+    packet: &ReceivedPacketRef<'_>,
+    _from: &umsh_core::PublicKey,
+    identity: &NodeIdentityPayload,
+) -> bool {
+    identity.signature.is_none() && packet.source_authenticated()
+}
+
 fn dispatch_payload_callbacks<M: MacBackend>(
     node: &LocalNode<M>,
     packet: &ReceivedPacketRef<'_>,
@@ -386,10 +421,22 @@ fn dispatch_payload_callbacks<M: MacBackend>(
             )>,
         >,
     >,
+    pending_mobility: &Rc<RefCell<Vec<(umsh_core::PublicKey, bool)>>>,
     now_ms: u64,
 ) {
     if packet.payload_type() == PayloadType::NodeIdentity {
         if let Ok(identity) = NodeIdentityPayload::from_bytes(packet.payload()) {
+            // Whether the node moves decides whether a route to it keeps a
+            // flood hop of slack. That holds however the advertisement got
+            // here, so long as the claim is the node's own.
+            if identity_is_trustworthy(packet, &from, &identity) {
+                pending_mobility.borrow_mut().push((
+                    from,
+                    identity
+                        .capabilities
+                        .contains(crate::NodeCapabilities::MOBILE),
+                ));
+            }
             // Only an advertisement heard from its owner directly places
             // the owner in this node's repeater neighborhood: one that
             // arrived forwarded says nothing about whether the owner is a
@@ -489,5 +536,81 @@ fn dispatch_payload_callbacks<M: MacBackend>(
                     .push((node.identity_id(), from, reply_channel, owned));
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "software-crypto"))]
+mod tests {
+    use alloc::vec::Vec;
+
+    use umsh_core::{Fcf, PacketHeader, PacketType, ParsedOptions, PayloadType, PublicKey};
+
+    use super::identity_is_trustworthy;
+    use crate::identity::tests::signed_payload;
+    use crate::receive::ReceivedPacketRef;
+    use crate::{NodeCapabilities, NodeIdentityPayload, NodeRole};
+
+    /// An advertisement from `from` carrying `payload`, its source
+    /// authenticated or not.
+    fn advertisement(
+        from: PublicKey,
+        payload: &[u8],
+        source_authenticated: bool,
+    ) -> ReceivedPacketRef<'static> {
+        let mut bytes = Vec::from([PayloadType::NodeIdentity as u8]);
+        bytes.extend_from_slice(payload);
+        let wire: &'static [u8] = alloc::boxed::Box::leak(bytes.into_boxed_slice());
+        let header = PacketHeader {
+            fcf: Fcf::new(PacketType::Broadcast, true, false),
+            options_range: 0..0,
+            flood_hops: None,
+            dst: None,
+            channel: None,
+            source: umsh_core::SourceAddrRef::Hint(from.hint()),
+            sec_info: None,
+            body_range: 0..wire.len(),
+            mic_range: wire.len()..wire.len(),
+            total_len: wire.len(),
+        };
+        ReceivedPacketRef::new(
+            wire,
+            wire,
+            header,
+            ParsedOptions::default(),
+            Some(from),
+            Some(from.hint()),
+            source_authenticated,
+            None,
+            umsh_mac::RxMetadata::default(),
+        )
+    }
+
+    fn trusted(packet: &ReceivedPacketRef<'_>, from: &PublicKey) -> bool {
+        let identity = NodeIdentityPayload::from_bytes(packet.payload()).unwrap();
+        identity_is_trustworthy(packet, from, &identity)
+    }
+
+    #[test]
+    fn a_signed_advertisement_is_trusted_however_it_arrived() {
+        let (key, payload) = signed_payload(0x31, NodeCapabilities::MOBILE);
+        assert!(trusted(&advertisement(key, &payload, false), &key));
+    }
+
+    #[test]
+    fn a_signature_that_fails_is_never_trusted() {
+        let (_, payload) = signed_payload(0x31, NodeCapabilities::MOBILE);
+        let impostor = PublicKey([0x55; 32]);
+        assert!(!trusted(
+            &advertisement(impostor, &payload, true),
+            &impostor
+        ));
+    }
+
+    #[test]
+    fn an_unsigned_advertisement_needs_an_authenticated_source() {
+        let key = PublicKey([0x31; 32]);
+        let payload = [NodeRole::Chat.as_byte(), NodeCapabilities::MOBILE.bits()];
+        assert!(trusted(&advertisement(key, &payload, true), &key));
+        assert!(!trusted(&advertisement(key, &payload, false), &key));
     }
 }

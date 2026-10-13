@@ -654,13 +654,23 @@ device holds no other routing state for the host's peers:
   gets a direct ack.
 - A frame carrying no trace but a flood hop count gets `FHOPS_REM`
   initialized from its `FHOPS_ACC`, with any region-code options replayed.
+  An `FHOPS_ACC` of zero is a direct neighbor.
 - A frame carrying a source-route option and no trace—including an
   emptied option, which the last repeater keeps for provenance—spent flood
   hops only past the route's end, so its `FHOPS_ACC` is not a distance. The
-  ack floods at a default budget of 5 flood hops, or at `FHOPS_ACC` if that
-  is larger.
+  ack floods at a default budget of 5 flood hops, or at one more than
+  `FHOPS_ACC` if that is larger.
 - A frame with neither option and no flood hop count was heard off the
   sender's own transmitter and is acknowledged directly.
+
+Each way back carries the [margin](beacons.md#scoping-flood-hops-to-a-known-route)
+its last hop earns, judged from the acknowledged frame alone, since the
+device knows nothing else about the sender: the reception itself for a
+direct neighbor, the earliest trace-signal entry for a traced path, and no
+measurement for a flood distance. A re-ack of a duplicate (see
+**Duplicates** above) always carries the margin. An ack with no margin and
+no route is sent with no flood hop count and no trace route, which could
+only arrive empty.
 
 An ack a repeater may carry includes a trace route when the frame arrived with
 `FHOPS_ACC` greater than zero or carried a trace route of its own, so the sender

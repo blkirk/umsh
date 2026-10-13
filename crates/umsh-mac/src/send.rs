@@ -63,10 +63,10 @@ pub struct SendReceipt(pub u32);
 ///   only). `Some(n)` caps the initial `FHOPS_REM` budget; repeaters decrement it and drop
 ///   at zero. For unicast and blind unicast this is a ceiling rather than a fixed value:
 ///   a route already learned for the peer narrows the budget to what that route costs plus
-///   [`ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`](crate::ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS), so an
-///   established path does not re-flood the whole mesh. The default one-hop
-///   allowance also backstops a peer heard directly. Clear the cached route
-///   to restore the full requested discovery budget.
+///   whatever slack the route's far end earns (see
+///   [`established_route_slack`](crate::established_route_slack)), so an
+///   established path does not re-flood the whole mesh. Clear the cached
+///   route to restore the full requested discovery budget.
 /// - **`trace_route`**—unicast and blind unicast trace automatically when the peer
 ///   may hold no working path back: no route is known to it, its latest packet
 ///   had to flood to reach us, or nothing from it has reached us without
@@ -82,8 +82,8 @@ pub struct SendReceipt(pub u32);
 ///   preventing correlation of frames sharing the same counter value across sessions.
 /// - **`source_route`**—provide an explicit list of [`RouterHint`] values to route the
 ///   frame along a known path rather than relying on flood forwarding. Routed hops cost no
-///   flood budget, so an attached source route narrows `flood_hops` to the slack that would
-///   backstop the route's far end rather than to the route's length.
+///   flood budget, and a route chosen here earns no slack past its far end, so a unicast
+///   along it carries no flood-hop field unless `route_slack` asks for one.
 /// - **`route_slack`**—the flood budget past the end of the route this send takes, in
 ///   place of what the MAC would allow: the slack after a source route, or the whole
 ///   budget of a send with none. Still capped by `flood_hops`.

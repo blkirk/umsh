@@ -1,7 +1,9 @@
 use core::num::NonZeroU32;
 
 use heapless::{LinearMap, Vec};
-use umsh_core::{ChannelId, ChannelKey, NodeHint, PublicKey, RouterHint};
+use umsh_core::{
+    ChannelId, ChannelKey, NodeHint, PublicKey, RouterHint, options::TraceSignalEntry,
+};
 use umsh_crypto::{DerivedChannelKeys, PairwiseKeys};
 
 use crate::{CapacityError, cache::ReplayWindow};
@@ -81,6 +83,29 @@ impl CachedRoute {
             Self::Flood { flood_hops, .. } => flood_hops.saturating_add(1),
         }
     }
+
+    /// The node at the destination's end of the route's last hop: the one
+    /// that hears the destination first.
+    ///
+    /// A flood distance of zero is a peer heard off its own transmitter, the
+    /// same as a direct route. A longer flood distance names no path, and an
+    /// empty source route constrains no hop.
+    pub(crate) fn far_hop(&self) -> Option<FarHop> {
+        match self {
+            Self::Direct | Self::Flood { flood_hops: 0, .. } => Some(FarHop::Peer),
+            Self::Source(hints) => hints.last().copied().map(FarHop::Repeater),
+            Self::Flood { .. } => None,
+        }
+    }
+}
+
+/// Who hears a route's destination first; see [`CachedRoute::far_hop`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FarHop {
+    /// This node, directly.
+    Peer,
+    /// The repeater named by the route's last hint.
+    Repeater(RouterHint),
 }
 
 /// Shared metadata tracked for a remote peer.
@@ -101,6 +126,16 @@ pub struct PeerInfo {
     /// When an acknowledgment last came back for a send on the selected
     /// route.
     pub(crate) route_confirmed_ms: Option<u64>,
+    /// How the selected route's last hop was most recently measured: the
+    /// link between the peer and whoever hears it first (see
+    /// [`CachedRoute::far_hop`]). `None` when nothing has measured it.
+    pub(crate) route_last_hop: Option<TraceSignalEntry>,
+    /// The selected route was chosen by the application
+    /// ([`PeerRegistry::hold_route`]) rather than learned. It stays so after
+    /// the hold ends, until a learned route replaces it.
+    pub(crate) route_hand_set: bool,
+    /// The peer advertises itself as mobile.
+    pub(crate) mobile: bool,
     /// One recently failed route, suppressed only for passive route learning.
     failed_route: Option<(CachedRoute, u64)>,
     /// When a packet from this peer last reached us without flooding
@@ -131,12 +166,26 @@ impl PeerInfo {
             route_revision: 0,
             route_score: None,
             route_confirmed_ms: None,
+            route_last_hop: None,
+            route_hand_set: false,
+            mobile: false,
             failed_route: None,
             unflooded_arrival_s: None,
             trace_owed: false,
             last_seen_ms,
             initial_rx_counter: 0,
         }
+    }
+
+    /// How the selected route's last hop was most recently measured, if it
+    /// was. A point-to-point entry marks a hop with no radio in it.
+    pub fn route_last_hop(&self) -> Option<TraceSignalEntry> {
+        self.route_last_hop
+    }
+
+    /// Whether the peer advertises itself as mobile.
+    pub fn is_mobile(&self) -> bool {
+        self.mobile
     }
 
     /// How the selected route scored on the latest evidence for it, in
@@ -152,11 +201,70 @@ impl PeerInfo {
     }
 
     /// Select `route`, forgetting what was known about the one it replaces.
-    fn select_route(&mut self, route: Option<CachedRoute>, score: Option<i16>, revision: u64) {
-        self.route = route;
-        self.route_score = score;
+    fn select_route(&mut self, selection: RouteSelection, revision: u64) {
+        self.route = selection.route;
+        self.route_score = selection.score;
+        self.route_last_hop = selection.last_hop;
+        self.route_hand_set = selection.hand_set;
         self.route_confirmed_ms = None;
         self.route_revision = revision;
+    }
+}
+
+/// A route about to become a peer's selected route, with what is known
+/// about it.
+#[derive(Default)]
+struct RouteSelection {
+    route: Option<CachedRoute>,
+    score: Option<i16>,
+    last_hop: Option<TraceSignalEntry>,
+    hand_set: bool,
+}
+
+impl RouteSelection {
+    /// No route at all.
+    fn none() -> Self {
+        Self::default()
+    }
+
+    /// A route nothing has measured, installed from outside the MAC.
+    fn installed(route: CachedRoute, hand_set: bool) -> Self {
+        Self {
+            route: Some(route),
+            hand_set,
+            ..Self::default()
+        }
+    }
+
+    /// A route a received frame taught.
+    fn learned(candidate: RouteCandidate) -> Self {
+        Self {
+            route: Some(candidate.route),
+            score: candidate.score,
+            last_hop: candidate.last_hop,
+            hand_set: false,
+        }
+    }
+}
+
+/// A learned path waiting beside a held route; see [`RouteHold::candidate`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteCandidate {
+    /// The path.
+    pub route: CachedRoute,
+    /// How it scored on what the frame that taught it measured.
+    pub score: Option<i16>,
+    /// How its last hop was measured, if it was.
+    pub last_hop: Option<TraceSignalEntry>,
+}
+
+impl From<RouteOffer> for RouteCandidate {
+    fn from(offer: RouteOffer) -> Self {
+        Self {
+            route: offer.route,
+            score: offer.score,
+            last_hop: offer.last_hop,
+        }
     }
 }
 
@@ -172,14 +280,15 @@ pub struct RouteHold {
     pub until_ms: u64,
     /// Flood budget past the end of the held route: what a send on it
     /// spends once its hints are consumed, or from the start for a direct
-    /// route. Replaces [`crate::ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS`] while
-    /// the hold lasts; zero floods nothing.
+    /// route. Replaces the slack [`crate::established_route_slack`] would
+    /// grant while the hold lasts; zero floods nothing. An ack along the
+    /// route spends whichever of the two is larger.
     pub flood_hops: u8,
     /// Consecutive sends on the held route that missed their acknowledgment
     /// and were then acknowledged through the flood fallback.
     pub fallback_acks: u8,
-    /// The best path learned while the hold was in force, with its score.
-    pub candidate: Option<(CachedRoute, Option<i16>)>,
+    /// The best path learned while the hold was in force.
+    pub candidate: Option<RouteCandidate>,
 }
 
 /// A snapshot of the route to one peer, for an application to present.
@@ -232,6 +341,9 @@ pub(crate) struct RouteOffer {
     pub supersedes: bool,
     /// The path is the one an acknowledgment came back on.
     pub acknowledgment: bool,
+    /// How the frame measured the route's last hop (see
+    /// [`CachedRoute::far_hop`]), if it did.
+    pub last_hop: Option<TraceSignalEntry>,
 }
 
 /// Outcome of inserting or updating an auto-learned peer.
@@ -449,14 +561,21 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
     /// Explicitly restore a route, overriding any passive-learning holdoff.
     ///
     /// Nothing has measured a route installed this way, so the first
-    /// received frame that offers a scored path replaces it.
+    /// received frame that offers a scored path replaces it. It is a learned
+    /// route put back, not one chosen by hand.
     pub fn update_route(&mut self, id: PeerId, route: CachedRoute) {
         let revision = self.next_revision();
         if let Some(peer) = self.get_mut(id) {
-            peer.select_route(Some(route), None, revision);
+            peer.select_route(RouteSelection::installed(route, false), revision);
             peer.failed_route = None;
         }
         self.drop_hold(id);
+    }
+
+    /// Record whether `id` advertises itself as mobile. `false` when the
+    /// peer is unknown.
+    pub fn set_mobile(&mut self, id: PeerId, mobile: bool) -> bool {
+        self.get_mut(id).map(|peer| peer.mobile = mobile).is_some()
     }
 
     /// Install `route` and hold it until `until_ms`, spending `flood_hops`
@@ -466,6 +585,10 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
     /// retires it; a send that misses still falls back to a flood. After the
     /// deadline it is an ordinary unscored route, which the next measured
     /// path replaces. Installing a route restarts the hold and its record.
+    ///
+    /// The route counts as chosen by hand until a learned one replaces it,
+    /// so once the hold and its allowance are over, no send along it
+    /// carries flood slack past its end.
     ///
     /// `false`, changing nothing, when the peer is unknown or `H` holds are
     /// already in force for other peers.
@@ -496,7 +619,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         }
         let revision = self.next_revision();
         let peer = self.get_mut(id).expect("peer was just found");
-        peer.select_route(Some(route), None, revision);
+        peer.select_route(RouteSelection::installed(route, true), revision);
         peer.failed_route = None;
         true
     }
@@ -507,13 +630,13 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         let Some(index) = self.hold_index(id, now_ms) else {
             return false;
         };
-        let Some((route, score)) = self.holds[index].1.candidate.take() else {
+        let Some(candidate) = self.holds[index].1.candidate.take() else {
             return false;
         };
         self.holds.swap_remove(index);
         let revision = self.next_revision();
         if let Some(peer) = self.get_mut(id) {
-            peer.select_route(Some(route), score, revision);
+            peer.select_route(RouteSelection::learned(candidate), revision);
         }
         true
     }
@@ -550,10 +673,20 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
     /// - A scored path displaces one nothing has measured.
     /// - Otherwise the offer has to score clearly better, and better still
     ///   when an acknowledgment has recently vouched for the route held.
+    ///
+    /// Whatever becomes of the route, an offer that measured the same last
+    /// hop as the route held refreshes its reading: that link is the same
+    /// link however the frame traveled after it.
     pub(crate) fn offer_route(&mut self, id: PeerId, offer: RouteOffer, now_ms: u64) {
         let Some(peer) = self.get_mut(id) else {
             return;
         };
+        if offer.last_hop.is_some()
+            && offer.route.far_hop().is_some()
+            && peer.route.as_ref().and_then(CachedRoute::far_hop) == offer.route.far_hop()
+        {
+            peer.route_last_hop = offer.last_hop;
+        }
         if let Some((failed, until)) = &peer.failed_route {
             if now_ms < *until
                 && (failed == &offer.route
@@ -604,7 +737,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         }
         let revision = self.next_revision();
         let peer = self.get_mut(id).expect("peer was just found");
-        peer.select_route(Some(offer.route), offer.score, revision);
+        peer.select_route(RouteSelection::learned(offer.into()), revision);
     }
 
     /// Forget a route explicitly; passive learning remains allowed.
@@ -614,7 +747,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         self.get_mut(id)
             .map(|peer| {
                 let held = peer.route.is_some();
-                peer.select_route(None, None, revision);
+                peer.select_route(RouteSelection::none(), revision);
                 peer.failed_route = None;
                 held
             })
@@ -645,7 +778,7 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         match peer.route.take() {
             Some(route) => {
                 peer.failed_route = Some((route, now_ms.saturating_add(FAILED_ROUTE_HOLDOFF_MS)));
-                peer.select_route(None, None, next_revision);
+                peer.select_route(RouteSelection::none(), next_revision);
                 RouteFailure::Retired
             }
             None => RouteFailure::Unrelated,
@@ -714,28 +847,28 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
 /// nothing has measured; between two measured paths the newcomer must clear
 /// the usual switching margin.
 fn better_candidate(
-    candidate: Option<(CachedRoute, Option<i16>)>,
+    candidate: Option<RouteCandidate>,
     offer: RouteOffer,
-) -> Option<(CachedRoute, Option<i16>)> {
+) -> Option<RouteCandidate> {
     if matches!(offer.route, CachedRoute::Flood { .. }) {
         return candidate;
     }
-    let Some((route, score)) = candidate else {
-        return Some((offer.route, offer.score));
+    let Some(candidate) = candidate else {
+        return Some(offer.into());
     };
-    if route == offer.route {
-        return Some((route, offer.score.or(score)));
+    if candidate.route == offer.route {
+        return Some(RouteCandidate {
+            score: offer.score.or(candidate.score),
+            last_hop: offer.last_hop.or(candidate.last_hop),
+            ..candidate
+        });
     }
-    let replace = match (score, offer.score) {
+    let replace = match (candidate.score, offer.score) {
         (_, None) => false,
         (None, Some(_)) => true,
         (Some(held), Some(new)) => crate::route_score::displaces(new, held, false),
     };
-    Some(if replace {
-        (offer.route, offer.score)
-    } else {
-        (route, score)
-    })
+    Some(if replace { offer.into() } else { candidate })
 }
 
 /// Per-peer secure transport state.

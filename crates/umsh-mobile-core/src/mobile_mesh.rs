@@ -735,6 +735,16 @@ impl core::fmt::Debug for HostPeerKeyEntryRecord {
     }
 }
 
+/// One peer the platform hands the session at registration.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MobilePeerRegistrationRecord {
+    /// The peer's canonical Base58 address.
+    pub address: String,
+    /// Whether the peer's stored advertisement says it is mobile. A live
+    /// advertisement heard afterwards supersedes this.
+    pub mobile: bool,
+}
+
 /// One channel the platform hands the session at registration.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MobileChannelRegistrationRecord {
@@ -749,7 +759,7 @@ pub struct MobileChannelRegistrationRecord {
 
 enum WorkerCommand {
     RegisterPeers {
-        peers: Vec<PublicKey>,
+        peers: Vec<(PublicKey, bool)>,
         response: oneshot::Sender<Result<(), MobileMeshError>>,
     },
     ExportHostPeerKeys {
@@ -2149,10 +2159,17 @@ impl MobileMeshSession {
             .map_err(|_| MobileMeshError::SessionUnavailable)?
     }
 
-    pub async fn register_peers(&self, peer_addresses: Vec<String>) -> Result<(), MobileMeshError> {
-        let peers = peer_addresses
+    pub async fn register_peers(
+        &self,
+        peers: Vec<MobilePeerRegistrationRecord>,
+    ) -> Result<(), MobileMeshError> {
+        let peers = peers
             .iter()
-            .map(|address| decode_peer(address).map_err(|_| MobileMeshError::InvalidPeer))
+            .map(|peer| {
+                decode_peer(&peer.address)
+                    .map(|key| (key, peer.mobile))
+                    .map_err(|_| MobileMeshError::InvalidPeer)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let (response, result) = oneshot::channel();
         self.commands
@@ -3540,11 +3557,12 @@ async fn run_worker(
                     match command {
                         Some(WorkerCommand::RegisterPeers { peers, response }) => {
                             let mut result = Ok(());
-                            for peer in peers {
+                            for (peer, mobile) in peers {
                                 if node.peer(peer).await.is_err() {
                                     result = Err(MobileMeshError::SendFailed);
                                     break;
                                 }
+                                node.set_peer_mobile(&peer, mobile).await;
                             }
                             let _ = response.send(result);
                         }
@@ -4943,6 +4961,14 @@ mod tests {
         identity.public_identity.canonical_address.clone()
     }
 
+    /// A peer registration for `address`, not known to be mobile.
+    fn stationary(address: String) -> MobilePeerRegistrationRecord {
+        MobilePeerRegistrationRecord {
+            address,
+            mobile: false,
+        }
+    }
+
     // ─── Reading a device whole, across the mesh ─────────────────────────
 
     fn is_reply(property: u32, value: &[u8]) -> Vec<u8> {
@@ -5602,10 +5628,10 @@ mod tests {
             .unwrap();
 
         alice
-            .register_peers(vec![address(&bob_identity)])
+            .register_peers(vec![stationary(address(&bob_identity))])
             .await
             .unwrap();
-        bob.register_peers(vec![address(&alice_identity)])
+        bob.register_peers(vec![stationary(address(&alice_identity))])
             .await
             .unwrap();
         complete_ping(&alice, &bob, address(&bob_identity)).await;
@@ -5629,7 +5655,7 @@ mod tests {
         // replay state still accepts Alice because her TX counter is
         // identity-scoped and survived the peer-table churn.
         alice
-            .register_peers(vec![address(&bob_identity)])
+            .register_peers(vec![stationary(address(&bob_identity))])
             .await
             .unwrap();
         complete_ping(&alice, &bob, address(&bob_identity)).await;
@@ -5732,7 +5758,7 @@ mod tests {
         let other = tokio::select! {
             other = tokio::time::timeout(
                 Duration::from_secs(5),
-                alice.register_peers(vec![address(&carol_identity)]),
+                alice.register_peers(vec![stationary(address(&carol_identity))]),
             ) => other,
             _ = complete_every_outbound_frame(&alice) => unreachable!(),
         };
@@ -6903,10 +6929,10 @@ mod tests {
             .unwrap();
         let alice_address = address(&alice_identity);
         alice
-            .register_peers(vec![address(&bob_identity)])
+            .register_peers(vec![stationary(address(&bob_identity))])
             .await
             .unwrap();
-        bob.register_peers(vec![alice_address.clone()])
+        bob.register_peers(vec![stationary(alice_address.clone())])
             .await
             .unwrap();
 
@@ -7015,10 +7041,10 @@ mod tests {
         let alice_address = address(&alice_identity);
         let bob_address = address(&bob_identity);
         alice
-            .register_peers(vec![bob_address.clone()])
+            .register_peers(vec![stationary(bob_address.clone())])
             .await
             .unwrap();
-        bob.register_peers(vec![alice_address.clone()])
+        bob.register_peers(vec![stationary(alice_address.clone())])
             .await
             .unwrap();
 
@@ -7118,7 +7144,7 @@ mod tests {
                 .unwrap();
         let session = MobileMeshSession::new(local_identity, store).await.unwrap();
         session
-            .register_peers(vec![address(&peer_identity)])
+            .register_peers(vec![stationary(address(&peer_identity))])
             .await
             .unwrap();
         let batch = session
@@ -7173,10 +7199,10 @@ mod tests {
             .unwrap();
         let bob_address = address(&bob_identity);
         alice
-            .register_peers(vec![bob_address.clone()])
+            .register_peers(vec![stationary(bob_address.clone())])
             .await
             .unwrap();
-        bob.register_peers(vec![address(&alice_identity)])
+        bob.register_peers(vec![stationary(address(&alice_identity))])
             .await
             .unwrap();
 
@@ -7919,7 +7945,7 @@ mod tests {
 
         let own_address = address(&identity);
         session
-            .register_peers(vec![own_address.clone()])
+            .register_peers(vec![stationary(own_address.clone())])
             .await
             .unwrap();
 
@@ -8065,10 +8091,10 @@ mod tests {
         .unwrap();
         let bob_address = address(&bob_identity);
         alice
-            .register_peers(vec![bob_address.clone()])
+            .register_peers(vec![stationary(bob_address.clone())])
             .await
             .unwrap();
-        bob.register_peers(vec![address(&alice_identity)])
+        bob.register_peers(vec![stationary(address(&alice_identity))])
             .await
             .unwrap();
 

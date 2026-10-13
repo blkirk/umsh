@@ -47,6 +47,7 @@ pub mod options;
 mod packet;
 #[cfg(feature = "region-codec")]
 mod region;
+mod route_slack;
 
 pub use builder::{
     BlindUnicastBuilder, BroadcastBuilder, MacAckBuilder, MulticastBuilder, PacketBuilder,
@@ -61,15 +62,10 @@ pub use packet::{
 };
 #[cfg(feature = "region-codec")]
 pub use region::{REGION_NAME_MAX_LEN, RegionCode, RegionCodeError};
-
-/// Optional flood hops beyond a learned source route or flood distance,
-/// shared by endpoint sends and delegated acknowledgements.
-///
-/// Keep one hop even for a peer heard directly: inbound reception does not
-/// establish reverse reachability. Source-route hints must be consumed before
-/// this allowance can be used. Originating sends still respect their flood
-/// ceiling, including disabled flooding.
-pub const ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS: u8 = 1;
+pub use route_slack::{
+    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, RouteEvidence, STRONG_DIRECT_RSSI_DBM,
+    WEAK_LAST_HOP_RSSI_DBM, established_route_slack,
+};
 
 #[cfg(test)]
 mod tests {

@@ -459,6 +459,7 @@ fn receive_one_auto_replies_to_echo_request() {
         .public_key()
         .hint();
     let request = encode_echo_command_payload(4, &[9, 8, 7, 6]);
+    mac.radio_mut().rx_rssi = -100;
     mac.radio_mut().queue_received_unicast_with_route(
         &remote,
         &keys,
@@ -478,8 +479,9 @@ fn receive_one_auto_replies_to_echo_request() {
     let header = PacketHeader::parse(response.frame.as_slice()).unwrap();
     let options =
         ParsedOptions::extract(response.frame.as_slice(), header.options_range.clone()).unwrap();
-    // Direct reception does not establish the return link. The response
-    // keeps a one-hop fallback and traces any repeater that carries it.
+    // Weak direct reception does not establish the return link. The
+    // response keeps a one-hop fallback and traces any repeater that
+    // carries it.
     assert!(
         options.trace_route.is_some(),
         "the optional return hop needs a trace"
@@ -3493,7 +3495,7 @@ fn receive_one_reacks_duplicate_unicast_within_eight_counter_window() {
     let duplicate_ack = mac.tx_queue_mut().pop_next().unwrap().frame;
 
     assert_eq!(deliveries, 1);
-    assert_eq!(duplicate_ack.as_slice(), original_ack.as_slice());
+    assert_reack_keeps_the_trailer_and_adds_the_slack(&original_ack, &duplicate_ack);
 
     mac.radio_mut().queue_received_unicast_with_counter(
         &remote,
@@ -4347,7 +4349,7 @@ fn receive_one_reacks_duplicate_blind_unicast_without_redelivery() {
     let duplicate_ack = mac.tx_queue_mut().pop_next().unwrap().frame;
 
     assert_eq!(deliveries, 1);
-    assert_eq!(duplicate_ack.as_slice(), original_ack.as_slice());
+    assert_reack_keeps_the_trailer_and_adds_the_slack(&original_ack, &duplicate_ack);
 }
 
 #[test]
@@ -5004,12 +5006,92 @@ fn unrepeatable_unicast_carries_no_trace_route_even_to_an_unrouted_peer() {
     assert!(!frame_has_trace_route(queued.frame.as_slice()));
 }
 
-/// The same rule on the reply side, and the case that actually reaches the
-/// air: once the destination knows the sender is a direct neighbour its ack
-/// carries no flood budget and no source route, so mirroring a trace onto it
-/// puts an unanswerable option on every acknowledgement.
+/// A weak direct link earns the optional hop, and a repeater that carries
+/// the ack over it answers the mirrored trace.
 #[test]
-fn mac_ack_to_a_directly_heard_peer_mirrors_trace_for_optional_hop() {
+fn mac_ack_to_a_weak_direct_peer_mirrors_trace_for_optional_hop() {
+    let (mut mac, peer_id) = receive_traced_frame_from_a_direct_peer(-100);
+    assert_eq!(
+        mac.peer_registry().get(peer_id).unwrap().route,
+        Some(CachedRoute::Direct)
+    );
+    let queued = mac.tx_queue_mut().pop_next().expect("queued mac ack");
+    let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
+    assert_eq!(header.fcf.packet_type(), PacketType::MacAck);
+    assert_eq!(header.flood_hops, FloodHops::new(1, 0));
+    assert!(frame_has_trace_route(queued.frame.as_slice()));
+}
+
+/// The same rule on the reply side, and the case that actually reaches the
+/// air: a direct neighbor heard strongly earns no slack, so its ack carries
+/// no flood budget and no source route, and mirroring a trace onto it would
+/// put an unanswerable option on every acknowledgment.
+#[test]
+fn mac_ack_to_a_strong_direct_peer_carries_no_flood_hops_or_trace() {
+    let (mut mac, _) = receive_traced_frame_from_a_direct_peer(-60);
+    let queued = mac.tx_queue_mut().pop_next().expect("queued mac ack");
+    let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
+    assert_eq!(header.fcf.packet_type(), PacketType::MacAck);
+    assert_eq!(header.flood_hops, None);
+    assert!(!frame_has_trace_route(queued.frame.as_slice()));
+}
+
+/// A re-ack answers the same frame, so it carries the same 8-byte trailer;
+/// the first ack evidently did not arrive, so the re-ack also carries the
+/// slack a strong direct link would not earn.
+fn assert_reack_keeps_the_trailer_and_adds_the_slack(original: &[u8], reack: &[u8]) {
+    assert_eq!(reack[reack.len() - 8..], original[original.len() - 8..]);
+    assert_eq!(PacketHeader::parse(original).unwrap().flood_hops, None);
+    assert_eq!(
+        PacketHeader::parse(reack).unwrap().flood_hops,
+        FloodHops::new(1, 0)
+    );
+}
+
+/// The sender retrying past the holdoff says the first ack never arrived,
+/// so the re-ack keeps the hop a strong direct link would not earn.
+#[test]
+fn reack_of_a_retransmission_keeps_the_slack() {
+    let (mut mac, _) = receive_traced_frame_from_a_direct_peer(-60);
+    let first = mac.tx_queue_mut().pop_next().expect("queued mac ack");
+    let header = PacketHeader::parse(first.frame.as_slice()).unwrap();
+    assert_eq!(header.flood_hops, None);
+
+    mac.clock().advance_ms(10_000);
+    let local_id = LocalIdentityId(0);
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.radio_mut().queue_received_unicast_with_route(
+        &remote,
+        &PairwiseKeys {
+            k_enc: [1; 32],
+            k_mic: [2; 32],
+        },
+        &dst_hint,
+        b"hello",
+        true,
+        7,
+        Some((3, 0)),
+        Some(&[]),
+        None,
+    );
+    assert!(block_on(mac.receive_one(|_, _| {})).unwrap());
+    let reack = mac.tx_queue_mut().pop_next().expect("queued re-ack");
+    let header = PacketHeader::parse(reack.frame.as_slice()).unwrap();
+    assert_eq!(header.fcf.packet_type(), PacketType::MacAck);
+    assert_eq!(header.flood_hops, FloodHops::new(1, 0));
+    assert!(frame_has_trace_route(reack.frame.as_slice()));
+}
+
+/// Receive an ack-requested unicast that was traced and flooded but arrived
+/// with an empty trace, at `rssi_dbm`: a direct neighbor, which is what the
+/// ack then has to route around.
+fn receive_traced_frame_from_a_direct_peer(rssi_dbm: i16) -> (TestMac, PeerId) {
     let mut mac = make_mac();
     let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
     let remote = DummyIdentity::new([0xAB; 32]);
@@ -5028,8 +5110,7 @@ fn mac_ack_to_a_directly_heard_peer_mirrors_trace_for_optional_hop() {
         .public_key()
         .hint();
 
-    // Traced and flooded, but it arrived with an empty trace: a direct
-    // neighbour, which is what the ack then has to route around.
+    mac.radio_mut().rx_rssi = rssi_dbm;
     mac.radio_mut().queue_received_unicast_with_route(
         &remote,
         &keys,
@@ -5042,15 +5123,7 @@ fn mac_ack_to_a_directly_heard_peer_mirrors_trace_for_optional_hop() {
         None,
     );
     assert!(block_on(mac.receive_one(|_, _| {})).unwrap());
-
-    assert_eq!(
-        mac.peer_registry().get(peer_id).unwrap().route,
-        Some(CachedRoute::Direct)
-    );
-    let queued = mac.tx_queue_mut().pop_next().expect("queued mac ack");
-    let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
-    assert_eq!(header.fcf.packet_type(), PacketType::MacAck);
-    assert!(frame_has_trace_route(queued.frame.as_slice()));
+    (mac, peer_id)
 }
 
 /// The evidence an empty trace route used to carry, read off the frame's own
@@ -5472,10 +5545,6 @@ fn send_unicast_uses_cached_source_route_when_present() {
     );
 }
 
-/// The `FHOPS_REM` a send narrowed to the established-route slack carries.
-///
-/// Zero slack is not `Some(0)`: a field granting no forward says nothing a
-/// missing field does not, so the send leaves it off.
 /// A trace route's value: the hints, nearest first.
 fn encode_trace(trace: &[RouterHint]) -> ([u8; 30], usize) {
     let mut encoded = [0u8; 30];
@@ -5486,7 +5555,8 @@ fn encode_trace(trace: &[RouterHint]) -> ([u8; 30], usize) {
 }
 
 /// A trace signal's value for SNR readings in centibels, nearest first. The
-/// RSSI in each entry is an arbitrary reading; route scoring ignores it.
+/// RSSI in each entry is a weak reading, so the route's last hop earns its
+/// slack; route scoring ignores it.
 fn encode_trace_signal(snr_centibels: &[i16]) -> ([u8; 30], usize) {
     let mut encoded = [0u8; 30];
     for (at, snr) in snr_centibels.iter().enumerate() {
@@ -5495,6 +5565,10 @@ fn encode_trace_signal(snr_centibels: &[i16]) -> ([u8; 30], usize) {
     (encoded, 2 * snr_centibels.len())
 }
 
+/// The `FHOPS_REM` a send narrowed to the established-route slack carries.
+///
+/// Zero slack is not `Some(0)`: a field granting no forward says nothing a
+/// missing field does not, so the send leaves it off.
 const ESTABLISHED_ROUTE_SLACK_FIELD: Option<u8> = if ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS > 0 {
     Some(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
 } else {
@@ -5639,6 +5713,105 @@ fn send_unicast_keeps_flooding_disabled_for_a_routed_peer() {
         &peer_key,
         &SendOptions::default().no_flood(),
     );
+
+    assert_eq!(hops, None);
+}
+
+/// The flood hops a unicast goes out with to a peer this node has heard
+/// once, as `trace` and the RSSI readings of its trace signal (nearest
+/// first) describe. An empty trace is the peer heard directly, at
+/// `rssi_dbm`.
+fn flood_hops_after_hearing(
+    rssi_dbm: i16,
+    trace: &[RouterHint],
+    signal_rssi_dbm: &[i16],
+    mobile: bool,
+) -> Option<u8> {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_key = *remote.public_key();
+    let peer_id = mac.add_peer(peer_key).unwrap();
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    assert!(mac.peer_registry_mut().set_mobile(peer_id, mobile));
+    let dst = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    let signal: std::vec::Vec<u8> = signal_rssi_dbm
+        .iter()
+        .flat_map(|rssi| TraceSignalEntry::new(*rssi, 0).as_bytes())
+        .collect();
+    mac.radio_mut().rx_rssi = rssi_dbm;
+    mac.radio_mut()
+        .queue_received_traced_unicast_with_signal(&remote, &keys, &dst, 7, trace, &signal);
+    assert!(block_on(mac.receive_one(|_, _| {})).unwrap());
+    queued_unicast_flood_hops(&mut mac, local_id, &peer_key, &SendOptions::default())
+}
+
+#[test]
+fn a_direct_peer_earns_slack_only_when_heard_weakly_or_mobile() {
+    for (rssi_dbm, mobile, expected) in [
+        (-60, false, None),
+        (-80, false, None),
+        (-95, false, None),
+        (-100, false, Some(1)),
+        // A peer heard strongly is close enough not to have wandered off.
+        (-60, true, None),
+        (-80, true, Some(1)),
+    ] {
+        assert_eq!(
+            flood_hops_after_hearing(rssi_dbm, &[], &[], mobile),
+            expected,
+            "rssi={rssi_dbm} mobile={mobile}"
+        );
+    }
+}
+
+#[test]
+fn a_routed_peer_earns_slack_past_a_weak_last_hop_or_when_mobile() {
+    let trace = [RouterHint([1, 1]), RouterHint([2, 2])];
+    // The last entry is how the first repeater heard the peer.
+    for (last_hop_dbm, mobile, expected) in [
+        (-60, false, None),
+        (-90, false, None),
+        (-100, false, Some(1)),
+        (-60, true, Some(1)),
+    ] {
+        assert_eq!(
+            flood_hops_after_hearing(-50, &trace, &[-50, last_hop_dbm], mobile),
+            expected,
+            "last hop={last_hop_dbm} mobile={mobile}"
+        );
+    }
+}
+
+#[test]
+fn a_routed_peer_with_an_unattributable_signal_earns_slack() {
+    let trace = [RouterHint([1, 1]), RouterHint([2, 2])];
+    assert_eq!(
+        flood_hops_after_hearing(-50, &trace, &[-50], false),
+        Some(1)
+    );
+}
+
+#[test]
+fn a_source_route_chosen_for_one_send_carries_no_slack() {
+    let (mut mac, local_id, peer_key, peer_id) = mac_with_keyed_peer();
+    mac.peer_registry_mut()
+        .update_route(peer_id, CachedRoute::Direct);
+
+    let options = SendOptions::default()
+        .try_with_source_route(&[RouterHint([1, 1])])
+        .unwrap();
+    let hops = queued_unicast_flood_hops(&mut mac, local_id, &peer_key, &options);
 
     assert_eq!(hops, None);
 }
@@ -11726,8 +11899,29 @@ impl DummyRadio {
         trace: &[RouterHint],
         snr_centibels: &[i16],
     ) {
-        let (hints, hints_len) = encode_trace(trace);
         let (signal, signal_len) = encode_trace_signal(snr_centibels);
+        self.queue_received_traced_unicast_with_signal(
+            source,
+            keys,
+            dst,
+            frame_counter,
+            trace,
+            &signal[..signal_len],
+        );
+    }
+
+    /// As [`Self::queue_received_traced_unicast`], with the trace signal's
+    /// encoded value given whole.
+    fn queue_received_traced_unicast_with_signal(
+        &mut self,
+        source: &DummyIdentity,
+        keys: &PairwiseKeys,
+        dst: &umsh_core::NodeHint,
+        frame_counter: u32,
+        trace: &[RouterHint],
+        signal: &[u8],
+    ) {
+        let (hints, hints_len) = encode_trace(trace);
         let mut buf = [0u8; 256];
         let mut packet = PacketBuilder::new(&mut buf)
             .unicast(*dst)
@@ -11736,7 +11930,7 @@ impl DummyRadio {
             .encrypted()
             .flood_hops(2)
             .option(OptionNumber::TraceRoute, &hints[..hints_len])
-            .option(OptionNumber::TraceSignal, &signal[..signal_len])
+            .option(OptionNumber::TraceSignal, signal)
             .payload(b"reply")
             .build()
             .unwrap();

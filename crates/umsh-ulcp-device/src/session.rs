@@ -3,10 +3,10 @@
 use core::str::FromStr;
 
 use heapless::{Deque, Vec as HeaplessVec};
-use umsh_core::options::{OptionDecoder, OptionEncoder};
+use umsh_core::options::{OptionDecoder, OptionEncoder, TraceSignalEntry};
 use umsh_core::{
-    ChannelKey, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, EncodeError, NodeHint, OptionNumber,
-    PacketBuilder, PacketHeader, PacketType, ParsedOptions, RegionCode, SourceAddrRef,
+    ChannelKey, EncodeError, NodeHint, OptionNumber, PacketBuilder, PacketHeader, PacketType,
+    ParsedOptions, RegionCode, RouteEvidence, SourceAddrRef, established_route_slack,
 };
 use umsh_crypto::replay::{ReplayVerdict, ReplayWindow};
 use umsh_crypto::{AesProvider, CryptoEngine, PairwiseKeys, Sha256Provider};
@@ -661,6 +661,15 @@ struct AckPlan {
     trailer: [u8; 8],
     /// The way back to the sender.
     route: AckReturn,
+    /// Flood hops the way back costs before any slack: the sender's
+    /// distance for a flooded return, nothing for a direct or routed one.
+    distance: u8,
+    /// The least `FHOPS_REM` the ack may carry, for a way back nothing on
+    /// the frame measured.
+    floor: u8,
+    /// What the frame says about the way back's far end, which decides the
+    /// slack past it.
+    evidence: RouteEvidence,
     /// Whether the ack carries a trace route: the acknowledged frame had to
     /// flood here, so its sender holds no working path to us, or it carried
     /// a trace of its own, which the ack mirrors. It goes on an ack a
@@ -691,26 +700,17 @@ const UNROUTED_ACK_FLOOD_HOPS: u8 = 5;
 /// from (beacons.md § Route Learning). The device has no route cache
 /// for the host's peers, so the frame is the whole of the evidence.
 enum AckReturn {
-    /// Heard directly; the reverse link still needs an optional flood hop.
+    /// Heard directly.
     Direct,
-    /// Flood back at this `FHOPS_REM`.
-    Flood(u8),
+    /// Flood back.
+    Flood,
     /// Steer back down the trace the frame accumulated, which repeaters
     /// prepend to and so already reads in return order.
     Source(HeaplessVec<umsh_core::RouterHint, MAX_ACK_ROUTE_HINTS>),
 }
 
-impl AckReturn {
-    fn flood_hops(&self) -> u8 {
-        match self {
-            Self::Flood(hops) => (*hops).clamp(1, 15),
-            Self::Direct | Self::Source(_) => ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS,
-        }
-    }
-}
-
 impl AckPlan {
-    /// Read the way back off `frame`.
+    /// Read the way back off `frame`, received as `rx` describes.
     ///
     /// The precedence is the MAC's: a trace names the path and wins; an
     /// empty trace is a direct neighbor. Without one, a source-route
@@ -719,39 +719,91 @@ impl AckPlan {
     /// never saw, so `FHOPS_ACC` is not a distance and the ack floods at
     /// a default instead. A flood hop count alone is a distance. Nothing
     /// at all means no repeater could have carried the frame here.
-    fn new(trailer: [u8; 8], frame: &[u8], header: &PacketHeader) -> Self {
+    ///
+    /// The slack past the way back is the MAC's too
+    /// ([`established_route_slack`]), judged from the frame alone: this
+    /// reception for a sender heard directly, the trace signal's entry for
+    /// the first repeater that heard it otherwise. Whether the sender is
+    /// mobile is not something the device knows, and the frame has only
+    /// just measured the path.
+    fn new(trailer: [u8; 8], frame: &[u8], header: &PacketHeader, rx: &RadioRxInfo) -> Self {
+        // This reception, as the last hop of a way back nothing relayed.
+        let heard_directly = rx
+            .rssi_dbm
+            .map_or(TraceSignalEntry::POINT_TO_POINT, |rssi| {
+                TraceSignalEntry::new(rssi, rx.snr_cb.unwrap_or(0))
+            });
+        let evidence = |direct: bool, last_hop: Option<TraceSignalEntry>| RouteEvidence {
+            direct,
+            last_hop,
+            ..RouteEvidence::default()
+        };
+        let direct = (
+            AckReturn::Direct,
+            0,
+            0,
+            evidence(true, Some(heard_directly)),
+        );
+        // A flood distance of zero came off the sender's own transmitter.
+        let flood_back = |accumulated: u8| {
+            let direct = accumulated == 0;
+            (
+                AckReturn::Flood,
+                accumulated,
+                0,
+                evidence(direct, direct.then_some(heard_directly)),
+            )
+        };
         let accumulated = header.flood_hops.map(|hops| hops.accumulated());
         let flooded = accumulated.is_some_and(|hops| hops > 0);
         let Ok(options) = ParsedOptions::extract(frame, header.options_range.clone()) else {
+            let (route, distance, floor, evidence) = match accumulated {
+                Some(accumulated) => flood_back(accumulated),
+                None => direct,
+            };
             return Self {
                 trailer,
-                route: accumulated.map_or(AckReturn::Direct, |hops| {
-                    AckReturn::Flood(hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS))
-                }),
+                route,
+                distance,
+                floor,
+                evidence,
                 trace: flooded,
                 regions: HeaplessVec::new(),
                 replay: None,
             };
         };
         let trace = flooded || options.trace_route.is_some();
-        let traced = options
+        let trace_bytes = options
             .trace_route
             .clone()
-            .and_then(|range| frame.get(range))
-            .and_then(Self::route_from_trace);
-        let route = match (traced, options.source_route.is_some(), accumulated) {
-            (Some(route), _, _) if route.is_empty() => AckReturn::Direct,
-            (Some(route), _, _) => AckReturn::Source(route),
-            (None, true, tail) => AckReturn::Flood(
-                tail.unwrap_or(0)
-                    .saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS)
-                    .max(UNROUTED_ACK_FLOOD_HOPS),
-            ),
-            (None, false, Some(flood_hops)) => {
-                AckReturn::Flood(flood_hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS))
-            }
-            (None, false, None) => AckReturn::Direct,
-        };
+            .and_then(|range| frame.get(range));
+        let traced = trace_bytes.and_then(Self::route_from_trace);
+        let (route, distance, floor, evidence) =
+            match (traced, options.source_route.is_some(), accumulated) {
+                (Some(route), _, _) if route.is_empty() => direct,
+                (Some(route), _, _) => {
+                    // The earliest entry, at the end of the list, is how the
+                    // first repeater heard the sender: the way back's last hop.
+                    let last_hop = options
+                        .trace_signal
+                        .clone()
+                        .and_then(|range| frame.get(range))
+                        .filter(|signal| Some(signal.len()) == trace_bytes.map(<[u8]>::len))
+                        .map(|signal| {
+                            let at = signal.len() - 2;
+                            TraceSignalEntry::from_bytes([signal[at], signal[at + 1]])
+                        });
+                    (AckReturn::Source(route), 0, 0, evidence(false, last_hop))
+                }
+                (None, true, tail) => (
+                    AckReturn::Flood,
+                    tail.unwrap_or(0),
+                    UNROUTED_ACK_FLOOD_HOPS,
+                    evidence(false, None),
+                ),
+                (None, false, Some(accumulated)) => flood_back(accumulated),
+                (None, false, None) => direct,
+            };
         let mut regions = HeaplessVec::new();
         if !header.options_range.is_empty() {
             for entry in umsh_core::iter_options(frame, header.options_range.clone()) {
@@ -769,10 +821,36 @@ impl AckPlan {
         Self {
             trailer,
             route,
+            distance,
+            floor,
+            evidence,
             trace,
             regions,
             replay: None,
         }
+    }
+
+    /// The same ack for a retransmission of a frame already acknowledged:
+    /// the earlier ack did not arrive, so this one keeps the slack.
+    fn for_retransmission(mut self) -> Self {
+        self.evidence.peer_retransmitted = true;
+        self
+    }
+
+    /// The ack's `FHOPS_REM`: the way back's flood distance plus any slack
+    /// past it. Zero is an ack no repeater may carry, which goes out with
+    /// no flood-hop field at all.
+    fn flood_hops(&self) -> u8 {
+        self.distance
+            .saturating_add(established_route_slack(self.evidence))
+            .max(self.floor)
+            .min(15)
+    }
+
+    /// Whether the ack carries its trace route. A trace on an ack no
+    /// repeater may carry could only arrive empty.
+    fn traced(&self) -> bool {
+        self.trace && (self.flood_hops() > 0 || matches!(self.route, AckReturn::Source(_)))
     }
 
     /// The trace's hints as a source route, or `None` for a trace no
@@ -4195,7 +4273,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             if !self.host.accepts_queued_frame(data) {
                 return None;
             }
-            return match self.evaluate_detached_rx(data, now_ms) {
+            return match self.evaluate_detached_rx(data, info, now_ms) {
                 SecureRx::Duplicate { ack, identity } => {
                     // Coalesced with the existing queue entry. A
                     // confirmed re-ack marks the original entry, which
@@ -4270,7 +4348,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// host keys and update the source peer's replay window. Crypto
     /// runs on a scratch copy: the queue always holds the original wire
     /// bytes, exactly as the host would have received them live.
-    fn evaluate_detached_rx(&mut self, data: &[u8], now_ms: u64) -> SecureRx {
+    fn evaluate_detached_rx(&mut self, data: &[u8], info: &RadioRxInfo, now_ms: u64) -> SecureRx {
         let Ok(header) = PacketHeader::parse(data) else {
             return SecureRx::Plain;
         };
@@ -4441,6 +4519,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 self.engine.compute_ack_trailer(&full_mac, &keys.k_enc),
                 data,
                 &header,
+                info,
             )
         });
         let identity = RxIdentity::new(counter, mic);
@@ -4478,10 +4557,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 // for the MAC's forwarding-confirmation window,
                 // `2 × T_frame + W_max + W_jitter + D_ack` = 2.85 × T_frame.
                 let holdoff_ms = u64::from(airtime_ms) * 285 / 100;
+                // A copy past the holdoff is the sender retrying because
+                // no ack reached it, so the re-ack keeps the slack.
                 let ack = window
                     .can_acknowledge_duplicate(counter, mic, now_ms, holdoff_ms)
                     .then_some(())
-                    .and(plan);
+                    .and(plan)
+                    .map(AckPlan::for_retransmission);
                 SecureRx::Duplicate { ack, identity }
             }
             // A suspected replay outside the window is not identified
@@ -4503,10 +4585,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         }
         // Includes a full trace/source route, flood allowance, and regions.
         let mut buf = [0u8; 96];
-        let mut builder = PacketBuilder::new(&mut buf)
-            .mac_ack(plan.trailer)
-            .flood_hops(plan.route.flood_hops());
-        if plan.trace {
+        let mut builder = PacketBuilder::new(&mut buf).mac_ack(plan.trailer);
+        let flood_hops = plan.flood_hops();
+        if flood_hops > 0 {
+            builder = builder.flood_hops(flood_hops);
+        }
+        let traced = plan.traced();
+        if traced {
             builder = builder.trace_route();
         }
         if let AckReturn::Source(hints) = &plan.route {
@@ -4514,7 +4599,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         }
         // Option order puts the signal after the source route; it rides
         // with the trace so the origin can weigh the path it learns.
-        if plan.trace {
+        if traced {
             builder = builder.trace_signal();
         }
         for region in &plan.regions {
@@ -14619,9 +14704,19 @@ mod tests {
 
     /// Feed a detached frame; detached processing must emit nothing.
     fn rx_effect(session: &mut TestSession, frame: &[u8], now_ms: u64) -> Option<Effect> {
+        rx_effect_at(session, frame, now_ms, -80)
+    }
+
+    /// As [`rx_effect`], received at `rssi_dbm`.
+    fn rx_effect_at(
+        session: &mut TestSession,
+        frame: &[u8],
+        now_ms: u64,
+        rssi_dbm: i16,
+    ) -> Option<Effect> {
         session.on_radio_rx(
             frame,
-            &RadioRxInfo::measured(-80, 40, None),
+            &RadioRxInfo::measured(rssi_dbm, 40, None),
             now_ms,
             &mut |_: &[u8]| panic!("detached receive must not emit"),
         )
@@ -15655,16 +15750,44 @@ mod tests {
         let mut session = auto_ack_session();
         let keys = test_pairwise();
 
-        // Direct reception: one optional return hop.
-        let effect = rx_effect(&mut session, &sealed_unar(1, &keys, false), 0);
-        assert_eq!(effect, Some(Effect::StartTransmit));
-        let header = PacketHeader::parse(session.tx_data()).unwrap();
-        assert_eq!(header.flood_hops, umsh_core::FloodHops::new(1, 0));
-        session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        // Direct reception: one optional return hop only when the sender
+        // was heard weakly. Anything stronger acks with no flood field.
+        for (counter, rssi_dbm, expected) in [
+            (1, -100, umsh_core::FloodHops::new(1, 0)),
+            (2, -80, None),
+            (3, -60, None),
+        ] {
+            let effect = rx_effect_at(
+                &mut session,
+                &sealed_unar(counter, &keys, false),
+                0,
+                rssi_dbm,
+            );
+            assert_eq!(effect, Some(Effect::StartTransmit));
+            let header = PacketHeader::parse(session.tx_data()).unwrap();
+            assert_eq!(header.flood_hops, expected, "rssi={rssi_dbm}");
+            session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        }
+
+        // A flood nobody forwarded came off the sender's own transmitter:
+        // the same rule.
+        for (counter, rssi_dbm, expected) in [(4, -100, Some(1)), (5, -80, None)] {
+            let frame = sealed_flooded_unar(counter, &keys, 0);
+            let effect = rx_effect_at(&mut session, &frame, 0, rssi_dbm);
+            assert_eq!(effect, Some(Effect::StartTransmit));
+            let header = PacketHeader::parse(session.tx_data()).unwrap();
+            assert_eq!(
+                header.flood_hops.map(|hops| hops.remaining()),
+                expected,
+                "rssi={rssi_dbm}"
+            );
+            session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        }
 
         // Flooded traffic: the ack's remaining hops seed from the
-        // received frame's accumulated count.
-        for (accumulated, expected_remaining) in [(3u8, 4u8), (0, 1), (15, 15)] {
+        // received frame's accumulated count, plus the slack an unmeasured
+        // way back earns.
+        for (accumulated, expected_remaining) in [(3u8, 4u8), (15, 15)] {
             let frame = sealed_flooded_unar(u32::from(accumulated) + 10, &keys, accumulated);
             let effect = rx_effect(&mut session, &frame, 0);
             assert_eq!(
@@ -15784,18 +15907,23 @@ mod tests {
         assert_eq!(ack_route_options(&ack), (Some(trace[..2].to_vec()), true));
         session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
 
-        // An empty trace is a direct observation: keep the traced optional
-        // return hop because the reverse radio link may be asymmetric.
-        let frame = sealed_routed_unar(3, &keys, Some(&[]), None);
-        let effect = rx_effect(&mut session, &frame, 0);
-        assert_eq!(effect, Some(Effect::StartTransmit));
-        let ack = session.tx_data().to_vec();
-        assert_eq!(
-            PacketHeader::parse(&ack).unwrap().flood_hops,
-            umsh_core::FloodHops::new(1, 0)
-        );
-        assert_eq!(ack_route_options(&ack), (None, true));
-        session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        // An empty trace is a direct observation. Heard weakly, keep the
+        // traced optional return hop, since the reverse radio link may be
+        // asymmetric; heard any better, the ack goes direct, and a trace
+        // no repeater may answer stays off it.
+        for (counter, rssi_dbm, expected) in [
+            (3, -100, (umsh_core::FloodHops::new(1, 0), true)),
+            (4, -80, (None, false)),
+        ] {
+            let frame = sealed_routed_unar(counter, &keys, Some(&[]), None);
+            let effect = rx_effect_at(&mut session, &frame, 0, rssi_dbm);
+            assert_eq!(effect, Some(Effect::StartTransmit));
+            let ack = session.tx_data().to_vec();
+            let (flood_hops, traced) = expected;
+            assert_eq!(PacketHeader::parse(&ack).unwrap().flood_hops, flood_hops);
+            assert_eq!(ack_route_options(&ack), (None, traced), "rssi={rssi_dbm}");
+            session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        }
 
         // No trace at all: nothing on the frame says how far the sender
         // is, and its flood tail is known short, so the ack floods at
@@ -15821,6 +15949,72 @@ mod tests {
             );
             let flooded = tail.is_some_and(|hops| hops > 0);
             assert_eq!(ack_route_options(&ack), (None, flooded), "tail={tail:?}");
+            session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
+        }
+    }
+
+    /// A retransmission past the holdoff says the first ack did not
+    /// arrive, so the re-ack keeps the hop the link alone would not earn.
+    #[test]
+    fn a_reack_keeps_slack_a_strong_direct_link_would_not_earn() {
+        let mut session = auto_ack_session();
+        let keys = test_pairwise();
+        let frame = sealed_routed_unar(1, &keys, Some(&[]), None);
+        for (now_ms, expected) in [
+            (0, (None, false)),
+            (10_000, (umsh_core::FloodHops::new(1, 0), true)),
+        ] {
+            let effect = rx_effect_at(&mut session, &frame, now_ms, -60);
+            assert_eq!(effect, Some(Effect::StartTransmit), "at {now_ms}");
+            let ack = session.tx_data().to_vec();
+            let (flood_hops, traced) = expected;
+            assert_eq!(PacketHeader::parse(&ack).unwrap().flood_hops, flood_hops);
+            assert_eq!(ack_route_options(&ack), (None, traced), "at {now_ms}");
+            session.on_tx_result(TxOutcome::Sent, now_ms, &mut |_: &[u8]| {});
+        }
+    }
+
+    /// A traced frame whose trace signal pairs with its trace: the earliest
+    /// entry, how the first repeater heard the sender, decides the slack.
+    #[test]
+    fn a_traced_ack_keeps_slack_only_past_a_weak_last_hop() {
+        let mut session = auto_ack_session();
+        let keys = test_pairwise();
+        let trace = [0xA1, 0xB2, 0xC3, 0xD4];
+        for (counter, first_hop_rssi, expected) in
+            [(1, -90, None), (2, -100, umsh_core::FloodHops::new(1, 0))]
+        {
+            let signal: Vec<u8> = [
+                TraceSignalEntry::new(-50, 0),
+                TraceSignalEntry::new(first_hop_rssi, 0),
+            ]
+            .iter()
+            .flat_map(|entry| entry.as_bytes())
+            .collect();
+            let mut buf = [0u8; 96];
+            let mut packet = PacketBuilder::new(&mut buf)
+                .unicast(NodeHint([0xC4, 0xC4, 0xC4]))
+                .source_hint(NodeHint([0x0A, 0x0A, 0x0A]))
+                .frame_counter(counter)
+                .ack_requested()
+                .mic_size(MicSize::Mic8)
+                .option(OptionNumber::TraceRoute, &trace)
+                .option(OptionNumber::SourceRoute, &[])
+                .option(OptionNumber::TraceSignal, &signal)
+                .payload(&[3, 1, 2])
+                .build()
+                .unwrap();
+            test_engine().seal_packet(&mut packet, &keys).unwrap();
+            let effect = rx_effect(&mut session, packet.as_bytes(), 0);
+            assert_eq!(effect, Some(Effect::StartTransmit));
+            let ack = session.tx_data().to_vec();
+            assert_eq!(
+                PacketHeader::parse(&ack).unwrap().flood_hops,
+                expected,
+                "first hop at {first_hop_rssi}"
+            );
+            // Routed back either way, so the trace is answerable.
+            assert_eq!(ack_route_options(&ack), (Some(trace.to_vec()), true));
             session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
         }
     }

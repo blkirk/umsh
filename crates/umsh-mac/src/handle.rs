@@ -604,6 +604,21 @@ impl<
         true
     }
 
+    /// Record whether `peer` advertises itself as mobile, returning whether
+    /// the peer was registered to receive it.
+    ///
+    /// A mobile peer keeps a flood hop of slack past the end of its route
+    /// (see [`umsh_core::established_route_slack`]). Only for a peer already
+    /// registered, for the same reason as [`Self::restore_peer_route`]; a
+    /// peer registered later starts out not known to be mobile.
+    pub async fn set_peer_mobile(&self, peer: &umsh_core::PublicKey, mobile: bool) -> bool {
+        let mut mac = self.mac.borrow_mut().await;
+        let Some((peer_id, _)) = mac.peer_registry().lookup_by_key(peer) else {
+            return false;
+        };
+        mac.peer_registry_mut().set_mobile(peer_id, mobile)
+    }
+
     /// Install `route` for `peer` and hold it for `hold_ms`, returning
     /// whether it took: the peer must be registered, and the MAC must have
     /// room for another hold (its `HOLDS` parameter).
@@ -665,8 +680,11 @@ impl<
             hold_remaining_ms: hold.map(|hold| hold.until_ms - now_ms),
             hold_flood_hops: hold.map(|hold| hold.flood_hops),
             fallback_acks: hold.map_or(0, |hold| hold.fallback_acks),
-            candidate: hold
-                .and_then(|hold| hold.candidate.as_ref().map(|(route, _)| route.clone())),
+            candidate: hold.and_then(|hold| {
+                hold.candidate
+                    .as_ref()
+                    .map(|candidate| candidate.route.clone())
+            }),
             confirmed_age_ms: info
                 .route_confirmed_ms()
                 .map(|at| now_ms.saturating_sub(at)),

@@ -968,17 +968,17 @@ actor FakeRadioConnection: RadioConnection {
     }
 
     func prepareChat(
-        peerAddresses: [String],
+        peers: [MobilePeerRegistrationRecord],
         checkpoints: [MobileChatCheckpointRecord]
     ) async throws {
         guard let meshSession else { return }
-        try await meshSession.registerPeers(peerAddresses: peerAddresses)
+        try await meshSession.registerPeers(peers: peers)
         try await meshSession.restoreChat(checkpoints: checkpoints)
     }
 
-    func registerChatPeers(_ peerAddresses: [String]) async throws {
+    func registerChatPeers(_ peers: [MobilePeerRegistrationRecord]) async throws {
         guard let meshSession else { return }
-        try await meshSession.registerPeers(peerAddresses: peerAddresses)
+        try await meshSession.registerPeers(peers: peers)
     }
 
     func removeChatPeers(_ peerAddresses: [String]) async throws {

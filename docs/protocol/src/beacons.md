@@ -130,17 +130,23 @@ Recovery stays within the sender's original flood ceiling; disabled flooding doe
 
 ## Scoping Flood Hops to a Known Route
 
-A wide flood hop count is a first-contact cost. Once routing state exists for a destination, the sender SHOULD scope `FHOPS_REM` to what the known path actually costs, plus a small margin:
+A wide flood hop count is a first-contact cost. Once routing state exists for a destination, the sender SHOULD scope `FHOPS_REM` to what the known path actually costs, plus a margin where the far end of the path is in doubt:
 
 - **Source route**: named repeaters consume hints without spending flood budget; the margin is available only after all hints are consumed.
 - **Flood distance**: the cached `FHOPS_ACC` is the radius at which the destination was last heard.
-- **Direct observation**: no repeater carried the observed packet, but the reverse direction may still need one.
+- **Direct observation**: no repeater carried the observed packet.
 
-The margin—one hop is a reasonable default—keeps delivery self-healing when the path has grown by a hop since it was learned, without paying for a mesh-wide flood on every packet. A route that has failed outright is repaired through the route-retry behavior above, which floods at the sender's full budget rather than the narrowed one.
+The margin is one flood hop. It keeps delivery self-healing when the destination has moved since the path was learned, without paying for a mesh-wide flood on every packet. What decides it is the path's *last hop*: the link between the destination and the first node that heard it. For a direct observation that node is the sender itself; for a traced path it is the earliest repeater in the trace, whose [trace signal](packet-options.md#trace-signal-option-10) entry records how it heard the destination. A cached flood distance names no last hop. The sender SHOULD include the margin when:
 
-The margin also accommodates asymmetric links: a direct observation can still require a repeater in the reverse direction. ACKs can use the same allowance, retaining the request's region codes to scope any flooding even when the ACK also follows a source route. A consumed source route without a usable return trace supplies no total distance; a direct observation alone is insufficient to bound that ACK's return path. The request's flood ceiling governs the request, not the ACK's independently selected return path.
+- the destination advertises itself as mobile (the `MOB` bit of its [capabilities](node-identity.md#capability-bitmap)), unless it was observed directly and strongly;
+- the last hop was never measured; or
+- the last hop was measured weak.
 
-An optional hop does not imply that a repeater is present. Not hearing a repeat is therefore insufficient reason to retransmit a directly addressed packet that requests no ACK, or an ACK sent directly with that allowance. Strong reception does not establish reverse reachability, and a successful exchange with the margin does not show it was unnecessary.
+The sender MAY omit the margin when the destination was observed directly and strongly or across a point-to-point link, when the last hop was measured without being weak, or when the application chose the path rather than learned it. Stronger than −75 dBm is a reasonable bar for a strong direct observation, and −96 dBm or weaker a reasonable bar for a weak last hop. A later packet whose path ends at the same last hop refreshes its measurement, whether or not that path replaces the one in use. A route that has failed outright is repaired through the route-retry behavior above, which floods at the sender's full budget rather than the narrowed one.
+
+A weak direct observation keeps the margin partly because the reverse direction may need a repeater the observed packet did not. ACKs can use the same margin, judged from the path the request taught, retaining the request's region codes to scope any flooding even when the ACK also follows a source route. A strong link can still be one-way, so an ACK for a retransmission of a packet already acknowledged SHOULD carry the margin whatever its path: the retransmission shows the earlier ACK did not arrive. A consumed source route without a usable return trace supplies no total distance; a direct observation alone is insufficient to bound that ACK's return path. The request's flood ceiling governs the request, not the ACK's independently selected return path.
+
+An optional hop does not imply that a repeater is present. Not hearing a repeat is therefore insufficient reason to retransmit a directly addressed packet that requests no ACK, or an ACK sent directly with that allowance. A successful exchange with the margin does not show it was unnecessary.
 
 ## Potential Improvement: Proactive Route Refresh
 

@@ -43,8 +43,11 @@ actor StagingMeshAir: FakeRadioAir {
     func registerPhone(address: String) async {
         phoneAddress = address
         guard let peers else { return }
+        // The phone's identity always advertises itself as mobile.
         for peer in peers {
-            try? await peer.session.registerPeers(peerAddresses: [address])
+            try? await peer.session.registerPeers(
+                peers: [MobilePeerRegistrationRecord(address: address, mobile: true)]
+            )
         }
     }
 
@@ -217,7 +220,9 @@ actor StagingMeshAir: FakeRadioAir {
                     )
                 }
                 if let phoneAddress {
-                    try await session.registerPeers(peerAddresses: [phoneAddress])
+                    try await session.registerPeers(
+                        peers: [MobilePeerRegistrationRecord(address: phoneAddress, mobile: true)]
+                    )
                 }
                 let listener = StagedPeerWakeListener(air: self, peerIndex: built.count)
                 wakeListeners.append(listener)

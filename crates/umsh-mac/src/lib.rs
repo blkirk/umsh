@@ -244,7 +244,10 @@ pub const DEFAULT_ROUTE_HOLDS: usize = 0;
 /// further" into "do not flood at all".
 pub const MAX_FLOOD_HOPS: u8 = 15;
 
-pub use umsh_core::ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS;
+pub use umsh_core::{
+    ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, RouteEvidence, STRONG_DIRECT_RSSI_DBM,
+    WEAK_LAST_HOP_RSSI_DBM, established_route_slack,
+};
 
 /// How long a packet that reached us from a peer without flooding vouches
 /// for the peer's path here. Past it, the next packet to the peer carries a
@@ -331,7 +334,7 @@ pub use observations::{
 };
 pub use peers::{
     CachedRoute, ChannelState, ChannelTable, HintReplayState, PeerCryptoMap, PeerCryptoState,
-    PeerId, PeerInfo, PeerRegistry, PeerRemoval, PeerRouteStatus, RouteHold,
+    PeerId, PeerInfo, PeerRegistry, PeerRemoval, PeerRouteStatus, RouteCandidate, RouteHold,
 };
 pub use send::{
     AckState, ChannelInfoRef, CompletionSignal, MacEventRef, PacketFamily, PendingAck,

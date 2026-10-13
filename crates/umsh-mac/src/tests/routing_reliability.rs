@@ -8,6 +8,7 @@ fn scored(route: CachedRoute, score: i16) -> RouteOffer {
         score: Some(score),
         supersedes: false,
         acknowledgment: false,
+        last_hop: None,
     }
 }
 
@@ -777,18 +778,21 @@ fn consumed_source_route_without_usable_trace_uses_broader_ack_fallback() {
                 block_on(mac.receive_one(|_, _| {})).unwrap();
                 let ack = mac.tx_queue_mut().pop_next().unwrap();
                 let header = PacketHeader::parse(&ack.frame).unwrap();
+                // An empty trace is a direct neighbor, heard here at the
+                // dummy radio's strong default: no slack, so no flood field.
+                // The restored routes carry no reading, so they earn it.
                 let expected = if trace == Some(&[][..]) {
-                    1
+                    None
                 } else {
-                    match cached.as_ref() {
+                    Some(match cached.as_ref() {
                         Some(CachedRoute::Source(_)) => 1,
                         Some(CachedRoute::Flood { flood_hops, .. }) if *flood_hops > 0 => {
                             flood_hops + 1
                         }
                         _ => (accumulated + 1).clamp(5, 15),
-                    }
+                    })
                 };
-                assert_eq!(header.flood_hops.unwrap().remaining(), expected);
+                assert_eq!(header.flood_hops.map(|hops| hops.remaining()), expected);
             }
         }
     }
@@ -888,6 +892,7 @@ fn a_flood_distance_never_displaces_a_path() {
         score: None,
         supersedes: false,
         acknowledgment: false,
+        last_hop: None,
     };
     let path = CachedRoute::source(&[RouterHint([1, 2])]).unwrap();
     let registry = mac.peer_registry_mut();
@@ -1168,6 +1173,7 @@ fn a_held_route_survives_learning_and_keeps_the_best_offer_as_candidate() {
             score: None,
             supersedes: false,
             acknowledgment: false,
+            last_hop: None,
         },
         now,
     );
@@ -1178,7 +1184,11 @@ fn a_held_route_survives_learning_and_keeps_the_best_offer_as_candidate() {
             .route_hold(peer_id, now)
             .unwrap()
             .candidate,
-        Some((strong, Some(-10)))
+        Some(crate::RouteCandidate {
+            route: strong,
+            score: Some(-10),
+            last_hop: None,
+        })
     );
 }
 
@@ -1208,7 +1218,7 @@ fn a_missed_held_route_floods_but_stays_and_counts_the_fallback() {
     let hold = mac.peer_registry().route_hold(peer_id, now).unwrap();
     assert_eq!(hold.fallback_acks, 1);
     assert_eq!(
-        hold.candidate.as_ref().map(|(route, _)| route),
+        hold.candidate.as_ref().map(|candidate| &candidate.route),
         CachedRoute::source(&learned).as_ref()
     );
 
@@ -1352,4 +1362,160 @@ fn a_held_route_floods_its_own_allowance_past_its_end() {
     )
     .unwrap();
     assert_eq!(queued_shape(&mut mac), (Some(4), None));
+}
+
+/// A route offer carrying a measurement of its last hop, the RSSI how
+/// whoever first heard the peer heard it.
+fn measured(route: CachedRoute, score: i16, last_hop_dbm: i16) -> RouteOffer {
+    RouteOffer {
+        last_hop: Some(TraceSignalEntry::new(last_hop_dbm, 0)),
+        ..scored(route, score)
+    }
+}
+
+fn last_hop_dbm(mac: &TestMac, peer_id: PeerId) -> Option<i16> {
+    mac.peer_registry()
+        .get(peer_id)
+        .unwrap()
+        .route_last_hop()
+        .and_then(TraceSignalEntry::rssi_dbm)
+}
+
+#[test]
+fn a_path_through_the_same_last_repeater_refreshes_the_reading_it_does_not_displace() {
+    let (mut mac, _, _, peer_id) = mac_with_keyed_peer();
+    let held = CachedRoute::source(&[RouterHint([1, 1]), RouterHint([9, 9])]).unwrap();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, measured(held.clone(), -50, -100), 1);
+    // Far worse, so it stays a reading and not a route, but the peer is
+    // heard by the same repeater.
+    let worse = CachedRoute::source(&[RouterHint([2, 2]), RouterHint([9, 9])]).unwrap();
+    registry.offer_route(peer_id, measured(worse, -900, -60), 2);
+    assert_eq!(mac.peer_registry().get(peer_id).unwrap().route, Some(held));
+    assert_eq!(last_hop_dbm(&mac, peer_id), Some(-60));
+}
+
+#[test]
+fn a_path_ending_elsewhere_leaves_the_reading_alone() {
+    let (mut mac, _, _, peer_id) = mac_with_keyed_peer();
+    let held = CachedRoute::source(&[RouterHint([1, 1]), RouterHint([9, 9])]).unwrap();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, measured(held, -50, -100), 1);
+    let elsewhere = CachedRoute::source(&[RouterHint([1, 1]), RouterHint([8, 8])]).unwrap();
+    registry.offer_route(peer_id, measured(elsewhere, -900, -60), 2);
+    assert_eq!(last_hop_dbm(&mac, peer_id), Some(-100));
+}
+
+#[test]
+fn an_offer_that_measured_nothing_keeps_the_last_reading() {
+    let (mut mac, _, _, peer_id) = mac_with_keyed_peer();
+    let held = CachedRoute::source(&[RouterHint([9, 9])]).unwrap();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, measured(held.clone(), -50, -100), 1);
+    registry.offer_route(peer_id, scored(held, -50), 2);
+    assert_eq!(last_hop_dbm(&mac, peer_id), Some(-100));
+}
+
+#[test]
+fn a_route_that_takes_over_brings_its_own_reading_or_none() {
+    let (mut mac, _, _, peer_id) = mac_with_keyed_peer();
+    let registry = mac.peer_registry_mut();
+    let first = CachedRoute::source(&[RouterHint([9, 9])]).unwrap();
+    registry.offer_route(peer_id, measured(first, -500, -100), 1);
+    let better = CachedRoute::source(&[RouterHint([8, 8])]).unwrap();
+    registry.offer_route(peer_id, scored(better.clone(), -10), 2);
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(better));
+    assert_eq!(info.route_last_hop(), None);
+}
+
+#[test]
+fn a_restored_route_has_no_reading_and_was_not_chosen_by_hand() {
+    let (mut mac, _, _, peer_id) = mac_with_keyed_peer();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, measured(CachedRoute::Direct, -10, -60), 1);
+    registry.update_route(peer_id, CachedRoute::Direct);
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route_last_hop(), None);
+    assert!(!info.route_hand_set);
+}
+
+#[test]
+fn a_held_route_spends_only_its_allowance_until_a_learned_route_replaces_it() {
+    let (mut mac, local_id, key, peer_id) = mac_with_keyed_peer();
+    let now = mac.clock().now_ms();
+    let route = CachedRoute::source(&[RouterHint([1, 2])]).unwrap();
+    assert!(
+        mac.peer_registry_mut()
+            .hold_route(peer_id, route, 2, now + 1_000, now)
+    );
+    // A mobile peer would otherwise earn the slack.
+    mac.peer_registry_mut().set_mobile(peer_id, true);
+    let send = |mac: &mut TestMac| {
+        mac.queue_unicast(local_id, &key, b"payload", &SendOptions::default())
+            .unwrap();
+        let queued = mac.tx_queue_mut().pop_next().unwrap();
+        PacketHeader::parse(&queued.frame)
+            .unwrap()
+            .flood_hops
+            .map(|hops| hops.remaining())
+    };
+    assert_eq!(send(&mut mac), Some(2));
+
+    // The hold runs out; the route is still the one chosen by hand.
+    mac.clock().advance_ms(2_000);
+    let now = mac.clock().now_ms();
+    assert!(mac.peer_registry().route_hold(peer_id, now).is_none());
+    assert_eq!(send(&mut mac), None);
+
+    // A learned route replaces it and earns the slack again.
+    let learned = CachedRoute::source(&[RouterHint([7, 7])]).unwrap();
+    mac.peer_registry_mut()
+        .offer_route(peer_id, scored(learned.clone(), -10), now);
+    assert_eq!(
+        mac.peer_registry().get(peer_id).unwrap().route,
+        Some(learned)
+    );
+    assert_eq!(send(&mut mac), Some(1));
+}
+
+#[test]
+fn an_ack_along_a_held_route_keeps_the_slack_its_evidence_earns() {
+    let (mut mac, local_id, _, peer_id) = mac_with_keyed_peer();
+    let now = mac.clock().now_ms();
+    mac.peer_registry_mut().set_mobile(peer_id, true);
+    let ack = |mac: &mut TestMac, allowance: u8| {
+        assert!(mac.peer_registry_mut().hold_route(
+            peer_id,
+            CachedRoute::Direct,
+            allowance,
+            now + 60_000,
+            now,
+        ));
+        mac.queue_mac_ack_for_peer(local_id, peer_id, [0; 8], false)
+            .unwrap();
+        let queued = mac.tx_queue_mut().pop_next().unwrap();
+        PacketHeader::parse(&queued.frame)
+            .unwrap()
+            .flood_hops
+            .map(|hops| hops.remaining())
+    };
+    // The allowance does not narrow the ack below what a mobile peer earns...
+    assert_eq!(ack(&mut mac, 0), Some(1));
+    // ...and may widen it.
+    assert_eq!(ack(&mut mac, 3), Some(3));
+}
+
+#[test]
+fn an_adopted_candidate_brings_its_reading() {
+    let (mut mac, _, _, peer_id, _) = held_route_mac(600_000);
+    let now = mac.clock().now_ms();
+    let learned = CachedRoute::source(&[RouterHint([7, 7])]).unwrap();
+    let registry = mac.peer_registry_mut();
+    registry.offer_route(peer_id, measured(learned.clone(), -10, -60), now);
+    assert!(registry.adopt_candidate(peer_id, now));
+    let info = mac.peer_registry().get(peer_id).unwrap();
+    assert_eq!(info.route, Some(learned));
+    assert!(!info.route_hand_set);
+    assert_eq!(last_hop_dbm(&mac, peer_id), Some(-60));
 }

@@ -59,7 +59,7 @@ uniffi::setup_scaffolding!();
 ///
 /// Increment this when a binding-visible operation, record, or error contract
 /// changes incompatibly. It is independent of the UMSH wire version.
-pub const MOBILE_API_VERSION: u16 = 52;
+pub const MOBILE_API_VERSION: u16 = 53;
 
 /// Stable error categories consumed by platform adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]
@@ -636,17 +636,10 @@ fn node_identity_record(
     let identity = umsh_node::NodeIdentityPayload::from_bytes(payload)
         .map_err(|_| MobileError::InvalidIdentityData)?;
 
-    let signature = match identity.signature {
-        None => IdentitySignatureState::Unsigned,
-        Some(signature) => {
-            // The signed range is everything before the trailing signature.
-            let signed = &payload[..payload.len() - 64];
-            if umsh_crypto::verify_ed25519_signature(key, signed, &signature) {
-                IdentitySignatureState::Valid
-            } else {
-                IdentitySignatureState::Invalid
-            }
-        }
+    let signature = match identity.signature_state(key, payload) {
+        umsh_node::IdentitySignature::Unsigned => IdentitySignatureState::Unsigned,
+        umsh_node::IdentitySignature::Valid => IdentitySignatureState::Valid,
+        umsh_node::IdentitySignature::Invalid => IdentitySignatureState::Invalid,
     };
 
     let role_label = match identity.role {

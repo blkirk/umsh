@@ -145,6 +145,16 @@ impl TraceSignalEntry {
         }
     }
 
+    /// The RSSI the hop measured, in dBm, or `None` when it received the
+    /// packet over a point-to-point link and measured nothing.
+    pub const fn rssi_dbm(self) -> Option<i16> {
+        if self.is_point_to_point() {
+            None
+        } else {
+            Some(-(self.0[0] as i16))
+        }
+    }
+
     /// The two bytes, ready to prepend to a trace-signal option value.
     pub const fn as_bytes(self) -> [u8; 2] {
         self.0
@@ -427,6 +437,15 @@ mod tests {
         let entry = TraceSignalEntry::from_bytes(TraceSignalEntry::new(-120, -75).as_bytes());
         assert_eq!(entry.snr_centibels(), Some(-75));
         assert!(!entry.is_point_to_point());
+    }
+
+    #[test]
+    fn an_entry_reads_back_the_rssi_it_was_written_with() {
+        assert_eq!(TraceSignalEntry::new(-91, 42).rssi_dbm(), Some(-91));
+        // Saturated readings read back as the nearest representable value.
+        assert_eq!(TraceSignalEntry::new(0, 0).rssi_dbm(), Some(-1));
+        assert_eq!(TraceSignalEntry::new(-400, 0).rssi_dbm(), Some(-255));
+        assert_eq!(TraceSignalEntry::POINT_TO_POINT.rssi_dbm(), None);
     }
 
     // ── parse_be_u32 ──────────────────────────────────────────────────────────

@@ -191,6 +191,14 @@ pub trait MacBackend: Clone {
         false
     }
 
+    /// Record whether `peer` advertises itself as mobile, returning whether
+    /// `peer` was registered to receive it. A backend with no peer registry
+    /// keeps nothing.
+    async fn set_peer_mobile(&self, peer: &PublicKey, mobile: bool) -> bool {
+        let _ = (peer, mobile);
+        false
+    }
+
     /// Install `route` for `peer` and hold it for `hold_ms` against learning
     /// and failure, spending `flood_hops` past its end, returning whether it
     /// took.
@@ -423,6 +431,10 @@ impl<
 
     async fn restore_peer_route(&self, peer: &PublicKey, route: CachedRoute) -> bool {
         self.restore_peer_route(peer, route).await
+    }
+
+    async fn set_peer_mobile(&self, peer: &PublicKey, mobile: bool) -> bool {
+        self.set_peer_mobile(peer, mobile).await
     }
 
     async fn hold_peer_route(

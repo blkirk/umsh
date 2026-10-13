@@ -1,4 +1,5 @@
 import Foundation
+import UMSHMobileCore
 
 struct PeerSummary: Identifiable, Hashable, Sendable {
     let id: Int64
@@ -110,6 +111,16 @@ struct PeerSummary: Identifiable, Hashable, Sendable {
         case .unsigned: advertisedIdentityAuthenticated
         case .invalid, nil: false
         }
+    }
+
+    /// The peer as the mesh session registers it: its address, and whether
+    /// its own attributable advertisement says it moves.
+    var meshRegistration: MobilePeerRegistrationRecord {
+        MobilePeerRegistrationRecord(
+            address: identity.canonicalAddress,
+            mobile: advertisedIdentityIsAttributable
+                && advertisedIdentity?.capabilityBits.contains(.mobile) == true
+        )
     }
 
     /// Whether this node answers to a search query, across the names a user
@@ -662,8 +673,8 @@ struct ManualPath: Equatable, Sendable {
     var hops: [MeshRouterHint]
     var floodHops: UInt8
 
-    /// The flood allowance a new path starts with: the one hop of slack the
-    /// phone's routing allows past a learned route's end.
+    /// The flood allowance a new path starts with: the one hop of slack a
+    /// learned route earns when its far end is in doubt.
     static let standardFloodHops: UInt8 = 1
     /// The most flood hops a frame can carry.
     static let maximumFloodHops: UInt8 = 15

@@ -374,10 +374,10 @@ protocol RadioConnection: AnyObject, Sendable {
     /// Returns whether there was one to switch to.
     func adoptLearnedPeerRoute(peerAddress: String) async throws -> Bool
     func prepareChat(
-        peerAddresses: [String],
+        peers: [MobilePeerRegistrationRecord],
         checkpoints: [MobileChatCheckpointRecord]
     ) async throws
-    func registerChatPeers(_ peerAddresses: [String]) async throws
+    func registerChatPeers(_ peers: [MobilePeerRegistrationRecord]) async throws
     /// Drop these peers from the phone MAC's peer registry (idempotent;
     /// unknown peers are ignored). Best-effort: the store is the authority
     /// and `prepareChat` rebuilds the registry on the next attach.
