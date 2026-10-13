@@ -665,8 +665,8 @@ iOS virtual radio is its second.
   radio, so phase 2 starts from a virtual radio that is already exercised.
   - Its state (identity, saved configuration) lives under the umshctl state
     directory, locked so two processes never run one identity.
-  - Like any radio, it comes up with its PHY off until a host enables it and
-    saves; `umshctl --lan set phy-enabled on` once per state directory.
+  - Unlike a LoRa radio, umshctl switches its PHY on whenever it opens it:
+    choosing `--lan` is choosing the LAN.
 
 #### 1.9 Phase 1 validation
 

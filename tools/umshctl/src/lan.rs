@@ -137,7 +137,13 @@ pub async fn open(group: SocketAddrV4) -> Result<DuplexStream> {
     };
     let socket = LanSocket::bind(config).with_context(|| format!("joining {group}"))?;
     let (host, device_end) = tokio::io::duplex(READ_CHUNK);
-    let device = SoftDevice::new(session_config(), platform);
+    let mut device = SoftDevice::new(session_config(), platform);
+    // Asking for the LAN is asking for it on. A LoRa radio comes up off
+    // so that a throwaway identity never reaches the air; this one has no
+    // node of its own and sends only its host's frames.
+    if !device.session().settings().enabled {
+        let _ = device.session_mut().toggle_radio(&mut |_| {});
+    }
     tokio::task::spawn_local(async move {
         drive(device, socket, device_end).await;
         drop(lock);
