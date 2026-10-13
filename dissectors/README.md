@@ -87,11 +87,13 @@ type, and minimum length check). No manual configuration is needed for basic
 dissection—UMSH packets in any UDP stream will be detected and decoded
 automatically.
 
-If the heuristic isn't triggering (e.g. another dissector claims the port first),
-you can force it by setting the UDP port in the UMSH preferences:
+The dissector also claims UDP port 15056, the default for UMSH traffic, outright.
+If your application uses another port and the heuristic isn't triggering (e.g.
+another dissector claims the port first), point the dissector at it in the UMSH
+preferences:
 
 1. Go to **Edit > Preferences > Protocols > UMSH**
-2. Set **UDP Port** to the port your application uses (e.g. `15056`)
+2. Set **UDP Port** to the port your application uses
 
 ### 4. Example: two-node desktop_chat session
 
@@ -232,7 +234,7 @@ display filter for pulling every offending frame out of a capture.
 ## Test Vectors
 
 The `test_vectors.pcap` file contains all 8 protocol test-vector packets
-wrapped as UDP payloads on port 4242. Open it in Wireshark with the dissector
+wrapped as UDP payloads on port 15056. Open it in Wireshark with the dissector
 installed to verify the plugin is working. Every frame in it is valid, and the
 bytes are the ones in `docs/protocol/src/test-vectors.md`. To regenerate it:
 
@@ -261,8 +263,8 @@ cargo run -p umsh --bin umsh-capture --features ble-radio -- \
     --ble --pcap=techo.pcap --capture=both
 ```
 
-Radio frames use UDP port 4242 and are handled by the main UMSH dissector. ULCP frames use
-ports 4243 (host) and 4244 (device) and are handled by the included `UMSH ULCP`
+Radio frames use UDP port 15056 and are handled by the main UMSH dissector. ULCP frames use
+ports 15057 (host) and 15058 (device) and are handled by the included `UMSH ULCP`
 dissector. Display filters include `umsh`, `umsh.ulcp`,
 `umsh.ulcp.command`, and `umsh.ulcp.property`.
 ULCP pcaps may expose sensitive property values and application traffic and should be

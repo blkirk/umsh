@@ -9391,11 +9391,13 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
     public var bridgeLink: UlcpBridgeLinkRecord?
     public var lanBearerEnabled: Bool?
     /**
-     * The multicast group and port, as `GROUP:PORT`.
+     * The multicast group and port in effect, as `GROUP:PORT`. Written
+     * as `None`, it returns to the device's default.
      */
     public var lanBearerGroup: String?
     /**
-     * Frames per minute the device takes from the group.
+     * Frames per minute the device takes from the group. Written as
+     * `None`, it returns to the device's default.
      */
     public var lanBearerIngressLimit: UInt16?
     /**
@@ -9590,10 +9592,12 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
     // declare one manually.
     public init(bridgeEnabled: Bool?, bridgeHost: String?, bridgePort: UInt16?, bridgeServerKey: Data?, bridgeLink: UlcpBridgeLinkRecord?, lanBearerEnabled: Bool?,
         /**
-         * The multicast group and port, as `GROUP:PORT`.
+         * The multicast group and port in effect, as `GROUP:PORT`. Written
+         * as `None`, it returns to the device's default.
          */lanBearerGroup: String?,
         /**
-         * Frames per minute the device takes from the group.
+         * Frames per minute the device takes from the group. Written as
+         * `None`, it returns to the device's default.
          */lanBearerIngressLimit: UInt16?,
         /**
          * `PROP_LAN_BEARER_STATE`: 0 off, 1 active, 2 no network. Read-only.
@@ -18961,7 +18965,8 @@ public func ulcpInspectionProperties(capabilities: Data)throws  -> [UInt32]  {
 })
 }
 /**
- * A LAN multicast group as an operator types it, `GROUP:PORT`, in the
+ * A LAN multicast group, or a unicast peer in its place, as an operator
+ * types it, `GROUP:PORT` or a bare `GROUP` on the default port, in the
  * form the device reports it.
  */
 public func ulcpLanGroup(input: String)throws  -> String  {
@@ -19375,7 +19380,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_inspection_properties() != 61576) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_func_ulcp_lan_group() != 32476) {
+    if (uniffi_umsh_mobile_core_checksum_func_ulcp_lan_group() != 7429) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_location_cell_meters() != 13268) {

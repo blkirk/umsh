@@ -200,7 +200,7 @@ umsh.prefs.channel_keys = Pref.string("Channel keys", "",
   "One per line:\n  <key>:<display-name>\n  umsh:ck:<base58>:<display-name>"
   .. "\n  umsh:cs:<name>:<display-name>")
 
-umsh.prefs.udp_port     = Pref.uint  ("UDP Port", 0, "UDP port to dissect as UMSH (0 = disabled)")
+umsh.prefs.udp_port     = Pref.uint  ("UDP Port", 15056, "UDP port to dissect as UMSH (0 = disabled)")
 umsh.prefs.keyfile      = Pref.string("Key File",  "",
   "Optional key file path (INI format with [nodes]/[privkeys]/[channels] sections)")
 

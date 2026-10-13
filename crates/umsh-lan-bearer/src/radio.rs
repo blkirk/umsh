@@ -9,6 +9,7 @@
 //!   paths a LoRa reception takes—contention ranked by signal, route
 //!   scoring, the signal gates. Nothing on a real LAN should use this.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::Ipv4Addr;
 use std::task::{Context, Poll};
@@ -46,7 +47,12 @@ pub struct UdpMulticastRadio {
     mode: RxMode,
     t_frame_ms: u32,
     recv_buf: [u8; MAX_FRAME + 1],
+    /// Frames this radio sent whose echoes have not yet come back.
+    unheard: VecDeque<Vec<u8>>,
 }
+
+/// How many sent frames are remembered for their echoes.
+const UNHEARD_CAP: usize = 16;
 
 impl UdpMulticastRadio {
     /// The frame time a simulated channel reports: LoRa-like, so retry
@@ -61,6 +67,7 @@ impl UdpMulticastRadio {
             mode,
             t_frame_ms,
             recv_buf: [0; MAX_FRAME + 1],
+            unheard: VecDeque::new(),
         })
     }
 
@@ -99,7 +106,12 @@ impl Radio for UdpMulticastRadio {
         self.socket
             .send(data)
             .await
-            .map_err(|error| TxError::Io(UdpMulticastRadioError::Io(error)))
+            .map_err(|error| TxError::Io(UdpMulticastRadioError::Io(error)))?;
+        if self.unheard.len() == UNHEARD_CAP {
+            self.unheard.pop_front();
+        }
+        self.unheard.push_back(data.to_vec());
+        Ok(())
     }
 
     fn poll_receive(
@@ -120,7 +132,14 @@ impl Radio for UdpMulticastRadio {
             if len == 0 || len > MAX_FRAME || len > buf.len() {
                 continue;
             }
-            buf[..len].copy_from_slice(&self.recv_buf[..len]);
+            // A radio does not hear itself. Every participant shares the
+            // group's port, so its echo is known by content, not source.
+            let frame = &self.recv_buf[..len];
+            if let Some(index) = self.unheard.iter().position(|sent| sent == frame) {
+                self.unheard.remove(index);
+                continue;
+            }
+            buf[..len].copy_from_slice(frame);
             let (rssi, snr, origin) = match self.mode {
                 RxMode::Bearer(bearer) => (0, Snr::from_centibels(0), RxOrigin::Bearer(bearer)),
                 RxMode::SimulatedAir { rssi, snr } => (rssi, snr, RxOrigin::Air),

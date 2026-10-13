@@ -2,8 +2,8 @@
 """
 Generate a pcap file containing all 8 UMSH test-vector packets as UDP payloads.
 
-Each packet is sent from 127.0.0.1:1234 to 127.0.0.1:4242 so that Wireshark
-(with udp_port=4242 set in the UMSH preferences, or heuristic detection enabled)
+Each packet is sent from 127.0.0.1:1234 to 127.0.0.1:15056 so that Wireshark
+(through the UMSH dissector's default UDP port, or its heuristic)
 will parse them.
 
 Usage:
@@ -115,7 +115,7 @@ def pcap_record(ts_sec, ts_usec, payload):
     cap_len = len(payload)
     return struct.pack("<IIII", ts_sec, ts_usec, cap_len, cap_len) + payload
 
-def eth_ip_udp(payload, src_port=1234, dst_port=4242,
+def eth_ip_udp(payload, src_port=1234, dst_port=15056,
                src_ip="127.0.0.1", dst_ip="127.0.0.1"):
     """Wrap `payload` in a minimal Ethernet/IP/UDP frame."""
     def ip4(s):

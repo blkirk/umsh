@@ -37,7 +37,9 @@ impl State {
     }
 }
 
-/// A multicast group and port, as `PROP_LAN_BEARER_GROUP` carries them.
+/// A multicast group and port, as `PROP_LAN_BEARER_GROUP` carries them. A
+/// unicast address in place of the group names the one peer of a
+/// point-to-point link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
     pub address: [u8; 4],
@@ -60,17 +62,21 @@ impl Group {
         [a, b, c, d, lo, hi]
     }
 
-    /// Decode a group, refusing anything but an IPv4 multicast address
-    /// (224.0.0.0/4) and a nonzero port.
+    /// Whether the group is a multicast group (224.0.0.0/4), joined, rather
+    /// than a unicast peer.
+    pub fn is_multicast(self) -> bool {
+        self.address[0] & 0xF0 == 0xE0
+    }
+
+    /// Decode a group, refusing the unspecified and broadcast addresses and
+    /// a zero port.
     pub fn decode(value: &[u8]) -> Option<Self> {
         let &[a, b, c, d, lo, hi] = value else {
             return None;
         };
         let port = u16::from_le_bytes([lo, hi]);
-        (a & 0xF0 == 0xE0 && port != 0).then_some(Self {
-            address: [a, b, c, d],
-            port,
-        })
+        let address = [a, b, c, d];
+        (address != [0; 4] && address != [255; 4] && port != 0).then_some(Self { address, port })
     }
 }
 
@@ -79,11 +85,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_group_round_trips_and_only_a_multicast_one() {
+    fn a_group_round_trips_and_a_unicast_peer_stands_in_for_one() {
         let group = Group::default();
         assert_eq!(group.encode(), [239, 255, 134, 121, 0xD0, 0x3A]);
         assert_eq!(Group::decode(&group.encode()), Some(group));
-        assert_eq!(Group::decode(&[192, 168, 1, 1, 0xD0, 0x3A]), None);
+        assert!(group.is_multicast());
+        let peer = Group::decode(&[192, 168, 1, 1, 0xD0, 0x3A]).unwrap();
+        assert!(!peer.is_multicast());
+        assert_eq!(Group::decode(&[0, 0, 0, 0, 0xD0, 0x3A]), None);
+        assert_eq!(Group::decode(&[255, 255, 255, 255, 0xD0, 0x3A]), None);
         assert_eq!(Group::decode(&[239, 255, 134, 121, 0, 0]), None);
         assert_eq!(Group::decode(&[239, 255, 134, 121, 1]), None);
     }

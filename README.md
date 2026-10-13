@@ -257,8 +257,8 @@ records both:
 umshctl capture --pcap=techo.pcap --layers=both
 ```
 
-These captures use synthetic Ethernet/IPv4/UDP encapsulation: radio packets on UDP port 4242,
-and ULCP frames on directional ports 4243/4244 for the ULCP dissector in the same plugin,
+These captures use synthetic Ethernet/IPv4/UDP encapsulation: radio packets on UDP port 15056,
+and ULCP frames on directional ports 15057/15058 for the ULCP dissector in the same plugin,
 which exposes transaction IDs, commands, properties, stream envelopes, radio metadata, and
 nested UMSH packets. ULCP captures are diagnostic artifacts and may contain sensitive property
 values or application traffic; handle them accordingly before sharing. For a byte-for-byte

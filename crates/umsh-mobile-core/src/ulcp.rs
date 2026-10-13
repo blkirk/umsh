@@ -5051,7 +5051,8 @@ pub fn ulcp_bridge_server_key(input: String) -> Result<Vec<u8>, MobileError> {
     decode_bridge_key(&key.0)
 }
 
-/// A LAN multicast group as an operator types it, `GROUP:PORT`, in the
+/// A LAN multicast group, or a unicast peer in its place, as an operator
+/// types it, `GROUP:PORT` or a bare `GROUP` on the default port, in the
 /// form the device reports it.
 #[uniffi::export]
 pub fn ulcp_lan_group(input: String) -> Result<String, MobileError> {
@@ -5060,12 +5061,18 @@ pub fn ulcp_lan_group(input: String) -> Result<String, MobileError> {
 }
 
 fn parse_lan_group(text: &str) -> Result<lan::Group, MobileError> {
-    let address: SocketAddrV4 = text.parse().map_err(|_| MobileError::InvalidUlcpFrame)?;
+    let address = match text.parse::<std::net::Ipv4Addr>() {
+        Ok(group) => SocketAddrV4::new(group, lan::DEFAULT_PORT),
+        Err(_) => text
+            .parse::<SocketAddrV4>()
+            .map_err(|_| MobileError::InvalidUlcpFrame)?,
+    };
     let group = lan::Group {
         address: address.ip().octets(),
         port: address.port(),
     };
-    // The device's own rule: a multicast address and a nonzero port.
+    // The device's own rule: neither unspecified nor broadcast, and a
+    // nonzero port.
     lan::Group::decode(&group.encode()).ok_or(MobileError::InvalidUlcpFrame)
 }
 
@@ -5119,9 +5126,11 @@ pub struct UlcpDevicePropertiesRecord {
     pub bridge_server_key: Option<Vec<u8>>,
     pub bridge_link: Option<UlcpBridgeLinkRecord>,
     pub lan_bearer_enabled: Option<bool>,
-    /// The multicast group and port, as `GROUP:PORT`.
+    /// The multicast group and port in effect, as `GROUP:PORT`. Written
+    /// as `None`, it returns to the device's default.
     pub lan_bearer_group: Option<String>,
-    /// Frames per minute the device takes from the group.
+    /// Frames per minute the device takes from the group. Written as
+    /// `None`, it returns to the device's default.
     pub lan_bearer_ingress_limit: Option<u16>,
     /// `PROP_LAN_BEARER_STATE`: 0 off, 1 active, 2 no network. Read-only.
     pub lan_bearer_state: Option<u8>,
@@ -5685,18 +5694,18 @@ pub fn ulcp_dirty_writes(
                 decode_bridge_key(desired.bridge_server_key.as_deref().ok_or_else(missing)?)?
             }
             prop::LAN_BEARER_ENABLED => vec![desired.lan_bearer_enabled.ok_or_else(missing)? as u8],
-            prop::LAN_BEARER_GROUP => {
-                parse_lan_group(desired.lan_bearer_group.as_deref().ok_or_else(missing)?)?
-                    .encode()
-                    .to_vec()
-            }
-            prop::LAN_BEARER_INGRESS_LIMIT => {
-                let limit = desired.lan_bearer_ingress_limit.ok_or_else(missing)?;
-                if limit == 0 {
-                    return Err(missing());
-                }
-                limit.to_le_bytes().to_vec()
-            }
+            // Empty returns either to the device's own default, which a
+            // device never reports, so absent here is never a value that
+            // failed to read.
+            prop::LAN_BEARER_GROUP => match desired.lan_bearer_group.as_deref() {
+                Some(group) => parse_lan_group(group)?.encode().to_vec(),
+                None => Vec::new(),
+            },
+            prop::LAN_BEARER_INGRESS_LIMIT => match desired.lan_bearer_ingress_limit {
+                Some(0) => return Err(missing()),
+                Some(limit) => limit.to_le_bytes().to_vec(),
+                None => Vec::new(),
+            },
             prop::WIFI_SCANNING => vec![desired.wifi_scanning.ok_or_else(missing)? as u8],
             // The empty value deselects, which is a state a host writes
             // deliberately, so an empty SSID here is a value and not a
@@ -12092,15 +12101,30 @@ mod tests {
         desired.lan_bearer_ingress_limit = Some(0);
         assert!(ulcp_dirty_writes(desired.clone(), ids.clone()).is_err());
         desired.lan_bearer_ingress_limit = Some(60);
-        desired.lan_bearer_group = Some("192.168.1.1:7000".into());
-        assert!(ulcp_dirty_writes(desired, ids).is_err());
+        desired.lan_bearer_group = Some("0.0.0.0:7000".into());
+        assert!(ulcp_dirty_writes(desired.clone(), ids.clone()).is_err());
+        // Absent returns both to the device's default.
+        desired.lan_bearer_group = None;
+        desired.lan_bearer_ingress_limit = None;
+        let writes = ulcp_dirty_writes(desired, ids).unwrap();
+        assert!(writes[0].value.is_empty() && writes[1].value.is_empty());
 
         assert_eq!(
             ulcp_lan_group(" 239.255.134.121:15056 ".into()).unwrap(),
             "239.255.134.121:15056"
         );
         assert!(ulcp_lan_group("239.255.134.121:0".into()).is_err());
-        assert!(ulcp_lan_group("239.255.134.121".into()).is_err());
+        // A bare group takes the default port.
+        assert_eq!(
+            ulcp_lan_group("239.1.2.3".into()).unwrap(),
+            format!("239.1.2.3:{}", lan::DEFAULT_PORT)
+        );
+        // A unicast peer stands in for the group.
+        assert_eq!(
+            ulcp_lan_group("192.168.1.1".into()).unwrap(),
+            format!("192.168.1.1:{}", lan::DEFAULT_PORT)
+        );
+        assert!(ulcp_lan_group("255.255.255.255".into()).is_err());
 
         let actual = inspect_ulcp_properties(vec![
             response(prop::LAN_BEARER_ENABLED, &[1]),

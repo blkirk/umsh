@@ -648,8 +648,14 @@ actor FakeRadioConnection: RadioConnection {
                 propertyId: write.propertyId, value: nil, statusCode: 3
             )
         }
-        managedDevice.values[write.propertyId] = write.value
         let id = ulcpProperties
+        // An empty group or limit returns to the default, and the device
+        // answers with the value now in effect, as a real one does.
+        var value = write.value
+        if value.isEmpty, let fallback = FakeManagedDevice.lanDefaults[write.propertyId] {
+            value = fallback
+        }
+        managedDevice.values[write.propertyId] = value
         if [id.bridgeEnabled, id.bridgeHost, id.bridgePort, id.bridgeServerKey].contains(write.propertyId) {
             let enabled = managedDevice.values[id.bridgeEnabled]?.first == 1
             let host = managedDevice.values[id.bridgeHost] ?? Data()
@@ -661,7 +667,7 @@ actor FakeRadioConnection: RadioConnection {
         }
         return MobileMeshManagementAnswerRecord(
             propertyId: write.propertyId,
-            value: write.value,
+            value: value,
             statusCode: nil
         )
     }
@@ -1523,8 +1529,7 @@ struct FakeManagedDevice: Sendable {
         values[id.bridgeServerKey] = Data()
         values[id.bridgeLink] = Data([0, 0])
         values[id.lanBearerEnabled] = Data([0])
-        values[id.lanBearerGroup] = Data([239, 255, 134, 121]) + UInt16(15056).littleEndianData
-        values[id.lanBearerIngressLimit] = UInt16(120).littleEndianData
+        for (property, value) in Self.lanDefaults { values[property] = value }
         values[id.lanBearerState] = Data([0])
         // A real Ed25519 public key, so the identity codec and copy action
         // follow the same path as a physical device (RFC 8032 test key).
@@ -1741,6 +1746,14 @@ struct FakeManagedDevice: Sendable {
         0x10, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x3D, 0x31, 0x32,
         0x33, 0x34, 0x35, 0x3E, 0x83, 0x04,
     ])
+
+    /// The local network settings that fall back to a default, at that
+    /// default: what the device holds before they are set, and after an
+    /// empty write.
+    static let lanDefaults: [UInt32: Data] = [
+        ulcpProperties.lanBearerGroup: Data([239, 255, 134, 121]) + UInt16(15056).littleEndianData,
+        ulcpProperties.lanBearerIngressLimit: UInt16(120).littleEndianData,
+    ]
 }
 
 private extension FixedWidthInteger {

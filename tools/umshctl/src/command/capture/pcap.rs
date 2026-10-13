@@ -49,9 +49,9 @@ pub enum PcapDirection {
 
 const PCAP_LINKTYPE_ETHERNET: u32 = 1;
 const PCAP_LINKTYPE_LORATAP: u32 = 270;
-const RADIO_UDP_PORT: u16 = 4242;
-const ULCP_HOST_UDP_PORT: u16 = 4243;
-const ULCP_DEVICE_UDP_PORT: u16 = 4244;
+const RADIO_UDP_PORT: u16 = 15056;
+const ULCP_HOST_UDP_PORT: u16 = 15057;
+const ULCP_DEVICE_UDP_PORT: u16 = 15058;
 
 /// Fixed part of a LoRaTap v0 header, in bytes.
 const LORATAP_V0_LEN: u16 = 15;

@@ -1,4 +1,4 @@
-const RADIO_UDP_PORT = 4242;
+const RADIO_UDP_PORT = 15056;
 const PCAP_LINKTYPE_ETHERNET = 1;
 
 /** DOM-free capture state reusable by debugger, chat, and management pages. */

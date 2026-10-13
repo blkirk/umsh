@@ -16,15 +16,17 @@ pub enum LanOp {
     Show,
     On,
     Off,
-    /// Set the multicast group, as `GROUP:PORT`.
+    /// Set the multicast group, or a unicast peer in its place, as
+    /// `GROUP[:PORT]`, or `default` for the device's own.
     Group {
         #[arg(value_parser = parse_group)]
-        group: SocketAddrV4,
+        group: OrDefault<SocketAddrV4>,
     },
-    /// Set the ingress limit, in frames per minute.
+    /// Set the ingress limit, in frames per minute, or `default` for the
+    /// device's own.
     Limit {
-        #[arg(value_parser = clap::value_parser!(u16).range(1..))]
-        per_minute: u16,
+        #[arg(value_parser = parse_limit)]
+        per_minute: OrDefault<u16>,
     },
     /// List the participants advertising on the LAN.
     Browse {
@@ -41,8 +43,28 @@ impl LanOp {
     }
 }
 
-fn parse_group(spec: &str) -> Result<SocketAddrV4> {
-    crate::parse_group(spec)
+/// A setting's new value, or a return to whatever the device defaults to.
+#[derive(Clone, Copy, Debug)]
+pub enum OrDefault<T> {
+    Default,
+    Value(T),
+}
+
+fn parse_group(spec: &str) -> Result<OrDefault<SocketAddrV4>> {
+    match spec {
+        "default" => Ok(OrDefault::Default),
+        _ => crate::parse_group(spec).map(OrDefault::Value),
+    }
+}
+
+fn parse_limit(spec: &str) -> Result<OrDefault<u16>> {
+    match spec {
+        "default" => Ok(OrDefault::Default),
+        _ => match spec.parse::<u16>() {
+            Ok(limit) if limit > 0 => Ok(OrDefault::Value(limit)),
+            _ => bail!("expected frames per minute from 1 to 65535, or `default`"),
+        },
+    }
 }
 
 pub async fn run(app: &mut App, op: Option<LanOp>) -> Result<()> {
@@ -99,18 +121,26 @@ pub async fn run(app: &mut App, op: Option<LanOp>) -> Result<()> {
         LanOp::Off => {
             device.set_prop(prop::LAN_BEARER_ENABLED, &[0]).await?;
         }
+        // An empty value returns either setting to the device's default.
         LanOp::Group { group } => {
-            let group = Group {
-                address: group.ip().octets(),
-                port: group.port(),
+            let value = match group {
+                OrDefault::Default => Vec::new(),
+                OrDefault::Value(group) => Group {
+                    address: group.ip().octets(),
+                    port: group.port(),
+                }
+                .encode()
+                .to_vec(),
             };
-            device
-                .set_prop(prop::LAN_BEARER_GROUP, &group.encode())
-                .await?;
+            device.set_prop(prop::LAN_BEARER_GROUP, &value).await?;
         }
         LanOp::Limit { per_minute } => {
+            let value = match per_minute {
+                OrDefault::Default => Vec::new(),
+                OrDefault::Value(limit) => limit.to_le_bytes().to_vec(),
+            };
             device
-                .set_prop(prop::LAN_BEARER_INGRESS_LIMIT, &per_minute.to_le_bytes())
+                .set_prop(prop::LAN_BEARER_INGRESS_LIMIT, &value)
                 .await?;
         }
         LanOp::Browse { .. } => unreachable!("handled above"),

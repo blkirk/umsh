@@ -1,12 +1,12 @@
-//! Group membership with echo suppression.
+//! Group membership.
 //!
-//! Two sockets. The receiving one binds the group's port, shared with
-//! every other participant on the host, and joins the group. The sending
-//! one binds an ephemeral port of its own, so the source address every
-//! receiver sees is unique to this participant—which is what lets this
-//! participant recognize and drop its own datagrams when multicast
-//! loopback hands them back, however many other participants share the
-//! host and however many frames are in flight.
+//! One socket, bound to the group's port, which every participant both
+//! sends from and listens on; several participants on one host share it.
+//! A multicast group is joined, and a participant hears its own datagrams
+//! when multicast loopback hands them back, which the node above already
+//! tolerates. A unicast address in place of the group names the one peer
+//! of a point-to-point link: nothing is joined, and only datagrams from
+//! that peer's address and port are taken.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket as StdUdpSocket};
@@ -56,20 +56,19 @@ impl LanConfig {
 
 /// A participant's membership in the group.
 pub struct LanSocket {
-    recv: UdpSocket,
-    send: UdpSocket,
-    /// The address every datagram this participant sends comes from.
-    own: SocketAddr,
+    socket: UdpSocket,
     group: SocketAddrV4,
 }
 
 impl LanSocket {
-    /// Join the group described by `config`.
+    /// Join the group described by `config`, or, for a unicast address,
+    /// listen for that one peer.
     pub fn bind(config: LanConfig) -> io::Result<Self> {
-        if !config.group.ip().is_multicast() {
+        let group = *config.group.ip();
+        if group.is_unspecified() || group.is_broadcast() || config.group.port() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "the group must be an IPv4 multicast address",
+                "the group must be a multicast group or a peer, with a nonzero port",
             ));
         }
         let interface = match config.interface {
@@ -77,41 +76,26 @@ impl LanSocket {
             interface => interface,
         };
 
-        // Sending: an address of its own, on the interface the group is
-        // joined on, so the source every receiver sees is exactly the
-        // one recorded here.
-        let send = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        send.set_multicast_if_v4(&interface)?;
-        send.set_multicast_ttl_v4(MULTICAST_TTL)?;
-        send.set_multicast_loop_v4(config.loopback)?;
-        send.bind(&SocketAddrV4::new(interface, 0).into())?;
-        send.set_nonblocking(true)?;
-        let send: StdUdpSocket = send.into();
-        let own = send.local_addr()?;
-        let send = UdpSocket::from_std(send)?;
-
-        // Receiving: the group's port, shared with every participant on
-        // the host.
-        let recv = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        recv.set_reuse_address(true)?;
+        // The group's port, shared with every participant on the host,
+        // for sending as well as receiving: a peer knows where to answer.
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_reuse_address(true)?;
         #[cfg(unix)]
-        recv.set_reuse_port(true)?;
-        recv.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.group.port()).into())?;
-        recv.join_multicast_v4(config.group.ip(), &interface)?;
-        recv.set_nonblocking(true)?;
-        let recv = UdpSocket::from_std(recv.into())?;
+        socket.set_reuse_port(true)?;
+        socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.group.port()).into())?;
+        if group.is_multicast() {
+            socket.set_multicast_if_v4(&interface)?;
+            socket.set_multicast_ttl_v4(MULTICAST_TTL)?;
+            socket.set_multicast_loop_v4(config.loopback)?;
+            socket.join_multicast_v4(&group, &interface)?;
+        }
+        socket.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(StdUdpSocket::from(socket))?;
 
         Ok(Self {
-            recv,
-            send,
-            own,
+            socket,
             group: config.group,
         })
-    }
-
-    /// The source address of everything this participant sends.
-    pub fn local_addr(&self) -> SocketAddr {
-        self.own
     }
 
     /// The group this participant joined.
@@ -127,13 +111,13 @@ impl LanSocket {
                 "a frame larger than 255 octets cannot be sent",
             ));
         }
-        self.send.send_to(frame, self.group).await?;
+        self.socket.send_to(frame, self.group).await?;
         Ok(())
     }
 
-    /// Poll for the next datagram another participant sent, copying it
-    /// into `buf` and returning its length and source. This
-    /// participant's own datagrams are dropped here.
+    /// Poll for the next datagram, copying it into `buf` and returning its
+    /// length and source. On a point-to-point link, datagrams from anyone
+    /// but the peer are dropped here.
     pub fn poll_recv(
         &self,
         cx: &mut Context<'_>,
@@ -141,19 +125,19 @@ impl LanSocket {
     ) -> Poll<io::Result<(usize, SocketAddr)>> {
         loop {
             let mut read = ReadBuf::new(buf);
-            let source = match self.recv.poll_recv_from(cx, &mut read) {
+            let source = match self.socket.poll_recv_from(cx, &mut read) {
                 Poll::Ready(Ok(source)) => source,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             };
-            if source == self.own {
+            if !self.group.ip().is_multicast() && source != SocketAddr::V4(self.group) {
                 continue;
             }
             return Poll::Ready(Ok((read.filled().len(), source)));
         }
     }
 
-    /// Receive the next datagram another participant sent.
+    /// Receive the next datagram.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         std::future::poll_fn(|cx| self.poll_recv(cx, buf)).await
     }
@@ -189,39 +173,50 @@ mod tests {
             .map(|result| buf[..result.unwrap().0].to_vec())
     }
 
-    /// Several participants on one host each hear the others and never
-    /// themselves, however many frames are in flight.
+    /// Several participants on one host each hear every frame sent to the
+    /// group, their own included, however many frames are in flight.
     #[tokio::test]
-    async fn every_participant_hears_the_others_and_never_itself() {
+    async fn every_participant_hears_the_group() {
         let config = LanConfig::host_local(GROUP, 47_101);
         let a = LanSocket::bind(config).unwrap();
         let b = LanSocket::bind(config).unwrap();
         let c = LanSocket::bind(config).unwrap();
-        assert_ne!(a.local_addr(), b.local_addr());
 
         for tag in 0..3u8 {
             a.send(&[0xC0, tag]).await.unwrap();
         }
         b.send(&[0xC0, 0xBB]).await.unwrap();
 
-        let mut heard_by_c = Vec::new();
-        while let Some(frame) = recv_within(&c, 200).await {
-            heard_by_c.push(frame);
+        for socket in [&a, &b, &c] {
+            let mut heard = Vec::new();
+            while let Some(frame) = recv_within(socket, 200).await {
+                heard.push(frame);
+            }
+            assert_eq!(heard.len(), 4);
         }
-        assert_eq!(heard_by_c.len(), 4);
+    }
 
-        let mut heard_by_a = Vec::new();
-        while let Some(frame) = recv_within(&a, 200).await {
-            heard_by_a.push(frame);
-        }
-        assert_eq!(heard_by_a, [vec![0xC0, 0xBB]]);
+    /// A unicast address stands in for the group: datagrams come and go on
+    /// the shared port, and only the peer's are taken.
+    #[tokio::test]
+    async fn a_unicast_peer_is_the_only_one_heard() {
+        // The peer is this host's own address on the shared port, so the
+        // socket is its own peer.
+        let port = 47_104;
+        let socket = LanSocket::bind(LanConfig::host_local(Ipv4Addr::LOCALHOST, port)).unwrap();
+        let stranger = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        stranger
+            .send_to(&[0xC0, 0x55], (Ipv4Addr::LOCALHOST, port))
+            .unwrap();
+        socket.send(&[0xC0, 0xAA]).await.unwrap();
+        assert_eq!(recv_within(&socket, 200).await, Some(vec![0xC0, 0xAA]));
+        assert_eq!(recv_within(&socket, 200).await, None);
     }
 
     #[tokio::test]
-    async fn only_a_multicast_group_and_a_fitting_frame() {
-        assert!(
-            LanSocket::bind(LanConfig::host_local(Ipv4Addr::new(10, 0, 0, 1), 47_102)).is_err()
-        );
+    async fn only_a_usable_group_and_a_fitting_frame() {
+        assert!(LanSocket::bind(LanConfig::host_local(Ipv4Addr::UNSPECIFIED, 47_102)).is_err());
+        assert!(LanSocket::bind(LanConfig::host_local(Ipv4Addr::BROADCAST, 47_102)).is_err());
         let socket = LanSocket::bind(LanConfig::host_local(GROUP, 47_103)).unwrap();
         assert!(socket.send(&[0xC0; MAX_FRAME + 1]).await.is_err());
     }

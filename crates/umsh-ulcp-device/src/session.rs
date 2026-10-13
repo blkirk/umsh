@@ -2601,6 +2601,13 @@ impl SavedState {
                 }
                 Ok(())
             }
+            // An unchosen group or limit is left out, so that it restores
+            // as unchosen and follows whatever default the firmware has.
+            prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT
+                if self.lan_bearer.is_default(u32::from(number)) =>
+            {
+                Ok(())
+            }
             prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT => {
                 let mut bytes = [0; umsh_ulcp::lan::GROUP_LEN];
                 let len = self
@@ -3703,12 +3710,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     prop::MESHCORE_REGIONS => {
                         self.device.meshcore_regions = saved.meshcore_regions.clone()
                     }
-                    prop::LAN_BEARER_ENABLED => {
-                        self.device.lan_bearer.enabled = saved.lan_bearer.enabled
-                    }
-                    prop::LAN_BEARER_GROUP => self.device.lan_bearer.group = saved.lan_bearer.group,
-                    prop::LAN_BEARER_INGRESS_LIMIT => {
-                        self.device.lan_bearer.ingress_limit = saved.lan_bearer.ingress_limit
+                    key @ (prop::LAN_BEARER_ENABLED
+                    | prop::LAN_BEARER_GROUP
+                    | prop::LAN_BEARER_INGRESS_LIMIT) => {
+                        self.device.lan_bearer.restore(key, &saved.lan_bearer)
                     }
                     prop::DEV_DISCOVERABLE => self.device.dev_discoverable = saved.dev_discoverable,
                     prop::ADVERT_INTERVAL => {
@@ -10892,7 +10897,7 @@ mod tests {
 
         // Only a multicast group, and only a nonzero limit.
         for (key, value) in [
-            (prop::LAN_BEARER_GROUP, &[10, 0, 0, 1, 0xD0, 0x3A][..]),
+            (prop::LAN_BEARER_GROUP, &[0, 0, 0, 0, 0xD0, 0x3A][..]),
             (prop::LAN_BEARER_INGRESS_LIMIT, &[0, 0][..]),
             (prop::LAN_BEARER_ENABLED, &[2][..]),
         ] {
@@ -10916,9 +10921,9 @@ mod tests {
         assert_ne!(session.dev_domain_version(), version);
         let config = *session.lan_bearer_config();
         assert!(config.enabled);
-        assert_eq!(config.group.address, [239, 1, 2, 3]);
-        assert_eq!(config.group.port, 10_000);
-        assert_eq!(config.ingress_limit, 30);
+        assert_eq!(config.group().address, [239, 1, 2, 3]);
+        assert_eq!(config.group().port, 10_000);
+        assert_eq!(config.ingress_limit(), 30);
 
         // The state is the platform's to report, and an attached host
         // hears it change.
@@ -10936,6 +10941,24 @@ mod tests {
             Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
         booted.restore_at_boot(&bytes[..len]).unwrap();
         assert_eq!(*booted.lan_bearer_config(), config);
+
+        // An empty write returns a setting to the default, which is saved
+        // as no choice at all rather than as the default's value.
+        set(&mut session, prop::LAN_BEARER_GROUP, &[]);
+        set(&mut session, prop::LAN_BEARER_INGRESS_LIMIT, &[]);
+        assert_eq!(
+            get(&mut session, prop::LAN_BEARER_GROUP),
+            umsh_ulcp::lan::Group::default().encode()
+        );
+        save(&mut session);
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.restore_at_boot(&bytes[..len]).unwrap();
+        let restored = booted.lan_bearer_config();
+        assert!(restored.enabled);
+        assert!(restored.is_default(prop::LAN_BEARER_GROUP));
+        assert!(restored.is_default(prop::LAN_BEARER_INGRESS_LIMIT));
     }
 
     #[test]

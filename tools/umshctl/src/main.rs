@@ -108,7 +108,7 @@ pub struct ToolArgs {
     tcp: Option<String>,
 
     /// Use a virtual radio on the LAN bearer, optionally naming its
-    /// group as `GROUP:PORT`.
+    /// group as `GROUP[:PORT]`.
     ///
     /// The radio runs in this process with an identity of its own, and
     /// reaches the mesh through whichever radios on the LAN have their
@@ -116,7 +116,7 @@ pub struct ToolArgs {
     /// (`--lan=239.255.134.121:15056`); bare `--lan` uses the default.
     #[arg(
         long,
-        value_name = "GROUP:PORT",
+        value_name = "GROUP[:PORT]",
         num_args(0..=1),
         require_equals = true,
         global = true
@@ -392,13 +392,17 @@ async fn resolve(args: &ToolArgs, prefs: &Prefs) -> Result<Option<Target>> {
     Ok(target)
 }
 
-/// Parse a `GROUP:PORT` multicast endpoint.
+/// A multicast group, or a unicast peer in its place, as `GROUP:PORT` or
+/// as a bare `GROUP` on the default port.
 pub fn parse_group(spec: &str) -> Result<std::net::SocketAddrV4> {
-    let group: std::net::SocketAddrV4 = spec
-        .parse()
-        .map_err(|_| anyhow::anyhow!("{spec:?} is not an IPv4 GROUP:PORT"))?;
-    if !group.ip().is_multicast() {
-        bail!("{} is not a multicast group", group.ip());
+    let group: std::net::SocketAddrV4 = match spec.parse::<std::net::Ipv4Addr>() {
+        Ok(address) => std::net::SocketAddrV4::new(address, umsh_lan_bearer::DEFAULT_PORT),
+        Err(_) => spec
+            .parse()
+            .map_err(|_| anyhow::anyhow!("{spec:?} is not an IPv4 GROUP or GROUP:PORT"))?,
+    };
+    if group.ip().is_unspecified() || group.ip().is_broadcast() {
+        bail!("{} is neither a multicast group nor a peer", group.ip());
     }
     if group.port() == 0 {
         bail!("port 0 is not a destination");
@@ -518,6 +522,16 @@ mod tests {
         let mut args = vec!["umshctl"];
         args.extend_from_slice(argv);
         ToolArgs::try_parse_from(args)
+    }
+
+    #[test]
+    fn a_group_without_a_port_takes_the_default_port() {
+        let group = parse_group("239.1.2.3").unwrap();
+        assert_eq!(group.port(), umsh_lan_bearer::DEFAULT_PORT);
+        assert_eq!(parse_group("239.1.2.3:7000").unwrap().port(), 7000);
+        assert!(parse_group("192.168.1.1").is_ok());
+        assert!(parse_group("0.0.0.0").is_err());
+        assert!(parse_group("239.1.2.3:0").is_err());
     }
 
     #[test]

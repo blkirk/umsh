@@ -45,8 +45,8 @@ entropy-sar-adc = []
 # For images plausibly left in place as infrastructure.
 meshcore-forwarder = ["umsh-ulcp-runtime/meshcore-forwarder"]
 # The LAN bearer: the device node's frames over IP multicast on the
-# station's network, and the DNS-SD record that describes them. In no
-# image's `default` yet: none has the internal RAM to spare for it.
+# station's network, and the DNS-SD record that describes them. Only the
+# T-Beam Supreme carries it by default.
 lan-bearer = [
     "wifi",
     "dep:umsh-lan-bearer",
@@ -61,7 +61,7 @@ lan-bearer = [
 # kept in step across the ESP32 device images by
 # `scripts/check_esp32_manifests.py`; `default` and BSP feature
 # forwarding select the image.
-default = ["board-tbeam-supreme", "ble", "psram", "coex", "bridge-client", "meshcore-forwarder"]
+default = ["board-tbeam-supreme", "ble", "psram", "coex", "bridge-client", "meshcore-forwarder", "lan-bearer"]
 board-heltec-v2 = ["ulcp-i2c", "chip-esp32", "radio-sx127x", "vext-gates-battery"]
 board-heltec-v3 = ["ulcp-i2c", "chip-esp32s3", "radio-sx126x"]
 board-tlora-pager = ["chip-esp32s3", "radio-sx126x", "display-st7796", "wired-usb-serial-jtag", "gnss", "external-rtc"]

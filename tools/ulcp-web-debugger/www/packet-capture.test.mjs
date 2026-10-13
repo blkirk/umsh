@@ -49,7 +49,7 @@ test("PCAP matches the native radio Ethernet and UDP encapsulation", () => {
   const frame = 24 + 16;
   assert.deepEqual([...pcap.slice(frame, frame + 6)], [2, 0, 0, 0, 0, 2]);
   assert.deepEqual([...pcap.slice(frame + 26, frame + 34)], [127, 0, 0, 2, 127, 0, 0, 1]);
-  assert.deepEqual([...pcap.slice(frame + 34, frame + 38)], [0x10, 0x92, 0x10, 0x92]);
+  assert.deepEqual([...pcap.slice(frame + 34, frame + 38)], [0x3a, 0xd0, 0x3a, 0xd0]);
   assert.deepEqual([...pcap.slice(-4)], [0xc0, 0xa1, 0xb2, 0x03]);
 });
 

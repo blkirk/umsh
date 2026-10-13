@@ -125,23 +125,27 @@ struct RemoteTextField: View {
     @Binding var text: String
     let isKnown: Bool
     var problem: String?
+    /// What an empty field shows. The title when unset.
+    var placeholder: String?
 
     init(
         _ title: String,
         text: Binding<String>,
         isKnown: Bool,
-        problem: String? = nil
+        problem: String? = nil,
+        placeholder: String? = nil
     ) {
         self.title = title
         _text = text
         self.isKnown = isKnown
         self.problem = problem
+        self.placeholder = placeholder
     }
 
     var body: some View {
         if isKnown {
             LabeledContent {
-                TextField(title, text: $text)
+                TextField(placeholder ?? title, text: $text)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .multilineTextAlignment(.trailing)

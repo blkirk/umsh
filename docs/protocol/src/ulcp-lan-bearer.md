@@ -20,17 +20,21 @@ state immediately; it does not wait for the device to join the group.
 
 ## PROP_LAN_BEARER_GROUP {#prop-lan-bearer-group}
 
-Property 4993; Get/Set; six octets: an IPv4 multicast address in network
-order, followed by a UINT16 port. Defaults to `239.255.134.121` port 15056. A
-write of an address outside `224.0.0.0/4`, a zero port, or any other length is
-refused with `STATUS_INVALID_ARGUMENT`.
+Property 4993; Get/Set; six octets: an IPv4 address in network order,
+followed by a UINT16 port. Defaults to `239.255.134.121` port 15056. An
+address in `224.0.0.0/4` is a multicast group; any other is the peer of a
+[point-to-point](lan-bearer.md#point-to-point) link. A write of an empty value
+returns it to the default; a read always reports the group in effect. A write
+of `0.0.0.0`, `255.255.255.255`, a zero port, or any other length is refused
+with `STATUS_INVALID_ARGUMENT`.
 
 ## PROP_LAN_BEARER_INGRESS_LIMIT {#prop-lan-bearer-ingress-limit}
 
 Property 4994; Get/Set; UINT16. The most bearer receptions per minute the
 device hands to its node; see [Ingress Limit](lan-bearer.md#ingress-limit).
-Defaults to 120. Zero is invalid. The device MAY admit a short burst above
-the rate after a quiet interval.
+Defaults to 120. A write of an empty value returns it to the default; a read
+always reports the limit in effect. Zero is invalid. The device MAY admit a
+short burst above the rate after a quiet interval.
 
 ## PROP_LAN_BEARER_STATE {#prop-lan-bearer-state}
 
@@ -62,7 +66,9 @@ Property | Name | Counts
 ## Persistence and lifecycle
 
 The three configuration properties are saved by `CMD_SAVE` in the device
-snapshot. `CMD_CLEAR` erases saved configuration without changing live
+snapshot. A group or ingress limit at its default is saved as the default,
+not as its value, so that the device follows the default of whatever firmware
+it later runs. `CMD_CLEAR` erases saved configuration without changing live
 configuration; `CMD_RST` follows the normal saved-state restore rules.
 Attach and detach do not change these properties or interrupt the bearer.
 Authorized mesh administrators may write them through the existing

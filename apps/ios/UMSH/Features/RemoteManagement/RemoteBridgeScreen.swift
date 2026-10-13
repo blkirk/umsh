@@ -48,9 +48,11 @@ struct RemoteBridgeScreen: View {
         }
         Section {
             RemoteTextField("Group", text: $edits.group.edited.replacingNil(with: ""),
-                            isKnown: edits.group.isKnown, problem: problems[ulcpProperties.lanBearerGroup])
+                            isKnown: edits.group.isKnown, problem: problems[ulcpProperties.lanBearerGroup],
+                            placeholder: "Default")
             RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
-                            isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit])
+                            isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit],
+                            placeholder: "Default")
             if !hasServer { RemoteReadingFooter(reading: reading, isBusy: model.isBusy) }
         } header: {
             Text("Local Network Settings")
@@ -156,16 +158,23 @@ struct RemoteBridgeScreen: View {
             catch { validation = "Enter a valid UMSH server identity, or leave it empty to clear it."; return }
         }
         desired.lanBearerEnabled = edits.localEnabled.value
+        // A cleared field hands the setting back to the device's default.
         if edits.group.isDirty {
-            do { desired.lanBearerGroup = try ulcpLanGroup(input: edits.group.value ?? "") }
-            catch { validation = "Enter a multicast group and port, such as 239.255.134.121:15056."; return }
+            let text = (edits.group.value ?? "").trimmingCharacters(in: .whitespaces)
+            do { desired.lanBearerGroup = text.isEmpty ? nil : try ulcpLanGroup(input: text) }
+            catch { validation = "Enter a multicast group or a peer address, with an optional port."; return }
         }
         if edits.limit.isDirty {
-            guard let text = edits.limit.value, let limit = UInt16(text), limit > 0 else {
-                validation = "Enter a limit from 1 to 65535 frames per minute."
-                return
+            let text = (edits.limit.value ?? "").trimmingCharacters(in: .whitespaces)
+            if text.isEmpty {
+                desired.lanBearerIngressLimit = nil
+            } else {
+                guard let limit = UInt16(text), limit > 0 else {
+                    validation = "Enter a limit from 1 to 65535 frames per minute."
+                    return
+                }
+                desired.lanBearerIngressLimit = limit
             }
-            desired.lanBearerIngressLimit = limit
         }
         if await model.apply(.bridge, desired: desired, dirty: edits.dirty) {
             edits = Edits(model.readings[.bridge])

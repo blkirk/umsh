@@ -668,15 +668,15 @@ M.dissect_frame = dissect_frame
 function proto.dissector(buf, pinfo, tree)
   pinfo.cols.protocol = "UMSH-ULCP"
   local src_port = tonumber(tostring(pinfo.src_port)) or 0
-  local direction = src_port == 4243 and "Host → Device" or "Device → Host"
+  local direction = src_port == 15057 and "Host → Device" or "Device → Host"
   local info = dissect_frame(buf, pinfo, tree, direction)
   if info then pinfo.cols.info = info end
 end
 
 function M.register()
   local udp = DissectorTable.get("udp.port")
-  udp:add(4243, proto)
-  udp:add(4244, proto)
+  udp:add(15057, proto)
+  udp:add(15058, proto)
 end
 
 return M

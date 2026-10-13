@@ -36,6 +36,9 @@ is 15056. A deployment MAY configure another IPv4 multicast group and another
 nonzero port; every participant that is to hear the others uses the same
 pair.
 
+Every participant sends from the group's port as well as to it, and listens
+on it; several participants on one host share it.
+
 A participant joins the group on the interface it uses for the local network
 and sends to the group from that interface, with a multicast TTL of 16 unless
 configured otherwise. How far the group reaches is the network's decision:
@@ -43,17 +46,20 @@ routers forward a multicast group only where they are configured to, and
 `239.255.0.0/16` is scoped to the organization. A network that routes the
 group between its subnets joins their participants into one bearer.
 
+### Point-to-Point
+
+A unicast address MAY be configured in place of the group, naming the one
+peer of a point-to-point link. The participant joins nothing, sends to the
+peer at the group's port, and drops every datagram whose source address and
+port are not the peer's. Each end names the other, on the same port.
+
 ### Echoes
 
-A participant sends from a socket whose local address and port are unique to
-it on its host, and drops every datagram whose source address and port equal
-that address. A participant that is alone on its host MAY instead disable
-multicast loopback.
-
-Several participants on one host share the group's port for receiving, so a
-participant that sends from the receiving socket shares its source address
-with every other participant there and cannot tell its own datagrams from
-theirs.
+A participant in a multicast group hears its own datagrams when multicast
+loopback, or an access point repeating a station's multicast, hands them
+back. A participant MAY drop a datagram whose source address and port are its
+own, which on a host with several participants also drops the others'. A
+participant that is alone on its host MAY instead disable multicast loopback.
 
 ## Datagram Format
 

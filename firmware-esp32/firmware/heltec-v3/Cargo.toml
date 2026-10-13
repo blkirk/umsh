@@ -43,8 +43,8 @@ entropy-sar-adc = []
 # For images plausibly left in place as infrastructure.
 meshcore-forwarder = ["umsh-ulcp-runtime/meshcore-forwarder"]
 # The LAN bearer: the device node's frames over IP multicast on the
-# station's network, and the DNS-SD record that describes them. In no
-# image's `default` yet: none has the internal RAM to spare for it.
+# station's network, and the DNS-SD record that describes them. Only the
+# T-Beam Supreme carries it by default.
 lan-bearer = [
     "wifi",
     "dep:umsh-lan-bearer",

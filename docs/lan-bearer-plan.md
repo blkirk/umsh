@@ -69,19 +69,16 @@ per datagram with no header. That carries everything the bearer needs:
 - **Signal metadata does not belong on the LAN.** A bearer reception is
   unmeasured by definition, like a backhaul reception.
 
-### Echo suppression needs a distinct send socket
+### Echoes are the node's business, except on a simulated radio
 
-Today every instance binds the group port with `SO_REUSEPORT` and sends from
-that socket (`tokio_support.rs:211-219`). Co-located instances therefore send
-from an identical `address:15056`, and the radio falls back to dropping
-byte-for-byte copies of its last transmission (`tokio_support.rs:283-288`),
-which fails as soon as more than one frame is in flight.
-
-The fix is local: send from a second socket bound to an ephemeral port and
-connected to the group, so the OS picks and reports the source address. A
-receiver drops datagrams whose source equals that address. Every instance has
-a unique `address:port`, and the check is exact. On a host with one instance,
-such as a radio or a phone, multicast loopback can simply be off.
+Every instance binds the group port with `SO_REUSEPORT` and sends from that
+socket, so co-located instances send from an identical `address:15056` and
+no source-address check can tell an instance's own datagrams from its
+neighbors'. A node already tolerates hearing its own frames, so a bearer
+participant takes its echoes like any other datagram. A simulated LoRa radio
+cannot: a radio does not hear itself, and its MAC reads a repeat of its own
+frame as forwarding confirmation. `UdpMulticastRadio` therefore remembers the
+frames it sent and drops the first identical datagram for each.
 
 ### A crossing is already defined
 
@@ -389,8 +386,10 @@ Two things stay outside the chapter, following existing precedent:
   are distinguished by their version bits. Senders MUST NOT send a frame
   larger than 255 octets. Receivers drop, with accounting, datagrams that are
   empty, oversized, or carry an unknown version.
-- **Echo:** a participant sends from a socket whose local address is unique to
-  it, and drops datagrams whose source address equals that address.
+- **Shared port:** every participant sends from the group's port as well as
+  to it; see [P9](#p9-point-to-point-and-the-shared-port).
+- **Echo:** a participant MAY drop datagrams whose source is its own address
+  and port; it otherwise takes its echoes like any datagram.
 - **Bearer semantics:** a datagram is a bearer reception: unmeasured, subject to
   [P4](#p4-forwarding-across-bearers) and [P5](#p5-channel-access).
 - **Ingress limit:** a radio limits LAN-to-LoRa forwards with a token bucket
@@ -476,9 +475,18 @@ administrators. Numbers are tentative, chosen clear of the MeshCore block
 | Prop | Name | Type | Access | Notes |
 |---|---|---|---|---|
 | 4992 | `PROP_LAN_BEARER_ENABLED` | BOOL | Get/Set | Default false |
-| 4993 | `PROP_LAN_BEARER_GROUP` | Address and port | Get/Set | Default `239.255.134.121:15056` |
-| 4994 | `PROP_LAN_BEARER_INGRESS_LIMIT` | UINT16 | Get/Set | Frames per minute; zero invalid |
+| 4993 | `PROP_LAN_BEARER_GROUP` | Address and port | Get/Set | Default `239.255.134.121:15056`; empty write restores it |
+| 4994 | `PROP_LAN_BEARER_INGRESS_LIMIT` | UINT16 | Get/Set | Frames per minute; zero invalid; empty write restores the default |
 | 4995 | `PROP_LAN_BEARER_STATE` | UINT8 | Get/Is | 0 Disabled, 1 Active, 2 No network |
+
+**Defaults are followed, not copied.** A group or ingress limit that nobody
+has set holds no value of its own: a read reports the default in effect, an
+empty write returns a set one to that state, and `CMD_SAVE` records it as
+unset. A device that saves its settings for any reason therefore keeps
+following its firmware's default, and a firmware with a different default
+brings it along. Saving the default's value instead would freeze whatever
+default was current at the first save of any setting. The precedent for the
+empty write is `PROP_IDENT_ROLE`, where empty means "derive your own."
 
 **Independence from other switches.** Enabling the bearer does not change
 `PROP_MAC_REPEATER_ENABLED` or the Wi-Fi properties. When Wi-Fi is off or not
@@ -513,6 +521,18 @@ settings is decision D10.
 HDLC-Lite over a Unix domain socket, whose possession requirement is met by
 filesystem access to the socket. It is general, not iOS-specific, and lands
 with the iOS work because that is its first user.
+
+### P9. Point-to-point and the shared port
+
+- **Shared port:** every participant sends from the group's port and listens
+  on it, so a peer always knows where to answer, and a stateful firewall or
+  NAT passes the answer to an outgoing datagram.
+- **Point-to-point:** `PROP_LAN_BEARER_GROUP` MAY hold a unicast address,
+  naming the one peer of a link. Nothing is joined; datagrams go to the peer
+  at the group's port, and only datagrams from the peer's address and port
+  are taken. Each end names the other on the same port. The property refuses
+  `0.0.0.0` and `255.255.255.255`.
+- **Discovery:** unchanged; `grp` reports whatever address is configured.
 
 ## Implementation
 
@@ -592,8 +612,8 @@ bearer, using the `SimulatedNetwork` harness in
 - Move `UdpMulticastRadio` out of `umsh/src/tokio_support.rs`, so the
   umbrella, `umsh-bridge`, `umshctl`, and later `umsh-mobile-core` share one
   implementation.
-- Separate send socket, source-address echo filter, TTL 16, and loopback
-  only when requested.
+- One socket on the group's port for sending and receiving, TTL 16, a join
+  only for a multicast group, and a peer filter for a unicast one.
 - A receive-origin setting: `Bearer` for real use, and the current fixed
   measured `Air` for simulation tests that need signal values.
 - DNS-SD advertise and browse for hosts (the `mdns-sd` crate), with the P3 TXT
@@ -651,7 +671,8 @@ iOS virtual radio is its second.
 #### 1.9 Phase 1 validation
 
 - **Host:** two `umshctl --lan` instances and the bridge on one Mac through
-  the group; echo filtering with several instances per host.
+  the group; several instances per host; a point-to-point link between
+  two hosts.
 - **Radios:** two ESP32 radios on different LoRa settings bridged by one LAN;
   a crossing in each direction; contention when both hear the same LAN frame.
 - **Desktop to mesh:** `umshctl --lan` messages a LoRa-only node through a

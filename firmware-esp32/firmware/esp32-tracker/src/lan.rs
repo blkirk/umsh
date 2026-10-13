@@ -239,7 +239,7 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
             CONFIG_CHANGED.wait().await;
             continue;
         };
-        let group = Ipv4Address::from(config.group.address);
+        let group = Ipv4Address::from(config.group().address);
         let Some(address) = address(stack) else {
             report(&mut published, State::NoNetwork).await;
             select(CONFIG_CHANGED.wait(), Timer::after_millis(NETWORK_POLL_MS)).await;
@@ -256,9 +256,13 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
             &mut buffers.tx_meta,
             &mut buffers.tx,
         );
-        // Where the group reaches is the network's routing decision.
+        // Where the group reaches is the network's routing decision. A
+        // unicast address in its place is a peer, and nothing is joined.
         socket.set_hop_limit(Some(umsh_lan_bearer::MULTICAST_TTL as u8));
-        if stack.join_multicast_group(group).is_err() || socket.bind(config.group.port).is_err() {
+        let multicast = config.group().is_multicast();
+        if (multicast && stack.join_multicast_group(group).is_err())
+            || socket.bind(config.group().port).is_err()
+        {
             super::debug_log(format_args!("lan: could not join {}", group));
             drop(socket);
             let _ = stack.leave_multicast_group(group);
@@ -279,15 +283,20 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
             stack.join_multicast_group(MDNS_GROUP).is_ok() && mdns.bind(MDNS_PORT).is_ok();
 
         mac.set_bearer_enabled(BearerId::LAN, true).await;
-        PORT.configure(true, config.ingress_limit, now_ms());
+        PORT.configure(true, config.ingress_limit(), now_ms());
         report(&mut published, State::Active).await;
-        let own = IpEndpoint::new(IpAddress::Ipv4(address), config.group.port);
-        let destination = IpEndpoint::new(IpAddress::Ipv4(group), config.group.port);
+        let own = IpEndpoint::new(IpAddress::Ipv4(address), config.group().port);
+        let destination = IpEndpoint::new(IpAddress::Ipv4(group), config.group().port);
         select4(
             CONFIG_CHANGED.wait(),
             address_changes(stack, address),
             join(
-                receive(&socket, own, &mut buffers.datagram),
+                receive(
+                    &socket,
+                    own,
+                    (!multicast).then_some(destination),
+                    &mut buffers.datagram,
+                ),
                 export(&socket, &mac, destination, &mut buffers.export),
             ),
             advertise(&mut mdns, mdns_ready, address, &mut buffers.reply),
@@ -302,13 +311,20 @@ pub async fn run(stack: Stack<'static>, mac: DeviceNodeHandle) -> ! {
     }
 }
 
-/// Offer every datagram from the group to the node.
-async fn receive(socket: &UdpSocket<'_>, own: IpEndpoint, datagram: &mut [u8; MAX_FRAME + 1]) {
+/// Offer every datagram from the group to the node; on a point-to-point
+/// link, only those from `peer`.
+async fn receive(
+    socket: &UdpSocket<'_>,
+    own: IpEndpoint,
+    peer: Option<IpEndpoint>,
+    datagram: &mut [u8; MAX_FRAME + 1],
+) {
     loop {
         match socket.recv_from(datagram).await {
             // An access point repeats a station's multicast to every
             // station, the sender included.
             Ok((_, meta)) if meta.endpoint == own => {}
+            Ok((_, meta)) if peer.is_some_and(|peer| meta.endpoint != peer) => {}
             Ok((len, _)) => {
                 PORT.offer(&datagram[..len], now_ms());
             }
@@ -356,9 +372,9 @@ impl Record {
             instance: settings.name,
             hostname: label(&super::wifi::hostname()?),
             address,
-            port: settings.config.group.port,
+            port: settings.config.group().port,
             advertisement: Advertisement {
-                group: settings.config.group.address,
+                group: settings.config.group().address,
                 node_key: settings.node_key?,
                 lora: settings.lora,
                 meshcore: settings.meshcore,
