@@ -220,7 +220,13 @@ local _registered_port = 0
 -- verified (not just correlated).
 --
 -- _ack_by_mic:   ack_mic_hex → {frame=N, timestamp=T, src_label=S,
---                               dst_label=D, exp_tag_hex=<4B hex or nil>}
+--                               dst_label=D, src_addr=A, dst_addr=A,
+--                               src_name=N, dst_name=N,
+--                               exp_tag_hex=<4B hex or nil>}
+--                 The labels are what the columns show; the addresses are
+--                 the canonical umsh.src_addr/umsh.dst_addr strings, and the
+--                 names whatever the keystore resolved. Any of them is nil
+--                 when the packet concealed it.
 -- _ack_by_frame: frame_num → {ack_frame=N, rsp_time=delta_seconds} (back-annotation)
 -- _ack_origin:   ack frame_num → the _ack_by_mic entry that ack resolved to
 --
@@ -791,6 +797,23 @@ local function dissect_uack(buf, pinfo, tree, off)
       -- genuine, so a tag mismatch below leaves the columns empty rather
       -- than asserting a conversation that did not happen.
       set_endpoints(pinfo, origin.dst_label, origin.src_label)
+      -- The same reversal for the filterable fields, so
+      -- `umsh.src_addr == "GySV"` catches the acks GySV sent too. They
+      -- are generated: the ack carries none of these bytes, and they
+      -- hang off the ack_mic that names the packet they came from.
+      local mic_range = buf(off, 4)
+      if origin.dst_addr then
+        tree:add(f.src_addr, mic_range, origin.dst_addr):set_generated():set_hidden()
+      end
+      if origin.src_addr then
+        tree:add(f.dst_addr, mic_range, origin.src_addr):set_generated():set_hidden()
+      end
+      if origin.dst_name and origin.dst_name ~= "" then
+        tree:add(f.src_name, mic_range, origin.dst_name):set_generated()
+      end
+      if origin.src_name and origin.src_name ~= "" then
+        tree:add(f.dst_name, mic_range, origin.src_name):set_generated()
+      end
       -- Store back-reference so the UNAR/BUAR frame can show "Acknowledged in frame N"
       if not pinfo.visited then
         _ack_by_frame[origin.frame] = {
@@ -859,6 +882,10 @@ local function dissect_unicast(buf, pinfo, tree, off, full_src, fcf_byte, static
       timestamp   = pinfo.abs_ts,
       src_label   = sl,
       dst_label   = dl,
+      src_addr    = addr_short(src_bytes),
+      dst_addr    = hint_short(dst_bytes),
+      src_name    = src_name,
+      dst_name    = dst_name,
       exp_tag_hex = prior and prior.exp_tag_hex or nil,
     }
   end
@@ -904,6 +931,10 @@ local function dissect_unicast(buf, pinfo, tree, off, full_src, fcf_byte, static
             timestamp = pinfo.abs_ts,
             src_label = sl,
             dst_label = dl,
+            src_addr  = addr_short(src_bytes),
+            dst_addr  = hint_short(dst_bytes),
+            src_name  = src_name,
+            dst_name  = dst_name,
           }
           entry.exp_tag_hex = tag_hex
           _ack_by_mic[mic_hex] = entry
@@ -1119,6 +1150,10 @@ local function dissect_blind_unicast(buf, pinfo, tree, off, full_src, fcf_byte, 
         timestamp   = pinfo.abs_ts,
         src_label   = prior and prior.src_label or "?",
         dst_label   = prior and prior.dst_label or "?",
+        src_addr    = prior and prior.src_addr,
+        dst_addr    = prior and prior.dst_addr,
+        src_name    = prior and prior.src_name,
+        dst_name    = prior and prior.dst_name,
         exp_tag_hex = prior and prior.exp_tag_hex or nil,
       }
     end
@@ -1180,6 +1215,10 @@ local function dissect_blind_unicast(buf, pinfo, tree, off, full_src, fcf_byte, 
             }
             entry.src_label   = s_name or (dec_src and addr_short(dec_src)) or "?"
             entry.dst_label   = d_name or (dst_hint and hint_short(dst_hint)) or "?"
+            entry.src_addr    = dec_src and addr_short(dec_src)
+            entry.dst_addr    = dst_hint and hint_short(dst_hint)
+            entry.src_name    = s_name
+            entry.dst_name    = d_name
             entry.exp_tag_hex = tag_hex
             _ack_by_mic[mic_hex] = entry
           end
@@ -1237,6 +1276,10 @@ local function dissect_blind_unicast(buf, pinfo, tree, off, full_src, fcf_byte, 
         timestamp   = pinfo.abs_ts,
         src_label   = sl,
         dst_label   = dl,
+        src_addr    = addr_short(src_bytes),
+        dst_addr    = hint_short(dst_bytes),
+        src_name    = src_name,
+        dst_name    = dst_name,
         exp_tag_hex = prior and prior.exp_tag_hex or nil,
       }
     end
@@ -1306,6 +1349,10 @@ local function dissect_blind_unicast(buf, pinfo, tree, off, full_src, fcf_byte, 
                   timestamp = pinfo.abs_ts,
                   src_label = sl,
                   dst_label = dl,
+                  src_addr  = addr_short(src_bytes),
+                  dst_addr  = hint_short(dst_bytes),
+                  src_name  = src_name,
+                  dst_name  = dst_name,
                 }
                 entry.exp_tag_hex = tag_hex
                 _ack_by_mic[mic_hex] = entry

@@ -354,3 +354,11 @@ with the bytes it was read from alongside—`GySV (ED:54:A5)` for a node hint,
 matching that hint would produce; the star marks where the hint stops proving
 anything. `umsh.src_addr` and `umsh.dst_addr` carry the canonical text for
 filtering, and the address columns use it whenever no keystore name is known.
+
+A MAC ack carries no addresses, but the packet it acknowledges does. Once an
+ack is matched to that packet, it takes the packet's endpoints reversed: the
+ack's source is the acknowledged packet's destination. Its columns,
+`umsh.src_addr`/`umsh.dst_addr`, and keystore names all follow, so filtering
+on a node's address also finds the acks it sent. These fields are generated
+rather than read from the ack's bytes, and they are left empty for an ack
+that matches nothing, or whose tag a configured key proves wrong.
