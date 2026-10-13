@@ -844,11 +844,8 @@ struct PeerDetailView: View {
             if let route {
                 LabeledContent("Next send", value: Self.routeSummary(route))
                 if let holdUntil = route.holdUntil {
-                    if let floodHops = route.heldFloodHops {
-                        LabeledContent(
-                            route.hints.isEmpty ? "Flood" : "Then flood",
-                            value: ManualPathEditor.floodText(floodHops)
-                        )
+                    if !route.hints.isEmpty, let floodHops = route.heldFloodHops {
+                        LabeledContent("Then flood", value: ManualPathEditor.floodText(floodHops))
                     }
                     LabeledContent("Held until") {
                         Text(holdUntil, format: .dateTime.hour().minute())
@@ -969,9 +966,11 @@ struct PeerDetailView: View {
     private static func routeSummary(_ route: PeerRoute?) -> String {
         guard let route else { return "Reading…" }
         if route.isHeld {
-            return route.hints.isEmpty
-                ? "Manual · Direct"
-                : "Manual · \(Self.hopsText(route.hopCount ?? UInt8(route.hints.count + 1)))"
+            if !route.hints.isEmpty {
+                return "Manual · \(Self.hopsText(route.hopCount ?? UInt8(route.hints.count + 1)))"
+            }
+            return route.heldFloodFromStart.map { "Manual · Flood (\(Self.hopsText($0)))" }
+                ?? "Manual · Direct"
         }
         return switch route.kind {
         case .unavailable:

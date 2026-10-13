@@ -17,14 +17,14 @@ struct LearnedPathPromptSheet: View {
         NavigationStack {
             List {
                 Section {
-                    Text(route.hints.isEmpty ? "Direct" : pathText(route.hints))
+                    Text(manualPathText)
                     Label(
                         "No ack on the last \(route.fallbackAcks) send\(route.fallbackAcks == 1 ? "" : "s")",
                         systemImage: "xmark.circle"
                     )
                     .foregroundStyle(.orange)
                 } header: {
-                    header("Manual", hops: route.hints.count + 1)
+                    header("Manual", hops: route.heldFloodFromStart.map(Int.init) ?? route.hints.count + 1)
                 }
                 if let candidate = route.candidate {
                     Section {
@@ -75,6 +75,11 @@ struct LearnedPathPromptSheet: View {
             Spacer()
             Text(ManualPathEditor.hopsText(hops))
         }
+    }
+
+    private var manualPathText: String {
+        if !route.hints.isEmpty { return pathText(route.hints) }
+        return route.heldFloodFromStart == nil ? "Direct" : "Flood"
     }
 
     private func pathText(_ hints: [MeshRouterHint]) -> String {

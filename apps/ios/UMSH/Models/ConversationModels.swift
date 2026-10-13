@@ -653,6 +653,13 @@ struct PeerRoute: Equatable, Sendable {
 
     var isHeld: Bool { holdUntil != nil }
 
+    /// How far a held route that names no repeaters floods from the start;
+    /// `nil` when it names repeaters, floods nothing, or is not held.
+    var heldFloodFromStart: UInt8? {
+        guard hints.isEmpty, let hops = heldFloodHops, hops > 0 else { return nil }
+        return hops
+    }
+
     static let unknown = PeerRoute(
         kind: .unknown, hints: [], hopCount: nil, floodHops: nil, floodRegions: []
     )
