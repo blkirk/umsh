@@ -342,6 +342,7 @@ struct RadioPosition: Equatable, Sendable {
             }
         case .twoD: "2D fix"
         case .threeD: "3D fix"
+        case .unknown: "Fix"
         }
     }
 
@@ -565,7 +566,7 @@ extension UlcpFixKind {
     var symbolName: String {
         switch self {
         case .none: "location.slash"
-        case .twoD, .threeD: "location.fill"
+        case .twoD, .threeD, .unknown: "location.fill"
         }
     }
 }

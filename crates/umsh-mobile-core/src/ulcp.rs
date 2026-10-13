@@ -16,12 +16,10 @@ use umsh_ulcp::{
     host::{PropertyNotification, PropertyNotificationError, TidAllocator},
     ids::{
         INTERFACE_TYPE, MAX_ANNOUNCE_FLOOD_HOPS, MAX_AUTO_ANNOUNCE_INTERVAL_S,
-        MIN_AUTO_ANNOUNCE_INTERVAL_S, PROTOCOL_MAJOR_VERSION, PROTOCOL_MINOR_VERSION, cap,
-        meshcore_identity_allowed, meshcore_region_policy, prop, saved,
+        MIN_AUTO_ANNOUNCE_INTERVAL_S, PROTOCOL_MAJOR_VERSION, cap, meshcore_identity_allowed,
+        meshcore_region_policy, prop, saved,
     },
-    ip,
-    items::{self, Filter},
-    lan,
+    ip, items, lan,
     meta::{BufferedRxMeta, RX_FLAG_ACKED, RX_FLAG_BUFFERED},
     pui, wifi,
 };
@@ -243,6 +241,9 @@ pub enum UlcpFixKind {
     TwoD,
     /// Position and altitude.
     ThreeD,
+    /// A solution of a quality this phone has no name for, reported by
+    /// firmware newer than it. Still a fix: only zero means none.
+    Unknown,
 }
 
 impl UlcpFixKind {
@@ -251,6 +252,7 @@ impl UlcpFixKind {
             FixKind::None => Self::None,
             FixKind::TwoD => Self::TwoD,
             FixKind::ThreeD => Self::ThreeD,
+            FixKind::Other(_) => Self::Unknown,
         }
     }
 }
@@ -1292,7 +1294,7 @@ impl MobileUlcpSession {
         if session.stage != SessionStage::Attached {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !session.has_capability(cap::ALERT)? {
+        if !session.has_capability(cap::ALERT) {
             return Err(MobileError::UnsupportedCapability);
         }
         let value = encode_alert_state(state)?;
@@ -1322,7 +1324,7 @@ impl MobileUlcpSession {
     ) -> Result<UlcpSessionUpdateRecord, MobileError> {
         let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
         state.begin_local_management()?;
-        if !state.has_capability(cap::ADVERT)? {
+        if !state.has_capability(cap::ADVERT) {
             return Err(MobileError::UnsupportedCapability);
         }
         // Encoded before anything is put in flight: a request the device
@@ -1374,7 +1376,7 @@ impl MobileUlcpSession {
         if session.stage != SessionStage::Attached {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !session.has_capability(cap::TIME)? {
+        if !session.has_capability(cap::TIME) {
             return Err(MobileError::UnsupportedCapability);
         }
         let value = epoch_seconds
@@ -1545,7 +1547,7 @@ impl MobileUlcpSession {
             .clone();
         // A device without the capability has nothing to sample, and
         // asking anyway would earn a refusal per property.
-        if !decode_capabilities(&capabilities)?.contains(&cap::GNSS) {
+        if !decode_capabilities(&capabilities).contains(&cap::GNSS) {
             return Err(MobileError::InvalidUlcpFrame);
         }
         state.inspection_queue = VecDeque::from(vec![
@@ -1585,7 +1587,7 @@ impl MobileUlcpSession {
                 .all(|key| umsh_ulcp::battery_diagnostics::Fields::ALL.contains(*key));
         let temperature_multi = property_ids == [prop::TEMPERATURES, prop::TEMPERATURE_NAMES];
         let multi_get =
-            temperature_multi || (battery_multi && state.has_capability(cap::CMD_MULTI)?);
+            temperature_multi || (battery_multi && state.has_capability(cap::CMD_MULTI));
         state.management = Some(LocalManagement {
             fetch_queue: property_ids.into(),
             multi_get,
@@ -1666,7 +1668,7 @@ impl MobileUlcpSession {
     pub fn begin_save(&self) -> Result<UlcpSessionUpdateRecord, MobileError> {
         let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
         state.begin_local_management()?;
-        if !state.has_capability(cap::SAVE)? {
+        if !state.has_capability(cap::SAVE) {
             state.management_event = Some(UlcpLocalManagementEventRecord {
                 answers: Vec::new(),
                 status_code: None,
@@ -1764,7 +1766,7 @@ impl MobileUlcpSession {
         if state.stage != SessionStage::Attached || !state.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !state.has_capability(cap::HOST_KEYS)? {
+        if !state.has_capability(cap::HOST_KEYS) {
             return Err(MobileError::UnsupportedCapability);
         }
 
@@ -1816,7 +1818,7 @@ impl MobileUlcpSession {
         if state.stage != SessionStage::Attached || !state.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !state.has_capability(cap::HOST_RX_QUEUE)? {
+        if !state.has_capability(cap::HOST_RX_QUEUE) {
             return Err(MobileError::UnsupportedCapability);
         }
         let tid = state.allocate_tid();
@@ -1877,7 +1879,7 @@ impl MobileUlcpSession {
         if state.stage != SessionStage::Attached || !state.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !state.has_capability(cap::HOST_KEYS)? {
+        if !state.has_capability(cap::HOST_KEYS) {
             return Err(MobileError::UnsupportedCapability);
         }
 
@@ -1920,7 +1922,7 @@ impl MobileUlcpSession {
         if state.stage != SessionStage::Attached || !state.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !state.has_capability(cap::HOST_AUTO_ACK)? {
+        if !state.has_capability(cap::HOST_AUTO_ACK) {
             return Err(MobileError::UnsupportedCapability);
         }
         let desired = vec![u8::from(enabled)];
@@ -1974,7 +1976,7 @@ impl MobileUlcpSession {
         if state.stage != SessionStage::Attached || !state.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !state.has_capability(cap::HOST_RX_QUEUE)? {
+        if !state.has_capability(cap::HOST_RX_QUEUE) {
             return Err(MobileError::UnsupportedCapability);
         }
 
@@ -2139,7 +2141,17 @@ impl MobileUlcpSession {
 
     /// Consume one complete ULCP frame and advance the session reducer.
     pub fn consume(&self, frame: Vec<u8>) -> Result<UlcpSessionUpdateRecord, MobileError> {
-        let parsed = Frame::parse(&frame).map_err(|_| MobileError::UlcpFrameUnparsable)?;
+        let Ok(parsed) = Frame::parse(&frame) else {
+            // Reserved header bits, a command with its top bit set, a flag
+            // pattern that is not ULCP's: the spec has a receiver ignore
+            // the entire frame, and that is all that happens here. The
+            // transport delimited it, so the next frame is unaffected, and
+            // one this session cannot read is no evidence that the next
+            // will be unreadable too. Nothing changed, so the update is
+            // empty.
+            let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
+            return Ok(state.update(Vec::new()));
+        };
         if parsed.command() == Some(Cmd::StrRecv) {
             if parsed.header.tid() != frame::TID_UNSOLICITED {
                 return Err(MobileError::UlcpUnexpectedFrame);
@@ -2149,8 +2161,10 @@ impl MobileUlcpSession {
             if payload.stream != umsh_ulcp::ids::stream::PHY_RAW {
                 return Err(MobileError::UlcpUnexpectedFrame);
             }
-            let metadata = BufferedRxMeta::decode(payload.metadata)
-                .map_err(|_| MobileError::UlcpMalformedPayload)?;
+            // Metadata cut short mid-field is about the reception, not
+            // the frame: the frame is still delivered, with no
+            // measurements attached.
+            let metadata = BufferedRxMeta::decode(payload.metadata).unwrap_or_default();
             let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
             if state.stage == SessionStage::Idle {
                 return Err(MobileError::UlcpUnexpectedFrame);
@@ -2169,10 +2183,9 @@ impl MobileUlcpSession {
             if parsed.header.tid() != frame::TID_UNSOLICITED {
                 return Err(MobileError::UlcpUnexpectedFrame);
             }
-            // The reason is diagnostic; what matters is that the device
-            // started a session over.
-            frame::parse_session_reset(parsed.payload)
-                .map_err(|_| MobileError::UlcpMalformedPayload)?;
+            // The reason is diagnostic, so it is not even read: what
+            // matters is that the device started a session over, and a
+            // reason this session cannot decode does not change that.
             let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
             if state.stage == SessionStage::Idle {
                 return Err(MobileError::UlcpUnexpectedFrame);
@@ -2203,7 +2216,7 @@ impl MobileUlcpSession {
             {
                 let keys = keys.clone();
                 let tid = parsed.header.tid();
-                let mut update = state.consume_management_multi(parsed, &keys)?;
+                let mut update = state.consume_management_multi(tid, &frame, &keys)?;
                 update.completed_control_transaction = Some(tid);
                 return Ok(update);
             }
@@ -2215,14 +2228,17 @@ impl MobileUlcpSession {
         let mut operation_error = None;
 
         if response.transaction_id == frame::TID_UNSOLICITED {
+            let mut replaced = None;
             let kind = if response.command == Cmd::PropIs as u8 {
                 // Only a whole value replaces the cached one. An item
                 // notification describes a change to a value this
                 // session never held, so folding it in here would
                 // invent a table out of its own increments.
-                state
-                    .responses
-                    .insert(response.property_id, response.clone());
+                replaced = Some(
+                    state
+                        .responses
+                        .insert(response.property_id, response.clone()),
+                );
                 Some(UlcpPropertyPushKind::Is)
             } else if response.command == Cmd::PropInserted as u8 {
                 Some(UlcpPropertyPushKind::Inserted)
@@ -2241,8 +2257,20 @@ impl MobileUlcpSession {
                     kind,
                 });
             }
-            state.apply_property(&response)?;
-            state.refresh_attached_snapshot(Some(response.property_id))?;
+            state.apply_property(&response);
+            if !state.refresh_attached_snapshot(Some(response.property_id))
+                && let Some(replaced) = replaced
+            {
+                // A pushed value the snapshot cannot be built around—one
+                // of the properties every snapshot needs, in a form this
+                // session cannot read. The push is still carried out
+                // verbatim above; the cache goes back to what it held, so
+                // the next reduction is not stuck on it either.
+                match replaced {
+                    Some(previous) => state.responses.insert(response.property_id, previous),
+                    None => state.responses.remove(&response.property_id),
+                };
+            }
             return Ok(state.update(outbound));
         }
 
@@ -2280,14 +2308,15 @@ impl MobileUlcpSession {
                     if expected_property {
                         state.responses.remove(&property);
                     } else {
-                        operation_error = Some(ulcp_operation_error(
-                            format!("read property {property}"),
-                            response.value.as_slice(),
-                        )?);
+                        operation_error =
+                            state.refusal(format!("read property {property}"), &response, None);
                         let optional = state.stage == SessionStage::Initial
                             && optional_initial_property(property);
                         state.stage_failure_pending |= !optional;
-                        if state.stage == SessionStage::Initial && property == prop::HOST_KEY {
+                        if state.stage == SessionStage::Initial
+                            && property == prop::HOST_KEY
+                            && operation_error.is_some()
+                        {
                             state.host_key_unsupported = true;
                         }
                     }
@@ -2308,15 +2337,16 @@ impl MobileUlcpSession {
                     }
                 } else {
                     state.responses.insert(property, response.clone());
-                    state.apply_property(&response)?;
+                    state.apply_property(&response);
                 }
             }
             ExpectedResponse::Claim => {
                 if response.property_id == prop::LAST_STATUS {
-                    operation_error = Some(ulcp_operation_error(
+                    operation_error = state.refusal(
                         "claim host identity".to_owned(),
-                        response.value.as_slice(),
-                    )?);
+                        &response,
+                        Some(prop::HOST_KEY),
+                    );
                     state.stage_failure_pending = true;
                 } else if response.property_id != prop::HOST_KEY
                     || response.command != Cmd::PropIs as u8
@@ -2331,9 +2361,9 @@ impl MobileUlcpSession {
                     // take means this radio belongs to someone else, which
                     // `ownership()` reads off this value and reports as
                     // `OtherHost`. That is an answer, not a broken session.
-                    state.radio_host_key = Some(response.value.clone());
+                    state.apply_property(&response);
                     state.responses.insert(prop::HOST_KEY, response);
-                    if state.has_capability(cap::SAVE)? {
+                    if state.has_capability(cap::SAVE) {
                         state.stage = SessionStage::Saving;
                         let tid = state.allocate_tid();
                         state.expected.insert(tid, ExpectedResponse::Save);
@@ -2352,11 +2382,11 @@ impl MobileUlcpSession {
                     // it does after a refused save.
                     state.note_mismatch("save claimed host identity".to_owned(), &response);
                     state.stage_failure_pending = true;
-                } else if inspect_ulcp_status(response.value.clone())? != 0 {
-                    operation_error = Some(ulcp_operation_error(
+                } else if reported_status(&response.value) != 0 {
+                    operation_error = ulcp_operation_error(
                         "save claimed host identity".to_owned(),
                         response.value.as_slice(),
-                    )?);
+                    );
                     state.stage_failure_pending = true;
                 } else {
                     state.start_inspection(&mut outbound)?;
@@ -2364,10 +2394,11 @@ impl MobileUlcpSession {
             }
             ExpectedResponse::ConfigurationProperty(property) => {
                 if response.property_id == prop::LAST_STATUS {
-                    operation_error = Some(ulcp_operation_error(
+                    operation_error = state.refusal(
                         format!("set property {property}"),
-                        response.value.as_slice(),
-                    )?);
+                        &response,
+                        Some(property),
+                    );
                     state.stage_failure_pending = true;
                     // The status frame describes the write, not the property.
                     // Filing it under the property would leave the snapshot
@@ -2393,7 +2424,7 @@ impl MobileUlcpSession {
                     // device says, never what was asked for. Failure is a
                     // `PROP_LAST_STATUS`, handled above.
                     state.responses.insert(property, response.clone());
-                    state.apply_property(&response)?;
+                    state.apply_property(&response);
                 }
             }
             ExpectedResponse::SaveConfiguration => {
@@ -2402,11 +2433,11 @@ impl MobileUlcpSession {
                 {
                     state.note_mismatch("save radio configuration".to_owned(), &response);
                     state.stage_failure_pending = true;
-                } else if inspect_ulcp_status(response.value.clone())? != 0 {
-                    operation_error = Some(ulcp_operation_error(
+                } else if reported_status(&response.value) != 0 {
+                    operation_error = ulcp_operation_error(
                         "save radio configuration".to_owned(),
                         response.value.as_slice(),
-                    )?);
+                    );
                     state.stage_failure_pending = true;
                 } else {
                     state.finish_configuration()?;
@@ -2430,7 +2461,7 @@ impl MobileUlcpSession {
                         disposition: UlcpRawTransmitDisposition::Rejected,
                     });
                 } else {
-                    let status_code = inspect_ulcp_status(response.value)?;
+                    let status_code = reported_status(&response.value);
                     let status = umsh_ulcp::Status(status_code);
                     raw_transmit_result = Some(UlcpRawTransmitResultRecord {
                         transaction_id: response.transaction_id,
@@ -2453,18 +2484,21 @@ impl MobileUlcpSession {
             }
             ExpectedResponse::HostChannelInsert(mut remaining) => {
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
+                    let error = state.refusal(
                         "provision host channel key".to_owned(),
-                        response.value.as_slice(),
-                    )?;
+                        &response,
+                        Some(prop::HOST_CHANNEL_KEYS),
+                    );
                     // A channel key is its own item, so ALREADY asserts the
                     // state that was asked for. Anything else—NOMEM above
                     // all—stops the pass; the phone still runs its own MAC
                     // while attached, so this degrades radio-side filtering
                     // rather than the user's ability to use the channel.
-                    if error.status_code != umsh_ulcp::Status::ALREADY.0 {
+                    if let Some(error) = error
+                        && error.status_code != umsh_ulcp::Status::ALREADY.0
+                    {
                         operation_error = Some(error);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                         remaining.clear();
                     }
                 } else if response.property_id != prop::HOST_CHANNEL_KEYS
@@ -2481,30 +2515,32 @@ impl MobileUlcpSession {
                 if let Some(frame) = state.next_host_channel_insert(remaining) {
                     outbound.push(frame);
                 } else {
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::HostChannelReplace => {
                 if response.property_id == prop::LAST_STATUS {
-                    operation_error = Some(ulcp_operation_error(
+                    operation_error = state.refusal(
                         "provision host channel keys".to_owned(),
-                        response.value.as_slice(),
-                    )?);
+                        &response,
+                        Some(prop::HOST_CHANNEL_KEYS),
+                    );
                 } else if response.property_id != prop::HOST_CHANNEL_KEYS
                     || response.command != Cmd::PropIs as u8
                 {
                     state.note_mismatch("provision host channel keys".to_owned(), &response);
                     state.reread(prop::HOST_CHANNEL_KEYS);
                 }
-                state.refresh_attached_snapshot(None)?;
+                state.refresh_attached_snapshot(None);
             }
             ExpectedResponse::HostPeerInsert(mut remaining) => {
                 if response.property_id == prop::LAST_STATUS {
-                    operation_error = Some(ulcp_operation_error(
+                    operation_error = state.refusal(
                         "provision host peer key".to_owned(),
-                        response.value.as_slice(),
-                    )?);
-                    state.refresh_attached_snapshot(None)?;
+                        &response,
+                        Some(prop::HOST_PEER_KEYS),
+                    );
+                    state.refresh_attached_snapshot(None);
                     remaining.clear();
                 } else if response.property_id != prop::HOST_PEER_KEYS
                     || response.command != Cmd::PropInserted as u8
@@ -2516,7 +2552,7 @@ impl MobileUlcpSession {
                 if let Some(frame) = state.next_host_peer_operation(VecDeque::new(), remaining) {
                     outbound.push(frame);
                 } else {
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::HostPeerRemove {
@@ -2524,15 +2560,18 @@ impl MobileUlcpSession {
                 mut inserts,
             } => {
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
+                    let error = state.refusal(
                         "shed host peer key".to_owned(),
-                        response.value.as_slice(),
-                    )?;
+                        &response,
+                        Some(prop::HOST_PEER_KEYS),
+                    );
                     // ITEM_NOT_FOUND asserts the state that was asked for;
                     // anything else stops the pass.
-                    if error.status_code != umsh_ulcp::Status::ITEM_NOT_FOUND.0 {
+                    if let Some(error) = error
+                        && error.status_code != umsh_ulcp::Status::ITEM_NOT_FOUND.0
+                    {
                         operation_error = Some(error);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                         removals.clear();
                         inserts.clear();
                     }
@@ -2547,15 +2586,16 @@ impl MobileUlcpSession {
                 if let Some(frame) = state.next_host_peer_operation(removals, inserts) {
                     outbound.push(frame);
                 } else {
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::HostAutoAck => {
                 if response.property_id == prop::LAST_STATUS {
-                    operation_error = Some(ulcp_operation_error(
+                    operation_error = state.refusal(
                         "set delegated acknowledgement".to_owned(),
-                        response.value.as_slice(),
-                    )?);
+                        &response,
+                        Some(prop::HOST_AUTO_ACK),
+                    );
                 } else if response.property_id != prop::HOST_AUTO_ACK
                     || response.command != Cmd::PropIs as u8
                 {
@@ -2566,17 +2606,18 @@ impl MobileUlcpSession {
                         .responses
                         .insert(prop::HOST_AUTO_ACK, response.clone());
                 }
-                state.refresh_attached_snapshot(None)?;
+                state.refresh_attached_snapshot(None);
             }
             ExpectedResponse::HostMute {
                 issued,
                 mut remaining,
             } => {
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
+                    let error = state.refusal(
                         "reconcile notification mutes".to_owned(),
-                        response.value.as_slice(),
-                    )?;
+                        &response,
+                        Some(issued.property),
+                    );
                     // Either refusal asserts the state that was asked
                     // for: the entry is already there, or already gone.
                     let benign = if issued.insert {
@@ -2584,7 +2625,9 @@ impl MobileUlcpSession {
                     } else {
                         umsh_ulcp::Status::ITEM_NOT_FOUND.0
                     };
-                    if error.status_code != benign {
+                    if let Some(error) = error
+                        && error.status_code != benign
+                    {
                         operation_error = Some(error);
                         remaining.clear();
                     }
@@ -2605,7 +2648,7 @@ impl MobileUlcpSession {
                 if let Some(frame) = state.next_host_mute_operation(remaining) {
                     outbound.push(frame);
                 } else {
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::QueueDrain => {
@@ -2615,33 +2658,36 @@ impl MobileUlcpSession {
                     state.note_mismatch("drain offline queue".to_owned(), &response);
                     state.reread(prop::HOST_RX_QUEUE_COUNT);
                 } else {
-                    let status_code = inspect_ulcp_status(response.value.clone())?;
+                    let status_code = reported_status(&response.value);
                     if status_code == u32::from(umsh_ulcp::Status::OK.0) {
                         // A completed drain leaves the queue empty by
                         // definition; the cached count is patched rather
                         // than re-read, like every other table mutation.
                         state.patch_queue_count(0);
                     } else {
-                        operation_error = Some(ulcp_operation_error(
+                        operation_error = ulcp_operation_error(
                             "drain offline queue".to_owned(),
                             response.value.as_slice(),
-                        )?);
+                        );
                     }
                 }
-                state.refresh_attached_snapshot(None)?;
+                state.refresh_attached_snapshot(None);
             }
             ExpectedResponse::DevChannelInsert(id) => {
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
+                    let error = state.refusal(
                         "insert device channel key".to_owned(),
-                        response.value.as_slice(),
-                    )?;
+                        &response,
+                        Some(prop::DEV_CHANNEL_KEYS),
+                    );
                     // ALREADY is the device saying the channel is stored.
-                    if error.status_code == umsh_ulcp::Status::ALREADY.0 {
+                    if let Some(error) = &error
+                        && error.status_code == umsh_ulcp::Status::ALREADY.0
+                    {
                         state.patch_dev_channels(&id, true);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                     }
-                    operation_error = Some(error);
+                    operation_error = error;
                 } else {
                     if response.property_id != prop::DEV_CHANNEL_KEYS
                         || response.command != Cmd::PropInserted as u8
@@ -2661,27 +2707,30 @@ impl MobileUlcpSession {
                     } else {
                         state.patch_dev_channels(&id, true);
                     }
-                    if state.has_capability(cap::SAVE)? {
+                    if state.has_capability(cap::SAVE) {
                         let tid = state.allocate_tid();
                         state
                             .expected
                             .insert(tid, ExpectedResponse::SaveDevChannels);
                         outbound.push(ulcp_save(tid)?);
                     }
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::DevChannelRemove(id) => {
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
+                    let error = state.refusal(
                         "remove device channel key".to_owned(),
-                        response.value.as_slice(),
-                    )?;
-                    if error.status_code == umsh_ulcp::Status::ITEM_NOT_FOUND.0 {
+                        &response,
+                        Some(prop::DEV_CHANNEL_KEYS),
+                    );
+                    if let Some(error) = &error
+                        && error.status_code == umsh_ulcp::Status::ITEM_NOT_FOUND.0
+                    {
                         state.patch_dev_channels(&id, false);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                     }
-                    operation_error = Some(error);
+                    operation_error = error;
                 } else {
                     if response.property_id != prop::DEV_CHANNEL_KEYS
                         || response.command != Cmd::PropRemoved as u8
@@ -2693,14 +2742,14 @@ impl MobileUlcpSession {
                     } else {
                         state.patch_dev_channels(&id, false);
                     }
-                    if state.has_capability(cap::SAVE)? {
+                    if state.has_capability(cap::SAVE) {
                         let tid = state.allocate_tid();
                         state
                             .expected
                             .insert(tid, ExpectedResponse::SaveDevChannels);
                         outbound.push(ulcp_save(tid)?);
                     }
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::SaveDevChannels => {
@@ -2708,27 +2757,27 @@ impl MobileUlcpSession {
                     || response.command != Cmd::PropIs as u8
                 {
                     state.note_mismatch("save device channel keys".to_owned(), &response);
-                } else if inspect_ulcp_status(response.value.clone())? != 0 {
-                    operation_error = Some(ulcp_save_operation_error(
+                } else if reported_status(&response.value) != 0 {
+                    operation_error = ulcp_save_operation_error(
                         "save device channel keys".to_owned(),
                         response.value.as_slice(),
-                    )?);
+                    );
                 }
             }
             ExpectedResponse::DevKeyInsert { property, item } => {
                 let table = dev_key_table_name(property);
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
-                        format!("insert device {table}"),
-                        response.value.as_slice(),
-                    )?;
+                    let error =
+                        state.refusal(format!("insert device {table}"), &response, Some(property));
                     // ALREADY is the device saying the key is stored; keep
                     // the cache truthful even though the operation "failed".
-                    if error.status_code == umsh_ulcp::Status::ALREADY.0 {
+                    if let Some(error) = &error
+                        && error.status_code == umsh_ulcp::Status::ALREADY.0
+                    {
                         state.patch_dev_keys(property, &item, true);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                     }
-                    operation_error = Some(error);
+                    operation_error = error;
                 } else {
                     if response.property_id != property
                         || response.command != Cmd::PropInserted as u8
@@ -2741,30 +2790,30 @@ impl MobileUlcpSession {
                     } else {
                         state.patch_dev_keys(property, &item, true);
                     }
-                    if state.has_capability(cap::SAVE)? {
+                    if state.has_capability(cap::SAVE) {
                         let tid = state.allocate_tid();
                         state
                             .expected
                             .insert(tid, ExpectedResponse::SaveDevKeys { property });
                         outbound.push(ulcp_save(tid)?);
                     }
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::DevKeyRemove { property, item } => {
                 let table = dev_key_table_name(property);
                 if response.property_id == prop::LAST_STATUS {
-                    let error = ulcp_operation_error(
-                        format!("remove device {table}"),
-                        response.value.as_slice(),
-                    )?;
+                    let error =
+                        state.refusal(format!("remove device {table}"), &response, Some(property));
                     // ITEM_NOT_FOUND means the key is not on the device,
                     // which is the state the caller asked for.
-                    if error.status_code == umsh_ulcp::Status::ITEM_NOT_FOUND.0 {
+                    if let Some(error) = &error
+                        && error.status_code == umsh_ulcp::Status::ITEM_NOT_FOUND.0
+                    {
                         state.patch_dev_keys(property, &item, false);
-                        state.refresh_attached_snapshot(None)?;
+                        state.refresh_attached_snapshot(None);
                     }
-                    operation_error = Some(error);
+                    operation_error = error;
                 } else {
                     if response.property_id != property
                         || response.command != Cmd::PropRemoved as u8
@@ -2775,14 +2824,14 @@ impl MobileUlcpSession {
                     } else {
                         state.patch_dev_keys(property, &item, false);
                     }
-                    if state.has_capability(cap::SAVE)? {
+                    if state.has_capability(cap::SAVE) {
                         let tid = state.allocate_tid();
                         state
                             .expected
                             .insert(tid, ExpectedResponse::SaveDevKeys { property });
                         outbound.push(ulcp_save(tid)?);
                     }
-                    state.refresh_attached_snapshot(None)?;
+                    state.refresh_attached_snapshot(None);
                 }
             }
             ExpectedResponse::SaveDevKeys { property } => {
@@ -2791,15 +2840,15 @@ impl MobileUlcpSession {
                 {
                     let table = dev_key_table_name(property);
                     state.note_mismatch(format!("save device {table}s"), &response);
-                } else if inspect_ulcp_status(response.value.clone())? != 0 {
+                } else if reported_status(&response.value) != 0 {
                     // The live mutation stuck; only persistence failed. The
                     // session stays attached and the caller sees the same
                     // `saved` warning path a failed configuration save uses.
                     let table = dev_key_table_name(property);
-                    operation_error = Some(ulcp_save_operation_error(
+                    operation_error = ulcp_save_operation_error(
                         format!("save device {table}s"),
                         response.value.as_slice(),
-                    )?);
+                    );
                 }
             }
             ExpectedResponse::ManagementMultiGet(_) => {
@@ -2810,7 +2859,7 @@ impl MobileUlcpSession {
                     // A refusal is the device's whole answer about this
                     // property. Drop any stale cached value so the session
                     // snapshot agrees with what was just reported.
-                    let status_code = inspect_ulcp_status(response.value.clone())?;
+                    let status_code = reported_status(&response.value);
                     state.responses.remove(&property);
                     state.record_management_answer(MobileMeshManagementAnswerRecord {
                         property_id: property,
@@ -2827,7 +2876,7 @@ impl MobileUlcpSession {
                     state.responses.remove(&property);
                 } else {
                     state.responses.insert(property, response.clone());
-                    state.apply_property(&response)?;
+                    state.apply_property(&response);
                     state.record_management_answer(MobileMeshManagementAnswerRecord {
                         property_id: property,
                         value: Some(response.value.clone()),
@@ -2842,7 +2891,7 @@ impl MobileUlcpSession {
                     // held. The answer records the refusal and the run
                     // continues—the caller decides per property, like the
                     // mesh path.
-                    let status_code = inspect_ulcp_status(response.value.clone())?;
+                    let status_code = reported_status(&response.value);
                     state.record_management_answer(MobileMeshManagementAnswerRecord {
                         property_id: property,
                         value: None,
@@ -2859,7 +2908,7 @@ impl MobileUlcpSession {
                     // The echo is the device's authoritative value, whatever
                     // was written—see the ConfigurationProperty arm.
                     state.responses.insert(property, response.clone());
-                    state.apply_property(&response)?;
+                    state.apply_property(&response);
                     state.record_management_answer(MobileMeshManagementAnswerRecord {
                         property_id: property,
                         value: Some(response.value.clone()),
@@ -2876,7 +2925,7 @@ impl MobileUlcpSession {
                     // INVALID_ARGUMENT, and UNIMPLEMENTED it got: the
                     // last of those is the cue to try a weaker security
                     // mode.
-                    let status_code = inspect_ulcp_status(response.value.clone())?;
+                    let status_code = reported_status(&response.value);
                     state.record_management_answer(MobileMeshManagementAnswerRecord {
                         property_id: property,
                         value: None,
@@ -2924,7 +2973,7 @@ impl MobileUlcpSession {
                     };
                     state.note_mismatch(operation.to_owned(), &response);
                 } else {
-                    let status_code = inspect_ulcp_status(response.value.clone())?;
+                    let status_code = reported_status(&response.value);
                     if let Some(op) = state.management.as_mut() {
                         op.command_status = Some(status_code);
                     }
@@ -3178,42 +3227,56 @@ impl UlcpSessionState {
         }
     }
 
-    fn apply_property(&mut self, response: &UlcpPropertyFrameRecord) -> Result<(), MobileError> {
+    /// Fold one property value into the session snapshot.
+    ///
+    /// Infallible on purpose. Most of these arrive unsolicited, so a value
+    /// this session cannot read—a newer firmware's encoding, a field it
+    /// has outgrown—would otherwise cost the whole link on every push. A
+    /// value's shape is the sender's obligation; what a receiver owes is
+    /// to report that one field as unknown and keep the rest.
+    fn apply_property(&mut self, response: &UlcpPropertyFrameRecord) {
         if response.command != Cmd::PropIs as u8 {
             // Insert/remove notifications are valid protocol frames, but none
             // of the mobile snapshot fields are multi-value payloads.
-            return Ok(());
+            return;
         }
         match response.property_id {
             prop::DEV_KEY => {
-                if response.value.is_empty() {
-                    self.device_key = None;
-                } else if response.value.len() == items::PUBLIC_KEY_LEN {
-                    self.device_key = Some(response.value.clone());
-                } else {
-                    return Err(MobileError::InvalidUlcpFrame);
-                }
+                // A key of any other length names no identity this phone
+                // can address, which is what an absent key says too.
+                self.device_key =
+                    (response.value.len() == items::PUBLIC_KEY_LEN).then(|| response.value.clone());
             }
             prop::DEV_NAME => {
-                let name = core::str::from_utf8(&response.value)
-                    .map_err(|_| MobileError::InvalidUlcpFrame)?;
-                self.device_name = (!name.is_empty()).then(|| name.to_owned());
+                let name = String::from_utf8_lossy(&response.value);
+                self.device_name = (!name.is_empty()).then(|| name.into_owned());
             }
             prop::BATTERY => {
-                self.battery = Some(inspect_ulcp_battery(response.value.clone())?);
+                // An unreadable snapshot is reported as one with nothing
+                // known in it: the spec forbids carrying an earlier
+                // reading forward in place of a field this one lacks.
+                self.battery = Some(inspect_ulcp_battery(response.value.clone()).unwrap_or(
+                    UlcpBatteryRecord {
+                        percentage: None,
+                        voltage_mv: None,
+                        charge_state: None,
+                    },
+                ));
             }
             prop::ALERT => {
                 // Arrives both as the answer to a write and unsolicited,
-                // when the radio ends the alert itself.
-                self.alert = Some(inspect_ulcp_alert(response.value.clone())?);
+                // when the radio ends the alert itself. A state this phone
+                // does not know is reported as unknown.
+                self.alert = inspect_ulcp_alert(response.value.clone()).ok();
             }
             prop::TIME => {
                 // Announced when the clock goes from unknown to known and
                 // whenever it steps, which is how a phone learns the
-                // device found the time on its own.
-                self.time = Some(UlcpTimeRecord {
-                    epoch_seconds: decode_optional(&response.value, decode_u32)?,
-                });
+                // device found the time on its own. An unreadable clock
+                // is simply not reported.
+                if let Ok(epoch_seconds) = decode_optional(&response.value, decode_u32) {
+                    self.time = Some(UlcpTimeRecord { epoch_seconds });
+                }
             }
             key if umsh_ulcp::gnss::is_positioning_property(key) => {
                 // Read or announced, indifferently: a device is meant to
@@ -3222,20 +3285,25 @@ impl UlcpSessionState {
                 // carrying the value a read would have returned, so this
                 // takes it. Folding rather than replacing is what lets a
                 // single property arrive without erasing the others.
-                self.gnss
-                    .get_or_insert(GnssSnapshot::SEARCHING)
-                    .absorb(key, &response.value)
-                    .map_err(|_| MobileError::InvalidUlcpFrame)?;
+                let gnss = self.gnss.get_or_insert(GnssSnapshot::SEARCHING);
+                if gnss.absorb(key, &response.value).is_err() {
+                    // Folding in the empty value clears whichever field
+                    // this property describes, so an unreadable position
+                    // reads as no position rather than the last one. The
+                    // fix and the satellite count have no empty form, and
+                    // keep what they held.
+                    let _ = gnss.absorb(key, &[]);
+                }
             }
             prop::HOST_KEY => {
-                if !response.value.is_empty() && response.value.len() != items::PUBLIC_KEY_LEN {
-                    return Err(MobileError::InvalidUlcpFrame);
-                }
-                self.radio_host_key = Some(response.value.clone());
+                // A key this session cannot read leaves ownership unknown,
+                // which is a question for the user rather than a fault.
+                let readable =
+                    response.value.is_empty() || response.value.len() == items::PUBLIC_KEY_LEN;
+                self.radio_host_key = readable.then(|| response.value.clone());
             }
             _ => {}
         }
-        Ok(())
     }
 
     /// Whether synchronization may proceed straight to inspection without
@@ -3261,7 +3329,7 @@ impl UlcpSessionState {
         if self.stage != SessionStage::Attached || !self.expected.is_empty() {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        if !self.has_capability(capability)? {
+        if !self.has_capability(capability) {
             return Err(MobileError::InvalidUlcpFrame);
         }
         Ok(())
@@ -3374,91 +3442,90 @@ impl UlcpSessionState {
                 answers: op.answers,
                 status_code: op.command_status,
             });
-            self.refresh_attached_snapshot(None)?;
+            self.refresh_attached_snapshot(None);
         }
         Ok(())
     }
 
-    /// Decode the whole response before accepting any entries. Statuses
+    /// Read a `CMD_PROP_MULTI_GET` answer position by position, the way
+    /// the mesh path reads one ([`umsh_ulcp::reply::entries`]). Statuses
     /// occupy the position of the property they answer, including empty
-    /// successful readings. A short response re-asks its unreturned suffix.
+    /// successful readings.
+    ///
+    /// Whatever stands is kept, and nothing is attributed to a key it does
+    /// not name: the read ends at the first entry that is malformed or
+    /// answers some other property, exactly as it ends at a short answer,
+    /// and every key after that point is asked for again. An answer that
+    /// reached no key at all would ask forever, so that batch is asked
+    /// for one property at a time instead.
     fn consume_management_multi(
         &mut self,
-        response: Frame<'_>,
+        tid: u8,
+        reply: &[u8],
         keys: &[u32],
     ) -> Result<UlcpSessionUpdateRecord, MobileError> {
-        let entries: Vec<_> = match response.command() {
-            Some(Cmd::PropAre) => frame::MultiEntries::new(response.payload)
-                .collect::<Result<_, _>>()
-                .map_err(|_| MobileError::UlcpMalformedPayload)?,
-            Some(Cmd::PropIs) => {
-                let payload = frame::PropPayload::parse(response.payload)
-                    .map_err(|_| MobileError::UlcpMalformedPayload)?;
-                if payload.key != prop::LAST_STATUS {
-                    return Err(MobileError::UlcpMismatchedResponse);
+        self.expected.remove(&tid);
+        let mut answered = 0usize;
+        match umsh_ulcp::reply::entries(keys, reply) {
+            Ok(entries) => {
+                // Entries past the last key asked for name themselves, and
+                // answer nothing this request is waiting on.
+                for (key, answer) in entries.map_while(Result::ok).take(keys.len()) {
+                    answered += 1;
+                    self.record_multi_answer(key, answer);
                 }
-                vec![
-                    frame::MultiEntry {
-                        key: prop::LAST_STATUS,
-                        value: payload.value
-                    };
-                    keys.len()
-                ]
             }
-            _ => return Err(MobileError::UlcpMismatchedResponse),
-        };
-        if entries.is_empty() || entries.len() > keys.len() {
-            return Err(MobileError::UlcpMismatchedResponse);
+            Err(_) => {
+                // One status for the whole request. UNIMPLEMENTED is a
+                // device advertising MULTI but declining the command,
+                // which still has a usable single-property interface, as
+                // does one answering in a form this session cannot read;
+                // any other status is that status for every key.
+                let status = umsh_ulcp::reply::status_of(reply)
+                    .filter(|&status| status != umsh_ulcp::Status::UNIMPLEMENTED);
+                if let Some(status) = status {
+                    for &key in keys {
+                        answered += 1;
+                        self.record_multi_answer(key, umsh_ulcp::reply::Answer::Refused(status));
+                    }
+                }
+            }
         }
-        let answers = entries
-            .iter()
-            .zip(keys)
-            .map(|(entry, &key)| {
-                if entry.key == prop::LAST_STATUS {
-                    Ok(MobileMeshManagementAnswerRecord {
-                        property_id: key,
-                        value: None,
-                        status_code: Some(inspect_ulcp_status(entry.value.to_vec())?),
-                    })
-                } else if entry.key == key {
-                    Ok(MobileMeshManagementAnswerRecord {
-                        property_id: key,
-                        value: Some(entry.value.to_vec()),
-                        status_code: None,
-                    })
-                } else {
-                    Err(MobileError::UlcpMismatchedResponse)
-                }
-            })
-            .collect::<Result<Vec<_>, MobileError>>()?;
-        self.expected.remove(&response.header.tid());
-        // A device advertising MULTI but declining the command still has
-        // a usable single-property interface.
-        if response.command() == Some(Cmd::PropIs)
-            && answers[0].status_code == Some(umsh_ulcp::Status::UNIMPLEMENTED.0)
-        {
-            if let Some(op) = self.management.as_mut() {
+        if let Some(op) = self.management.as_mut() {
+            if answered == 0 {
                 op.multi_get = false;
-                op.fetch_queue.extend(keys.iter().copied());
             }
-        } else {
-            for answer in answers {
-                if let Some(value) = &answer.value {
-                    let property = ulcp_property_record(answer.property_id, value.clone());
-                    self.apply_property(&property)?;
-                    self.responses.insert(answer.property_id, property);
-                } else {
-                    self.responses.remove(&answer.property_id);
-                }
-                self.record_management_answer(answer);
-            }
-            if let Some(op) = self.management.as_mut() {
-                op.fetch_queue.extend(keys[entries.len()..].iter().copied());
-            }
+            op.fetch_queue.extend(keys[answered..].iter().copied());
         }
         let mut outbound = Vec::new();
         self.continue_local_management(&mut outbound)?;
         Ok(self.update(outbound))
+    }
+
+    /// File one position of a multi-property answer: into the cache, and
+    /// into the management operation's answers.
+    fn record_multi_answer(&mut self, key: u32, answer: umsh_ulcp::reply::Answer<'_>) {
+        let record = match answer {
+            umsh_ulcp::reply::Answer::Value(value) => {
+                let property = ulcp_property_record(key, value.to_vec());
+                self.apply_property(&property);
+                self.responses.insert(key, property);
+                MobileMeshManagementAnswerRecord {
+                    property_id: key,
+                    value: Some(value.to_vec()),
+                    status_code: None,
+                }
+            }
+            umsh_ulcp::reply::Answer::Refused(status) => {
+                self.responses.remove(&key);
+                MobileMeshManagementAnswerRecord {
+                    property_id: key,
+                    value: None,
+                    status_code: Some(status.0),
+                }
+            }
+        };
+        self.record_management_answer(record);
     }
 
     /// Queue the next host channel-key insert, if any remain. The cached
@@ -3679,12 +3746,12 @@ impl UlcpSessionState {
         entry.value = value;
     }
 
-    fn has_capability(&self, capability: u32) -> Result<bool, MobileError> {
-        let capabilities = self
-            .responses
-            .get(&prop::CAPS)
-            .ok_or(MobileError::InvalidUlcpFrame)?;
-        Ok(decode_capabilities(&capabilities.value)?.contains(&capability))
+    /// Whether the device advertised `capability`. A session that has not
+    /// read the capabilities yet knows of none.
+    fn has_capability(&self, capability: u32) -> bool {
+        self.responses.get(&prop::CAPS).is_some_and(|capabilities| {
+            decode_capabilities(&capabilities.value).contains(&capability)
+        })
     }
 
     fn writable(&self, values: Vec<(u32, Vec<u8>)>) -> VecDeque<(u32, Vec<u8>)> {
@@ -3703,7 +3770,12 @@ impl UlcpSessionState {
                     .responses
                     .get(&prop::PROTOCOL_VERSION)
                     .ok_or(MobileError::InvalidUlcpFrame)?;
-                if version.value != [PROTOCOL_MAJOR_VERSION, PROTOCOL_MINOR_VERSION] {
+                // Only the major version says whether this session can
+                // speak to the device at all. A different minor version is
+                // a backward-compatible revision the spec says must not be
+                // fatal, and octets past the two defined ones are a later
+                // revision's to explain.
+                if version.value.len() < 2 || version.value[0] != PROTOCOL_MAJOR_VERSION {
                     return Err(MobileError::InvalidUlcpFrame);
                 }
                 let capabilities = self
@@ -3724,10 +3796,11 @@ impl UlcpSessionState {
                 } else {
                     ulcp_inspection_properties(capabilities.value.clone())?.into()
                 };
-                let advertises_host_filter = self.has_capability(cap::HOST_FILTER)?;
-                if advertises_host_filter == self.host_key_unsupported {
-                    return Err(MobileError::InvalidUlcpFrame);
-                }
+                // Whose radio this is comes from what `PROP_HOST_KEY`
+                // actually answered, not from whether `CAP_HOST_FILTER`
+                // says it should have: a device whose capabilities and
+                // answers disagree is still the device the answers
+                // describe.
                 if self.attaches_without_host_decision() {
                     self.start_inspection(outbound)?;
                 } else {
@@ -3739,7 +3812,7 @@ impl UlcpSessionState {
             SessionStage::Configuring => {
                 if !self.configuration_queue.is_empty() {
                     self.start_configuration(outbound)?;
-                } else if self.has_capability(cap::SAVE)? {
+                } else if self.has_capability(cap::SAVE) {
                     self.stage = SessionStage::SavingConfiguration;
                     let tid = self.allocate_tid();
                     self.expected
@@ -3771,6 +3844,29 @@ impl UlcpSessionState {
                 command: response.command,
             });
         }
+    }
+
+    /// Read a `PROP_LAST_STATUS` that stood in for the answer an operation
+    /// promised.
+    ///
+    /// A refusal is the operation's error. `STATUS_OK` in its place is the
+    /// device reporting success without the echo: noted as a mismatch, and
+    /// `reread`—the property whose value the echo would have carried—is
+    /// read back so the cache learns what the device holds.
+    fn refusal(
+        &mut self,
+        operation: String,
+        response: &UlcpPropertyFrameRecord,
+        reread: Option<u32>,
+    ) -> Option<UlcpOperationErrorRecord> {
+        let error = ulcp_operation_error(operation.clone(), &response.value);
+        if error.is_none() {
+            self.note_mismatch(operation, response);
+            if let Some(property) = reread {
+                self.reread(property);
+            }
+        }
+        error
     }
 
     /// Ask for a property to be read back once nothing is outstanding.
@@ -3836,8 +3932,22 @@ impl UlcpSessionState {
     }
 
     fn finish_configuration(&mut self) -> Result<(), MobileError> {
+        self.settle_snapshot()
+    }
+
+    /// Reduce the cache to the attached snapshot and attach.
+    ///
+    /// A session that already has a snapshot keeps it when the cache no
+    /// longer reduces: one property read back in a form this session
+    /// cannot use is no reason to lose a radio it has been using. Only a
+    /// first attach, with nothing to fall back on, fails.
+    fn settle_snapshot(&mut self) -> Result<(), MobileError> {
         let responses = self.responses.values().cloned().collect();
-        self.provisioning = Some(inspect_ulcp_sync(responses)?);
+        match inspect_ulcp_sync(responses) {
+            Ok(provisioning) => self.provisioning = Some(provisioning),
+            Err(error) if self.provisioning.is_none() => return Err(error),
+            Err(_) => {}
+        }
         self.stage = SessionStage::Attached;
         Ok(())
     }
@@ -3859,10 +3969,7 @@ impl UlcpSessionState {
     fn start_inspection(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
         self.stage = SessionStage::Inspection;
         if self.inspection_queue.is_empty() {
-            let responses = self.responses.values().cloned().collect();
-            self.provisioning = Some(inspect_ulcp_sync(responses)?);
-            self.stage = SessionStage::Attached;
-            return Ok(());
+            return self.settle_snapshot();
         }
         for _ in 0..usize::from(frame::TID_MAX) {
             let Some(property) = self.inspection_queue.pop_front() else {
@@ -3876,10 +3983,7 @@ impl UlcpSessionState {
     fn start_refresh(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
         self.stage = SessionStage::Refreshing;
         if self.inspection_queue.is_empty() {
-            let responses = self.responses.values().cloned().collect();
-            self.provisioning = Some(inspect_ulcp_sync(responses)?);
-            self.stage = SessionStage::Attached;
-            return Ok(());
+            return self.settle_snapshot();
         }
         for _ in 0..usize::from(frame::TID_MAX) {
             let Some(property) = self.inspection_queue.pop_front() else {
@@ -3906,19 +4010,24 @@ impl UlcpSessionState {
     /// otherwise be thrown back to the prompt by any unsolicited update at
     /// all. `PROP_BATTERY` makes that concrete, being the one notification
     /// that arrives on its own schedule for the life of the session.
-    fn refresh_attached_snapshot(
-        &mut self,
-        changed_property: Option<u32>,
-    ) -> Result<(), MobileError> {
+    ///
+    /// Returns whether the cached values still reduce to a snapshot. When
+    /// they do not—a required property now holds something this session
+    /// cannot read—the previous snapshot stands, and the caller that just
+    /// changed the cache is the one that knows which value to take back.
+    fn refresh_attached_snapshot(&mut self, changed_property: Option<u32>) -> bool {
         if self.stage != SessionStage::Attached {
-            return Ok(());
+            return true;
         }
         let responses = self.responses.values().cloned().collect();
-        self.provisioning = Some(inspect_ulcp_sync(responses)?);
+        let Ok(provisioning) = inspect_ulcp_sync(responses) else {
+            return false;
+        };
+        self.provisioning = Some(provisioning);
         if changed_property == Some(prop::HOST_KEY) && !self.attaches_without_host_decision() {
             self.stage = SessionStage::AwaitingHost;
         }
-        Ok(())
+        true
     }
 }
 
@@ -3926,7 +4035,7 @@ impl UlcpSessionState {
 /// inspection, gated by the supplied `PROP_CAPS` value.
 #[uniffi::export]
 pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, MobileError> {
-    let capabilities = decode_capabilities(&capabilities)?;
+    let capabilities = decode_capabilities(&capabilities);
     let has = |capability| capabilities.contains(&capability);
 
     let mut properties = vec![
@@ -4035,7 +4144,7 @@ pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, Mob
 }
 
 pub(crate) fn ulcp_refresh_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, MobileError> {
-    let decoded = decode_capabilities(&capabilities)?;
+    let decoded = decode_capabilities(&capabilities);
     let has = |capability| decoded.contains(&capability);
     let mut properties = Vec::new();
     if has(cap::DEV_IDENTITY) {
@@ -4068,10 +4177,10 @@ pub fn inspect_ulcp_sync(
     responses: Vec<UlcpPropertyFrameRecord>,
 ) -> Result<UlcpSyncRecord, MobileError> {
     let value = |key| property_value(&responses, key);
-    let capabilities = decode_capabilities(value(prop::CAPS)?)?;
+    let capabilities = decode_capabilities(value(prop::CAPS)?);
     let has = |capability| capabilities.contains(&capability);
 
-    let interface = decode_exact_pui(value(prop::INTERFACE_TYPE)?)?;
+    let interface = decode_leading_pui(value(prop::INTERFACE_TYPE)?)?;
     if interface != INTERFACE_TYPE {
         return Err(MobileError::InvalidUlcpFrame);
     }
@@ -4603,7 +4712,7 @@ pub fn ulcp_category_properties(
     category: UlcpManageCategory,
     capabilities: Vec<u8>,
 ) -> Result<Vec<u32>, MobileError> {
-    let capabilities = decode_capabilities(&capabilities)?;
+    let capabilities = decode_capabilities(&capabilities);
     let has = |capability| capabilities.contains(&capability);
     let mut properties = Vec::new();
     let mut when = |gate: bool, keys: &[u32]| {
@@ -4894,7 +5003,7 @@ pub fn inspect_ulcp_device_card(
     responses: Vec<UlcpPropertyFrameRecord>,
 ) -> Result<UlcpDeviceCardRecord, MobileError> {
     let raw = property_value(&responses, prop::CAPS)?.to_vec();
-    let capabilities = decode_capabilities(&raw)?;
+    let capabilities = decode_capabilities(&raw);
     let has = |capability| capabilities.contains(&capability);
     let text = |key| {
         property_value(&responses, key)
@@ -5933,32 +6042,37 @@ fn property_value(responses: &[UlcpPropertyFrameRecord], key: u32) -> Result<&[u
     Ok(&response.value)
 }
 
-pub(crate) fn decode_capabilities(value: &[u8]) -> Result<Vec<u32>, MobileError> {
+/// Decode a `PROP_CAPS` value.
+///
+/// A PUI that does not decode ends the list, and everything before it
+/// stands: a truncated tail costs the capabilities it would have named,
+/// not the ones already read.
+pub(crate) fn decode_capabilities(value: &[u8]) -> Vec<u32> {
     let mut capabilities = Vec::new();
     let mut rest = value;
-    while !rest.is_empty() {
-        let (capability, used) = pui::decode(rest).map_err(|_| MobileError::InvalidUlcpFrame)?;
+    while let Ok((capability, used)) = pui::decode(rest) {
         if !capabilities.contains(&capability) {
             capabilities.push(capability);
         }
         rest = &rest[used..];
     }
-    Ok(capabilities)
+    capabilities
 }
 
-fn decode_exact_pui(value: &[u8]) -> Result<u32, MobileError> {
-    let (decoded, used) = pui::decode(value).map_err(|_| MobileError::InvalidUlcpFrame)?;
-    (used == value.len())
-        .then_some(decoded)
-        .ok_or(MobileError::InvalidUlcpFrame)
+/// Decode the PUI a value leads with, ignoring whatever follows it.
+fn decode_leading_pui(value: &[u8]) -> Result<u32, MobileError> {
+    pui::decode(value)
+        .map(|(decoded, _)| decoded)
+        .map_err(|_| MobileError::InvalidUlcpFrame)
 }
 
+/// A boolean: the first octet, any nonzero value true. A sender writes
+/// exactly 0 or 1, and a reader gains nothing by refusing anything else.
 fn decode_bool(value: &[u8]) -> Result<bool, MobileError> {
-    match value {
-        [0] => Ok(false),
-        [1] => Ok(true),
-        _ => Err(MobileError::InvalidUlcpFrame),
-    }
+    value
+        .first()
+        .map(|&octet| octet != 0)
+        .ok_or(MobileError::InvalidUlcpFrame)
 }
 
 fn decode_saved(value: &[u8]) -> Result<SavedSnapshotRecord, MobileError> {
@@ -5971,19 +6085,24 @@ fn decode_saved(value: &[u8]) -> Result<SavedSnapshotRecord, MobileError> {
     }
 }
 
-fn decode_u16(value: &[u8]) -> Result<u16, MobileError> {
+/// The `N` octets a fixed-width value leads with.
+///
+/// Octets past the width belong to a later revision of the property, and
+/// what they extend still means what it did; only a value too short to
+/// hold the field at all is unreadable.
+fn leading<const N: usize>(value: &[u8]) -> Result<[u8; N], MobileError> {
     value
-        .try_into()
-        .map(u16::from_le_bytes)
-        .map_err(|_| MobileError::InvalidUlcpFrame)
+        .get(..N)
+        .and_then(|field| field.try_into().ok())
+        .ok_or(MobileError::InvalidUlcpFrame)
+}
+
+fn decode_u16(value: &[u8]) -> Result<u16, MobileError> {
+    leading(value).map(u16::from_le_bytes)
 }
 
 fn decode_u8(value: &[u8]) -> Result<u8, MobileError> {
-    value
-        .first()
-        .copied()
-        .filter(|_| value.len() == 1)
-        .ok_or(MobileError::InvalidUlcpFrame)
+    leading(value).map(u8::from_le_bytes)
 }
 
 fn decode_i8(value: &[u8]) -> Result<i8, MobileError> {
@@ -6016,10 +6135,7 @@ fn validate_meshcore_region_policy(policy: u8) -> Result<u8, MobileError> {
 }
 
 fn decode_i16(value: &[u8]) -> Result<i16, MobileError> {
-    value
-        .try_into()
-        .map(i16::from_le_bytes)
-        .map_err(|_| MobileError::InvalidUlcpFrame)
+    leading(value).map(i16::from_le_bytes)
 }
 
 /// Decode a property whose empty value means "unset" rather than zero.
@@ -6160,16 +6276,16 @@ impl DeviceCapabilities {
     /// What the attached device answered `PROP_CAPS` with.
     fn read(state: &UlcpSessionState) -> Result<Self, MobileError> {
         Ok(Self {
-            device_name: state.has_capability(cap::DEV_NAME)?,
-            lora: state.has_capability(cap::PHY_LORA)?,
-            duty_cycle_limit: state.has_capability(cap::PHY_DUTY_LIMIT)?,
-            ident: state.has_capability(cap::IDENT)?,
-            dev_identity: state.has_capability(cap::DEV_IDENTITY)?,
-            repeater: state.has_capability(cap::REPEATER)?,
-            meshcore_forwarder: state.has_capability(cap::MESHCORE_FORWARDER)?,
-            time: state.has_capability(cap::TIME)?,
-            gnss: state.has_capability(cap::GNSS)?,
-            advert: state.has_capability(cap::ADVERT)?,
+            device_name: state.has_capability(cap::DEV_NAME),
+            lora: state.has_capability(cap::PHY_LORA),
+            duty_cycle_limit: state.has_capability(cap::PHY_DUTY_LIMIT),
+            ident: state.has_capability(cap::IDENT),
+            dev_identity: state.has_capability(cap::DEV_IDENTITY),
+            repeater: state.has_capability(cap::REPEATER),
+            meshcore_forwarder: state.has_capability(cap::MESHCORE_FORWARDER),
+            time: state.has_capability(cap::TIME),
+            gnss: state.has_capability(cap::GNSS),
+            advert: state.has_capability(cap::ADVERT),
         })
     }
 
@@ -6485,10 +6601,7 @@ fn decode_device_name(value: &[u8]) -> Result<Option<String>, MobileError> {
 }
 
 fn decode_u32(value: &[u8]) -> Result<u32, MobileError> {
-    value
-        .try_into()
-        .map(u32::from_le_bytes)
-        .map_err(|_| MobileError::InvalidUlcpFrame)
+    leading(value).map(u32::from_le_bytes)
 }
 
 /// Split a concatenation of fixed-width items into the items themselves.
@@ -6761,14 +6874,16 @@ fn decode_fixed_count<const N: usize>(value: &[u8]) -> Result<u32, MobileError> 
     count.try_into().map_err(|_| MobileError::InvalidUlcpFrame)
 }
 
+/// How many filters `PROP_HOST_RX_FILTERS` holds.
+///
+/// Every framed item is a filter, including one of a type this phone does
+/// not know—the device holds it and applies it all the same. A malformed
+/// length prefix ends the table, and the count is of what came before it.
 fn decode_filter_count(value: &[u8]) -> Result<u32, MobileError> {
-    let mut count = 0u32;
-    for item in items::prefixed_items(value) {
-        let item = item.map_err(|_| MobileError::InvalidUlcpFrame)?;
-        Filter::decode(item).map_err(|_| MobileError::InvalidUlcpFrame)?;
-        count = count.checked_add(1).ok_or(MobileError::InvalidUlcpFrame)?;
-    }
-    Ok(count)
+    let count = items::prefixed_items(value)
+        .take_while(Result::is_ok)
+        .count();
+    count.try_into().map_err(|_| MobileError::InvalidUlcpFrame)
 }
 
 /// Split a ULCP frame into ATT values using the negotiated maximum write
@@ -7083,25 +7198,42 @@ pub fn ulcp_status_name(status: u32) -> String {
     format!("{:?}", umsh_ulcp::Status(status))
 }
 
-/// Decode an exact packed status value from `PROP_LAST_STATUS`.
+/// Decode the status a `PROP_LAST_STATUS` value reports.
+///
+/// The value is a PUI optionally followed by a diagnostic string, so only
+/// the leading PUI is read; whatever follows it is the device's to
+/// explain. Fails only when there is no readable PUI at all.
 #[uniffi::export]
 pub fn inspect_ulcp_status(value: Vec<u8>) -> Result<u32, MobileError> {
-    decode_exact_pui(&value)
+    pui::decode(&value)
+        .map(|(status, _)| status)
+        .map_err(|_| MobileError::InvalidUlcpFrame)
 }
 
-fn ulcp_operation_error(
-    operation: String,
-    value: &[u8],
-) -> Result<UlcpOperationErrorRecord, MobileError> {
-    let status_code = inspect_ulcp_status(value.to_vec())?;
+/// The status a `PROP_LAST_STATUS` value reports, for a session reading
+/// an answer.
+///
+/// A status that cannot be read at all still stood where an answer was
+/// expected, so it reads as a failure—what [`umsh_ulcp::reply`] makes of
+/// it too—rather than as a reason to give up on the link.
+fn reported_status(value: &[u8]) -> u32 {
+    inspect_ulcp_status(value.to_vec()).unwrap_or(umsh_ulcp::Status::FAILURE.0)
+}
+
+/// The operation error a refusal reports, or `None` when the status in
+/// place of the promised answer is `STATUS_OK`.
+///
+/// Success with no echo is not something the operation can report as a
+/// failure, and not a fault in the session either: the device did what it
+/// was asked and said so in a form this session did not predict. The
+/// caller reads back what the echo would have told it.
+fn ulcp_operation_error(operation: String, value: &[u8]) -> Option<UlcpOperationErrorRecord> {
+    let status_code = reported_status(value);
     let status = umsh_ulcp::Status(status_code);
     if status == umsh_ulcp::Status::OK {
-        // A property operation that promised an echoed value cannot silently
-        // substitute status-only success. That is a real session violation,
-        // not a reported operation error.
-        return Err(MobileError::InvalidUlcpFrame);
+        return None;
     }
-    Ok(UlcpOperationErrorRecord {
+    Some(UlcpOperationErrorRecord {
         kind: match status {
             umsh_ulcp::Status::ALREADY => UlcpOperationFailureKind::AlreadyApplied,
             umsh_ulcp::Status::ITEM_NOT_FOUND => UlcpOperationFailureKind::ItemMissing,
@@ -7114,13 +7246,10 @@ fn ulcp_operation_error(
     })
 }
 
-fn ulcp_save_operation_error(
-    operation: String,
-    value: &[u8],
-) -> Result<UlcpOperationErrorRecord, MobileError> {
+fn ulcp_save_operation_error(operation: String, value: &[u8]) -> Option<UlcpOperationErrorRecord> {
     let mut error = ulcp_operation_error(operation, value)?;
     error.kind = UlcpOperationFailureKind::SaveFailed;
-    Ok(error)
+    Some(error)
 }
 
 /// Summarize a frame's header for a diagnostic log.
@@ -7245,7 +7374,9 @@ impl MobileGattReassembler {
     }
 
     /// Consume one ATT value, returning a complete ULCP frame when the
-    /// segment ends one. Invalid input resets the shared reassembly state.
+    /// segment ends one. Invalid input resets the shared reassembly state
+    /// and reports why, for the log: the spec makes a discarded segment a
+    /// transport-level event, so the caller drops it and carries on.
     pub fn push(&self, segment: Vec<u8>) -> Result<Option<Vec<u8>>, MobileError> {
         let mut reassembler = self.inner.lock().expect("GATT reassembler mutex poisoned");
         match reassembler.push(&segment) {
@@ -7289,9 +7420,7 @@ impl MobileHdlcDecoder {
     /// frames are discarded rather than reported: the decoder
     /// resynchronizes on the next flag, and a byte stream can carry
     /// line noise that belongs to nobody—a bridge opening a serial
-    /// port mid-transmission, most commonly. This is the one place the
-    /// two transports differ, GATT being reliable enough that a bad
-    /// segment is a protocol violation worth surfacing.
+    /// port mid-transmission, most commonly.
     pub fn push(&self, bytes: Vec<u8>) -> Vec<Vec<u8>> {
         let mut decoder = self.inner.lock().expect("HDLC decoder mutex poisoned");
         let mut frames = Vec::new();
@@ -8265,12 +8394,14 @@ mod tests {
             responses.push(response(property, value));
             inspect_ulcp_sync(responses)
         };
-        for property in [
-            prop::MAC_REPEATER_REGIONS,
-            prop::MAC_REPEATER_DEFAULT_REGION,
-            prop::MAC_REPEATER_MIN_RSSI,
+        // A value longer than its field is read for the field it leads
+        // with; one too short to hold it is not readable at all.
+        for (property, value) in [
+            (prop::MAC_REPEATER_REGIONS, &[0x8D, 0x53, 0x7C][..]),
+            (prop::MAC_REPEATER_DEFAULT_REGION, &[0x8D, 0x53, 0x7C][..]),
+            (prop::MAC_REPEATER_MIN_RSSI, &[0x8D][..]),
         ] {
-            let sync = malformed(property, &[0x8D, 0x53, 0x7C]).expect("device still described");
+            let sync = malformed(property, value).expect("device still described");
             assert_eq!(sync.repeater, None, "property {property}");
             assert!(sync.supports_repeater, "property {property}");
             assert!(
@@ -8909,10 +9040,14 @@ mod tests {
     #[test]
     fn received_frame_causes_are_distinguishable() {
         let session = MobileUlcpSession::new();
-        assert_eq!(
-            session.consume(vec![0x00, 0x06]),
-            Err(MobileError::UlcpFrameUnparsable)
-        );
+        // Not a ULCP frame, reserved header bits set, a command with its
+        // top bit set: each is ignored whole, as the spec has a receiver
+        // do, rather than taken as a reason to close the link.
+        for ignored in [vec![0x00, 0x06], vec![0x88, 0x06], vec![0x81, 0x86]] {
+            let update = session.consume(ignored.clone()).unwrap();
+            assert!(update.outbound_frames.is_empty(), "{ignored:02x?}");
+            assert!(update.pushed_properties.is_empty(), "{ignored:02x?}");
+        }
         // A well-formed command this session does not handle—a newer
         // firmware's unsolicited notification, or a `CMD_PROP_ARE`—is
         // named as such, not reported as a corrupt frame.
@@ -12706,7 +12841,7 @@ mod tests {
         );
 
         let with = inspect_ulcp_properties(vec![
-            response(prop::GNSS_FIX, &[FixKind::ThreeD as u8]),
+            response(prop::GNSS_FIX, &[FixKind::ThreeD.code()]),
             response(prop::GNSS_LOCATION, &[0x84, 0x21, 0x9f, 0x40]),
             response(prop::GNSS_ALTITUDE, &1_400i32.to_le_bytes()),
             response(prop::GNSS_SATELLITES, &[7, 9]),
@@ -13119,7 +13254,7 @@ mod tests {
         {
             let mut state = session.inner.lock().unwrap();
             let response = state.responses.get_mut(&prop::CAPS).unwrap();
-            let mut caps = decode_capabilities(&response.value).unwrap();
+            let mut caps = decode_capabilities(&response.value);
             caps.extend([cap::CMD_MULTI, cap::BATTERY]);
             caps.sort_unstable();
             caps.dedup();
@@ -13180,7 +13315,44 @@ mod tests {
     }
 
     #[test]
-    fn battery_diagnostics_multi_checks_order_and_retries_short_responses() {
+    fn battery_diagnostics_multi_keeps_what_matched_and_retries_the_rest() {
+        let session = battery_multi_session();
+        let start = session
+            .begin_property_fetch(vec![prop::BATTERY_CURRENT, prop::BATTERY_PRESENT])
+            .unwrap();
+        let request = Frame::parse(&start.outbound_frames[0]).unwrap();
+        let mut bytes = [0; 40];
+        // The first position is answered; the second names a property
+        // that was never asked for there. The read stops at it, keeps the
+        // first, and asks for the rest again.
+        let mut misplaced = frame::prop_are(&mut bytes, request.header.tid()).unwrap();
+        misplaced.write_entry(prop::BATTERY_CURRENT, &[0]).unwrap();
+        misplaced.write_entry(prop::BATTERY, &[2, 95]).unwrap();
+        let used = misplaced.finish();
+        let more = session.consume(bytes[..used].to_vec()).unwrap();
+        assert!(more.management_event.is_none());
+        assert_eq!(more.outbound_frames.len(), 1);
+        let next = Frame::parse(&more.outbound_frames[0]).unwrap();
+        assert_eq!(next.command(), Some(Cmd::PropMultiGet));
+        let mut response = frame::prop_are(&mut bytes, next.header.tid()).unwrap();
+        response.write_entry(prop::BATTERY_PRESENT, &[1]).unwrap();
+        let used = response.finish();
+        let answers = session
+            .consume(bytes[..used].to_vec())
+            .unwrap()
+            .management_event
+            .unwrap()
+            .answers;
+        assert_eq!(
+            answers.iter().map(|a| a.property_id).collect::<Vec<_>>(),
+            vec![prop::BATTERY_CURRENT, prop::BATTERY_PRESENT]
+        );
+    }
+
+    /// An answer that reaches no key at all would be asked for forever, so
+    /// the batch is broken up into single reads rather than failing.
+    #[test]
+    fn battery_diagnostics_multi_that_answers_nothing_falls_back_to_single_reads() {
         let session = battery_multi_session();
         let start = session
             .begin_property_fetch(vec![prop::BATTERY_CURRENT, prop::BATTERY_PRESENT])
@@ -13190,27 +13362,11 @@ mod tests {
         let mut bad = frame::prop_are(&mut bytes, request.header.tid()).unwrap();
         bad.write_entry(prop::BATTERY_PRESENT, &[1]).unwrap();
         let used = bad.finish();
-        assert!(session.consume(bytes[..used].to_vec()).is_err());
-        let mut short = frame::prop_are(&mut bytes, request.header.tid()).unwrap();
-        short.write_entry(prop::BATTERY_CURRENT, &[0]).unwrap();
-        let used = short.finish();
-        let more = session.consume(bytes[..used].to_vec()).unwrap();
-        assert!(more.management_event.is_none());
-        assert_eq!(more.outbound_frames.len(), 1);
-        let next = Frame::parse(&more.outbound_frames[0]).unwrap();
-        let mut response = frame::prop_are(&mut bytes, next.header.tid()).unwrap();
-        response.write_entry(prop::BATTERY_PRESENT, &[1]).unwrap();
-        let used = response.finish();
-        assert_eq!(
-            session
-                .consume(bytes[..used].to_vec())
-                .unwrap()
-                .management_event
-                .unwrap()
-                .answers
-                .len(),
-            2
-        );
+        let fallback = session.consume(bytes[..used].to_vec()).unwrap();
+        assert_eq!(fallback.outbound_frames.len(), 2);
+        for frame in &fallback.outbound_frames {
+            assert_eq!(Frame::parse(frame).unwrap().command(), Some(Cmd::PropGet));
+        }
     }
 
     #[test]
@@ -13732,5 +13888,171 @@ mod tests {
             ulcp_supported_bandwidths_hz(),
             umsh_ulcp::profiles::SUPPORTED_BANDWIDTHS_HZ
         );
+    }
+
+    fn push(session: &MobileUlcpSession, property: u32, value: &[u8]) -> UlcpSessionUpdateRecord {
+        session
+            .consume(property_response(frame::TID_UNSOLICITED, property, value))
+            .unwrap_or_else(|error| panic!("push of property {property} failed: {error:?}"))
+    }
+
+    /// A newer minor version is backward compatible by definition, and
+    /// octets past the two this session knows are a later revision's.
+    #[test]
+    fn a_newer_minor_version_attaches() {
+        for version in [vec![6, 1], vec![6, 0, 9]] {
+            let session = MobileUlcpSession::new();
+            let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+            let attached =
+                drive_reads(&session, begin.outbound_frames, |property| match property {
+                    prop::PROTOCOL_VERSION => (property, version.clone()),
+                    prop::HOST_KEY => (property, vec![0xAA; 32]),
+                    _ => commissionable_value(property),
+                });
+            assert_eq!(
+                attached.snapshot.phase,
+                UlcpSessionPhase::Attached,
+                "{version:?}"
+            );
+        }
+    }
+
+    /// Ownership comes from what `PROP_HOST_KEY` answered. A device
+    /// advertising host filtering that declines to report a host key is
+    /// one without a host domain to claim, not a broken one.
+    #[test]
+    fn a_host_key_answer_that_disagrees_with_the_capabilities_still_attaches() {
+        let session = MobileUlcpSession::new();
+        let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+        let attached = drive_reads(&session, begin.outbound_frames, |property| match property {
+            prop::HOST_KEY => (
+                prop::LAST_STATUS,
+                vec![umsh_ulcp::Status::PROP_NOT_FOUND.0 as u8],
+            ),
+            _ => commissionable_value(property),
+        });
+        assert_eq!(attached.snapshot.phase, UlcpSessionPhase::Attached);
+        assert_eq!(
+            attached.snapshot.host_ownership,
+            UlcpHostOwnership::Unsupported
+        );
+    }
+
+    /// Unsolicited values arrive for the life of the session, and one in a
+    /// form this phone cannot read is that one value unknown—never the
+    /// session.
+    #[test]
+    fn an_unreadable_push_is_one_unknown_value_not_a_lost_session() {
+        let session = MobileUlcpSession::new();
+        attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
+
+        // A charge state newer than this phone: the level still reads.
+        let battery = push(&session, prop::BATTERY, &[0b110, 64, 9]);
+        assert_eq!(
+            battery.snapshot.battery,
+            Some(UlcpBatteryRecord {
+                percentage: Some(64),
+                voltage_mv: None,
+                charge_state: None,
+            })
+        );
+        // A snapshot that cannot be read at all is one that knows nothing,
+        // never the previous reading carried forward.
+        let unreadable = push(&session, prop::BATTERY, &[0b1000]);
+        assert_eq!(
+            unreadable.snapshot.battery,
+            Some(UlcpBatteryRecord {
+                percentage: None,
+                voltage_mv: None,
+                charge_state: None,
+            })
+        );
+        assert_eq!(push(&session, prop::ALERT, &[9]).snapshot.alert, None);
+        assert_eq!(
+            push(&session, prop::DEV_NAME, &[0xFF, b'R'])
+                .snapshot
+                .device_name
+                .as_deref(),
+            Some("\u{FFFD}R")
+        );
+        let fix = push(&session, prop::GNSS_FIX, &[7]);
+        assert_eq!(fix.snapshot.gnss.unwrap().fix, UlcpFixKind::Unknown);
+
+        // A required property pushed in a form the snapshot cannot be
+        // built around leaves the snapshot as it was.
+        let frequency = push(&session, prop::PHY_FREQ, &[1, 2]);
+        assert_eq!(frequency.snapshot.phase, UlcpSessionPhase::Attached);
+        assert_eq!(
+            frequency.snapshot.provisioning.unwrap().frequency_khz,
+            915_000
+        );
+        // And the cache did not keep it, so the next push still reduces.
+        let longer = push(&session, prop::PHY_FREQ, &[0x48, 0xF5, 0x0D, 0x00, 0xEE]);
+        assert_eq!(longer.snapshot.provisioning.unwrap().frequency_khz, 914_760);
+    }
+
+    /// `PROP_LAST_STATUS` is a PUI optionally followed by a string; the
+    /// string is the device's to explain and changes nothing.
+    #[test]
+    fn a_status_with_a_trailing_string_reads_as_its_status() {
+        assert_eq!(inspect_ulcp_status(vec![0x05, b'n', b'o']), Ok(5));
+
+        let session = MobileUlcpSession::new();
+        attach_host_keys_capable(&session);
+        let update = session
+            .reconcile_host_channel_keys(vec![vec![0xD8; 32]])
+            .unwrap();
+        let request = Frame::parse(&update.outbound_frames[0]).unwrap();
+        let mut value = vec![umsh_ulcp::Status::NOMEM.0 as u8];
+        value.extend_from_slice(b"table full");
+        let full = session
+            .consume(property_response(
+                request.header.tid(),
+                prop::LAST_STATUS,
+                &value,
+            ))
+            .unwrap();
+        assert_eq!(
+            full.operation_error.unwrap().kind,
+            UlcpOperationFailureKind::Capacity
+        );
+        assert_eq!(full.snapshot.phase, UlcpSessionPhase::Attached);
+    }
+
+    /// Success with no echo is the device doing what it was asked in a
+    /// form this session did not predict: a mismatch to read back, not a
+    /// failed operation and not a fault in the session.
+    #[test]
+    fn success_in_place_of_an_echo_is_read_back() {
+        let session = MobileUlcpSession::new();
+        attach_host_keys_capable(&session);
+        let update = session
+            .reconcile_host_channel_keys(vec![vec![0xD8; 32]])
+            .unwrap();
+        let request = Frame::parse(&update.outbound_frames[0]).unwrap();
+        let ok = session
+            .consume(property_response(
+                request.header.tid(),
+                prop::LAST_STATUS,
+                &[umsh_ulcp::Status::OK.0 as u8],
+            ))
+            .unwrap();
+        assert_eq!(ok.operation_error, None);
+        assert_eq!(ok.outbound_frames.len(), 1);
+        let (tid, reread) = property_request(&ok.outbound_frames[0]);
+        assert_eq!(reread, prop::HOST_CHANNEL_KEYS);
+        // Reported once the read-back settles the operation.
+        let settled = session
+            .consume(property_response(tid, prop::HOST_CHANNEL_KEYS, &[0x11; 16]))
+            .unwrap();
+        assert!(settled.mismatched_response.is_some());
+        assert_eq!(settled.snapshot.phase, UlcpSessionPhase::Attached);
+    }
+
+    #[test]
+    fn a_truncated_capability_tail_keeps_the_capabilities_before_it() {
+        let mut value = encoded_capabilities(&[cap::SAVE, cap::DEV_NAME]);
+        value.push(0x80);
+        assert_eq!(decode_capabilities(&value), vec![cap::SAVE, cap::DEV_NAME]);
     }
 }

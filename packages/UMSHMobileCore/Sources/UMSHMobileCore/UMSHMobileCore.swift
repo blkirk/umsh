@@ -849,7 +849,9 @@ public protocol MobileGattReassemblerProtocol: AnyObject, Sendable {
 
     /**
      * Consume one ATT value, returning a complete ULCP frame when the
-     * segment ends one. Invalid input resets the shared reassembly state.
+     * segment ends one. Invalid input resets the shared reassembly state
+     * and reports why, for the log: the spec makes a discarded segment a
+     * transport-level event, so the caller drops it and carries on.
      */
     func push(segment: Data) throws  -> Data?
 
@@ -922,7 +924,9 @@ public convenience init() {
 
     /**
      * Consume one ATT value, returning a complete ULCP frame when the
-     * segment ends one. Invalid input resets the shared reassembly state.
+     * segment ends one. Invalid input resets the shared reassembly state
+     * and reports why, for the log: the spec makes a discarded segment a
+     * transport-level event, so the caller drops it and carries on.
      */
 open func push(segment: Data)throws  -> Data?  {
     return try  FfiConverterOptionData.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
@@ -1009,9 +1013,7 @@ public protocol MobileHdlcDecoderProtocol: AnyObject, Sendable {
      * frames are discarded rather than reported: the decoder
      * resynchronizes on the next flag, and a byte stream can carry
      * line noise that belongs to nobody—a bridge opening a serial
-     * port mid-transmission, most commonly. This is the one place the
-     * two transports differ, GATT being reliable enough that a bad
-     * segment is a protocol violation worth surfacing.
+     * port mid-transmission, most commonly.
      */
     func push(bytes: Data)  -> [Data]
 
@@ -1099,9 +1101,7 @@ public convenience init() {
      * frames are discarded rather than reported: the decoder
      * resynchronizes on the next flag, and a byte stream can carry
      * line noise that belongs to nobody—a bridge opening a serial
-     * port mid-transmission, most commonly. This is the one place the
-     * two transports differ, GATT being reliable enough that a bad
-     * segment is a protocol violation worth surfacing.
+     * port mid-transmission, most commonly.
      */
 open func push(bytes: Data) -> [Data]  {
     return try!  FfiConverterSequenceData.lift(try! rustCall() {
@@ -15580,6 +15580,11 @@ public enum UlcpFixKind: Equatable, Hashable {
      * Position and altitude.
      */
     case threeD
+    /**
+     * A solution of a quality this phone has no name for, reported by
+     * firmware newer than it. Still a fix: only zero means none.
+     */
+    case unknown
 
 
 
@@ -15607,6 +15612,8 @@ public struct FfiConverterTypeUlcpFixKind: FfiConverterRustBuffer {
 
         case 3: return .threeD
 
+        case 4: return .unknown
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -15625,6 +15632,10 @@ public struct FfiConverterTypeUlcpFixKind: FfiConverterRustBuffer {
 
         case .threeD:
             writeInt(&buf, Int32(3))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -18742,7 +18753,11 @@ public func inspectUlcpPropertyFrame(bytes: Data)throws  -> UlcpPropertyFrameRec
 })
 }
 /**
- * Decode an exact packed status value from `PROP_LAST_STATUS`.
+ * Decode the status a `PROP_LAST_STATUS` value reports.
+ *
+ * The value is a PUI optionally followed by a diagnostic string, so only
+ * the leading PUI is read; whatever follows it is the device's to
+ * explain. Fails only when there is no readable PUI at all.
  */
 public func inspectUlcpStatus(value: Data)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
@@ -19335,7 +19350,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_func_inspect_ulcp_property_frame() != 62110) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_func_inspect_ulcp_status() != 30949) {
+    if (uniffi_umsh_mobile_core_checksum_func_inspect_ulcp_status() != 1822) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_func_inspect_ulcp_sync() != 14194) {
@@ -19632,13 +19647,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobileregiondatabase_region_count() != 10598) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilegattreassembler_push() != 45673) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilegattreassembler_push() != 37189) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilegattreassembler_reset() != 47215) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilehdlcdecoder_push() != 62363) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilehdlcdecoder_push() != 5693) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilehdlcdecoder_reset() != 13551) {

@@ -32,26 +32,45 @@ const UERE_DM: u32 = 50;
 pub enum FixKind {
     /// No position solution.
     #[default]
-    None = 0,
+    None,
     /// A two-dimensional solution: position without altitude.
-    TwoD = 1,
+    TwoD,
     /// A three-dimensional solution.
-    ThreeD = 2,
+    ThreeD,
+    /// A code this crate does not assign, kept as reported. Zero is the
+    /// only code that means no solution, so this is still some kind of
+    /// fix—one newer than this reader.
+    Other(u8),
 }
 
 impl FixKind {
     /// The wire code for this fix quality.
     pub const fn code(self) -> u8 {
-        self as u8
+        match self {
+            Self::None => 0,
+            Self::TwoD => 1,
+            Self::ThreeD => 2,
+            Self::Other(code) => code,
+        }
     }
 
-    /// Strict conversion from a wire code.
+    /// Strict conversion from a wire code: `None` for a code this crate
+    /// does not assign.
     pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::None),
             1 => Some(Self::TwoD),
             2 => Some(Self::ThreeD),
             _ => None,
+        }
+    }
+
+    /// Tolerant conversion from a wire code, for a reader: a code this
+    /// crate does not assign is [`Self::Other`] rather than an error.
+    pub const fn from_wire(code: u8) -> Self {
+        match Self::from_code(code) {
+            Some(kind) => kind,
+            None => Self::Other(code),
         }
     }
 
@@ -184,10 +203,13 @@ impl GnssSnapshot {
                 };
             }
             prop::GNSS_FIX => {
-                let [code] = value else {
+                // A sender writes exactly one octet. Anything after it is
+                // nothing this reader can use, and no reason to lose the
+                // octet that is there.
+                let [code, ..] = value else {
                     return Err(GnssError::Malformed);
                 };
-                self.fix = FixKind::from_code(*code).ok_or(GnssError::Malformed)?;
+                self.fix = FixKind::from_wire(*code);
             }
             prop::GNSS_PRECISION => {
                 self.accuracy_dm = match value {
@@ -197,15 +219,17 @@ impl GnssSnapshot {
                 };
             }
             prop::GNSS_SATELLITES => match value {
+                [] => return Err(GnssError::Malformed),
                 [used] => {
                     self.sats_used = *used;
                     self.sats_in_view = None;
                 }
-                [used, in_view] => {
+                // Octets past the second belong to a later revision; the
+                // two this one defines still mean what they say.
+                [used, in_view, ..] => {
                     self.sats_used = *used;
                     self.sats_in_view = Some(*in_view);
                 }
-                _ => return Err(GnssError::Malformed),
             },
             _ => return Err(GnssError::UnknownProperty),
         }
@@ -315,21 +339,32 @@ mod tests {
             Err(GnssError::Malformed)
         );
         assert_eq!(
-            snapshot.absorb(prop::GNSS_FIX, &[3]),
-            Err(GnssError::Malformed)
-        );
-        assert_eq!(
             snapshot.absorb(prop::GNSS_PRECISION, &[1]),
             Err(GnssError::Malformed)
         );
         assert_eq!(
-            snapshot.absorb(prop::GNSS_SATELLITES, &[1, 2, 3]),
+            snapshot.absorb(prop::GNSS_SATELLITES, &[]),
             Err(GnssError::Malformed)
         );
         assert_eq!(
             snapshot.absorb(prop::TIME, &[]),
             Err(GnssError::UnknownProperty)
         );
+    }
+
+    #[test]
+    fn newer_codes_and_trailing_octets_are_read_not_refused() {
+        let mut snapshot = GnssSnapshot::SEARCHING;
+        snapshot.absorb(prop::GNSS_FIX, &[3]).unwrap();
+        assert_eq!(snapshot.fix, FixKind::Other(3));
+        assert!(snapshot.fix.is_fixed());
+        let mut buf = [0u8; MAX_VALUE_LEN];
+        assert_eq!(snapshot.encode(prop::GNSS_FIX, &mut buf), Ok(1));
+        assert_eq!(buf[0], 3);
+        snapshot.absorb(prop::GNSS_FIX, &[2, 0xAA]).unwrap();
+        assert_eq!(snapshot.fix, FixKind::ThreeD);
+        snapshot.absorb(prop::GNSS_SATELLITES, &[7, 12, 4]).unwrap();
+        assert_eq!((snapshot.sats_used, snapshot.sats_in_view), (7, Some(12)));
     }
 
     #[test]
@@ -369,6 +404,8 @@ mod tests {
         assert_eq!(FixKind::from_code(0), Some(FixKind::None));
         assert_eq!(FixKind::from_code(2), Some(FixKind::ThreeD));
         assert_eq!(FixKind::from_code(3), None);
+        assert_eq!(FixKind::from_wire(3), FixKind::Other(3));
+        assert_eq!(FixKind::from_wire(1), FixKind::TwoD);
         assert!(!FixKind::default().is_fixed());
         assert!(FixKind::TwoD.is_fixed());
     }

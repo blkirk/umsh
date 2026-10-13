@@ -1751,22 +1751,23 @@ extension CoreBluetoothRadioConnection: CBPeripheralDelegate {
             )
             return
         }
-        guard let value = characteristic.value else {
-            terminateConnectionForFatalProtocolError("The radio sent an empty GATT notification", name: displayName(for: peripheral))
-            return
-        }
+        // An empty value carries no segment header; the reassembler
+        // discards it and resets, as it does any other invalid segment.
+        let value = characteristic.value ?? Data()
         do {
             guard let frame = try reassembler.push(segment: value) else { return }
             linkDidReceive(frame: frame)
         } catch {
-            terminateConnectionForFatalProtocolError(
-                "The radio sent an invalid ULCP frame",
-                detail: """
-                    cause=\(UlcpFrameDiagnostic.cause(error)) \
-                    stage=gatt-reassembly segment=\(value.count)B
-                    """,
-                bytes: value,
-                name: displayName(for: peripheral)
+            // The spec makes a discarded segment a transport-level event:
+            // the reassembler has already reset, the next `SAR_COMPLETE`
+            // or `SAR_FIRST` starts clean, and closing the link would turn
+            // one lost frame into a lost session.
+            Self.logger.notice(
+                """
+                ulcp: discarding GATT segment \
+                cause=\(UlcpFrameDiagnostic.cause(error), privacy: .public) \
+                segment=\(value.count)B
+                """
             )
         }
     }

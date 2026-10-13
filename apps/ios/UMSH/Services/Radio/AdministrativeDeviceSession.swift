@@ -950,14 +950,15 @@ final class AdministrativeDeviceSession: NSObject, @unchecked Sendable {
             guard let reassembled = try reassembler.push(segment: value) else { return }
             frame = reassembled
         } catch {
-            fail(
-                "The device sent an invalid ULCP frame",
-                error: RadioConnectionError.incompatibleProtocol,
-                detail: """
-                    cause=\(UlcpFrameDiagnostic.cause(error)) \
-                    stage=gatt-reassembly segment=\(value.count)B
-                    """,
-                bytes: value
+            // A discarded segment is a transport-level event: dropped, for
+            // the reasons `peripheral(_:didUpdateValueFor:error:)` gives in
+            // the tethered connection.
+            Self.logger.notice(
+                """
+                administrative session: discarding GATT segment \
+                cause=\(UlcpFrameDiagnostic.cause(error), privacy: .public) \
+                segment=\(value.count)B
+                """
             )
             return
         }
@@ -1430,13 +1431,8 @@ extension AdministrativeDeviceSession: CBPeripheralDelegate {
             )
             return
         }
-        guard let value = characteristic.value else {
-            fail(
-                "The device sent an empty GATT notification",
-                error: RadioConnectionError.incompatibleProtocol
-            )
-            return
-        }
-        receive(value, from: peripheral)
+        // An empty value carries no segment header; the reassembler
+        // discards it and resets, as it does any other invalid segment.
+        receive(characteristic.value ?? Data(), from: peripheral)
     }
 }

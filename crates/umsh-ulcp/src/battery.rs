@@ -55,8 +55,8 @@ impl BatteryChargeState {
 /// Snapshot or decode error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BatteryError {
-    /// Reserved flag bits set, length inconsistent with the flags, an
-    /// out-of-range level, or an unknown charge-state code.
+    /// Reserved flag bits set, length inconsistent with the flags, or an
+    /// out-of-range level.
     Malformed,
     /// The output buffer cannot hold the encoded snapshot.
     BufferTooSmall,
@@ -138,8 +138,9 @@ impl BatteryStatus {
     ///
     /// The empty value decodes to an all-`None` snapshot. Any other value
     /// must consist of exactly the flags octet and the fields it declares;
-    /// a zero flags octet, reserved bits, trailing bytes, a level above
-    /// 100, and unknown charge-state codes are all malformed.
+    /// a zero flags octet, reserved bits, trailing bytes, and a level
+    /// above 100 are all malformed. An unassigned charge-state code reads
+    /// as an unknown (`None`) charge state.
     pub fn decode(value: &[u8]) -> Result<Self, BatteryError> {
         let Some((&flags, mut rest)) = value.split_first() else {
             return Ok(Self::default());
@@ -173,7 +174,11 @@ impl BatteryStatus {
         let charge_state = if flags & FLAG_CHARGE_STATE != 0 {
             let (code, consumed) = pui::decode(rest).map_err(|_| BatteryError::Malformed)?;
             rest = &rest[consumed..];
-            Some(BatteryChargeState::from_code(code).ok_or(BatteryError::Malformed)?)
+            // A state this crate does not name is still a well-formed
+            // field. A host treats it as unknown at this instant—the
+            // same as an absent one—rather than discarding the voltage
+            // and level measured alongside it.
+            BatteryChargeState::from_code(code)
         } else {
             None
         };
@@ -289,15 +294,22 @@ mod tests {
             BatteryStatus::decode(&[0b010, 101]),
             Err(BatteryError::Malformed)
         );
-        // Unknown charge-state code.
-        assert_eq!(
-            BatteryStatus::decode(&[0b100, 4]),
-            Err(BatteryError::Malformed)
-        );
         // Truncated charge-state PUI.
         assert_eq!(
             BatteryStatus::decode(&[0b100, 0x80]),
             Err(BatteryError::Malformed)
+        );
+    }
+
+    #[test]
+    fn an_unassigned_charge_state_is_unknown_not_malformed() {
+        assert_eq!(
+            BatteryStatus::decode(&[0b110, 64, 4]),
+            Ok(BatteryStatus {
+                level_percent: Some(64),
+                charge_state: None,
+                ..Default::default()
+            })
         );
     }
 

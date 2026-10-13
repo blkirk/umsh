@@ -300,6 +300,7 @@ struct RemoteGnssScreen: View {
         case .none: "Searching"
         case .twoD: "2D"
         case .threeD: "3D"
+        case .unknown: "Fix"
         }
     }
 

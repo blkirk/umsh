@@ -2689,8 +2689,9 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
             // exchange the watchdog stopped waiting for) or a device
             // answering twice. Closing the link would turn a stray frame
             // into a lost session, and reconnecting would not stop the
-            // device sending it. Frames that do not parse at all stay
-            // fatal below: those say the framing is broken.
+            // device sending it. A frame whose header does not parse is
+            // never thrown at all: Rust ignores it whole, as the spec has
+            // a receiver do.
             Self.logger.notice(
                 """
                 ulcp: ignoring frame nothing is waiting on \
