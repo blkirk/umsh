@@ -213,11 +213,17 @@ forward. A device MAY bound what it retains, in entries or in octets,
 evicting the least recently active administrator's entry first, but
 retains at least the entry for the most recently active administrator.
 
-An administrator that receives no response retransmits the identical
-request with the identical token, paced to the path's round-trip
-behavior. This is safe whether the request or only its response was
-lost: a retained response is repeated, and a read is answered afresh. An
-administrator MUST NOT have more than one exchange outstanding with a
+An administrator requests a MAC acknowledgment for every request, and
+recovering a lost request is the MAC's work: its retransmissions and
+[Route Retry](packet-options.md#route-retry-option-6). An administrator
+MUST NOT retransmit a request whose delivery the MAC has not yet
+resolved, since a retransmission is a new packet that repeaters forward
+again. A request the MAC fails to deliver ends the exchange. A request
+that is acknowledged but not answered is retransmitted, identical and
+under the identical token, once its response is overdue for the path's
+round-trip behavior. This is safe whether or not the device executed the
+request: a retained response is repeated, and a read is answered afresh.
+An administrator MUST NOT have more than one exchange outstanding with a
 given device.
 
 Retained entries do not survive a reset. A reset command retransmitted

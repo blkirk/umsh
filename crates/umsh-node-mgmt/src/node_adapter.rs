@@ -61,12 +61,17 @@ pub enum ManagementError<E> {
     Idle,
 }
 
+/// How often a service call looks again at an attempt still with the MAC.
+/// Checking costs nothing on the air; it only bounds how long a caller
+/// that sleeps until the deadline goes without noticing an acknowledgment.
+const DELIVERY_RECHECK_MS: u64 = 1_000;
+
 /// What the caller should do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
     /// Nothing further until `deadline_ms`. Pump the host until then; a
-    /// response arriving earlier makes the next service call productive
-    /// sooner.
+    /// response or acknowledgment arriving earlier makes the next service
+    /// call productive sooner.
     Waiting { deadline_ms: u64 },
     /// The exchange is over.
     Done(Outcome),
@@ -87,8 +92,9 @@ pub struct NodeManager<M: MacBackend> {
     /// call.
     reply: Vec<u8>,
     assembled: usize,
-    /// The most recent send, for a reset-class command whose completion
-    /// is the acknowledgment rather than a response.
+    /// The most recent send. Its acknowledgment, or the MAC giving up on
+    /// it, is what moves the exchange on, and it is canceled once nothing
+    /// depends on it.
     ticket: Option<SendProgressTicket>,
     /// Distinguishes each exchange's token from the last.
     counter: u16,
@@ -142,9 +148,8 @@ impl<M: MacBackend> NodeManager<M> {
         self.peer.peer()
     }
 
-    /// How requests go out. An acknowledgment is requested by default: it
-    /// is what completes a reset, and elsewhere it turns an unreachable
-    /// path into an early answer rather than four silent retries.
+    /// How requests go out. An acknowledgment is requested whatever these
+    /// say: it is what paces retransmission and completes a reset.
     pub fn send_options_mut(&mut self) -> &mut SendOptions {
         &mut self.options
     }
@@ -209,18 +214,6 @@ impl<M: MacBackend> NodeManager<M> {
             return Err(ManagementError::Idle);
         };
 
-        // A reset-class command is answered by no response payload, so
-        // the acknowledgment is what ends it.
-        if !exchange.expects_response()
-            && self
-                .ticket
-                .as_ref()
-                .is_some_and(SendProgressTicket::was_acked)
-        {
-            exchange.delivered();
-            return Ok(self.settle(Outcome::NoResponse));
-        }
-
         let mut payload = [0u8; 1 + PAYLOAD_MAX];
         payload[0] = PayloadType::NodeManagementRequest as u8;
 
@@ -238,27 +231,47 @@ impl<M: MacBackend> NodeManager<M> {
             }
         }
 
+        // A response in hand settles more than the MAC's verdict could, so
+        // the verdict is read only when nothing arrived.
         let step = match step {
             Some(step) => step,
-            None => exchange.poll(now_ms, &mut payload[1..]),
+            None => {
+                if exchange.is_delivering()
+                    && let Some(ticket) = &self.ticket
+                {
+                    if ticket.was_acked() {
+                        exchange.acknowledged(now_ms);
+                    } else if ticket.has_failed() {
+                        exchange.undelivered();
+                    }
+                }
+                exchange.poll(now_ms, &mut payload[1..])
+            }
         };
 
         match step {
             Step::Send { len } => {
-                // The exchange set its own deadline when it handed out
-                // the attempt, so ask rather than recompute; a send that
-                // fails outright leaves the exchange to time out.
-                let deadline_ms = exchange.deadline_ms().unwrap_or(now_ms);
+                // The attempt before this one may still be with the MAC:
+                // an earlier fragment whose response arrived ahead of its
+                // acknowledgment. Left alone, it would go on retrying, and
+                // eventually flood, a request that has been answered.
+                cancel_unfinished(&self.peer, self.ticket.take()).await;
+                self.options.ack_requested = true;
                 let ticket = self
                     .peer
                     .send(&payload[..1 + len], &self.options)
                     .await
                     .map_err(ManagementError::Transport)?;
                 self.ticket = Some(ticket);
-                Ok(Progress::Waiting { deadline_ms })
+                Ok(Progress::Waiting {
+                    deadline_ms: now_ms + DELIVERY_RECHECK_MS,
+                })
             }
             Step::Wait { deadline_ms } => Ok(Progress::Waiting { deadline_ms }),
-            Step::Done(outcome) => Ok(self.settle(outcome)),
+            Step::Delivering => Ok(Progress::Waiting {
+                deadline_ms: now_ms + DELIVERY_RECHECK_MS,
+            }),
+            Step::Done(outcome) => Ok(self.settle(outcome).await),
         }
     }
 
@@ -269,14 +282,15 @@ impl<M: MacBackend> NodeManager<M> {
     /// ran out, or the radio underneath it was replaced—rather than the
     /// engine's. The token count is carried forward exactly as
     /// [`settle`](Self::settle) carries it, so a device that does answer
-    /// the abandoned exchange late answers a token nothing will reissue.
-    /// A no-op when nothing is outstanding.
-    pub fn abandon(&mut self) {
+    /// the abandoned exchange late answers a token nothing will reissue,
+    /// and the MAC stops retrying the request. A no-op when nothing is
+    /// outstanding.
+    pub async fn abandon(&mut self) {
         if let Some(exchange) = &self.exchange {
             self.counter = exchange.counter();
         }
         self.exchange = None;
-        self.ticket = None;
+        cancel_unfinished(&self.peer, self.ticket.take()).await;
         self.inbox.borrow_mut().clear();
     }
 
@@ -286,7 +300,7 @@ impl<M: MacBackend> NodeManager<M> {
         &self.reply[..self.assembled]
     }
 
-    fn settle(&mut self, outcome: Outcome) -> Progress {
+    async fn settle(&mut self, outcome: Outcome) -> Progress {
         // A continued read rotated tokens the manager's own counter never
         // saw. Taking the exchange's final count back is what keeps the
         // next `begin` from reissuing one of them—which the device
@@ -295,11 +309,26 @@ impl<M: MacBackend> NodeManager<M> {
             self.counter = exchange.counter();
         }
         self.exchange = None;
-        self.ticket = None;
+        // A response that overtook its request's acknowledgment leaves the
+        // MAC waiting on one nobody needs.
+        cancel_unfinished(&self.peer, self.ticket.take()).await;
         if let Outcome::Replied { len } = outcome {
             self.assembled = len;
         }
         Progress::Done(outcome)
+    }
+}
+
+/// Stop the MAC working on a send whose outcome no longer matters.
+async fn cancel_unfinished<M: MacBackend>(
+    peer: &PeerConnection<LocalNode<M>>,
+    ticket: Option<SendProgressTicket>,
+) {
+    if let Some(ticket) = ticket
+        && !ticket.is_finished()
+        && let Some(token) = ticket.token()
+    {
+        peer.cancel_send(token).await;
     }
 }
 

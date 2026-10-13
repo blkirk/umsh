@@ -2929,7 +2929,9 @@ impl<M: MacBackend> ManagementJob<M> {
         now_ms: u64,
     ) -> Option<MobileMeshManagementEventRecord> {
         match outcome {
-            umsh_node_mgmt::Outcome::Failed(umsh_node_mgmt::Failure::TimedOut) => {
+            umsh_node_mgmt::Outcome::Failed(
+                umsh_node_mgmt::Failure::TimedOut | umsh_node_mgmt::Failure::Unreachable,
+            ) => {
                 return Some(self.event(MobileMeshManagementOutcome::TimedOut));
             }
             umsh_node_mgmt::Outcome::Failed(_) => {

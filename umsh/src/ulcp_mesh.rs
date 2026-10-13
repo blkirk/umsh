@@ -279,8 +279,12 @@ impl MeshEndpoint {
 pub fn describe(failure: Failure) -> String {
     match failure {
         Failure::TimedOut => {
-            "no answer—the device may be out of range, or this host may not be one of its \
-             administrators"
+            "the device received the request but did not answer—this host may not be one of \
+             its administrators"
+                .into()
+        }
+        Failure::Unreachable => {
+            "the device did not acknowledge the request—it may be out of range or switched off"
                 .into()
         }
         Failure::CursorInvalid => {

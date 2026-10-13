@@ -5,6 +5,15 @@
 //! reads the payloads that come back; the caller owns the transport, the
 //! clock, and the buffer the read reassembles into.
 //!
+//! Getting a request to the device is the transport's job, not this
+//! engine's. Every attempt is sent with a MAC acknowledgment requested,
+//! and the MAC already retries it and recovers a failed route. The
+//! caller reports how that went ([`Exchange::acknowledged`],
+//! [`Exchange::undelivered`]), and the engine retransmits only when a
+//! request arrived but its response did not. An attempt whose delivery
+//! is still unresolved is never sent again: a retransmission is a new
+//! frame, and repeaters would flood it a second time.
+//!
 //! One [`Exchange`] serves a whole operation, which may span several
 //! request/response round trips when a read does not fit one payload.
 //! An administrator MUST NOT have more than one exchange outstanding
@@ -16,20 +25,32 @@ use umsh_ulcp::status::Status;
 
 use crate::envelope::{Envelope, EnvelopeError, Token};
 
-/// How long to wait for a response before retransmitting, matching the
-/// request pacing `umsh-text` settled on for the same mesh.
-pub const RETRY_MS: u64 = 8_000;
+/// Shortest wait for a response once its request has been acknowledged.
+///
+/// The device answers right behind its acknowledgment, so the response
+/// normally lands about when the acknowledgment did. The rest of the wait
+/// covers the response's own forwarding retries on a slow modulation.
+pub const RESPONSE_WAIT_MIN_MS: u64 = 20_000;
 
-/// Retransmissions before an exchange is abandoned. Four attempts across
-/// half a minute is long enough for a multi-hop path to recover and
-/// short enough that a person waiting on it gets an answer.
-pub const MAX_ATTEMPTS: u32 = 4;
+/// The wait after an acknowledgment, as a multiple of how long that
+/// acknowledgment took to come back, when that is longer than
+/// [`RESPONSE_WAIT_MIN_MS`]. A path that was slow to acknowledge is slow
+/// to answer.
+pub const RESPONSE_WAIT_RTT_MULTIPLE: u64 = 3;
+
+/// Attempts an exchange makes: the request, and one retransmission to
+/// recover a lost response. Delivering the request is already the MAC's
+/// job, so more attempts would mostly repeat a flood.
+pub const MAX_ATTEMPTS: u32 = 2;
 
 /// How an exchange ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Every attempt went unanswered.
+    /// The device acknowledged the request but never answered it.
     TimedOut,
+    /// The request was never acknowledged: the MAC exhausted its retries
+    /// and its route recovery.
+    Unreachable,
     /// A response carried a critical option this implementation does not
     /// recognize, so what it says cannot be trusted.
     UnknownCriticalOption(u16),
@@ -46,11 +67,16 @@ pub enum Failure {
 /// What the caller should do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Send `out[..len]` as a Node Management Request payload.
+    /// Send `out[..len]` as a Node Management Request payload, with a MAC
+    /// acknowledgment requested.
     Send { len: usize },
     /// Nothing to do until `deadline_ms`, when [`Exchange::poll`] will
     /// have another attempt to hand out.
     Wait { deadline_ms: u64 },
+    /// The attempt is with the transport. Nothing to do until it is
+    /// [acknowledged](Exchange::acknowledged) or reported
+    /// [undelivered](Exchange::undelivered), or a response arrives.
+    Delivering,
     /// The exchange is over.
     Done(Outcome),
 }
@@ -62,8 +88,8 @@ pub enum Outcome {
     /// first `len` octets—one whole ULCP frame, its trailing content
     /// the concatenation of every fragment.
     Replied { len: usize },
-    /// A reset-class command, which is answered by no response payload.
-    /// Delivery is confirmed by the MAC acknowledgment, not here.
+    /// A reset-class command, which is answered by no response payload,
+    /// was acknowledged.
     NoResponse,
     /// The exchange failed.
     Failed(Failure),
@@ -71,8 +97,19 @@ pub enum Outcome {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// Waiting for a response to the attempt now outstanding.
-    Awaiting {
+    /// The next request goes out at `at_ms`: the first attempt, or the
+    /// next fragment of a continued read.
+    Due {
+        at_ms: u64,
+    },
+    /// The attempt is with the transport, sent at `sent_ms`.
+    Delivering {
+        sent_ms: u64,
+        attempts: u32,
+    },
+    /// The attempt was acknowledged. Its response is due by
+    /// `deadline_ms`, after which it is retransmitted if attempts remain.
+    Answering {
         deadline_ms: u64,
         attempts: u32,
     },
@@ -196,10 +233,7 @@ impl<const REQUEST: usize> Exchange<REQUEST> {
             counter: seed,
             resets,
             remaining: None,
-            state: State::Awaiting {
-                deadline_ms: now_ms,
-                attempts: 0,
-            },
+            state: State::Due { at_ms: now_ms },
         })
     }
 
@@ -227,59 +261,78 @@ impl<const REQUEST: usize> Exchange<REQUEST> {
         self.remaining
     }
 
-    /// When the outstanding attempt stops waiting, or `None` once the
-    /// exchange has finished.
+    /// When the exchange next has something to do on its own, or `None`
+    /// while that waits on the transport or once the exchange has
+    /// finished.
     pub fn deadline_ms(&self) -> Option<u64> {
         match self.state {
-            State::Awaiting { deadline_ms, .. } => Some(deadline_ms),
-            State::Finished(_) => None,
+            State::Due { at_ms } => Some(at_ms),
+            State::Answering { deadline_ms, .. } => Some(deadline_ms),
+            State::Delivering { .. } | State::Finished(_) => None,
         }
     }
 
-    /// What to do now: send an attempt, wait for the deadline, or stop.
+    /// Whether the attempt now outstanding is still with the transport,
+    /// so its acknowledgment or failure is what the caller watches for.
+    pub fn is_delivering(&self) -> bool {
+        matches!(self.state, State::Delivering { .. })
+    }
+
+    /// What to do now: send an attempt, wait, or stop.
     ///
-    /// The first call hands out the first attempt; later calls hand out
-    /// retransmissions of the identical request under the identical
-    /// token. The device answers a write's from its retained response
-    /// rather than executing it again, and simply answers a read again.
+    /// The first call hands out the first attempt. A retransmission of the
+    /// identical request under the identical token is handed out only
+    /// once an acknowledged attempt's response is overdue. The device
+    /// answers a write's from its retained response rather than executing
+    /// it again, and simply answers a read again.
     pub fn poll(&mut self, now_ms: u64, out: &mut [u8]) -> Step {
-        let (deadline_ms, attempts) = match self.state {
-            State::Finished(outcome) => return Step::Done(outcome),
-            State::Awaiting {
-                deadline_ms,
-                attempts,
-            } => (deadline_ms, attempts),
-        };
-
-        if now_ms < deadline_ms {
-            return Step::Wait { deadline_ms };
+        match self.state {
+            State::Finished(outcome) => Step::Done(outcome),
+            State::Delivering { .. } => Step::Delivering,
+            State::Due { at_ms } if now_ms < at_ms => Step::Wait { deadline_ms: at_ms },
+            State::Due { .. } => self.send(now_ms, 0, out),
+            State::Answering { deadline_ms, .. } if now_ms < deadline_ms => {
+                Step::Wait { deadline_ms }
+            }
+            State::Answering { attempts, .. } if attempts >= MAX_ATTEMPTS => {
+                self.finish(Outcome::Failed(Failure::TimedOut))
+            }
+            State::Answering { attempts, .. } => self.send(now_ms, attempts, out),
         }
-        if attempts >= MAX_ATTEMPTS {
-            return self.finish(Outcome::Failed(Failure::TimedOut));
-        }
-
-        let mut request = Envelope::new(self.token, &self.frame[..self.frame_len]);
-        if self.cursor_len > 0 {
-            request = request.with_cursor(&self.cursor[..self.cursor_len]);
-        }
-        let Ok(len) = request.encode(out) else {
-            return self.finish(Outcome::Failed(Failure::TooLarge));
-        };
-
-        self.state = State::Awaiting {
-            deadline_ms: now_ms + RETRY_MS,
-            attempts: attempts + 1,
-        };
-        Step::Send { len }
     }
 
-    /// A reset-class command has been delivered—the MAC acknowledged
-    /// it—and no response is coming.
+    /// The attempt now outstanding was acknowledged at `now_ms`.
     ///
-    /// Calling this for anything else discards a reply that may still
-    /// arrive; the caller checks [`Exchange::expects_response`] first.
-    pub fn delivered(&mut self) -> Step {
-        self.finish(Outcome::NoResponse)
+    /// For a reset-class command that is the whole exchange. Anything else
+    /// waits for its response, for longer the slower the acknowledgment
+    /// was to come back. A no-op unless an attempt is with the transport.
+    pub fn acknowledged(&mut self, now_ms: u64) {
+        let State::Delivering { sent_ms, attempts } = self.state else {
+            return;
+        };
+        if self.resets {
+            self.finish(Outcome::NoResponse);
+            return;
+        }
+        let round_trip_ms = now_ms.saturating_sub(sent_ms);
+        let wait_ms =
+            RESPONSE_WAIT_MIN_MS.max(round_trip_ms.saturating_mul(RESPONSE_WAIT_RTT_MULTIPLE));
+        self.state = State::Answering {
+            deadline_ms: now_ms.saturating_add(wait_ms),
+            attempts,
+        };
+    }
+
+    /// The transport gave up on the attempt now outstanding without an
+    /// acknowledgment.
+    ///
+    /// That ends the exchange. The MAC has already retried the frame and
+    /// tried a fresh route, so sending it again would only flood it again.
+    /// A no-op unless an attempt is with the transport.
+    pub fn undelivered(&mut self) {
+        if self.is_delivering() {
+            self.finish(Outcome::Failed(Failure::Unreachable));
+        }
     }
 
     /// Whether a response is guaranteed. False for the reset-class
@@ -288,10 +341,26 @@ impl<const REQUEST: usize> Exchange<REQUEST> {
     ///
     /// One that arrives anyway is still accepted—`CMD_RESTORE` on a
     /// device with no saved snapshot resets nothing and answers like any
-    /// other command—so this says when to wait on the acknowledgment
-    /// instead, not when to stop listening.
+    /// other command.
     pub fn expects_response(&self) -> bool {
         !self.resets
+    }
+
+    /// Encode the request into `out` and hand it to the transport as
+    /// attempt `attempts + 1`.
+    fn send(&mut self, now_ms: u64, attempts: u32, out: &mut [u8]) -> Step {
+        let mut request = Envelope::new(self.token, &self.frame[..self.frame_len]);
+        if self.cursor_len > 0 {
+            request = request.with_cursor(&self.cursor[..self.cursor_len]);
+        }
+        let Ok(len) = request.encode(out) else {
+            return self.finish(Outcome::Failed(Failure::TooLarge));
+        };
+        self.state = State::Delivering {
+            sent_ms: now_ms,
+            attempts: attempts + 1,
+        };
+        Step::Send { len }
     }
 
     /// Feed an arriving Node Management Response payload, the payload
@@ -369,20 +438,13 @@ impl<const REQUEST: usize> Exchange<REQUEST> {
 
         if stalled {
             // An empty fragment carries the read no further. Asking again
-            // at once would spin; the deadline paces it instead, and the
-            // attempt budget still bounds the wait.
-            let deadline_ms = now_ms + RETRY_MS;
-            self.state = State::Awaiting {
-                deadline_ms,
-                attempts: 0,
-            };
-            return Some(Step::Wait { deadline_ms });
+            // at once would spin; the deadline paces it instead.
+            let at_ms = now_ms + RESPONSE_WAIT_MIN_MS;
+            self.state = State::Due { at_ms };
+            return Some(Step::Wait { deadline_ms: at_ms });
         }
 
-        self.state = State::Awaiting {
-            deadline_ms: now_ms,
-            attempts: 0,
-        };
+        self.state = State::Due { at_ms: now_ms };
         Some(self.poll(now_ms, out))
     }
 
@@ -466,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_poll_hands_out_a_request_and_the_next_one_waits() {
+    fn the_first_poll_hands_out_a_request_and_the_next_one_waits_on_delivery() {
         let mut buf = [0u8; 8];
         let frame_len = get(prop::CAPS, &mut buf);
         let frame = &buf[..frame_len];
@@ -481,12 +543,29 @@ mod tests {
         assert_eq!(request.cursor, None);
         assert_eq!(request.frame, frame);
 
+        assert_eq!(exchange.poll(1_001, &mut out), Step::Delivering);
+        assert_eq!(exchange.deadline_ms(), None);
+
+        exchange.acknowledged(1_500);
         assert_eq!(
-            exchange.poll(1_001, &mut out),
+            exchange.poll(1_501, &mut out),
             Step::Wait {
-                deadline_ms: 1_000 + RETRY_MS
+                deadline_ms: 1_500 + RESPONSE_WAIT_MIN_MS
             }
         );
+    }
+
+    /// However long the MAC takes, the engine never sends a second frame
+    /// over one whose delivery is unresolved.
+    #[test]
+    fn nothing_is_retransmitted_while_delivery_is_unresolved() {
+        let mut buf = [0u8; 8];
+        let frame_len = get(prop::CAPS, &mut buf);
+        let mut exchange = Admin::new(&buf[..frame_len], 1, 0).expect("begin");
+        let mut out = [0u8; PAYLOAD];
+
+        assert!(matches!(exchange.poll(0, &mut out), Step::Send { .. }));
+        assert_eq!(exchange.poll(10 * 60_000, &mut out), Step::Delivering);
     }
 
     #[test]
@@ -501,12 +580,29 @@ mod tests {
             panic!("expected a request");
         };
         let first = first[..len].to_vec();
+        exchange.acknowledged(100);
 
         let mut again = [0u8; PAYLOAD];
-        let Step::Send { len } = exchange.poll(RETRY_MS, &mut again) else {
+        let Step::Send { len } = exchange.poll(100 + RESPONSE_WAIT_MIN_MS, &mut again) else {
             panic!("expected a retransmission");
         };
         assert_eq!(&again[..len], &first[..]);
+    }
+
+    #[test]
+    fn a_slow_acknowledgment_lengthens_the_wait_for_the_response() {
+        let mut buf = [0u8; 8];
+        let frame_len = get(prop::CAPS, &mut buf);
+        let mut exchange = Admin::new(&buf[..frame_len], 1, 0).expect("begin");
+        let mut out = [0u8; PAYLOAD];
+
+        assert!(matches!(exchange.poll(0, &mut out), Step::Send { .. }));
+        let round_trip = RESPONSE_WAIT_MIN_MS;
+        exchange.acknowledged(round_trip);
+        assert_eq!(
+            exchange.deadline_ms(),
+            Some(round_trip + round_trip * RESPONSE_WAIT_RTT_MULTIPLE)
+        );
     }
 
     #[test]
@@ -517,13 +613,32 @@ mod tests {
         let mut exchange = Admin::new(frame, 1, 0).expect("begin");
         let mut out = [0u8; PAYLOAD];
 
-        for attempt in 0..MAX_ATTEMPTS {
-            let now = u64::from(attempt) * RETRY_MS;
+        let mut now = 0;
+        for _ in 0..MAX_ATTEMPTS {
             assert!(matches!(exchange.poll(now, &mut out), Step::Send { .. }));
+            exchange.acknowledged(now);
+            now = exchange.deadline_ms().expect("waiting on the response");
         }
         assert_eq!(
-            exchange.poll(u64::from(MAX_ATTEMPTS) * RETRY_MS, &mut out),
+            exchange.poll(now, &mut out),
             Step::Done(Outcome::Failed(Failure::TimedOut))
+        );
+    }
+
+    /// The MAC has already retried and rerouted a request it reports
+    /// undelivered, so the exchange ends rather than flooding it again.
+    #[test]
+    fn an_undelivered_request_ends_the_exchange() {
+        let mut buf = [0u8; 8];
+        let frame_len = get(prop::CAPS, &mut buf);
+        let mut exchange = Admin::new(&buf[..frame_len], 1, 0).expect("begin");
+        let mut out = [0u8; PAYLOAD];
+
+        assert!(matches!(exchange.poll(0, &mut out), Step::Send { .. }));
+        exchange.undelivered();
+        assert_eq!(
+            exchange.poll(1, &mut out),
+            Step::Done(Outcome::Failed(Failure::Unreachable))
         );
     }
 
@@ -558,7 +673,10 @@ mod tests {
         ] {
             let mut exchange = Admin::new(&buf[..len], 1, 0).expect("begin");
             assert!(!exchange.expects_response());
-            assert_eq!(exchange.delivered(), Step::Done(Outcome::NoResponse));
+            let mut out = [0u8; PAYLOAD];
+            assert!(matches!(exchange.poll(0, &mut out), Step::Send { .. }));
+            exchange.acknowledged(10);
+            assert_eq!(exchange.poll(10, &mut out), Step::Done(Outcome::NoResponse));
         }
 
         let len = get(prop::CAPS, &mut buf);
@@ -573,8 +691,9 @@ mod tests {
         assert!(exchange.expects_response());
         let mut out = [0; PAYLOAD];
         assert!(matches!(exchange.poll(0, &mut out), Step::Send { .. }));
-        // The node adapter calls delivered() only for commands that do not
-        // expect a response; DFU continues waiting under the same token.
+        // The acknowledgment completes only a reset-class command; DFU
+        // continues waiting under the same token.
+        exchange.acknowledged(1);
         assert!(matches!(exchange.poll(1, &mut out), Step::Wait { .. }));
         let mut response = [0; PAYLOAD];
         let len = frame::last_status(&mut buf, 0, Status::OK).unwrap();
@@ -769,13 +888,13 @@ mod tests {
         assert_eq!(
             admin.receive(&response[..len], &mut reassembly, 100, &mut wire),
             Some(Step::Wait {
-                deadline_ms: 100 + RETRY_MS
+                deadline_ms: 100 + RESPONSE_WAIT_MIN_MS
             })
         );
         // Nothing was contributed, and the read is still going.
         assert_eq!(crate::fragment::trailing(reassembly.frame()), &[1u8, 2][..]);
         assert!(matches!(
-            admin.poll(100 + RETRY_MS, &mut wire),
+            admin.poll(100 + RESPONSE_WAIT_MIN_MS, &mut wire),
             Step::Send { .. }
         ));
     }

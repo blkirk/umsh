@@ -181,7 +181,7 @@ async fn an_abandoned_exchange_frees_the_manager_for_the_next() {
     mesh.settle(2).await;
     let abandoned = mesh.manager.counter();
     assert!(mesh.manager.is_busy());
-    mesh.manager.abandon();
+    mesh.manager.abandon().await;
     assert!(!mesh.manager.is_busy());
 
     // The next operation begins at once, on a token the abandoned one

@@ -13,7 +13,7 @@
 
 use umsh_crypto::CryptoEngine;
 use umsh_crypto::software::{SoftwareAes, SoftwareSha256};
-use umsh_node_mgmt::admin::{Exchange, Outcome, RETRY_MS, Reassembly, Step};
+use umsh_node_mgmt::admin::{Exchange, Outcome, RESPONSE_WAIT_MIN_MS, Reassembly, Step};
 use umsh_node_mgmt::device::{DeviceEngine, Ingress};
 use umsh_ulcp::frame::{Cmd, Frame, MultiEntries};
 use umsh_ulcp::ids::prop;
@@ -378,21 +378,16 @@ fn converse_lossy<const PAYLOAD: usize>(
             Step::Send { len } => {
                 requests += 1;
                 let response = device.deliver(key, &wire[..len].to_vec(), now);
+                // The MAC acknowledges whatever reaches the device, whether
+                // or not anything answers it. That completes a reset;
+                // anything else waits out its response deadline.
+                exchange.acknowledged(now);
                 let Some(response) = response else {
-                    if !exchange.expects_response() {
-                        // A reset: the MAC acknowledgment is what
-                        // completes it.
-                        step = exchange.delivered();
-                        continue;
-                    }
-                    // Nothing came back. Wait out the retry deadline.
-                    now += RETRY_MS;
                     step = exchange.poll(now, &mut wire);
                     continue;
                 };
                 responses += 1;
                 if drop_responses.contains(&responses) {
-                    now += RETRY_MS;
                     step = exchange.poll(now, &mut wire);
                     continue;
                 }
@@ -405,6 +400,7 @@ fn converse_lossy<const PAYLOAD: usize>(
                 now = deadline_ms;
                 step = exchange.poll(now, &mut wire);
             }
+            Step::Delivering => panic!("every attempt here is acknowledged"),
             Step::Done(outcome) => {
                 return Conversation {
                     outcome,
@@ -653,7 +649,7 @@ fn a_retransmission_is_answered_without_executing_again() {
 
     // The identical payload again: the same token, the same everything.
     let again = device
-        .deliver(&ADMIN_KEY, &request, RETRY_MS)
+        .deliver(&ADMIN_KEY, &request, RESPONSE_WAIT_MIN_MS)
         .expect("a response");
     assert_eq!(again, first, "the retained response is repeated verbatim");
     assert_eq!(device.executed, 1, "the request did not run twice");
@@ -675,12 +671,14 @@ fn a_retried_temperature_read_samples_again() {
     device.deliver(&ADMIN_KEY, &request[..len], 0).unwrap();
     assert_eq!(device.temperature_samples, 1);
 
-    // No answer arrived, so the identical request goes out again.
-    let Step::Send { len } = exchange.poll(RETRY_MS, &mut request) else {
+    // Acknowledged, but no answer arrived, so the identical request goes
+    // out again.
+    exchange.acknowledged(0);
+    let Step::Send { len } = exchange.poll(RESPONSE_WAIT_MIN_MS, &mut request) else {
         panic!("expected a retransmission")
     };
     device
-        .deliver(&ADMIN_KEY, &request[..len], RETRY_MS)
+        .deliver(&ADMIN_KEY, &request[..len], RESPONSE_WAIT_MIN_MS)
         .unwrap();
     assert_eq!(device.temperature_samples, 2);
     assert_eq!(device.executed, 2);
@@ -719,7 +717,7 @@ fn a_retransmitted_bus_write_is_answered_without_touching_the_bus_again() {
     assert_eq!(device.i2c.registers()[4], 0x5A);
 
     let again = device
-        .deliver(&ADMIN_KEY, &request, RETRY_MS)
+        .deliver(&ADMIN_KEY, &request, RESPONSE_WAIT_MIN_MS)
         .expect("a response");
     assert_eq!(again, first, "the retained response is repeated verbatim");
     assert_eq!(device.executed, 1, "the request did not run twice");
@@ -792,7 +790,7 @@ fn battery_multi_get_samples_once_and_a_retry_samples_again() {
         let first = device.deliver(&ADMIN_KEY, &wire[..wire_len], 0).unwrap();
         assert_eq!(device.battery_samples, 1);
         let retry = device
-            .deliver(&ADMIN_KEY, &wire[..wire_len], RETRY_MS)
+            .deliver(&ADMIN_KEY, &wire[..wire_len], RESPONSE_WAIT_MIN_MS)
             .unwrap();
         assert_eq!(device.battery_samples, 2);
         assert_ne!(first, retry, "a fresh reading, not the lost one");
@@ -801,7 +799,7 @@ fn battery_multi_get_samples_once_and_a_retry_samples_again() {
         let mut reassembly = Reassembly::new(&mut storage);
         let mut out = [0; PAYLOAD];
         assert!(matches!(
-            exchange.receive(&retry, &mut reassembly, RETRY_MS, &mut out),
+            exchange.receive(&retry, &mut reassembly, RESPONSE_WAIT_MIN_MS, &mut out),
             Some(Step::Done(Outcome::Replied { .. }))
         ));
         let parsed = Frame::parse(reassembly.frame()).unwrap();

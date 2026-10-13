@@ -487,7 +487,7 @@ impl<'a> NodeStack<'a> {
             .map_err(|error| anyhow!("{error:?}"))?;
         let outcome = self.carry(manager, give_up).await;
         if outcome.is_err() {
-            manager.abandon();
+            manager.abandon().await;
         }
         outcome
     }
@@ -519,8 +519,11 @@ impl<'a> NodeStack<'a> {
 pub fn describe(failure: Failure) -> anyhow::Error {
     match failure {
         Failure::TimedOut => anyhow!(
-            "no answer—the device may be out of range, or this tool may not be one of its \
-             administrators (`admin-key` prints the key it would have to list)"
+            "the device received the request but did not answer—this tool may not be one of \
+             its administrators (`admin-key` prints the key it would have to list)"
+        ),
+        Failure::Unreachable => anyhow!(
+            "the device did not acknowledge the request—it may be out of range or switched off"
         ),
         Failure::CursorInvalid => {
             anyhow!("the device lost its place in the read; run the command again")
@@ -739,7 +742,7 @@ fn should_rerun(recovered: bool, outcome: &Result<Outcome>, reset_class: bool) -
     recovered
         && !reset_class
         && match outcome {
-            Err(_) | Ok(Outcome::Failed(Failure::TimedOut)) => true,
+            Err(_) | Ok(Outcome::Failed(Failure::TimedOut | Failure::Unreachable)) => true,
             Ok(_) => false,
         }
 }

@@ -75,6 +75,13 @@ where
             .insert(Box::new(handler))
     }
 
+    /// Stop a send made through this connection: its queued transmissions,
+    /// forwarding retries, and route recovery. Nothing further is reported
+    /// for it.
+    pub async fn cancel_send(&self, token: crate::SendToken) {
+        self.transport.local_node().cancel_send(token).await;
+    }
+
     pub fn on_receive<F>(&self, handler: F) -> Subscription
     where
         F: FnMut(&ReceivedPacketRef<'_>) -> bool + 'static,
