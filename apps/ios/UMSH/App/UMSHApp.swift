@@ -19,7 +19,7 @@ import UIKit
 /// before `willRestoreState` can hand it back.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
-    private static let logger = Logger(subsystem: "com.umsh.ios", category: "AppRoot")
+    private static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "AppRoot")
 
     /// The one pipeline. Reassigned only when a debug toggle selects a
     /// different radio, which rebuilds the interface with it.

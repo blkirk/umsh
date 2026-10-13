@@ -23,9 +23,20 @@ protocol ChannelKeyVault: Actor {
 }
 
 actor KeychainChannelKeyVault: ChannelKeyVault {
-    private static let service = "com.umsh.channel-keys"
+    private static let service = "com.voria.umsh.channel-keys"
+    private static let legacyService = "com.umsh.channel-keys"
+
+    private var legacyServiceMoved = false
+
+    private func moveLegacyServiceIfNeeded() throws {
+        guard !legacyServiceMoved else { return }
+        let status = renameKeychainService(from: Self.legacyService, to: Self.service)
+        guard status == errSecSuccess else { throw mapKeychainStatus(status) }
+        legacyServiceMoved = true
+    }
 
     func storeKey(_ key: Data, channelID: UUID) throws {
+        try moveLegacyServiceIfNeeded()
         guard key.count == 32 else {
             throw IdentityVaultError.coreFailure
         }
@@ -65,6 +76,7 @@ actor KeychainChannelKeyVault: ChannelKeyVault {
     }
 
     func loadKey(channelID: UUID) throws -> Data? {
+        try moveLegacyServiceIfNeeded()
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.service,
@@ -85,6 +97,7 @@ actor KeychainChannelKeyVault: ChannelKeyVault {
     }
 
     func deleteKey(channelID: UUID) throws {
+        try moveLegacyServiceIfNeeded()
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.service,
@@ -98,6 +111,7 @@ actor KeychainChannelKeyVault: ChannelKeyVault {
     }
 
     func deleteAllKeys() throws {
+        try moveLegacyServiceIfNeeded()
         // No account: on iOS a delete matching only class and service takes
         // every item under it, which is the point—this must not depend on
         // a channel list that may itself be gone.

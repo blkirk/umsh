@@ -19,11 +19,11 @@ import UMSHMobileCore
 @Observable
 final class AppRuntime {
 
-    private static let logger = Logger(subsystem: "com.umsh.ios", category: "AppRoot")
+    private static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "AppRoot")
     /// Chat has its own category because it is the part with a queue in it:
     /// composing, transmitting and applying happen on separate schedules, so
     /// a stuck message is only diagnosable from the sequence.
-    private static let chatLogger = Logger(subsystem: "com.umsh.ios", category: "Chat")
+    private static let chatLogger = Logger(subsystem: "com.voria.umsh.ios", category: "Chat")
     /// How many times to retry a chat batch before dropping it. Three attempts
     /// over the redelivery pump's two-second period is long enough to ride out
     /// a busy moment and short enough that a wedged session recovers while the

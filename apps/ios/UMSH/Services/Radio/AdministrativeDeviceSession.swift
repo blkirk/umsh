@@ -73,7 +73,7 @@ struct AdministeredDeviceSnapshot: Equatable, Sendable {
 /// reports "connection lost" and the user retries. That is the whole
 /// recovery model.
 final class AdministrativeDeviceSession: NSObject, @unchecked Sendable {
-    private static let logger = Logger(subsystem: "com.umsh.ios", category: "AdminDevice")
+    private static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "AdminDevice")
 
     /// Budget from `connect` to a fully attached ULCP session. Generous
     /// because a first connection to an unbonded device puts a system
@@ -106,7 +106,7 @@ final class AdministrativeDeviceSession: NSObject, @unchecked Sendable {
     private var nextDiscoveryOrder: UInt64 = 0
 
     private let queue = DispatchQueue(
-        label: "com.umsh.radio.administrative",
+        label: "com.voria.umsh.radio.administrative",
         qos: .userInitiated
     )
     // No CBCentralManagerOptionRestoreIdentifierKey: see the type comment.

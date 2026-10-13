@@ -155,7 +155,7 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
     /// Long enough for a several-hop LoRa round trip, but short enough that a
     /// silent peer does not leave the peer page waiting for half a minute.
     static let peerPingTimeoutMilliseconds: UInt64 = 8_000
-    static let logger = Logger(subsystem: "com.umsh.ios", category: "UlcpDevice")
+    static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "UlcpDevice")
     static let maximumRawTransmitBusyRetries = 20
     /// Reconnects a fatal protocol fault is worth before the failure sticks.
     static let fatalFaultRetryBudget = 2

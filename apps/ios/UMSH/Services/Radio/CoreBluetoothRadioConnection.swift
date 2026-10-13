@@ -63,7 +63,7 @@ final class CoreBluetoothRadioConnection: UlcpRadioSession, RadioConnection, Ulc
     private var accessoryTask: Task<Void, Never>?
     private var bluetoothWaiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
     private let bluetoothQueue = DispatchQueue(
-        label: "com.umsh.radio.core-bluetooth",
+        label: "com.voria.umsh.radio.core-bluetooth",
         qos: .userInitiated
     )
     private let defaults: UserDefaults
@@ -108,7 +108,7 @@ final class CoreBluetoothRadioConnection: UlcpRadioSession, RadioConnection, Ulc
     /// Stable restoration identifier: iOS relaunches the app in the
     /// background for ULCP events only when a central with this
     /// identifier is recreated promptly at launch.
-    private static let restoreIdentifier = "com.umsh.radio.central"
+    private static let restoreIdentifier = "com.voria.umsh.radio.central"
     private static var centralOptions: [String: Any] {
         [CBCentralManagerOptionRestoreIdentifierKey: restoreIdentifier]
     }

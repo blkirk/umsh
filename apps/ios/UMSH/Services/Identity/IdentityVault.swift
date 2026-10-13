@@ -59,18 +59,30 @@ extension IdentityVault {
 }
 
 actor KeychainIdentityVault: IdentityVault {
-    private static let service = "com.umsh.identity-secret"
+    private static let service = "com.voria.umsh.identity-secret"
+    private static let legacyService = "com.umsh.identity-secret"
     private static let account = "primary"
 
     private let meshEngine: any MeshEngine
     private let anchor: IdentityAnchor
+    private var legacyServiceMoved = false
 
     init(meshEngine: any MeshEngine, anchor: IdentityAnchor = IdentityAnchor()) {
         self.meshEngine = meshEngine
         self.anchor = anchor
     }
 
+    private func moveLegacyServiceIfNeeded() throws {
+        guard !legacyServiceMoved else { return }
+        let status = renameKeychainService(from: Self.legacyService, to: Self.service)
+        guard status == errSecSuccess else { throw mapKeychainStatus(status) }
+        legacyServiceMoved = true
+    }
+
     func storedIdentity() async throws -> StoredIdentity {
+        // Before the lookup: a key still under the old name would otherwise
+        // read as "nothing on file" and clear the anchor.
+        try moveLegacyServiceIfNeeded()
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.service,
@@ -169,6 +181,7 @@ actor KeychainIdentityVault: IdentityVault {
     }
 
     func eraseIdentity() throws {
+        try moveLegacyServiceIfNeeded()
         anchor.clear()
         let status = deleteSecret()
         guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -255,6 +268,24 @@ struct IdentityAnchor: Sendable {
     func clear() {
         guard let url else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+}
+
+/// Refile every generic-password item from one Keychain service to another.
+///
+/// The vaults' services once used a reverse-DNS prefix this project does not
+/// own. Returns `errSecSuccess` when nothing is left to move: no items under
+/// the old name, or a same-named item already filed under the new one.
+func renameKeychainService(from legacy: String, to current: String) -> OSStatus {
+    let status = SecItemUpdate(
+        [kSecClass: kSecClassGenericPassword, kSecAttrService: legacy] as CFDictionary,
+        [kSecAttrService: current] as CFDictionary
+    )
+    switch status {
+    case errSecItemNotFound, errSecDuplicateItem:
+        return errSecSuccess
+    default:
+        return status
     }
 }
 

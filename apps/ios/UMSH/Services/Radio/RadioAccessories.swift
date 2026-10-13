@@ -12,7 +12,7 @@ import UIKit
 @Observable
 final class RadioAccessories {
     static let shared = RadioAccessories()
-    private static let logger = Logger(subsystem: "com.umsh.ios", category: "RadioAccessories")
+    private static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "RadioAccessories")
 
     nonisolated static var usesSystemPicker: Bool {
         #if targetEnvironment(simulator)
@@ -40,7 +40,7 @@ final class RadioAccessories {
     private var pickerDiscoveryReports = 0
     private var pickerNamedReports = 0
     #if DEBUG
-    private static let nameTraceLogger = Logger(subsystem: "com.umsh.ios", category: "RadioPairingNames")
+    private static let nameTraceLogger = Logger(subsystem: "com.voria.umsh.ios", category: "RadioPairingNames")
     private var nameTraceSession = "launch"
     private var nameTraceStarted = ProcessInfo.processInfo.systemUptime
     private var nameTraceSequence = 0

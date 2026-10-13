@@ -77,7 +77,7 @@ final class TcpRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrameLink
     init(endpoint: TcpEndpoint) {
         self.endpoint = endpoint
         super.init(sessionQueue: DispatchQueue(
-            label: "com.umsh.radio.tcp",
+            label: "com.voria.umsh.radio.tcp",
             qos: .userInitiated
         ))
         adopt(link: self)

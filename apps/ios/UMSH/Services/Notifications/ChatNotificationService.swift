@@ -21,7 +21,7 @@ final class ChatNotificationService: NSObject, UNUserNotificationCenterDelegate,
     /// the visible conversation bannered itself.
     static let shared = ChatNotificationService()
 
-    private static let logger = Logger(subsystem: "com.umsh.ios", category: "Notifications")
+    private static let logger = Logger(subsystem: "com.voria.umsh.ios", category: "Notifications")
     private static let conversationAddressKey = "umsh.conversationAddress"
     /// Marks a notification that must banner even while the conversation it
     /// threads with is on screen. See `postNotice`.

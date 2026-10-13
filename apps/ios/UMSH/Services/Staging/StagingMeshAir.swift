@@ -123,7 +123,7 @@ actor StagingMeshAir: FakeRadioAir {
     /// which is the only way to raise a group notification here: the peer
     /// speaks to the room, and the phone hears it as a channel member.
     func sendFromPeer(body: String, onChannel: Bool) async {
-        let logger = Logger(subsystem: "com.umsh.ios", category: "Staging")
+        let logger = Logger(subsystem: "com.voria.umsh.ios", category: "Staging")
         guard let address = onChannel ? Self.channelAddress() : phoneAddress else {
             logger.warning("Staged send dropped: no address to send to")
             return
@@ -157,7 +157,7 @@ actor StagingMeshAir: FakeRadioAir {
     /// same real path: a compose, a commit, a frame, and the phone's own core
     /// resolving what the emote is about.
     func reactFromPeer(body: String) async {
-        let logger = Logger(subsystem: "com.umsh.ios", category: "Staging")
+        let logger = Logger(subsystem: "com.voria.umsh.ios", category: "Staging")
         let peers = await ensurePeers()
         guard let index = peers.indices.first else { return }
         guard let target = lastHeard[index] else {
