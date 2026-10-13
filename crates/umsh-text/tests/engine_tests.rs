@@ -11,7 +11,8 @@ use umsh_text::engine::{
     Destination, Diagnostic, Direction, Engine, EngineConfig, Event, MutationKind, Output,
     Presence, RegardingRef, RepairOutcome, ResolvedRef, StreamCheckpoint, destination_for,
 };
-use umsh_text::validate::{DeliveryPath, DirectChannelProfile, Envelope};
+use umsh_text::model::option;
+use umsh_text::validate::{DeliveryPath, DirectChannelProfile, Envelope, ValidateError};
 use umsh_text::{
     ConversationKey, Fragment, MessageSequence, MessageType, SenderScope, TextMessage, WireRef,
 };
@@ -1195,6 +1196,172 @@ fn unavailable_accounts_for_gap() {
             .iter()
             .any(|output| matches!(output, Drained::Transmit { .. }))
     );
+}
+
+fn extension_typed(id: u8, body: &str) -> TextMessage<'_> {
+    let mut message = sequenced(id, body);
+    message.message_type = MessageType::Extension(0x20);
+    message
+}
+
+fn transmits(outputs: &[Drained]) -> usize {
+    outputs
+        .iter()
+        .filter(|output| matches!(output, Drained::Transmit { .. }))
+        .count()
+}
+
+/// A message of a type this receiver does not present still occupies its
+/// sequence position: nothing renders, and the next message sees no gap.
+#[test]
+fn unrecognized_message_type_is_accounted_without_rendering() {
+    let mut engine = engine();
+    feed(&mut engine, &direct_envelope(), None, &sequenced(0, "a"), 0);
+    drain(&mut engine);
+
+    feed(
+        &mut engine,
+        &direct_envelope(),
+        None,
+        &extension_typed(1, "?"),
+        50,
+    );
+    let outputs = drain(&mut engine);
+    assert!(
+        !outputs
+            .iter()
+            .any(|output| matches!(output, Drained::Insert { .. })),
+        "nothing renders: {outputs:?}"
+    );
+    assert!(outputs.iter().any(|output| matches!(
+        output,
+        Drained::Diagnostic(Diagnostic::NotDisplayed {
+            reason: ValidateError::UnrecognizedMessageType(0x20)
+        })
+    )));
+
+    feed(
+        &mut engine,
+        &direct_envelope(),
+        None,
+        &sequenced(2, "c"),
+        100,
+    );
+    let outputs = drain(&mut engine);
+    assert!(
+        !outputs.iter().any(|output| matches!(
+            output,
+            Drained::Insert {
+                presence: Presence::GapPending,
+                ..
+            }
+        )),
+        "no gap is reserved for the accounted position"
+    );
+    engine.tick(60_000);
+    assert_eq!(transmits(&drain(&mut engine)), 0);
+}
+
+/// An unrecognized-type message that arrives into a reserved gap ends its
+/// repair and removes the placeholder.
+#[test]
+fn unrecognized_message_type_satisfies_a_reserved_gap() {
+    let mut engine = engine();
+    feed(&mut engine, &direct_envelope(), None, &sequenced(0, "a"), 0);
+    feed(
+        &mut engine,
+        &direct_envelope(),
+        None,
+        &sequenced(2, "c"),
+        50,
+    );
+    let placeholder_handle = drain(&mut engine)
+        .iter()
+        .find_map(|output| match output {
+            Drained::Insert {
+                handle,
+                wire_id: Some(1),
+                presence: Presence::GapPending,
+                ..
+            } => Some(*handle),
+            _ => None,
+        })
+        .expect("gap placeholder");
+
+    feed(
+        &mut engine,
+        &direct_envelope(),
+        None,
+        &extension_typed(1, "?"),
+        100,
+    );
+    let outputs = drain(&mut engine);
+    assert!(outputs.iter().any(|output| matches!(output,
+        Drained::Delete { original: ResolvedRef::Handle(h) } if *h == placeholder_handle)));
+    engine.tick(60_000);
+    assert_eq!(transmits(&drain(&mut engine)), 0);
+}
+
+/// Continuations that arrive before an unrecognized-type fragment zero are
+/// discarded with it, and later ones are duplicates: nothing renders and no
+/// fragment is requested.
+#[test]
+fn unrecognized_message_type_discards_its_fragments() {
+    let mut engine = engine();
+    feed(&mut engine, &direct_envelope(), None, &sequenced(0, "a"), 0);
+    drain(&mut engine);
+
+    engine
+        .receive(&direct_envelope(), None, &fragment_msg(1, 1, 3, b"mid"), 50)
+        .unwrap();
+    let mut zero = extension_typed(1, "");
+    zero.sequence = Some(MessageSequence {
+        message_id: 1,
+        fragment: Some(Fragment { index: 0, count: 3 }),
+    });
+    zero.body = b"head";
+    feed(&mut engine, &direct_envelope(), None, &zero, 60);
+    engine
+        .receive(
+            &direct_envelope(),
+            None,
+            &fragment_msg(1, 2, 3, b"tail"),
+            70,
+        )
+        .unwrap();
+    let outputs = drain(&mut engine);
+    assert!(
+        !outputs
+            .iter()
+            .any(|output| matches!(output, Drained::Insert { .. } | Drained::UpdateBody { .. })),
+        "nothing renders: {outputs:?}"
+    );
+    engine.tick(60_000);
+    assert_eq!(transmits(&drain(&mut engine)), 0);
+}
+
+/// A presentation option this receiver cannot decode is dropped; the
+/// message renders without it.
+#[test]
+fn undecodable_presentation_option_is_dropped_and_message_kept() {
+    let mut engine = engine();
+    // Sender Handle that is not UTF-8, then sequence 0, then a 2-byte
+    // Text Color.
+    let payload = [0x11, 0x80, 0x11, 0x00, 0x52, 0x01, 0x02, 0xFF, b'h', b'i'];
+    engine
+        .receive(&direct_envelope(), None, &payload, 0)
+        .unwrap();
+    let outputs = drain(&mut engine);
+    assert!(outputs.iter().any(|output| matches!(
+        output,
+        Drained::Insert { wire_id: Some(0), body, sender_handle: None, text_color: None, .. }
+            if body == "hi"
+    )));
+    assert!(outputs.iter().any(|output| matches!(
+        output,
+        Drained::Diagnostic(Diagnostic::DroppedPresentationOptions { mask })
+            if *mask == (1 << option::SENDER_HANDLE) | (1 << option::TEXT_COLOR)
+    )));
 }
 
 // ---------------------------------------------------------------------

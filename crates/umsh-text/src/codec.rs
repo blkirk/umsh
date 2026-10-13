@@ -21,16 +21,19 @@ pub struct ParseInfo {
     /// Bitmask of presentation options (Sender Handle, colors) that appeared
     /// more than once; the first occurrence was kept.
     pub repeated_presentation_mask: u16,
+    /// Bitmask of base options whose value could not be decoded. Each was
+    /// dropped; validation decides what its absence means for the message.
+    pub undecodable_mask: u16,
 }
 
 impl ParseInfo {
     pub fn saw(&self, number: u16) -> bool {
         number < 16 && self.seen_mask & (1 << number) != 0
     }
-}
 
-fn parse_utf8(input: &[u8]) -> Result<&str, ParseError> {
-    core::str::from_utf8(input).map_err(|_| ParseError::InvalidUtf8)
+    pub fn undecodable(&self, number: u16) -> bool {
+        number < 16 && self.undecodable_mask & (1 << number) != 0
+    }
 }
 
 /// Decode a text-message payload (after the payload-type byte).
@@ -90,17 +93,21 @@ pub fn parse_with_info(payload: &[u8]) -> Result<(TextMessage<'_>, ParseInfo), P
         }
         info.seen_mask |= bit;
 
+        // Options are non-critical: a value this receiver cannot decode is
+        // dropped and noted rather than rejecting the message. Message
+        // Sequence is the exception, since without it the message has no
+        // position to account for, and the zero-length flags keep the
+        // length rule their own sections give them.
         match number {
-            option::MESSAGE_TYPE => {
-                message.message_type = if value.is_empty() {
-                    MessageType::Basic
-                } else if value.len() == 1 {
-                    MessageType::from_byte(value[0])
-                } else {
-                    return Err(ParseError::InvalidOptionValue);
-                };
-            }
-            option::SENDER_HANDLE => message.sender_handle = Some(parse_utf8(value)?),
+            option::MESSAGE_TYPE => match value {
+                [] => message.message_type = MessageType::Basic,
+                [byte] => message.message_type = MessageType::from_byte(*byte),
+                _ => info.undecodable_mask |= bit,
+            },
+            option::SENDER_HANDLE => match core::str::from_utf8(value) {
+                Ok(handle) => message.sender_handle = Some(handle),
+                Err(_) => info.undecodable_mask |= bit,
+            },
             option::MESSAGE_SEQUENCE => {
                 message.sequence = Some(match value {
                     [message_id] => MessageSequence {
@@ -125,36 +132,32 @@ pub fn parse_with_info(payload: &[u8]) -> Result<(TextMessage<'_>, ParseInfo), P
                 }
                 message.sequence_reset = true;
             }
-            option::REGARDING => {
-                message.regarding = Some(match value {
-                    [message_id] => Regarding::Unicast {
+            option::REGARDING => match value {
+                [message_id] => {
+                    message.regarding = Some(Regarding::Unicast {
                         message_id: *message_id,
-                    },
-                    [message_id, a, b, c] => Regarding::Multicast {
+                    })
+                }
+                [message_id, a, b, c] => {
+                    message.regarding = Some(Regarding::Multicast {
                         message_id: *message_id,
                         source_prefix: umsh_core::NodeHint([*a, *b, *c]),
-                    },
-                    _ => return Err(ParseError::InvalidOptionValue),
-                });
-            }
-            option::EDITING => {
-                message.editing = match value {
-                    [message_id] => Some(*message_id),
-                    _ => return Err(ParseError::InvalidOptionValue),
-                };
-            }
-            option::BACKGROUND_COLOR => {
-                message.bg_color = match value {
-                    [r, g, b] => Some([*r, *g, *b]),
-                    _ => return Err(ParseError::InvalidOptionValue),
-                };
-            }
-            option::TEXT_COLOR => {
-                message.text_color = match value {
-                    [r, g, b] => Some([*r, *g, *b]),
-                    _ => return Err(ParseError::InvalidOptionValue),
-                };
-            }
+                    })
+                }
+                _ => info.undecodable_mask |= bit,
+            },
+            option::EDITING => match value {
+                [message_id] => message.editing = Some(*message_id),
+                _ => info.undecodable_mask |= bit,
+            },
+            option::BACKGROUND_COLOR => match value {
+                [r, g, b] => message.bg_color = Some([*r, *g, *b]),
+                _ => info.undecodable_mask |= bit,
+            },
+            option::TEXT_COLOR => match value {
+                [r, g, b] => message.text_color = Some([*r, *g, *b]),
+                _ => info.undecodable_mask |= bit,
+            },
             option::CHANNEL_GROUP_RESEND => {
                 if !value.is_empty() {
                     return Err(ParseError::InvalidOptionValue);

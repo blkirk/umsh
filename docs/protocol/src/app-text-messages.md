@@ -17,6 +17,8 @@ Every recognized option is a singleton unless a specification explicitly declare
 
 Repeated unrecognized options remain ignorable.
 
+A recognized option whose value the receiver cannot decode is ignored, with two exceptions. A message whose Message Sequence cannot be decoded is dropped. A message whose Message Type is unrecognized or undecodable, or whose Regarding or Editing is undecodable or of the wrong width for the conversation, is not displayed, but its sequence position is accounted for as with [Message Unavailable](#message-type).
+
 | Number | Name | Value |
 |---:|---|---|
 | 0 | Message Type | 0 or 1 bytes |

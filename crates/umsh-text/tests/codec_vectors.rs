@@ -217,11 +217,6 @@ fn repeated_flags_are_idempotent() {
 
 #[test]
 fn invalid_option_widths() {
-    // Message Type longer than 1 byte.
-    assert_eq!(
-        parse(&[0x02, 0x00, 0x01]),
-        Err(ParseError::InvalidOptionValue)
-    );
     // Sequence of 2 bytes.
     assert_eq!(
         parse(&[0x22, 0x05, 0x01]),
@@ -237,27 +232,83 @@ fn invalid_option_widths() {
         parse(&[0x23, 0x05, 0x03, 0x03]),
         Err(ParseError::InvalidOptionValue)
     );
-    // Regarding of 2 bytes.
-    assert_eq!(
-        parse(&[0x42, 0x05, 0x06]),
-        Err(ParseError::InvalidOptionValue)
-    );
-    // Editing of 2 bytes.
-    assert_eq!(
-        parse(&[0x52, 0x05, 0x06]),
-        Err(ParseError::InvalidOptionValue)
-    );
-    // Color of 2 bytes.
-    assert_eq!(
-        parse(&[0x62, 0x05, 0x06]),
-        Err(ParseError::InvalidOptionValue)
-    );
     // Channel Group Resend with a non-zero length.
     assert_eq!(parse(&[0x81, 0x00]), Err(ParseError::InvalidOptionValue));
     // Sequence Reset with a non-zero length.
     assert_eq!(parse(&[0x31, 0x00]), Err(ParseError::InvalidOptionValue));
-    // Non-UTF-8 sender handle.
-    assert_eq!(parse(&[0x11, 0x80]), Err(ParseError::InvalidUtf8));
+}
+
+#[test]
+fn undecodable_option_values_are_dropped_and_noted() {
+    let cases: [(&[u8], u16); 6] = [
+        // Message Type longer than 1 byte.
+        (&[0x02, 0x00, 0x01, 0xFF, b'x'], option::MESSAGE_TYPE),
+        // Non-UTF-8 sender handle.
+        (&[0x11, 0x80, 0xFF, b'x'], option::SENDER_HANDLE),
+        // Regarding of 2 bytes.
+        (&[0x42, 0x05, 0x06, 0xFF, b'x'], option::REGARDING),
+        // Editing of 2 bytes.
+        (&[0x52, 0x05, 0x06, 0xFF, b'x'], option::EDITING),
+        // Background Color of 2 bytes.
+        (&[0x62, 0x05, 0x06, 0xFF, b'x'], option::BACKGROUND_COLOR),
+        // Text Color of 4 bytes.
+        (&[0x74, 1, 2, 3, 4, 0xFF, b'x'], option::TEXT_COLOR),
+    ];
+    for (bytes, number) in cases {
+        let (message, info) = parse_with_info(bytes).unwrap();
+        assert_eq!(info.undecodable_mask, 1 << number, "option {number}");
+        assert_eq!(message.message_type, MessageType::Basic);
+        assert_eq!(message.sender_handle, None);
+        assert_eq!(message.regarding, None);
+        assert_eq!(message.editing, None);
+        assert_eq!(message.bg_color, None);
+        assert_eq!(message.text_color, None);
+        assert_eq!(message.body, b"x");
+    }
+}
+
+#[test]
+fn undecodable_presentation_options_keep_the_message() {
+    // Non-UTF-8 handle and a 2-byte background color around a valid
+    // sequence.
+    let bytes = [0x11, 0x80, 0x11, 0x07, 0x42, 0x01, 0x02, 0xFF, b'h', b'i'];
+    let leaked: &'static [u8] = Box::leak(bytes.to_vec().into_boxed_slice());
+    let (message, info) = parse_with_info(leaked).unwrap();
+    let (validated, notes) =
+        validate(&DirectChannelProfile, &direct_envelope(), &message, &info).unwrap();
+    let Validated::Content(content) = validated else {
+        panic!("expected content");
+    };
+    assert_eq!(content.undisplayable, None);
+    assert_eq!(content.body, b"hi");
+    assert_eq!(content.sequence, Some(MessageSequence::unfragmented(7)));
+    assert_eq!(
+        notes.dropped_presentation_mask,
+        (1 << option::SENDER_HANDLE) | (1 << option::BACKGROUND_COLOR)
+    );
+}
+
+#[test]
+fn undecodable_identity_options_make_the_message_undisplayable() {
+    let cases: [(&[u8], u16); 3] = [
+        // Message Type of 2 bytes, then sequence 7.
+        (&[0x02, 0x00, 0x01, 0x21, 0x07], option::MESSAGE_TYPE),
+        // Sequence 7, then a 2-byte Regarding.
+        (&[0x21, 0x07, 0x22, 0x05, 0x06], option::REGARDING),
+        // Sequence 7, then a 2-byte Editing.
+        (&[0x21, 0x07, 0x32, 0x05, 0x06], option::EDITING),
+    ];
+    for (bytes, number) in cases {
+        let validated = validate_bytes(&direct_envelope(), bytes).unwrap();
+        let Validated::Content(content) = validated else {
+            panic!("expected content");
+        };
+        assert_eq!(
+            content.undisplayable,
+            Some(ValidateError::UndecodableOption(number))
+        );
+        assert_eq!(content.sequence, Some(MessageSequence::unfragmented(7)));
+    }
 }
 
 #[test]
@@ -366,29 +417,49 @@ fn resend_request_ignores_extras_but_requires_sequence() {
     );
 }
 
+fn undisplayable_reason(envelope: &Envelope, bytes: &[u8]) -> Option<ValidateError> {
+    match validate_bytes(envelope, bytes) {
+        Ok(Validated::Content(content)) => content.undisplayable,
+        other => panic!("expected content, got {other:?}"),
+    }
+}
+
 #[test]
 fn regarding_width_must_match_conversation() {
-    // 4-byte form in a direct conversation: invalid.
+    // 4-byte form in a direct conversation: not displayable.
     let bytes = [0x44, 0x09, 0xAA, 0xBB, 0xCC, 0xFF, b'r'];
     assert_eq!(
-        validate_bytes(&direct_envelope(), &bytes),
-        Err(ValidateError::RegardingWidth)
+        undisplayable_reason(&direct_envelope(), &bytes),
+        Some(ValidateError::RegardingWidth)
     );
-    // 1-byte form in a channel-group conversation: invalid.
+    // 1-byte form in a channel-group conversation: not displayable.
     let bytes = [0x41, 0x09, 0xFF, b'r'];
     assert_eq!(
-        validate_bytes(&group_envelope(), &bytes),
-        Err(ValidateError::RegardingWidth)
+        undisplayable_reason(&group_envelope(), &bytes),
+        Some(ValidateError::RegardingWidth)
     );
 }
 
 #[test]
-fn unrecognized_message_type_rejected_by_base_profile() {
+fn unrecognized_message_type_is_undisplayable_in_base_profile() {
     let bytes = [0x01, 0x20, 0xFF, b'x'];
     assert_eq!(
-        validate_bytes(&direct_envelope(), &bytes),
-        Err(ValidateError::UnrecognizedMessageType(32))
+        undisplayable_reason(&direct_envelope(), &bytes),
+        Some(ValidateError::UnrecognizedMessageType(32))
     );
+    // Its body need not be UTF-8: nothing will render it.
+    let bytes = [0x01, 0x20, 0xFF, 0x80];
+    assert_eq!(
+        undisplayable_reason(&direct_envelope(), &bytes),
+        Some(ValidateError::UnrecognizedMessageType(32))
+    );
+}
+
+#[test]
+fn continuation_message_type_is_ignored() {
+    // Type 32 on fragment 1 of 3: continuation metadata does not count.
+    let bytes = [0x01, 0x20, 0x23, 0x07, 0x01, 0x03, 0xFF, b'x'];
+    assert_eq!(undisplayable_reason(&direct_envelope(), &bytes), None);
 }
 
 #[test]

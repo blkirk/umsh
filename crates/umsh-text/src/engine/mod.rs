@@ -331,6 +331,16 @@ pub enum Diagnostic {
     IgnoredContinuationMetadata {
         message_id: u8,
     },
+    /// Presentation options could not be decoded and were dropped; the
+    /// message was kept.
+    DroppedPresentationOptions {
+        mask: u16,
+    },
+    /// A message was accounted for in its sender's sequence but not
+    /// presented.
+    NotDisplayed {
+        reason: ValidateError,
+    },
     /// The render arena or output queue overflowed; see `lost_outputs`.
     OutputOverflow,
     /// An archive result arrived for an unknown request.
@@ -874,6 +884,11 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
                 },
             ));
         }
+        if notes.dropped_presentation_mask != 0 {
+            self.push_output(Output::Diagnostic(Diagnostic::DroppedPresentationOptions {
+                mask: notes.dropped_presentation_mask,
+            }));
+        }
 
         match validated {
             Validated::Content(content) => {
@@ -885,6 +900,9 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
                             message_id: sequence.message_id,
                         },
                     ));
+                }
+                if let Some(reason) = content.undisplayable {
+                    self.push_output(Output::Diagnostic(Diagnostic::NotDisplayed { reason }));
                 }
                 self.receive_content(envelope, sender_full_key, &content, now_ms);
             }
@@ -1100,6 +1118,9 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
         }
 
         let Some(sequence) = sequence else {
+            if content.undisplayable.is_some() {
+                return;
+            }
             // Unsequenced: display-only, unreferencable, no dedup possible.
             self.insert_content(
                 envelope,
@@ -1225,6 +1246,11 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
             }));
         }
 
+        if content.undisplayable.is_some() {
+            self.retire_undisplayable(key, id, first_sighting);
+            return;
+        }
+
         match sequence.fragment {
             Some(fragment) => {
                 self.receive_fragment(envelope, content, key, id, fragment, now_ms);
@@ -1237,6 +1263,50 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
                     return;
                 }
                 self.receive_single_frame(envelope, content, key, id, now_ms);
+            }
+        }
+    }
+
+    /// The leading frame of a message this receiver will not present has
+    /// been accounted for. Nothing further about the message is wanted:
+    /// drop any reassembly its continuations opened, stop repairing it, and
+    /// remove the gap placeholder reserved for it. Continuations still to
+    /// come find the ID seen with no open slot and drop as duplicates.
+    fn retire_undisplayable(&mut self, key: StreamKey, id: u8, first_sighting: bool) {
+        let Some(stream) = self.inbound.get_mut(&key) else {
+            return;
+        };
+        let epoch = stream.epoch;
+        // Only a slot still waiting for fragment zero is this message's; one
+        // that already has its metadata belongs to a presentable copy.
+        let slot = self.pool.find_slot(&key, epoch, id).filter(|index| {
+            self.pool.slots[*index]
+                .as_ref()
+                .is_some_and(|s| !s.have_meta)
+        });
+        let placeholder = match slot {
+            Some(slot_index) => {
+                let slot = self.pool.close_slot(slot_index).expect("occupied");
+                slot.late.then_some(slot.handle)
+            }
+            // A first sighting's registered handle is the gap placeholder
+            // reserved for it, as in `receive_single_frame`.
+            None if first_sighting => stream.refs.lookup(id),
+            None => return,
+        };
+        if let Some(stream) = self.inbound.get_mut(&key) {
+            stream.cancel_pending(id, None);
+        }
+        if let Some(handle) = placeholder {
+            self.emit_mutation(
+                handle,
+                MutationKind::Delete {
+                    conversation: key.conversation,
+                    original: ResolvedRef::Handle(handle),
+                },
+            );
+            if let Some(stream) = self.inbound.get_mut(&key) {
+                stream.refs.retire(id);
             }
         }
     }

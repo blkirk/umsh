@@ -50,6 +50,8 @@ pub enum ValidateError {
     RegardingWidth,
     /// The message type is not recognized by the selected profile.
     UnrecognizedMessageType(u8),
+    /// A base option the message depends on could not be decoded.
+    UndecodableOption(u16),
     /// A recognized extension option was duplicated in a role where
     /// duplication is unresolvable.
     DuplicateExtensionOption(u16),
@@ -115,6 +117,9 @@ pub struct ValidationNotes {
     /// A Channel Group Resend flag appeared on a non-request message and was
     /// ignored.
     pub ignored_channel_group_resend: bool,
+    /// Presentation options whose values could not be decoded and were
+    /// dropped.
+    pub dropped_presentation_mask: u16,
 }
 
 /// A displayable content message after contextual validation.
@@ -129,8 +134,12 @@ pub struct ContentMessage<'a> {
     pub bg_color: Option<[u8; 3]>,
     pub text_color: Option<[u8; 3]>,
     pub extensions: ExtensionOptions<'a>,
-    /// Raw body bytes; guaranteed UTF-8 when the message is unfragmented.
+    /// Raw body bytes; guaranteed UTF-8 when the message is unfragmented
+    /// and displayable.
     pub body: &'a [u8],
+    /// Why this receiver cannot present the message, when it cannot. The
+    /// message still occupies its position in the sender's sequence.
+    pub undisplayable: Option<ValidateError>,
 }
 
 /// A validated received text payload.
@@ -157,8 +166,11 @@ pub fn validate<'a>(
 ) -> Result<(Validated<'a>, ValidationNotes), ValidateError> {
     let mut notes = ValidationNotes {
         repeated_presentation_mask: info.repeated_presentation_mask,
+        dropped_presentation_mask: info.undecodable_mask & PRESENTATION_MASK,
         ..ValidationNotes::default()
     };
+    let fragmented = message.sequence.and_then(|sequence| sequence.fragment);
+    let is_continuation = fragmented.is_some_and(|fragment| fragment.index > 0);
 
     match message.message_type {
         MessageType::ResendRequest => {
@@ -193,19 +205,17 @@ pub fn validate<'a>(
             }
             return Ok((Validated::Unavailable { sequence }, notes));
         }
-        other => {
-            if !profile.recognizes_content_type(other) {
-                return Err(ValidateError::UnrecognizedMessageType(other.to_byte()));
-            }
-        }
+        _ => {}
     }
 
-    if let Some(regarding) = message.regarding {
-        let multicast_form = matches!(regarding, Regarding::Multicast { .. });
-        if multicast_form != envelope.conversation.uses_multicast_references() {
-            return Err(ValidateError::RegardingWidth);
-        }
-    }
+    // A message this receiver cannot interpret is still accounted for in
+    // the sender's sequence, so its position is not repaired as a gap.
+    // Continuations carry no message-level metadata of their own.
+    let undisplayable = if is_continuation {
+        None
+    } else {
+        undisplayable_reason(profile, envelope, message, info)
+    };
 
     validate_extensions(profile, &message.extensions, &mut notes)?;
 
@@ -220,14 +230,13 @@ pub fn validate<'a>(
         text_color: message.text_color,
         extensions: message.extensions,
         body: message.body,
+        undisplayable,
     };
 
     if message.channel_group_resend {
         notes.ignored_channel_group_resend = true;
     }
 
-    let fragmented = message.sequence.and_then(|sequence| sequence.fragment);
-    let is_continuation = fragmented.is_some_and(|fragment| fragment.index > 0);
     if is_continuation {
         // Continuation fragments carry only sequence metadata; message-level
         // metadata belongs to fragment zero and must be ignored here.
@@ -249,13 +258,47 @@ pub fn validate<'a>(
         content.bg_color = None;
         content.text_color = None;
         content.extensions = ExtensionOptions::empty();
-    } else if fragmented.is_none() {
+    } else if fragmented.is_none() && undisplayable.is_none() {
         // Unfragmented content bodies must be complete UTF-8. Fragment bodies
         // (including fragment zero) are validated only after reassembly.
         core::str::from_utf8(message.body).map_err(|_| ParseError::InvalidUtf8)?;
     }
 
     Ok((Validated::Content(content), notes))
+}
+
+/// Base presentation options, which a message is complete without.
+const PRESENTATION_MASK: u16 =
+    (1 << option::SENDER_HANDLE) | (1 << option::BACKGROUND_COLOR) | (1 << option::TEXT_COLOR);
+
+/// Why a message-leading frame cannot be presented, if it cannot. Message
+/// Type, Regarding, and Editing decide what the message *is*—a reaction
+/// without its target, or an edit without its original, would render as
+/// something the sender did not send—so losing any of them leaves nothing
+/// faithful to show.
+fn undisplayable_reason(
+    profile: &dyn TextProfile,
+    envelope: &Envelope,
+    message: &TextMessage<'_>,
+    info: &ParseInfo,
+) -> Option<ValidateError> {
+    for number in [option::MESSAGE_TYPE, option::REGARDING, option::EDITING] {
+        if info.undecodable(number) {
+            return Some(ValidateError::UndecodableOption(number));
+        }
+    }
+    if !profile.recognizes_content_type(message.message_type) {
+        return Some(ValidateError::UnrecognizedMessageType(
+            message.message_type.to_byte(),
+        ));
+    }
+    if let Some(regarding) = message.regarding {
+        let multicast_form = matches!(regarding, Regarding::Multicast { .. });
+        if multicast_form != envelope.conversation.uses_multicast_references() {
+            return Some(ValidateError::RegardingWidth);
+        }
+    }
+    None
 }
 
 fn validate_extensions(
