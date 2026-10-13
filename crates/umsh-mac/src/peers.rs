@@ -1,3 +1,5 @@
+use core::num::NonZeroU32;
+
 use heapless::{LinearMap, Vec};
 use umsh_core::{ChannelId, ChannelKey, NodeHint, PublicKey, RouterHint};
 use umsh_crypto::{DerivedChannelKeys, PairwiseKeys};
@@ -101,6 +103,15 @@ pub struct PeerInfo {
     pub(crate) route_confirmed_ms: Option<u64>,
     /// One recently failed route, suppressed only for passive route learning.
     failed_route: Option<(CachedRoute, u64)>,
+    /// When a packet from this peer last reached us without flooding
+    /// (`FHOPS_ACC` of zero): proof the peer holds a working path here.
+    /// Kept in wrapping whole seconds, offset by one so the first second
+    /// after boot is representable: every peer entry lives in the MAC's static, and a
+    /// `u64` here costs a constrained board its stack headroom.
+    unflooded_arrival_s: Option<NonZeroU32>,
+    /// The peer's latest packet reached us by flooding, and nothing traced
+    /// has gone back since: the next packet to it owes a trace route.
+    pub(crate) trace_owed: bool,
     /// Most recent observation timestamp.
     pub last_seen_ms: u64,
     /// Highest RX frame counter loaded from persistent storage at boot.
@@ -121,6 +132,8 @@ impl PeerInfo {
             route_score: None,
             route_confirmed_ms: None,
             failed_route: None,
+            unflooded_arrival_s: None,
+            trace_owed: false,
             last_seen_ms,
             initial_rx_counter: 0,
         }
@@ -648,6 +661,35 @@ impl<const N: usize, const H: usize> PeerRegistry<N, H> {
         peer.route_confirmed_ms = Some(now_ms);
     }
 
+    /// Record how a packet from `id` reached us: by flooding or not.
+    pub(crate) fn note_arrival(&mut self, id: PeerId, flooded: bool, now_ms: u64) {
+        if let Some(peer) = self.get_mut(id) {
+            if !flooded {
+                peer.unflooded_arrival_s = Some(arrival_seconds(now_ms));
+            }
+            peer.trace_owed = flooded;
+        }
+    }
+
+    /// Whether a packet from `id` reached us without flooding within the
+    /// last `window_ms` before `now_ms`.
+    pub(crate) fn arrived_unflooded_within(&self, id: PeerId, window_ms: u64, now_ms: u64) -> bool {
+        self.get(id)
+            .and_then(|peer| peer.unflooded_arrival_s)
+            .is_some_and(|at| {
+                let elapsed_s = arrival_seconds(now_ms).get().wrapping_sub(at.get());
+                u64::from(elapsed_s) * 1000 < window_ms
+            })
+    }
+
+    /// A packet carrying a trace route went to `id`, settling what a flooded
+    /// arrival owed it.
+    pub(crate) fn note_trace_sent(&mut self, id: PeerId) {
+        if let Some(peer) = self.get_mut(id) {
+            peer.trace_owed = false;
+        }
+    }
+
     /// Refresh the last-seen timestamp for `id`.
     pub fn touch(&mut self, id: PeerId, now_ms: u64) {
         if let Some(peer) = self.get_mut(id) {
@@ -899,4 +941,11 @@ mod tests {
             u8::MAX
         );
     }
+}
+
+/// `now_ms` as the whole seconds an arrival is recorded in, plus one. The
+/// count wraps, and is only ever compared by wrapping difference; the one
+/// second in every wrap that lands on zero is recorded a second late.
+fn arrival_seconds(now_ms: u64) -> NonZeroU32 {
+    NonZeroU32::new(((now_ms / 1000) as u32).wrapping_add(1)).unwrap_or(NonZeroU32::MIN)
 }

@@ -67,10 +67,12 @@ pub struct SendReceipt(pub u32);
 ///   established path does not re-flood the whole mesh. The default one-hop
 ///   allowance also backstops a peer heard directly. Clear the cached route
 ///   to restore the full requested discovery budget.
-/// - **`trace_route`**—floodable unicast traffic traces automatically, including
-///   direct observations with an optional flood hop. Source-routed traffic
-///   traces when requesting an ACK or when explicitly requested. A frame with
-///   neither flood permission nor source-route hints omits trace options.
+/// - **`trace_route`**—unicast and blind unicast trace automatically when the peer
+///   may hold no working path back: no route is known to it, its latest packet
+///   had to flood to reach us, or nothing from it has reached us without
+///   flooding for [`TRACE_ROUTE_REFRESH_MS`](crate::TRACE_ROUTE_REFRESH_MS).
+///   Otherwise only on request. A frame with neither flood permission nor
+///   source-route hints omits trace options.
 /// - **`trace_signal`**—held to the same condition as `trace_route`, which it pairs with
 ///   entry for entry.
 /// - **`full_source`**—include the full 32-byte public key instead of the 3-byte hint,
@@ -168,10 +170,11 @@ impl SendOptions {
 
     /// Request that a trace-route option be added.
     ///
-    /// This is a floor, not a switch: a unicast or blind unicast that has no
-    /// route to follow carries a trace route whether or not the caller asked
-    /// for one, so the destination can learn a path back. Leaving it unset
-    /// means "no trace beyond what routing needs", not "never".
+    /// This is a floor, not a switch: a unicast or blind unicast to a peer
+    /// that may hold no working path back carries a trace route whether or
+    /// not the caller asked for one, so the destination can learn a path
+    /// back. Leaving it unset means "no trace beyond what routing needs",
+    /// not "never".
     ///
     /// It is a request rather than an instruction in the other direction too.
     /// A trace is written by the repeaters that carry the frame, so a frame

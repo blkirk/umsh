@@ -4838,13 +4838,7 @@ fn unicast_to_a_flood_distance_peer_still_carries_a_trace_route() {
     assert!(frame_has_trace_route(queued.frame.as_slice()));
 }
 
-/// A frame that follows a source route already knows its path, and paying to
-/// record it again is the proactive-refresh behavior the spec leaves
-/// unspecified. This holds only while nothing has to come back—see
-/// [`unicast_over_a_source_route_traces_when_it_asks_for_an_ack`].
-#[test]
-fn unicast_over_a_cached_source_route_carries_no_trace_route() {
-    let mut mac = make_mac();
+fn peer_with_source_route(mac: &mut TestMac) -> (LocalIdentityId, PublicKey, PeerId) {
     let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
     let peer_key = test_pubkey(0xAB);
     let peer_id = mac.add_peer(peer_key).unwrap();
@@ -4861,68 +4855,121 @@ fn unicast_over_a_cached_source_route_carries_no_trace_route() {
         peer_id,
         CachedRoute::Source(heapless::Vec::from_slice(&[RouterHint([0x01, 0x02])]).unwrap()),
     );
-
-    let _ =
-        block_on(mac.send_unicast(local_id, &peer_key, b"hi", &SendOptions::default())).unwrap();
-
-    let queued = mac.tx_queue_mut().pop_next().expect("queued unicast");
-    assert!(!frame_has_trace_route(queued.frame.as_slice()));
-
-    // Still available on request: the automatic trace is a floor, not a cap.
-    let _ = block_on(mac.send_unicast(
-        local_id,
-        &peer_key,
-        b"hi",
-        &SendOptions::default().with_trace_route(),
-    ))
-    .unwrap();
-    let queued = mac.tx_queue_mut().pop_next().expect("queued unicast");
-    assert!(frame_has_trace_route(queued.frame.as_slice()));
+    (local_id, peer_key, peer_id)
 }
 
-/// The frame knows its path; the ack it asks for does not. A source route
-/// arrives consumed, so nothing on the frame describes the way back, and the
-/// destination composes its ack against an empty route cache: no flood
-/// budget, no route, dead at the first hop. The trace the routed hops record
-/// is the only thing that closes the return direction.
-#[test]
-fn unicast_over_a_source_route_traces_when_it_asks_for_an_ack() {
-    let mut mac = make_mac();
-    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
-    let peer_key = test_pubkey(0xAB);
-    let peer_id = mac.add_peer(peer_key).unwrap();
-    mac.install_pairwise_keys(
-        local_id,
-        peer_id,
-        PairwiseKeys {
-            k_enc: [1; 32],
-            k_mic: [2; 32],
-        },
-    )
-    .unwrap();
-    mac.peer_registry_mut().update_route(
-        peer_id,
-        CachedRoute::Source(heapless::Vec::from_slice(&[RouterHint([0x01, 0x02])]).unwrap()),
-    );
+fn next_send_traces(
+    mac: &mut TestMac,
+    local_id: LocalIdentityId,
+    peer_key: &PublicKey,
+    options: &SendOptions,
+) -> bool {
+    let _ = block_on(mac.send_unicast(local_id, peer_key, b"hi", options)).unwrap();
+    let queued = mac.tx_queue_mut().pop_next().expect("queued unicast");
+    frame_has_trace_route(queued.frame.as_slice())
+}
 
-    let _ = block_on(mac.send_unicast(
+/// A peer whose packets reach us without flooding holds a working path
+/// here, so a trace on a packet to it would only re-record what both sides
+/// already know—acknowledged or not, since the peer can route its ack.
+#[test]
+fn a_peer_recently_heard_unflooded_gets_no_trace_route() {
+    let mut mac = make_mac();
+    let (local_id, peer_key, peer_id) = peer_with_source_route(&mut mac);
+    let now_ms = mac.clock().now_ms();
+    mac.peer_registry_mut().note_arrival(peer_id, false, now_ms);
+
+    assert!(!next_send_traces(
+        &mut mac,
         local_id,
         &peer_key,
-        b"hi",
+        &SendOptions::default()
+    ));
+    assert!(!next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
         &SendOptions::default().with_ack_requested(true),
-    ))
-    .unwrap();
+    ));
+    // Still available on request: the automatic trace is a floor, not a cap.
+    assert!(next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default().with_trace_route(),
+    ));
+}
 
-    let queued = mac.tx_queue_mut().pop_next().expect("queued unicast");
-    assert!(frame_has_trace_route(queued.frame.as_slice()));
-    // The route still goes out: the trace rides alongside it, it does not
-    // replace it.
-    let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
-    let options = ParsedOptions::extract(queued.frame.as_slice(), header.options_range).unwrap();
-    assert_eq!(
-        queued.frame.as_slice()[options.source_route.unwrap()],
-        [0x01, 0x02]
-    );
+/// A route followed for long enough without the peer reaching us unflooded
+/// may no longer be one the peer can use back, and the next packet refreshes
+/// it. That includes a route never vouched for at all.
+#[test]
+fn a_trace_route_refreshes_a_path_the_peer_has_not_used_lately() {
+    let mut mac = make_mac();
+    let (local_id, peer_key, peer_id) = peer_with_source_route(&mut mac);
+    assert!(next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default()
+    ));
+
+    let now_ms = mac.clock().now_ms();
+    mac.peer_registry_mut().note_arrival(peer_id, false, now_ms);
+    // Arrivals are kept to the second.
+    mac.clock()
+        .advance_ms(crate::TRACE_ROUTE_REFRESH_MS - 1_000);
+    assert!(!next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default()
+    ));
+    mac.clock().advance_ms(1_000);
+    assert!(next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default()
+    ));
+}
+
+/// The arrival clock is kept in wrapping seconds, so an arrival recorded
+/// just before the count wraps still reads as recent just after it.
+#[test]
+fn an_unflooded_arrival_stays_recent_across_the_seconds_wrap() {
+    let mut mac = make_mac();
+    let (_, _, peer_id) = peer_with_source_route(&mut mac);
+    let wrap_ms = (u64::from(u32::MAX) + 1) * 1000;
+    let registry = mac.peer_registry_mut();
+    registry.note_arrival(peer_id, false, wrap_ms - 3_000);
+    let window = crate::TRACE_ROUTE_REFRESH_MS;
+    assert!(registry.arrived_unflooded_within(peer_id, window, wrap_ms + 3_000));
+    assert!(!registry.arrived_unflooded_within(peer_id, window, wrap_ms - 3_000 + window));
+}
+
+/// A packet that had to flood to reach us says its sender has no working
+/// path here. The answer owes it a trace, and one trace settles the debt.
+#[test]
+fn a_flooded_arrival_owes_the_next_send_a_trace_route() {
+    let mut mac = make_mac();
+    let (local_id, peer_key, peer_id) = peer_with_source_route(&mut mac);
+    let now_ms = mac.clock().now_ms();
+    mac.peer_registry_mut().note_arrival(peer_id, false, now_ms);
+    mac.peer_registry_mut().note_arrival(peer_id, true, now_ms);
+
+    assert!(next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default()
+    ));
+    assert!(!next_send_traces(
+        &mut mac,
+        local_id,
+        &peer_key,
+        &SendOptions::default()
+    ));
 }
 
 /// A trace route asks repeaters to record themselves. With no flood budget
@@ -5147,11 +5194,16 @@ fn requested_trace_options_are_dropped_on_an_unrepeatable_broadcast() {
     assert!(frame_has_trace_signal(frame));
 }
 
-/// The sender's trace taught us a path back; the mirrored trace on the ack is
-/// the only thing that closes the other direction.
+/// An ack answers the frame it acknowledges. A frame that had to flood here
+/// says its sender holds no working path to us, so the ack traces whatever
+/// the frame carried; otherwise it mirrors the frame's trace.
 #[test]
-fn mac_ack_mirrors_the_trace_route_of_the_frame_it_acknowledges() {
-    for (sender_traced, expected) in [(true, true), (false, false)] {
+fn mac_ack_traces_when_the_frame_it_acknowledges_traced_or_flooded() {
+    for (sender_traced, flood_hops, expected) in [
+        (true, None, true),
+        (false, None, false),
+        (false, Some((1, 2)), true),
+    ] {
         let mut mac = make_mac();
         let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
         let remote = DummyIdentity::new([0xAB; 32]);
@@ -5178,7 +5230,7 @@ fn mac_ack_mirrors_the_trace_route_of_the_frame_it_acknowledges() {
             b"hello",
             true,
             7,
-            None,
+            flood_hops,
             sender_traced.then_some(trace.as_slice()),
             None,
         );
@@ -5190,7 +5242,7 @@ fn mac_ack_mirrors_the_trace_route_of_the_frame_it_acknowledges() {
         assert_eq!(
             frame_has_trace_route(queued.frame.as_slice()),
             expected,
-            "sender_traced={sender_traced}",
+            "sender_traced={sender_traced} flood_hops={flood_hops:?}",
         );
     }
 }
@@ -9666,6 +9718,47 @@ fn route_retry_preserves_the_authenticated_header() {
         collect_aad(retry.frame.as_slice()),
         "the copied MIC only verifies if the AAD is byte-identical"
     );
+}
+
+/// A route retry floods to find a replacement route, so it carries a trace
+/// even when the send it retries had no reason to, and the trace signal that
+/// pairs with it.
+#[test]
+fn route_retry_adds_a_trace_route_and_its_trace_signal() {
+    let mut mac = make_mac();
+    let (local_id, peer_key, peer_id) = peer_with_source_route(&mut mac);
+    let now_ms = mac.clock().now_ms();
+    mac.peer_registry_mut().note_arrival(peer_id, false, now_ms);
+
+    let receipt = mac
+        .queue_unicast(
+            local_id,
+            &peer_key,
+            b"hello",
+            &SendOptions::default().with_ack_requested(true),
+        )
+        .unwrap()
+        .unwrap();
+    let original = mac.tx_queue_mut().pop_next().unwrap();
+    assert!(!frame_has_trace_route(original.frame.as_slice()));
+    assert!(!frame_has_trace_signal(original.frame.as_slice()));
+
+    let pending = mac
+        .identity_mut(local_id)
+        .unwrap()
+        .pending_ack_mut(&receipt)
+        .unwrap();
+    pending.state = AckState::AwaitingAck;
+    pending.ack_deadline_ms = 0;
+    mac.service_pending_ack_timeouts(|_, _| {}).unwrap();
+    let retry = mac.tx_queue_mut().pop_next().unwrap();
+    let frame = retry.frame.as_slice();
+    let header = PacketHeader::parse(frame).unwrap();
+    let options = ParsedOptions::extract(frame, header.options_range).unwrap();
+    assert!(options.route_retry);
+    assert!(options.source_route.is_none());
+    assert!(frame_has_trace_route(frame));
+    assert!(frame_has_trace_signal(frame));
 }
 
 /// A peer cached as directly reachable transmits at

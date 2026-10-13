@@ -246,6 +246,11 @@ pub const MAX_FLOOD_HOPS: u8 = 15;
 
 pub use umsh_core::ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS;
 
+/// How long a packet that reached us from a peer without flooding vouches
+/// for the peer's path here. Past it, the next packet to the peer carries a
+/// trace route so the peer can learn a fresh one.
+pub const TRACE_ROUTE_REFRESH_MS: u64 = 5 * 60 * 1000;
+
 /// Error returned when a fixed-capacity MAC data structure is full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CapacityError;

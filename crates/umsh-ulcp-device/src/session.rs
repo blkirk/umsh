@@ -661,9 +661,11 @@ struct AckPlan {
     trailer: [u8; 8],
     /// The way back to the sender.
     route: AckReturn,
-    /// Whether the acknowledged frame asked for a trace route. Mirrored
-    /// onto an ack a repeater may carry, so the sender learns the path
-    /// from the only frame an ack-only exchange gives it.
+    /// Whether the ack carries a trace route: the acknowledged frame had to
+    /// flood here, so its sender holds no working path to us, or it carried
+    /// a trace of its own, which the ack mirrors. It goes on an ack a
+    /// repeater may carry, so the sender learns the path from the only
+    /// frame an ack-only exchange gives it.
     trace: bool,
     /// Region codes the acknowledged frame flooded under, replayed on a
     /// flooded ack so it stays in the same domain.
@@ -719,18 +721,19 @@ impl AckPlan {
     /// at all means no repeater could have carried the frame here.
     fn new(trailer: [u8; 8], frame: &[u8], header: &PacketHeader) -> Self {
         let accumulated = header.flood_hops.map(|hops| hops.accumulated());
+        let flooded = accumulated.is_some_and(|hops| hops > 0);
         let Ok(options) = ParsedOptions::extract(frame, header.options_range.clone()) else {
             return Self {
                 trailer,
                 route: accumulated.map_or(AckReturn::Direct, |hops| {
                     AckReturn::Flood(hops.saturating_add(ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS))
                 }),
-                trace: false,
+                trace: flooded,
                 regions: HeaplessVec::new(),
                 replay: None,
             };
         };
-        let trace = options.trace_route.is_some();
+        let trace = flooded || options.trace_route.is_some();
         let traced = options
             .trace_route
             .clone()
@@ -15796,7 +15799,8 @@ mod tests {
 
         // No trace at all: nothing on the frame says how far the sender
         // is, and its flood tail is known short, so the ack floods at
-        // the default rather than at the tail or not at all.
+        // the default rather than at the tail or not at all. A frame
+        // that had to flood any of the way traces its ack regardless.
         for (tail, expected) in [
             (None, UNROUTED_ACK_FLOOD_HOPS),
             (Some(2), UNROUTED_ACK_FLOOD_HOPS),
@@ -15815,7 +15819,8 @@ mod tests {
                 Some(expected),
                 "tail={tail:?}"
             );
-            assert_eq!(ack_route_options(&ack), (None, false));
+            let flooded = tail.is_some_and(|hops| hops > 0);
+            assert_eq!(ack_route_options(&ack), (None, flooded), "tail={tail:?}");
             session.on_tx_result(TxOutcome::Sent, 0, &mut |_: &[u8]| {});
         }
     }

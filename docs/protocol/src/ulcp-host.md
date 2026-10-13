@@ -602,7 +602,7 @@ if all of the following hold:
 
 A delegated ACK also requires that no unconsumed source-route hints remain. An early overheard copy may be queued without an ACK; the first eligible duplicate can then supply the ACK without another queue entry. `RX_FLAG_ACKED` requires successful radio transmission.
 
-Delegated ACKs follow the [return-path guidance](beacons.md#scoping-flood-hops-to-a-known-route), mirror a requested trace, and preserve the request's region codes on both flooded and source-routed returns.
+Delegated ACKs follow the [return-path guidance](beacons.md#scoping-flood-hops-to-a-known-route), carry a trace route [when one is due](beacons.md#when-to-include-a-trace-route), and preserve the request's region codes on both flooded and source-routed returns.
 
 **Duplicates.** An authenticated frame that replay detection identifies as
 a previously accepted frame—typically a retransmission whose original
@@ -662,9 +662,9 @@ device holds no other routing state for the host's peers:
 - A frame with neither option and no flood hop count was heard off the
   sender's own transmitter and is acknowledged directly.
 
-An ack a repeater may carry mirrors the frame's trace-route request, so the
-sender learns the return path from the only frame an ack-only exchange gives
-it.
+An ack a repeater may carry includes a trace route when the frame arrived with
+`FHOPS_ACC` greater than zero or carried a trace route of its own, so the sender
+learns the return path from the only frame an ack-only exchange gives it.
 
 Delegated ack transmissions use the device's normal transmit path and are
 subject to the configured duty-cycle limit; the device **MUST NOT** exceed the

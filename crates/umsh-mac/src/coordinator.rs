@@ -18,7 +18,7 @@ use crate::{
     DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS,
     DEFAULT_TX, ESTABLISHED_ROUTE_EXTRA_FLOOD_HOPS, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS,
     MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES, MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform,
-    ReplayVerdict, ReplayWindow,
+    ReplayVerdict, ReplayWindow, TRACE_ROUTE_REFRESH_MS,
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
     peers::{
@@ -1915,12 +1915,7 @@ impl<
         }
         let traced = repeatable
             && (options.trace_route
-                || self.needs_route_discovery(
-                    peer_id,
-                    effective_source_route.as_ref(),
-                    effective_flood_hops,
-                    options.ack_requested,
-                ));
+                || self.needs_route_discovery(peer_id, effective_source_route.as_ref()));
         if traced {
             builder = builder.trace_route();
         }
@@ -2001,6 +1996,9 @@ impl<
                     .and_then(|slot| slot.remove_pending_ack(&tracked_receipt));
             }
             return Err(err);
+        }
+        if traced {
+            self.peer_registry.note_trace_sent(peer_id);
         }
         if let Some(ack_mic) = options.ack_mic {
             self.retire_ack_carried_onward(from, peer, &ack_mic);
@@ -2110,12 +2108,7 @@ impl<
         }
         let traced = repeatable
             && (options.trace_route
-                || self.needs_route_discovery(
-                    peer_id,
-                    effective_source_route.as_ref(),
-                    effective_flood_hops,
-                    options.ack_requested,
-                ));
+                || self.needs_route_discovery(peer_id, effective_source_route.as_ref()));
         if traced {
             builder = builder.trace_route();
         }
@@ -2198,6 +2191,9 @@ impl<
                     .and_then(|slot| slot.remove_pending_ack(&tracked_receipt));
             }
             return Err(err);
+        }
+        if traced {
+            self.peer_registry.note_trace_sent(peer_id);
         }
         if let Some(ack_mic) = options.ack_mic {
             self.retire_ack_carried_onward(from, peer, &ack_mic);
@@ -4207,20 +4203,29 @@ impl<
         }
     }
 
-    /// Trace all flooded discovery/backstop traffic, including peers heard
-    /// directly. An inbound direct observation does not prove the return link.
-    /// ACK-requested source routes also trace so the peer can route its ACK.
+    /// Whether a send to `peer_id` should carry a trace route the caller did
+    /// not ask for (beacons.md § Route Learning). A trace gives the peer a
+    /// path back to us, so it is spent when the peer may not hold one: we
+    /// know no route to it, its latest packet had to flood to reach us, or
+    /// nothing from it has reached us without flooding for
+    /// [`TRACE_ROUTE_REFRESH_MS`]. Hearing a peer directly counts as such
+    /// an arrival; what it does not establish is the reverse link, which is
+    /// the flood allowance's concern rather than the trace's.
     fn needs_route_discovery(
         &self,
-        _peer_id: PeerId,
+        peer_id: PeerId,
         source_route: Option<&Vec<RouterHint, MAX_SOURCE_ROUTE_HINTS>>,
-        flood_hops: Option<u8>,
-        ack_requested: bool,
     ) -> bool {
-        if source_route.is_some_and(|route| !route.is_empty()) {
-            return ack_requested;
-        }
-        flood_hops.is_some_and(|hops| hops > 0)
+        let Some(peer) = self.peer_registry.get(peer_id) else {
+            return true;
+        };
+        let routed = peer.route.is_some() || source_route.is_some_and(|route| !route.is_empty());
+        let fresh = self.peer_registry.arrived_unflooded_within(
+            peer_id,
+            TRACE_ROUTE_REFRESH_MS,
+            self.clock.now_ms(),
+        );
+        !routed || peer.trace_owed || !fresh
     }
 
     /// Whether a frame this node is about to originate gives any repeater
@@ -4501,6 +4506,10 @@ impl<
             return;
         };
         let regions = Self::region_codes_from_options(frame, header.options_range.clone());
+        // An ack is a response like any other: it traces when the packet it
+        // answers had to flood to get here, and may mirror a trace that
+        // packet carried.
+        let flooded = header.flood_hops.is_some_and(|hops| hops.accumulated() > 0);
         let usable_trace = options
             .trace_route
             .as_ref()
@@ -4519,7 +4528,7 @@ impl<
                 local_id,
                 peer_id,
                 ack_trailer,
-                options.trace_route.is_some(),
+                options.trace_route.is_some() || flooded,
                 &regions,
                 unknown_budget,
             )
@@ -5080,6 +5089,8 @@ impl<
         }
         let now_ms = self.clock.now_ms();
         self.peer_registry.touch(peer_id, now_ms);
+        let flooded = header.flood_hops.is_some_and(|hops| hops.accumulated() > 0);
+        self.peer_registry.note_arrival(peer_id, flooded, now_ms);
 
         let Ok(options) = ParsedOptions::extract(frame, header.options_range.clone()) else {
             return;
@@ -5986,48 +5997,50 @@ impl<
         _options: &ParsedOptions,
         dst: &mut [u8],
     ) -> Result<usize, CapacityError> {
+        // The retry floods to rediscover a route, so it carries a trace route
+        // and, paired with it, a trace signal. Each is inserted in number
+        // order unless the original already carried it.
+        const ADDED: [OptionNumber; 3] = [
+            OptionNumber::TraceRoute,
+            OptionNumber::RouteRetry,
+            OptionNumber::TraceSignal,
+        ];
         let mut encoder = OptionEncoder::new(dst);
-        let mut inserted_trace_route = false;
-        let mut inserted_route_retry = false;
+        let mut present = [false; ADDED.len()];
 
         if !options_range.is_empty() {
             for entry in umsh_core::iter_options(src, options_range) {
                 let (number, value) = entry.map_err(|_| CapacityError)?;
-                if !inserted_trace_route && number > OptionNumber::TraceRoute.as_u16() {
-                    encoder
-                        .put(OptionNumber::TraceRoute.as_u16(), &[])
-                        .map_err(|_| CapacityError)?;
-                    inserted_trace_route = true;
-                }
-                if !inserted_route_retry && number > OptionNumber::RouteRetry.as_u16() {
-                    encoder
-                        .put(OptionNumber::RouteRetry.as_u16(), &[])
-                        .map_err(|_| CapacityError)?;
-                    inserted_route_retry = true;
+                for (added, present) in ADDED.iter().zip(present.iter_mut()) {
+                    if !*present && number > added.as_u16() {
+                        encoder
+                            .put(added.as_u16(), &[])
+                            .map_err(|_| CapacityError)?;
+                        *present = true;
+                    }
                 }
                 match OptionNumber::from(number) {
                     OptionNumber::SourceRoute => {}
-                    OptionNumber::TraceRoute => {
-                        encoder.put(number, value).map_err(|_| CapacityError)?;
-                        inserted_trace_route = true;
+                    OptionNumber::RouteRetry => {
+                        encoder.put(number, &[]).map_err(|_| CapacityError)?;
+                        present[1] = true;
                     }
-                    OptionNumber::RouteRetry => {}
-                    _ => {
+                    other => {
+                        if let Some(at) = ADDED.iter().position(|added| *added == other) {
+                            present[at] = true;
+                        }
                         encoder.put(number, value).map_err(|_| CapacityError)?;
                     }
                 }
             }
         }
 
-        if !inserted_trace_route {
-            encoder
-                .put(OptionNumber::TraceRoute.as_u16(), &[])
-                .map_err(|_| CapacityError)?;
-        }
-        if !inserted_route_retry {
-            encoder
-                .put(OptionNumber::RouteRetry.as_u16(), &[])
-                .map_err(|_| CapacityError)?;
+        for (added, present) in ADDED.iter().zip(present) {
+            if !present {
+                encoder
+                    .put(added.as_u16(), &[])
+                    .map_err(|_| CapacityError)?;
+            }
         }
 
         Ok(encoder.finish())

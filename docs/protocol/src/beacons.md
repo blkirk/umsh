@@ -75,13 +75,24 @@ UMSH does not define a dedicated path-discovery packet type. Instead, path disco
 
 3. **Return path**: Node B can now send unicast packets to Node A using the learned source route. If the packet was ack-requested, Node B's MAC ack also traverses the mesh, allowing Node A to confirm reachability.
 
-4. **Bidirectional establishment**: The trace Node A sent taught Node B a path back, and nothing else. A node responding to a packet that carried a trace-route option SHOULD carry one on its response, whatever form that response takes—MAC ack, beacon, or application payload. Where the response is a MAC ack, that ack is the whole of what Node A receives, so an ack without a trace leaves Node A holding no route to Node B at all.
+4. **Bidirectional establishment**: The trace Node A sent taught Node B a path back, and nothing else. Node B's response—MAC ack, beacon, or application payload—teaches Node A a path only if it carries a trace of its own. Where the response is a MAC ack, that ack is the whole of what Node A receives.
 
-A sender decides whether to originate the option from what it already knows about the destination. One that holds no source route and permits flooding SHOULD include a trace route: the trace is what turns that flood into a path. This includes a peer heard directly, since hearing the peer does not establish that the peer can hear the sender. A sender following a source route SHOULD NOT routinely trace it, since that path is already known and re-recording it on every packet is the [proactive refresh](#potential-improvement-proactive-route-refresh) this specification does not define. An ACK-requested packet is an exception: it SHOULD include a trace so the destination can construct a return route for its ACK.
+### When to Include a Trace Route
+
+A beacon or advertisement that permits flooding SHOULD always carry a trace route: publishing a path back to its sender is much of what it is for, and every listener it reaches may lack one.
+
+A trace route gives the destination a path back to the sender, so a sender spends one when the destination may not hold a working path back. A sender SHOULD include a trace route on a unicast or blind unicast when any of the following holds:
+
+- it holds no route to the destination
+- the packet answers one from the destination that arrived with `FHOPS_ACC` greater than zero; a MAC ack is such an answer
+- no packet from the destination has arrived with `FHOPS_ACC` of zero in the last 5 minutes; a MAC ack correlated to the destination counts as a packet from it
+- it is a [Route Retry](repeater-operation.md#route-failure-recovery) resend
+
+A packet that arrives with `FHOPS_ACC` of zero, off the sender's own transmitter or along a source route, shows that its sender holds a working path to the receiver. That is what a trace route would otherwise give it. A packet that had to flood to arrive shows the opposite. The 5-minute window bounds how long the evidence is trusted, since a path that worked can stop working.
+
+A response to a packet that carried a trace route MAY carry one. Any other packet MAY carry one, but a sender SHOULD otherwise prefer the smaller frame.
 
 A packet that carries a trace route SHOULD also carry a [trace signal](packet-options.md#trace-signal-option-10). The hints say which repeaters a path crossed; the signal entries say how well each hop held, which is what lets the node learning the path choose between paths.
-
-The reason to omit a trace applies to a path the sender holds, which is what makes the re-recording redundant. A response steered down the trace its own request accumulated—the [Identity Request](mac-commands.md#identity-request-1) answered from a source route built out of the trace, for one—is following the requester's path rather than one either side had, and the response rule above governs: the requester holds nothing until the response records something.
 
 A packet carrying neither flood hops nor a source route SHOULD NOT carry a trace route at all, whatever the sender knows. No repeater may forward such a packet, so the option can only arrive as empty as it left, and its arrival already proves what an empty trace would have said.
 

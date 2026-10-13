@@ -103,10 +103,9 @@ the requester nothing: a broadcast solicitation leaves no route behind at the
 requester, and the response reaches it with its own Route option consumed and its
 `FHOPS_ACC` counting only the tail of the path. Without a trace on the response
 the requester ends the exchange holding no route to the node it just identified.
-This is the general rule for a response to a traced packet ([Path
-Discovery](beacons.md#path-discovery)) rather than an exception to the advice
-against tracing a source-routed packet: the path a response is steered down is
-the requester's own trace, not a route either side already held.
+A broadcast solicitation names no responder, so even one that arrived without
+flooding gives the requester no path to whoever answers it; the response traces
+regardless of the [general rule](beacons.md#when-to-include-a-trace-route).
 
 A repeater consumes its own hint while forwarding, not while receiving, so a
 request whose Route option still names a repeater is one that repeater drops.
