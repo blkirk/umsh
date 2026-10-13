@@ -205,9 +205,9 @@ This preserves a useful separation of responsibilities:
 
 For flood-forwarding repeaters that have accepted a packet for forwarding but have not yet transmitted it, overhearing another forwarding of the same packet SHOULD normally cause a bounded deferral rather than an immediate transmission. A safe default is:
 
-1. recalculate a forwarding delay using the contention-window procedure in [Channel Access](channel-access.md#flood-forwarding-contention-window)
+1. on each of the first two overheard copies, recalculate a forwarding delay using the contention-window procedure in [Channel Access](channel-access.md#flood-forwarding-contention-window)
 2. restart the waiting period
-3. after 3 such deferrals, abandon the pending forward
+3. on overhearing a third copy, abandon the pending forward
 
 This behavior is still provisional and should be validated empirically. The intent is to reduce near-simultaneous forwarding while still allowing a second or third repeater to contribute if an earlier forward was not widely heard.
 

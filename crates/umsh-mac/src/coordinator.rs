@@ -704,8 +704,10 @@ pub struct RepeaterConfig {
     /// received with no remaining source-route hops (see channel-access.md
     /// § ACK Protection Interval).
     pub flood_contention_ack_guard_percent: u8,
-    /// Maximum number of overheard-repeat deferrals before abandoning a pending forward.
-    pub flood_contention_max_deferrals: u8,
+    /// Overheard copies of a packet at which a pending forward of it is
+    /// abandoned. Each copy before that defers the forward; the copy that
+    /// reaches this count drops it.
+    pub flood_contention_abandon_copies: u8,
     /// Amateur-radio operating mode for forwarding.
     pub amateur_radio_mode: AmateurRadioMode,
     /// Optional station callsign injected on forwarded traffic.
@@ -728,7 +730,7 @@ impl Default for RepeaterConfig {
             flood_contention_max_window_percent: 50,
             flood_contention_jitter_percent: 10,
             flood_contention_ack_guard_percent: 25,
-            flood_contention_max_deferrals: 3,
+            flood_contention_abandon_copies: 3,
             amateur_radio_mode: AmateurRadioMode::Unlicensed,
             station_callsign: None,
         }
@@ -6223,7 +6225,11 @@ impl<
             return;
         };
 
-        if queued.forward_deferrals >= self.repeater.flood_contention_max_deferrals {
+        // `forward_deferrals` counts the copies already heard, so this one
+        // is the next; the copy that reaches the limit abandons the forward.
+        if queued.forward_deferrals.saturating_add(1)
+            >= self.repeater.flood_contention_abandon_copies
+        {
             return;
         }
 

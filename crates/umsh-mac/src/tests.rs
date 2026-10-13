@@ -7213,7 +7213,7 @@ fn receive_one_defers_pending_forward_when_duplicate_is_overheard() {
 }
 
 #[test]
-fn receive_one_drops_pending_forward_after_max_duplicate_deferrals() {
+fn receive_one_drops_pending_forward_on_the_third_overheard_copy() {
     let mut mac = make_mac();
     mac.repeater_config_mut().enabled = true;
     let repeater_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
@@ -7244,17 +7244,24 @@ fn receive_one_drops_pending_forward_after_max_duplicate_deferrals() {
     assert!(block_on(mac.receive_one(|_, _| {})).unwrap());
     assert_eq!(mac.tx_queue().len(), 1);
 
-    for _ in 0..mac.repeater_config().flood_contention_max_deferrals {
+    assert_eq!(mac.repeater_config().flood_contention_abandon_copies, 3);
+
+    // The first two copies overheard from other repeaters defer the forward.
+    for copy in 1..=2 {
         mac.radio_mut().queue_received_frame(frame.as_slice());
         let handled = block_on(mac.receive_one(|_, _| {})).unwrap();
         assert!(!handled);
-        assert_eq!(mac.tx_queue().len(), 1);
+        assert_eq!(mac.tx_queue().len(), 1, "copy {copy} defers");
     }
 
+    // The third drops it.
     mac.radio_mut().queue_received_frame(frame.as_slice());
     let handled = block_on(mac.receive_one(|_, _| {})).unwrap();
     assert!(!handled);
-    assert!(mac.tx_queue().is_empty());
+    assert!(
+        mac.tx_queue().is_empty(),
+        "the third copy abandons the forward"
+    );
 }
 
 #[test]
