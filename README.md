@@ -297,7 +297,7 @@ cargo run --example cli_udp --features cli -- --identity .umsh/alice.identity
 cargo run --example cli_udp --features cli -- --identity .umsh/bob.identity
 ```
 
-Both join the same multicast group (`239.255.42.42:7373` by default) and hear each other
+Both join the same multicast group (`239.255.134.121:15056` by default) and hear each other
 automatically. Register the other side's key and send a message:
 
 ```
@@ -311,7 +311,7 @@ two-node version of the same idea, and `simulated_repeater_delivery` runs a mult
 under the Embassy adapter.
 
 Because the transport is plain UDP, Wireshark can watch it directly: capture on loopback with
-the display filter `udp.port == 7373` and the dissector's UDP heuristic will find the frames.
+the display filter `udp.port == 15056` and the dissector's UDP heuristic will find the frames.
 To decrypt, add both identity files to the UMSH **Private keys** preference
 (**Edit > Preferences > Protocols > UMSH**):
 

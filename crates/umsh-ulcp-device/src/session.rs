@@ -10882,7 +10882,7 @@ mod tests {
         assert_eq!(get(&mut session, prop::LAN_BEARER_ENABLED), [0]);
         assert_eq!(
             get(&mut session, prop::LAN_BEARER_GROUP),
-            [239, 255, 42, 42, 0xCD, 0x1C]
+            [239, 255, 134, 121, 0xD0, 0x3A]
         );
         assert_eq!(
             get(&mut session, prop::LAN_BEARER_INGRESS_LIMIT),
@@ -10892,7 +10892,7 @@ mod tests {
 
         // Only a multicast group, and only a nonzero limit.
         for (key, value) in [
-            (prop::LAN_BEARER_GROUP, &[10, 0, 0, 1, 0xCD, 0x1C][..]),
+            (prop::LAN_BEARER_GROUP, &[10, 0, 0, 1, 0xD0, 0x3A][..]),
             (prop::LAN_BEARER_INGRESS_LIMIT, &[0, 0][..]),
             (prop::LAN_BEARER_ENABLED, &[2][..]),
         ] {

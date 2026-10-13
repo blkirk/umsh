@@ -4,9 +4,9 @@
 //! `docs/protocol/src/lan-bearer.md`.
 
 /// The default multicast group.
-pub const DEFAULT_GROUP: [u8; 4] = [239, 255, 42, 42];
+pub const DEFAULT_GROUP: [u8; 4] = [239, 255, 134, 121];
 /// The default UDP port.
-pub const DEFAULT_PORT: u16 = 7373;
+pub const DEFAULT_PORT: u16 = 15056;
 /// The default ingress limit, in datagrams per minute.
 pub const DEFAULT_INGRESS_LIMIT: u16 = 120;
 /// Length of a `PROP_LAN_BEARER_GROUP` value.
@@ -81,10 +81,10 @@ mod tests {
     #[test]
     fn a_group_round_trips_and_only_a_multicast_one() {
         let group = Group::default();
-        assert_eq!(group.encode(), [239, 255, 42, 42, 0xCD, 0x1C]);
+        assert_eq!(group.encode(), [239, 255, 134, 121, 0xD0, 0x3A]);
         assert_eq!(Group::decode(&group.encode()), Some(group));
-        assert_eq!(Group::decode(&[192, 168, 1, 1, 0xCD, 0x1C]), None);
-        assert_eq!(Group::decode(&[239, 255, 42, 42, 0, 0]), None);
-        assert_eq!(Group::decode(&[239, 255, 42, 42, 1]), None);
+        assert_eq!(Group::decode(&[192, 168, 1, 1, 0xD0, 0x3A]), None);
+        assert_eq!(Group::decode(&[239, 255, 134, 121, 0, 0]), None);
+        assert_eq!(Group::decode(&[239, 255, 134, 121, 1]), None);
     }
 }

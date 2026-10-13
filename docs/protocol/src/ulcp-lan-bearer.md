@@ -21,7 +21,7 @@ state immediately; it does not wait for the device to join the group.
 ## PROP_LAN_BEARER_GROUP {#prop-lan-bearer-group}
 
 Property 4993; Get/Set; six octets: an IPv4 multicast address in network
-order, followed by a UINT16 port. Defaults to `239.255.42.42` port 7373. A
+order, followed by a UINT16 port. Defaults to `239.255.134.121` port 15056. A
 write of an address outside `224.0.0.0/4`, a zero port, or any other length is
 refused with `STATUS_INVALID_ARGUMENT`.
 

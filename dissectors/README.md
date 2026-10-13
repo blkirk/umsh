@@ -54,8 +54,8 @@ SNR the radio reported, so the reception metadata survives into the capture.
 
 The [LAN bearer](../docs/protocol/src/lan-bearer.md) carries one raw UMSH
 frame per UDP datagram, with no additional framing, to an IPv4 multicast group
-(by default `239.255.42.42:7373`). Capture on the interface the radios and
-hosts share, with `udp.port == 7373`.
+(by default `239.255.134.121:15056`). Capture on the interface the radios and
+hosts share, with `udp.port == 15056`.
 
 The desktop examples' `UdpMulticastRadio` uses the same datagram format on the
 loopback interface, so the steps below apply to both.
@@ -74,10 +74,10 @@ on the loopback interface by default. To capture this traffic:
 If you know the UDP port your application uses, filter to just that traffic:
 
 ```
-udp.port == 4242
+udp.port == 15056
 ```
 
-Replace `4242` with whatever port you passed to `--udp`.
+Replace `15056` with whatever port you passed to `--udp`.
 
 ### 3. Let heuristic detection find UMSH packets
 
@@ -91,7 +91,7 @@ If the heuristic isn't triggering (e.g. another dissector claims the port first)
 you can force it by setting the UDP port in the UMSH preferences:
 
 1. Go to **Edit > Preferences > Protocols > UMSH**
-2. Set **UDP Port** to the port your application uses (e.g. `4242`)
+2. Set **UDP Port** to the port your application uses (e.g. `15056`)
 
 ### 4. Example: two-node desktop_chat session
 
@@ -101,15 +101,15 @@ In two terminals, start a chat pair over UDP multicast:
 # Terminal 1—print public key, then run
 cargo run --example desktop_chat --features tokio-support -- --print-public-key
 cargo run --example desktop_chat --features tokio-support -- \
-    --udp 239.255.42.42:4242 --peer <TERMINAL_2_PUBLIC_KEY>
+    --udp 239.255.134.121:15056 --peer <TERMINAL_2_PUBLIC_KEY>
 
 # Terminal 2
 cargo run --example desktop_chat --features tokio-support -- --print-public-key
 cargo run --example desktop_chat --features tokio-support -- \
-    --udp 239.255.42.42:4242 --peer <TERMINAL_1_PUBLIC_KEY>
+    --udp 239.255.134.121:15056 --peer <TERMINAL_1_PUBLIC_KEY>
 ```
 
-In Wireshark, capture on loopback with filter `udp.port == 4242`. You should
+In Wireshark, capture on loopback with filter `udp.port == 15056`. You should
 see UMSH packets appear in real time with decoded FCF, packet type, addresses,
 SECINFO, and MIC fields.
 

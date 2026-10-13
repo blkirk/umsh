@@ -30,9 +30,9 @@ pub mod socket;
 use umsh_core::{Fcf, UMSH_VERSION};
 
 /// The default multicast group.
-pub const DEFAULT_GROUP: [u8; 4] = [239, 255, 42, 42];
+pub const DEFAULT_GROUP: [u8; 4] = [239, 255, 134, 121];
 /// The default UDP port.
-pub const DEFAULT_PORT: u16 = 7373;
+pub const DEFAULT_PORT: u16 = 15056;
 /// The multicast TTL senders use. Large enough to cross whatever multicast
 /// routing a network is configured with; where the group stops is the
 /// network's decision, made by its routers and the group's scope.

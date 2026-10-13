@@ -17,8 +17,8 @@ struct RemoteBridgeScreen: View {
 
     var body: some View {
         Form {
-            if hasLocal { localSections }
             if hasServer { serverSections }
+            if hasLocal { localSections }
             if let validation { Text(validation).foregroundStyle(.red) }
             RemoteProblemSection(model: model)
         }
@@ -158,7 +158,7 @@ struct RemoteBridgeScreen: View {
         desired.lanBearerEnabled = edits.localEnabled.value
         if edits.group.isDirty {
             do { desired.lanBearerGroup = try ulcpLanGroup(input: edits.group.value ?? "") }
-            catch { validation = "Enter a multicast group and port, such as 239.255.42.42:7373."; return }
+            catch { validation = "Enter a multicast group and port, such as 239.255.134.121:15056."; return }
         }
         if edits.limit.isDirty {
             guard let text = edits.limit.value, let limit = UInt16(text), limit > 0 else {

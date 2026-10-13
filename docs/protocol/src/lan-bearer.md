@@ -31,8 +31,8 @@ present.
 ## Transport
 
 The bearer is UDP over IPv4 multicast. The default group is
-`239.255.42.42`, in the administratively scoped range, and the default port
-is 7373. A deployment MAY configure another IPv4 multicast group and another
+`239.255.134.121`, in the administratively scoped range, and the default port
+is 15056. A deployment MAY configure another IPv4 multicast group and another
 nonzero port; every participant that is to hear the others uses the same
 pair.
 

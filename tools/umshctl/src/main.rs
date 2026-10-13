@@ -113,7 +113,7 @@ pub struct ToolArgs {
     /// The radio runs in this process with an identity of its own, and
     /// reaches the mesh through whichever radios on the LAN have their
     /// bearer enabled. The group needs the `=` form
-    /// (`--lan=239.255.42.42:7373`); bare `--lan` uses the default.
+    /// (`--lan=239.255.134.121:15056`); bare `--lan` uses the default.
     #[arg(
         long,
         value_name = "GROUP:PORT",

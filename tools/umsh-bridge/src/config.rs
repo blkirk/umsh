@@ -370,10 +370,10 @@ fn default_baud() -> u32 {
     115_200
 }
 fn default_udp_group() -> Ipv4Addr {
-    Ipv4Addr::new(239, 255, 42, 42)
+    umsh_ulcp::lan::DEFAULT_GROUP.into()
 }
 fn default_udp_port() -> u16 {
-    7373
+    umsh_ulcp::lan::DEFAULT_PORT
 }
 fn default_udp_rssi() -> i16 {
     -40

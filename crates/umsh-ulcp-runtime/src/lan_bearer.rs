@@ -34,6 +34,15 @@ use umsh_ulcp::stats::{Counter, StatsLedger};
 
 use crate::radio_mux::BridgePort;
 
+// The device's default (what PROP_LAN_BEARER_GROUP reports after a reset)
+// and the transport's must be the same group.
+const _: () = {
+    let [a, b, c, d] = umsh_ulcp::lan::DEFAULT_GROUP;
+    let [e, f, g, h] = umsh_lan_bearer::DEFAULT_GROUP;
+    assert!(a == e && b == f && c == g && d == h);
+    assert!(umsh_ulcp::lan::DEFAULT_PORT == umsh_lan_bearer::DEFAULT_PORT);
+};
+
 /// Datagrams waiting for the multiplexer. The node drains them as fast as
 /// it receives anything; a few absorb a burst while it is busy.
 const QUEUE: usize = 4;

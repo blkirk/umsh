@@ -835,8 +835,8 @@ impl CliConfig {
         let mut identity_path = PathBuf::from(".umsh/desktop-chat.identity");
         let mut skip_counter_load = false;
         let mut mode = Mode::Udp {
-            group: Ipv4Addr::new(239, 255, 42, 42),
-            port: 7373,
+            group: Ipv4Addr::from(umsh::ulcp_wire::lan::DEFAULT_GROUP),
+            port: umsh::ulcp_wire::lan::DEFAULT_PORT,
             peer: PublicKey([0u8; 32]),
         };
         let mut peer = None;

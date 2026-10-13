@@ -73,7 +73,7 @@ per datagram with no header. That carries everything the bearer needs:
 
 Today every instance binds the group port with `SO_REUSEPORT` and sends from
 that socket (`tokio_support.rs:211-219`). Co-located instances therefore send
-from an identical `address:7373`, and the radio falls back to dropping
+from an identical `address:15056`, and the radio falls back to dropping
 byte-for-byte copies of its last transmission (`tokio_support.rs:283-288`),
 which fails as soon as more than one frame is in flight.
 
@@ -206,7 +206,7 @@ the same wrapper with real storage, OS entropy, and persistent counters.
  LoRa X ── radio A ──┐                                ┌── radio B ── LoRa Y
      (export at decision, Bearer ingress)             │
                      ╞══════ LAN multicast group ═════╡
-                     │         239.255.42.42:7373      │
+                     │         239.255.134.121:15056      │
           desktop tools, bridge,           phone: Network Extension
           iOS Simulator (in-process)       (virtual companion radio)
                                                  │ ULCP / HDLC-Lite
@@ -379,8 +379,10 @@ Two things stay outside the chapter, following existing precedent:
 
 ### P2. Transport and datagram format
 
-- **Transport:** UDP over IPv4 multicast. Default group `239.255.42.42`,
-  default port 7373 (the values the fake radio and bridge already use). Senders
+- **Transport:** UDP over IPv4 multicast. Default group `239.255.134.121`,
+  default port 15056, both drawn at random (the port from an unassigned IANA block
+  below the common ephemeral ranges) so the group is unlikely to be shared by
+  anything else. Senders
   use a multicast TTL of 16; containment is left to the network's multicast
   routing and the group's administrative scope.
 - **Datagram:** exactly one frame, with no header. UMSH and MeshCore v1 frames
@@ -474,7 +476,7 @@ administrators. Numbers are tentative, chosen clear of the MeshCore block
 | Prop | Name | Type | Access | Notes |
 |---|---|---|---|---|
 | 4992 | `PROP_LAN_BEARER_ENABLED` | BOOL | Get/Set | Default false |
-| 4993 | `PROP_LAN_BEARER_GROUP` | Address and port | Get/Set | Default `239.255.42.42:7373` |
+| 4993 | `PROP_LAN_BEARER_GROUP` | Address and port | Get/Set | Default `239.255.134.121:15056` |
 | 4994 | `PROP_LAN_BEARER_INGRESS_LIMIT` | UINT16 | Get/Set | Frames per minute; zero invalid |
 | 4995 | `PROP_LAN_BEARER_STATE` | UINT8 | Get/Is | 0 Disabled, 1 Active, 2 No network |
 

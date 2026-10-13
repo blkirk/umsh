@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --example cli_udp --features cli -- \
 //!     --identity /tmp/alice.key \
-//!     [--group 239.0.0.1] [--port 7373] \
+//!     [--group 239.255.134.121] [--port 15056] \
 //!     [--peer <b58key>[:alias]] ...
 //!
 //! Two terminals with different `--identity` files share the same
@@ -167,8 +167,8 @@ struct Config {
 
 fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
     let mut identity: Option<PathBuf> = None;
-    let mut group = Ipv4Addr::new(239, 255, 42, 42);
-    let mut port: u16 = 7373;
+    let mut group = Ipv4Addr::from(umsh::ulcp_wire::lan::DEFAULT_GROUP);
+    let mut port = umsh::ulcp_wire::lan::DEFAULT_PORT;
     let mut peers = Vec::new();
 
     let mut it = args.into_iter();

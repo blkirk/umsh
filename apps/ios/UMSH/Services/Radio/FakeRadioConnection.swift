@@ -1523,7 +1523,7 @@ struct FakeManagedDevice: Sendable {
         values[id.bridgeServerKey] = Data()
         values[id.bridgeLink] = Data([0, 0])
         values[id.lanBearerEnabled] = Data([0])
-        values[id.lanBearerGroup] = Data([239, 255, 42, 42]) + UInt16(7373).littleEndianData
+        values[id.lanBearerGroup] = Data([239, 255, 134, 121]) + UInt16(15056).littleEndianData
         values[id.lanBearerIngressLimit] = UInt16(120).littleEndianData
         values[id.lanBearerState] = Data([0])
         // A real Ed25519 public key, so the identity codec and copy action

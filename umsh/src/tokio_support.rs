@@ -335,7 +335,7 @@ mod tests {
                 .expect("system time before unix epoch")
                 .subsec_nanos()
                 % 10_000) as u16;
-        let group = Ipv4Addr::new(239, 255, 42, 42);
+        let group = Ipv4Addr::new(239, 255, 134, 121);
 
         let mut left = UdpMulticastRadio::bind_v4(group, port).await.unwrap();
         let mut right = UdpMulticastRadio::bind_v4(group, port).await.unwrap();

@@ -12096,22 +12096,22 @@ mod tests {
         assert!(ulcp_dirty_writes(desired, ids).is_err());
 
         assert_eq!(
-            ulcp_lan_group(" 239.255.42.42:7373 ".into()).unwrap(),
-            "239.255.42.42:7373"
+            ulcp_lan_group(" 239.255.134.121:15056 ".into()).unwrap(),
+            "239.255.134.121:15056"
         );
-        assert!(ulcp_lan_group("239.255.42.42:0".into()).is_err());
-        assert!(ulcp_lan_group("239.255.42.42".into()).is_err());
+        assert!(ulcp_lan_group("239.255.134.121:0".into()).is_err());
+        assert!(ulcp_lan_group("239.255.134.121".into()).is_err());
 
         let actual = inspect_ulcp_properties(vec![
             response(prop::LAN_BEARER_ENABLED, &[1]),
-            response(prop::LAN_BEARER_GROUP, &[239, 255, 42, 42, 0xCD, 0x1C]),
+            response(prop::LAN_BEARER_GROUP, &[239, 255, 134, 121, 0xD0, 0x3A]),
             response(prop::LAN_BEARER_INGRESS_LIMIT, &120u16.to_le_bytes()),
             response(prop::LAN_BEARER_STATE, &[2]),
         ]);
         assert_eq!(actual.lan_bearer_enabled, Some(true));
         assert_eq!(
             actual.lan_bearer_group.as_deref(),
-            Some("239.255.42.42:7373")
+            Some("239.255.134.121:15056")
         );
         assert_eq!(actual.lan_bearer_ingress_limit, Some(120));
         assert_eq!(actual.lan_bearer_state, Some(2));

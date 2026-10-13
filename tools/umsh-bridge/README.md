@@ -301,7 +301,7 @@ Selected by `type`; each type accepts only its own keys.
 | --- | --- | --- |
 | `serial` | `port`, `baud` (default 115200) | A ULCP device on a serial port. |
 | `ble` | `selector` (optional) | A ULCP device over BLE. Without a selector the first radio discovered is used, which is only unambiguous where exactly one is in range—name the radio for an unattended deployment. |
-| `udp-multicast` | `group` (default 239.255.42.42), `port` (default 7373), `rssi` (default −40), `snr` (default 10) | The fake radio the workspace examples use. UDP measures no signal quality, so `rssi`/`snr` are synthesized for received frames. |
+| `udp-multicast` | `group` (default 239.255.134.121), `port` (default 15056), `rssi` (default −40), `snr` (default 10) | The fake radio the workspace examples use. UDP measures no signal quality, so `rssi`/`snr` are synthesized for received frames. |
 | `none` | — | No radio: a server that only joins clients together. Not valid for a client, which would then relay nothing. This is the default when the table is absent. |
 
 ### `[server.limits]`

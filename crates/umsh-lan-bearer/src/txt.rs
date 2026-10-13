@@ -193,7 +193,7 @@ mod tests {
 
     fn radio() -> Advertisement {
         Advertisement {
-            group: [239, 255, 42, 42],
+            group: [239, 255, 134, 121],
             node_key: [7; 32],
             lora: Some(LoraSettings {
                 freq_hz: 906_875_000,
@@ -212,7 +212,7 @@ mod tests {
         let advertisement = radio();
         let map = record(&advertisement);
         assert_eq!(map["v"], "1");
-        assert_eq!(map["grp"], "239.255.42.42");
+        assert_eq!(map["grp"], "239.255.134.121");
         assert_eq!(map["id"].len(), 44);
         assert_eq!(map["f"], "906875000");
         assert_eq!(map["rep"], "1");
@@ -260,10 +260,13 @@ mod tests {
 
     #[test]
     fn a_group_has_one_spelling() {
-        assert_eq!(parse_dotted_quad("239.255.42.42"), Some([239, 255, 42, 42]));
+        assert_eq!(
+            parse_dotted_quad("239.255.134.121"),
+            Some([239, 255, 134, 121])
+        );
         assert_eq!(parse_dotted_quad("239.255.042.42"), None);
         assert_eq!(parse_dotted_quad("239.255.42"), None);
-        assert_eq!(parse_dotted_quad("239.255.42.42.1"), None);
+        assert_eq!(parse_dotted_quad("239.255.134.121.1"), None);
         assert_eq!(parse_dotted_quad("239.255.42.256"), None);
     }
 }
