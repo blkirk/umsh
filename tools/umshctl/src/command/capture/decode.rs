@@ -473,6 +473,7 @@ fn option_chip(number: u16, value: &[u8]) -> String {
         OptionNumber::MinSnr if value.is_empty() => "min-snr=default".to_owned(),
         OptionNumber::MinSnr if value.len() == 1 => format!("min-snr={}", value[0] as i8),
         OptionNumber::RouteRetry if value.is_empty() => "retry".to_owned(),
+        OptionNumber::RouteRetry => format!("retry={}", hex_text(value)),
         OptionNumber::OperatorCallsign => format!("op={}", callsign_text(value)),
         OptionNumber::StationCallsign => format!("via={}", callsign_text(value)),
         // Either an unknown option or a known one carrying a malformed value.

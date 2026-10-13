@@ -104,7 +104,7 @@ fn route_retry_changes_authenticated_duplicate_key_without_changing_mic() {
     };
     let dst = NodeHint([0xAA, 0xBB, 0xCC]);
 
-    let build = |route_retry: bool| {
+    let build = |route_retry: Option<&[u8]>| {
         let mut buf = [0u8; 256];
         let builder = PacketBuilder::new(&mut buf)
             .unicast(dst)
@@ -113,10 +113,9 @@ fn route_retry_changes_authenticated_duplicate_key_without_changing_mic() {
             .encrypted()
             .mic_size(umsh_core::MicSize::Mic16)
             .option(OptionNumber::TraceRoute, &[]);
-        let builder = if route_retry {
-            builder.option(OptionNumber::RouteRetry, &[])
-        } else {
-            builder
+        let builder = match route_retry {
+            Some(value) => builder.option(OptionNumber::RouteRetry, value),
+            None => builder,
         };
         let mut packet = builder.payload(b"hello").build().unwrap();
         CryptoEngine::new(DummyAes, DummySha)
@@ -127,8 +126,8 @@ fn route_retry_changes_authenticated_duplicate_key_without_changing_mic() {
         stored
     };
 
-    let plain = build(false);
-    let retried = build(true);
+    let plain = build(None);
+    let retried = build(Some(&[]));
     let plain_header = PacketHeader::parse(plain.as_slice()).unwrap();
     let retried_header = PacketHeader::parse(retried.as_slice()).unwrap();
 
@@ -141,6 +140,12 @@ fn route_retry_changes_authenticated_duplicate_key_without_changing_mic() {
     let key_retried = duplicate_key_for_secure_frame(retried.as_slice());
 
     assert_ne!(key_plain, key_retried);
+    // A value on the option is reserved; it is still a retry.
+    let valued = build(Some(&[0x2A]));
+    assert_eq!(
+        duplicate_key_for_secure_frame(valued.as_slice()),
+        key_retried
+    );
 }
 
 #[test]
@@ -6962,6 +6967,13 @@ fn receive_one_repeater_counts_configured_region_refusal_as_policy_drop() {
 /// Whether a repeater with a default region flood-forwards a unicast
 /// carrying the given option.
 fn repeater_forwards_flood_with_option(number: OptionNumber, value: &[u8]) -> bool {
+    repeater_forward_of_flood_with_options(&[(number, value)]).is_some()
+}
+
+/// The frame a repeater queues for a flood carrying `options`, if any.
+fn repeater_forward_of_flood_with_options(
+    options: &[(OptionNumber, &[u8])],
+) -> Option<heapless::Vec<u8, 256>> {
     let mut mac = make_mac();
     mac.repeater_config_mut().enabled = true;
     mac.repeater_config_mut().default_region = Some([0x78, 0x53]);
@@ -6973,16 +6985,16 @@ fn repeater_forwards_flood_with_option(number: OptionNumber, value: &[u8]) -> bo
         k_mic: [2; 32],
     };
     let mut buf = [0u8; 256];
-    let mut packet = PacketBuilder::new(&mut buf)
+    let mut builder = PacketBuilder::new(&mut buf)
         .unicast(umsh_core::NodeHint([0x77, 0x66, 0x55]))
         .source_full(remote.public_key())
         .frame_counter(7)
         .encrypted()
-        .flood_hops(4)
-        .option(number, value)
-        .payload(b"hello")
-        .build()
-        .unwrap();
+        .flood_hops(4);
+    for (number, value) in options {
+        builder = builder.option(*number, value);
+    }
+    let mut packet = builder.payload(b"hello").build().unwrap();
     {
         packet.header().unwrap();
         packet.as_bytes_mut()[1] = FloodHops::new(4, 0).unwrap().0;
@@ -6993,7 +7005,36 @@ fn repeater_forwards_flood_with_option(number: OptionNumber, value: &[u8]) -> bo
 
     mac.radio_mut().queue_received_frame(packet.as_bytes());
     let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
-    mac.tx_queue_mut().pop_next().is_some()
+    let queued = mac.tx_queue_mut().pop_next()?;
+    let mut frame = heapless::Vec::new();
+    frame.extend_from_slice(queued.frame.as_slice()).unwrap();
+    Some(frame)
+}
+
+#[test]
+fn receive_one_repeater_refuses_repeated_critical_singletons_and_keeps_the_first_of_others() {
+    assert!(
+        repeater_forward_of_flood_with_options(&[
+            (OptionNumber::MinRssi, &[0xFF]),
+            (OptionNumber::MinRssi, &[0xFF]),
+        ])
+        .is_none()
+    );
+
+    let forwarded = repeater_forward_of_flood_with_options(&[
+        (OptionNumber::TraceRoute, &[0xA1, 0xA2]),
+        (OptionNumber::TraceRoute, &[0xB1, 0xB2]),
+    ])
+    .expect("a repeated trace route is forwarded");
+    let header = PacketHeader::parse(forwarded.as_slice()).unwrap();
+    let traces: heapless::Vec<heapless::Vec<u8, 16>, 4> =
+        umsh_core::iter_options(forwarded.as_slice(), header.options_range.clone())
+            .filter_map(Result::ok)
+            .filter(|(number, _)| OptionNumber::from(*number) == OptionNumber::TraceRoute)
+            .map(|(_, value)| heapless::Vec::from_slice(value).unwrap())
+            .collect();
+    assert_eq!(traces.len(), 1, "only the first occurrence is carried on");
+    assert_eq!(&traces[0][2..], &[0xA1, 0xA2]);
 }
 
 #[test]

@@ -5704,10 +5704,21 @@ impl<
         let mut inserted_region = false;
         let mut inserted_station = false;
         let mut saw_station = false;
+        let mut seen_singletons = 0u16;
 
         if !header.options_range.is_empty() {
             for entry in umsh_core::iter_options(src, header.options_range.clone()) {
                 let (number, value) = entry.map_err(|_| CapacityError)?;
+                // A repeated singleton was read from its first occurrence
+                // (a repeated critical one is never forwarded), so only
+                // that occurrence is carried on.
+                if OptionNumber::from(number).is_singleton() {
+                    let bit = 1u16 << number;
+                    if seen_singletons & bit != 0 {
+                        continue;
+                    }
+                    seen_singletons |= bit;
+                }
                 if !inserted_region {
                     if let Some(region_code) = plan.insert_region_code {
                         if number > OptionNumber::RegionCode.as_u16() {

@@ -56,7 +56,7 @@ This distinction allows forwarding-related metadata (source routes, trace routes
 ### Trace Route (option 2)
 - Semantics: if present, repeaters prepend their own repeater hint before retransmitting.
 - If absent, no trace-route information is added automatically.
-- If more than one option with this number is present, the packet MUST be dropped.
+- A sender MUST NOT include more than one. A receiver reads the first and ignores the rest, and a forwarder carries only the first.
 - Value layout: see [Trace Route Option Value](#trace-route-option-value).
 - If implemented, Trace Signal (option 10) **MUST** also be implemented.
 
@@ -65,7 +65,7 @@ This distinction allows forwarding-related metadata (source routes, trace routes
 
 ### Source Route (option 3)
 - Semantics: contains an ordered list of repeater hints designating the forwarding path.
-- If more than one option with this number is present, the packet MUST be dropped.
+- A sender MUST NOT include more than one. A packet carrying more than one is handled as carrying an unrecognized critical option.
 - Repeater behavior:
   - Only the repeater matching the first hint may forward the packet.
   - That repeater removes its own hint before retransmission.
@@ -83,16 +83,16 @@ This distinction allows forwarding-related metadata (source routes, trace routes
 
 ### Minimum RSSI (option 5)
 - Type: unsigned 1-byte integer, interpreted as a negative dBm value
-- If more than one option with this number is present, the packet MUST be dropped.
+- A sender MUST NOT include more than one. A packet carrying more than one is handled as carrying an unrecognized critical option.
 - Semantics: packet must be received with at least this RSSI to be flood-forwarded. This option does not apply to source-routed hops.
 - Example: value `130` means `-130 dBm`
 - If present with no value (length 0), default is `-100 dBm` (THIS VALUE IS SUBJECT TO CHANGE)
 - If a repeater has a locally configured minimum RSSI, it must use the higher of the packet's minimum RSSI threshold and the repeater's configured minimum RSSI threshold.
 
 ### Route Retry (option 6)
-- Type: zero-length flag
+- Type: flag. A sender includes it with no value; a receiver treats the option as present whatever its value, and a forwarder carries the value unchanged.
 - Semantics: indicates that the originator is re-attempting forwarding of the same logical packet after a route it had assumed was considered failed.
-- If more than one option with this number is present, the packet MUST be dropped.
+- A sender MUST NOT include more than one. A receiver reads the first and ignores the rest, and a forwarder carries only the first.
 - This option is intended for sender-originated route recovery, not for ordinary first transmission.
 - The failed assumption need not be a source route. A sender that narrowed `FHOPS` because it believed the destination was directly reachable, or reachable within a known flood distance, has made the same kind of assumption; nothing on the wire distinguishes that packet from an ordinary short-radius flood, and the recovery is the same.
 - When present, repeaters treat the packet as a distinct forwarding attempt for duplicate-suppression purposes even though the MIC and frame counter are unchanged.
@@ -131,10 +131,11 @@ Because the option sits in the plaintext options block, forwarders read it under
 - Type: signed 1-byte integer, in dB
 - Semantics: packet must be received with at least this SNR to be flood-forwarded. This option does not apply to source-routed hops.
 - If present with no value (length 0), default is `-3 dB`. (THIS VALUE IS SUBJECT TO CHANGE)
-- If more than one option with this number is present, the packet MUST be dropped.
+- A sender MUST NOT include more than one. A packet carrying more than one is handled as carrying an unrecognized critical option.
 - If a repeater has a locally configured minimum SNR, it must use the higher of the packet's minimum SNR and the repeater's configured minimum SNR.
 
 ### Trace Signal (option 10)
+- A sender MUST NOT include more than one. A receiver reads the first and ignores the rest, and a forwarder carries only the first.
 
 This option works very much like the Trace Route option, except that repeaters append signal quality information instead of router hints.
 

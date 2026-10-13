@@ -630,6 +630,19 @@ impl OptionNumber {
     pub fn is_dynamic(self) -> bool {
         self.as_u16() & 2 != 0
     }
+
+    /// Return whether a packet may carry at most one of the option.
+    pub fn is_singleton(self) -> bool {
+        matches!(
+            self,
+            Self::TraceRoute
+                | Self::SourceRoute
+                | Self::MinRssi
+                | Self::RouteRetry
+                | Self::MinSnr
+                | Self::TraceSignal
+        )
+    }
 }
 
 impl From<u16> for OptionNumber {
@@ -982,8 +995,9 @@ pub struct ParsedOptions {
     pub min_snr: Option<i8>,
     pub route_retry: bool,
     pub has_unknown_critical: bool,
-    /// A recognized critical option whose value is malformed. Forwarding
-    /// treats it like an unrecognized critical option.
+    /// A recognized critical option whose value is malformed, or a
+    /// critical singleton that appears more than once. Forwarding treats
+    /// it like an unrecognized critical option.
     pub has_malformed_critical: bool,
 }
 
@@ -995,6 +1009,10 @@ impl ParsedOptions {
         }
         let options = &buf[range.clone()];
         let mut decoder = OptionDecoder::new(options);
+        // Singletons already seen, by option number. A repeated critical
+        // singleton is ambiguous and refuses forwarding; a repeated
+        // non-critical one is read from its first occurrence.
+        let mut seen = 0u16;
         // Driven by hand rather than `for`: the value's offset comes from
         // the decoder's own position, which a `for` loop would move.
         #[allow(clippy::while_let_on_iterator)]
@@ -1004,7 +1022,18 @@ impl ParsedOptions {
             // it, so backing off its length is the value's start.
             let value_start = range.start + decoder.position() - value.len();
             let value_range = value_start..value_start + value.len();
-            match OptionNumber::from(number) {
+            let option = OptionNumber::from(number);
+            if option.is_singleton() {
+                let bit = 1u16 << number;
+                if seen & bit != 0 {
+                    if option.is_critical() {
+                        parsed.has_malformed_critical = true;
+                    }
+                    continue;
+                }
+                seen |= bit;
+            }
+            match option {
                 OptionNumber::RegionCode if value.len() == 2 => {
                     parsed.region_code = Some([value[0], value[1]]);
                 }
@@ -1012,7 +1041,9 @@ impl ParsedOptions {
                 OptionNumber::TraceRoute => parsed.trace_route = Some(value_range),
                 OptionNumber::TraceSignal => parsed.trace_signal = Some(value_range),
                 OptionNumber::SourceRoute => parsed.source_route = Some(value_range),
-                OptionNumber::RouteRetry if value.is_empty() => parsed.route_retry = true,
+                // A flag: its presence is the meaning. Senders send it
+                // empty; a value is reserved and does not hide the flag.
+                OptionNumber::RouteRetry => parsed.route_retry = true,
                 // Minimum RSSI (option 5): unsigned 1-byte value read as a
                 // negative dBm threshold (e.g. 130 → -130 dBm). A zero-length
                 // value selects the default threshold. Longer values are
@@ -1046,6 +1077,37 @@ impl ParsedOptions {
 mod parsed_options_tests {
     use super::*;
     use crate::options::OptionEncoder;
+
+    #[test]
+    fn route_retry_is_a_flag_whatever_its_value() {
+        // Option 6, length 1: a reserved value does not hide the flag.
+        let buf = [0x61u8, 0x2A];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert!(parsed.route_retry);
+        assert!(!parsed.has_malformed_critical);
+    }
+
+    #[test]
+    fn a_repeated_non_critical_singleton_is_read_from_its_first_occurrence() {
+        // Trace Route (2) twice: delta 2 then delta 0, two bytes each.
+        let buf = [0x22u8, 0xA1, 0xA2, 0x02, 0xB1, 0xB2];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert_eq!(parsed.trace_route, Some(1..3));
+        assert!(!parsed.has_malformed_critical);
+    }
+
+    #[test]
+    fn a_repeated_critical_singleton_refuses_forwarding() {
+        // Source Route (3) twice.
+        let buf = [0x32u8, 0xA1, 0xA2, 0x02, 0xB1, 0xB2];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert_eq!(parsed.source_route, Some(1..3));
+        assert!(parsed.has_malformed_critical);
+        // Region Code (11) is not a singleton: two are a list.
+        let buf = [0xB2u8, 0x78, 0x53, 0x02, 0x52, 0x42];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert!(!parsed.has_malformed_critical);
+    }
 
     #[test]
     fn min_rssi_one_byte_is_negated_dbm() {
