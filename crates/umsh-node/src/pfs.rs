@@ -27,6 +27,25 @@ const DEFAULT_MAX_PFS_SESSIONS: usize = 4;
 #[cfg(feature = "software-crypto")]
 const PFS_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
+/// The longest PFS session this node agrees to, in minutes.
+///
+/// A responder answers a longer request with this, and either side reads a
+/// duration of 0—which no node may send—as this rather than as a session
+/// that never ends. Forward secrecy holds only once the ephemeral keys are
+/// erased, so every session has an end.
+#[cfg(feature = "software-crypto")]
+pub(crate) const MAX_PFS_SESSION_MINUTES: u16 = 24 * 60;
+
+/// The lifetime this node holds a session to, given the duration a request
+/// or response named.
+#[cfg(feature = "software-crypto")]
+pub(crate) fn session_minutes(duration_minutes: u16) -> u16 {
+    match duration_minutes {
+        0 => MAX_PFS_SESSION_MINUTES,
+        minutes => minutes.min(MAX_PFS_SESSION_MINUTES),
+    }
+}
+
 #[cfg(feature = "software-crypto")]
 /// Lifecycle state for a PFS session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +149,7 @@ impl PfsSessionManager {
     ) -> Result<Option<SendReceipt>, NodeError<M>> {
         self.remove_existing(mac, peer).await?;
         self.ensure_capacity()?;
+        let duration_minutes = session_minutes(duration_minutes);
         let mut secret = [0u8; 32];
         mac.fill_random(&mut secret).await;
         let local_ephemeral = SoftwareIdentity::from_secret_bytes(&secret);
@@ -175,6 +195,9 @@ impl PfsSessionManager {
     ) -> Result<(), NodeError<M>> {
         self.remove_existing(mac, &peer_long_term).await?;
         self.ensure_capacity()?;
+        // The accepted lifetime is what the response carries, so both sides
+        // hold the session to the same one.
+        let duration_minutes = session_minutes(duration_minutes);
         let mut secret = [0u8; 32];
         mac.fill_random(&mut secret).await;
         let local_ephemeral = SoftwareIdentity::from_secret_bytes(&secret);
@@ -237,7 +260,7 @@ impl PfsSessionManager {
             parent,
             local_ephemeral,
             peer_ephemeral,
-            duration_minutes,
+            session_minutes(duration_minutes),
         )
         .await?;
         session.local_ephemeral_id = active.local_ephemeral_id;

@@ -702,6 +702,89 @@ mod tests {
         assert!(matches!(error, crate::NodeError::PfsSessionMissing));
     }
 
+    #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]
+    #[test]
+    fn pfs_responder_answers_with_a_finite_lifetime() {
+        use crate::pfs::{MAX_PFS_SESSION_MINUTES, PfsSessionManager};
+
+        // Zero, which no node may send, and a request past the ceiling both
+        // come back as the ceiling; anything else is accepted as asked.
+        for (requested, accepted) in [
+            (0u16, MAX_PFS_SESSION_MINUTES),
+            (u16::MAX, MAX_PFS_SESSION_MINUTES),
+            (45, 45),
+        ] {
+            let mac = FakeMac::new(vec![[3u8; 32]]);
+            let options = SendOptions::default();
+            let mut pfs = PfsSessionManager::new();
+            block_on_ready(pfs.accept_request(
+                &mac,
+                LocalIdentityId(1),
+                PublicKey([0x55; 32]),
+                PublicKey([0x44; 32]),
+                requested,
+                None,
+                &options,
+            ))
+            .unwrap();
+
+            let sent = mac.take_unicasts();
+            let OwnedMacCommand::PfsSessionResponse {
+                duration_minutes, ..
+            } = parse_owned_mac_command(&sent[0].payload)
+            else {
+                panic!("expected a PFS response");
+            };
+            assert_eq!(duration_minutes, accepted, "requested {requested}");
+            assert_eq!(
+                pfs.sessions()[0].expires_ms - mac.state.borrow().now_ms,
+                u64::from(accepted) * 60_000,
+                "requested {requested}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]
+    #[test]
+    fn pfs_zero_duration_never_means_forever() {
+        use crate::pfs::{MAX_PFS_SESSION_MINUTES, PfsSessionManager};
+
+        let mac = FakeMac::new(vec![[3u8; 32]]);
+        let peer = PublicKey([0x55; 32]);
+        let options = SendOptions::default();
+        let mut pfs = PfsSessionManager::new();
+
+        // The initiator never puts 0 on the wire.
+        block_on_ready(pfs.request_session(&mac, LocalIdentityId(1), &peer, 0, &options)).unwrap();
+        let sent = mac.take_unicasts();
+        assert!(matches!(
+            parse_owned_mac_command(&sent[0].payload),
+            OwnedMacCommand::PfsSessionRequest {
+                duration_minutes: MAX_PFS_SESSION_MINUTES,
+                ..
+            }
+        ));
+
+        // A response that names 0 anyway still yields a session that ends.
+        block_on_ready(pfs.accept_response(
+            &mac,
+            LocalIdentityId(1),
+            peer,
+            PublicKey([0x44; 32]),
+            0,
+        ))
+        .unwrap();
+        let expires_ms = pfs.sessions()[0].expires_ms;
+        assert_eq!(
+            expires_ms - mac.state.borrow().now_ms,
+            u64::from(MAX_PFS_SESSION_MINUTES) * 60_000
+        );
+        assert_eq!(
+            block_on_ready(pfs.expire_sessions(&mac, expires_ms)).unwrap(),
+            vec![peer]
+        );
+    }
+
     #[cfg(feature = "unsafe-advanced")]
     fn encode_text_payload(text: &str) -> Vec<u8> {
         let message = OwnedTextMessage::basic(text);

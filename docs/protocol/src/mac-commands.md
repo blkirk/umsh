@@ -190,7 +190,7 @@ Initiates a PFS session. The sender generates a fresh ephemeral node address and
 | Field | Size | Description |
 |---|---:|---|
 | Ephemeral node address | 32 bytes | Sender's newly generated ephemeral node address (Ed25519 public key) for this session |
-| Session duration | 2 bytes | Requested session lifetime in minutes (0 = no expiration) |
+| Session duration | 2 bytes | Requested session lifetime in minutes; MUST NOT be 0 |
 
 ## PFS Session Response (7)
 
@@ -199,7 +199,9 @@ Sent in response to a PFS Session Request. The responder generates its own ephem
 | Field | Size | Description |
 |---|---:|---|
 | Ephemeral node address | 32 bytes | Responder's newly generated ephemeral node address (Ed25519 public key) for this session |
-| Session duration | 2 bytes | Accepted session lifetime in minutes |
+| Session duration | 2 bytes | Accepted session lifetime in minutes; MUST NOT be 0 |
+
+The responder MAY accept a shorter lifetime than was requested, and both parties hold the session to the accepted one. A node that receives a duration of 0 treats it as a finite lifetime of its own choosing; a responder answers with that lifetime.
 
 ## End PFS Session (8)
 
