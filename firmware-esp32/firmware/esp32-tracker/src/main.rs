@@ -3147,8 +3147,14 @@ async fn main(spawner: Spawner) {
     // umsh-node and umsh-sync use `alloc`. The classic ESP32 has roughly
     // half the S3's data RAM and the BT controller takes a fixed bite out
     // of it before the application sees any, so its heap is smaller.
+    // Most of it goes in the bootloader's former arena, which is free once
+    // `main` runs and would otherwise sit unused; every byte left in the
+    // ordinary arena comes out of the main stack.
     #[cfg(all(feature = "chip-esp32s3", not(feature = "wifi")))]
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    {
+        esp_alloc::heap_allocator!(size: 8 * 1024);
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+    }
     #[cfg(feature = "wifi")]
     {
         // Both regions are internal RAM. The bootloader's former arena

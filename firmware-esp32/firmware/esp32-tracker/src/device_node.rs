@@ -44,6 +44,10 @@ type SessionInput = umsh_ulcp_runtime::driver::InputChannel<
 // does not fit there alongside the rest of the image. `ram(reclaimed)`
 // only admits `MaybeUninit` statics (the section is NOLOAD, so nothing
 // zero-initialized may claim it), which is exactly what the arena is.
+//
+// Boards with PSRAM keep it there instead (`external::node_mac_arena`),
+// which hands its ~33 KiB of internal RAM back to the main stack.
+#[cfg(not(feature = "psram"))]
 #[cfg_attr(feature = "chip-esp32", esp_hal::ram(reclaimed))]
 static mut NODE_MAC_ARENA: node::DeviceNodeMacArena<CounterStore> =
     core::mem::MaybeUninit::uninit();
@@ -169,9 +173,13 @@ pub async fn bring_up(
     let identity_secret = &identity_secret;
     set_device_name(&crate::device_name_snapshot().await);
     let hooks = hooks();
+    #[cfg(feature = "psram")]
+    let arena = crate::external::node_mac_arena();
+    // SAFETY: sole borrow; `bring_up` is called at most once.
+    #[cfg(not(feature = "psram"))]
+    let arena = unsafe { &mut *&raw mut NODE_MAC_ARENA };
     let parts = node::bring_up(
-        // SAFETY: sole borrow; `bring_up` is called at most once.
-        unsafe { &mut *&raw mut NODE_MAC_ARENA },
+        arena,
         identity_secret,
         node_seed,
         t_frame_ms,

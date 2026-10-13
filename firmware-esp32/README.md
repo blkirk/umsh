@@ -200,10 +200,12 @@ main stack minus a nested-call reserve: 20 KiB on T-Beam and the Heltec V3
 bridge image, 32 KiB on Pager, and 8 KiB on the standard Heltec image. These
 checks do not replace stack measurements under load.
 
-The Heltec V3 uses internal session storage and a 104 KiB internal heap. The
-T-Beam uses a 104 KiB internal heap (108 KiB without the MeshCore
-forwarder) and, with its default `psram` feature,
-explicit PSRAM storage for the protocol session and snapshot buffer. WiFi
+The Heltec V3 uses internal session storage. Its standard image has a 72 KiB
+internal heap (8 KiB ordinary plus 64 KiB reclaimed from the bootloader), and
+its bridge image a 104 KiB one. The T-Beam uses a 104 KiB internal heap
+(108 KiB without the MeshCore forwarder). With their default `psram` feature,
+the T-Beam and the Pager keep the protocol session, the snapshot buffer, and
+the device node's MAC in explicit PSRAM storage. WiFi
 does not require PSRAM as a feature dependency. Neither WiFi nor PSRAM is
 enabled in the standard Heltec build; WiFi is unsupported on the Heltec V2.
 

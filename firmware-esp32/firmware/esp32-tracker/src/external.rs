@@ -119,3 +119,13 @@ pub fn meshcore_storage(
         &mut *ptr
     }
 }
+
+pub fn node_mac_arena()
+-> &'static mut umsh_ulcp_runtime::device_node::DeviceNodeMacArena<super::NodeCounterStore> {
+    // The device node's MAC: peer and channel tables, crypto state, queues,
+    // and a radio adapter that holds only references to the internal mux
+    // channels, duty ledger, and reseed state. Borrow tracking is
+    // `RefCell`/`Cell`, with no atomics, and only executor tasks touch it.
+    // Left uninitialized: `MaybeUninit` by type, written once at bring-up.
+    unsafe { &mut *storage() }
+}
