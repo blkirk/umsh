@@ -5449,7 +5449,9 @@ impl<
         options: &ParsedOptions,
         rx: &RxInfo,
     ) -> Option<ForwardPlan> {
-        if options.has_unknown_critical {
+        // A critical option this node cannot interpret, whether unrecognized
+        // or malformed, may carry a restriction it cannot honor.
+        if options.has_unknown_critical || options.has_malformed_critical {
             return None;
         }
 

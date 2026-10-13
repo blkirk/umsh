@@ -6959,6 +6959,74 @@ fn receive_one_repeater_counts_configured_region_refusal_as_policy_drop() {
     assert_eq!(mac.counters().forward_dropped_policy, 1);
 }
 
+/// Whether a repeater with a default region flood-forwards a unicast
+/// carrying the given option.
+fn repeater_forwards_flood_with_option(number: OptionNumber, value: &[u8]) -> bool {
+    let mut mac = make_mac();
+    mac.repeater_config_mut().enabled = true;
+    mac.repeater_config_mut().default_region = Some([0x78, 0x53]);
+    let _repeater_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let mut buf = [0u8; 256];
+    let mut packet = PacketBuilder::new(&mut buf)
+        .unicast(umsh_core::NodeHint([0x77, 0x66, 0x55]))
+        .source_full(remote.public_key())
+        .frame_counter(7)
+        .encrypted()
+        .flood_hops(4)
+        .option(number, value)
+        .payload(b"hello")
+        .build()
+        .unwrap();
+    {
+        packet.header().unwrap();
+        packet.as_bytes_mut()[1] = FloodHops::new(4, 0).unwrap().0;
+    }
+    CryptoEngine::new(DummyAes, DummySha)
+        .seal_packet(&mut packet, &keys)
+        .unwrap();
+
+    mac.radio_mut().queue_received_frame(packet.as_bytes());
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    mac.tx_queue_mut().pop_next().is_some()
+}
+
+#[test]
+fn receive_one_repeater_does_not_forward_malformed_critical_options() {
+    // Well-formed controls: the same frames forward.
+    assert!(repeater_forwards_flood_with_option(
+        OptionNumber::RegionCode,
+        &[0x78, 0x53]
+    ));
+    assert!(repeater_forwards_flood_with_option(
+        OptionNumber::MinRssi,
+        &[0xFF]
+    ));
+    assert!(repeater_forwards_flood_with_option(
+        OptionNumber::MinSnr,
+        &[0x80]
+    ));
+
+    for (number, value) in [
+        (OptionNumber::RegionCode, &[][..]),
+        (OptionNumber::RegionCode, &[0x78][..]),
+        (OptionNumber::RegionCode, &[0x78, 0x53, 0x00][..]),
+        (OptionNumber::MinRssi, &[0x00, 0x82][..]),
+        (OptionNumber::MinSnr, &[0x00, 0xFD][..]),
+    ] {
+        assert!(
+            !repeater_forwards_flood_with_option(number, value),
+            "{number:?} with {} bytes must not be forwarded",
+            value.len()
+        );
+    }
+}
+
 #[test]
 fn receive_one_repeater_preserves_existing_region_without_inserting_another() {
     let mut mac = make_mac();

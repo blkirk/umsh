@@ -25,6 +25,8 @@ These determine behavior when a node encounters an unknown option:
 - **Critical** (bit 0 set): if unrecognized, the packet must be dropped
 - **Non-Critical** (bit 0 clear): if unrecognized, the option is ignored and the node continues processing
 
+A recognized critical option whose value the node cannot interpret, such as one of the wrong length, is handled as unrecognized.
+
 ## Dynamic vs. Static
 
 These determine whether an option is covered by the MIC:

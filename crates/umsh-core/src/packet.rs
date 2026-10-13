@@ -982,6 +982,9 @@ pub struct ParsedOptions {
     pub min_snr: Option<i8>,
     pub route_retry: bool,
     pub has_unknown_critical: bool,
+    /// A recognized critical option whose value is malformed. Forwarding
+    /// treats it like an unrecognized critical option.
+    pub has_malformed_critical: bool,
 }
 
 impl ParsedOptions {
@@ -1005,6 +1008,7 @@ impl ParsedOptions {
                 OptionNumber::RegionCode if value.len() == 2 => {
                     parsed.region_code = Some([value[0], value[1]]);
                 }
+                OptionNumber::RegionCode => parsed.has_malformed_critical = true,
                 OptionNumber::TraceRoute => parsed.trace_route = Some(value_range),
                 OptionNumber::TraceSignal => parsed.trace_signal = Some(value_range),
                 OptionNumber::SourceRoute => parsed.source_route = Some(value_range),
@@ -1012,7 +1016,7 @@ impl ParsedOptions {
                 // Minimum RSSI (option 5): unsigned 1-byte value read as a
                 // negative dBm threshold (e.g. 130 → -130 dBm). A zero-length
                 // value selects the default threshold. Longer values are
-                // malformed and ignored.
+                // malformed.
                 OptionNumber::MinRssi if value.len() <= 1 => {
                     parsed.min_rssi = Some(match value.first() {
                         Some(&byte) => -i16::from(byte),
@@ -1027,6 +1031,9 @@ impl ParsedOptions {
                         None => DEFAULT_MIN_SNR_DB,
                     });
                 }
+                OptionNumber::MinRssi | OptionNumber::MinSnr => {
+                    parsed.has_malformed_critical = true
+                }
                 OptionNumber::Unknown(raw) if raw & 1 != 0 => parsed.has_unknown_critical = true,
                 _ => {}
             }
@@ -1038,6 +1045,7 @@ impl ParsedOptions {
 #[cfg(test)]
 mod parsed_options_tests {
     use super::*;
+    use crate::options::OptionEncoder;
 
     #[test]
     fn min_rssi_one_byte_is_negated_dbm() {
@@ -1072,11 +1080,43 @@ mod parsed_options_tests {
     }
 
     #[test]
-    fn min_rssi_two_bytes_is_ignored() {
-        // Length 2 is malformed for Min RSSI; the option is ignored.
+    fn min_rssi_two_bytes_is_malformed() {
+        // Length 2 is malformed for Min RSSI.
         let buf = [0x52u8, 0x00, 0x82];
         let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
         assert_eq!(parsed.min_rssi, None);
+        assert!(parsed.has_malformed_critical);
+        assert!(!parsed.has_unknown_critical);
+    }
+
+    #[test]
+    fn min_snr_two_bytes_is_malformed() {
+        let buf = [0x92u8, 0x00, 0xFD];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert_eq!(parsed.min_snr, None);
+        assert!(parsed.has_malformed_critical);
+    }
+
+    #[test]
+    fn region_code_wrong_length_is_malformed() {
+        for len in [0usize, 1, 3] {
+            let mut buf = [0u8; 16];
+            let mut encoder = OptionEncoder::new(&mut buf);
+            encoder
+                .put(OptionNumber::RegionCode.as_u16(), &[0xAB; 3][..len])
+                .unwrap();
+            let used = encoder.finish();
+            let parsed = ParsedOptions::extract(&buf, 0..used).unwrap();
+            assert_eq!(parsed.region_code, None, "len {len}");
+            assert!(parsed.has_malformed_critical, "len {len}");
+        }
+    }
+
+    #[test]
+    fn well_formed_options_are_not_malformed() {
+        let buf = [0x51u8, 130, 0x41, 0xFD];
+        let parsed = ParsedOptions::extract(&buf, 0..buf.len()).unwrap();
+        assert!(!parsed.has_malformed_critical);
     }
 }
 
