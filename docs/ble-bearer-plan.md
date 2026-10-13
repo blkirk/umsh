@@ -624,12 +624,12 @@ tests use to stand up several nodes in one process.
 
 | Option | Overhead | What it takes |
 |---|---|---|
-| Company ID (Manufacturer Data) | 4 octets | A Bluetooth SIG assignment. `0xFFFF`, used in ULCP pairing advertising today, is for testing only and must not ship on the bearer. |
+| Company ID (Manufacturer Data) | 4 octets | A Bluetooth SIG assignment. ULCP pairing advertising uses the test ID `0xFFFF`, which is harmless there because hosts gate on the service UUID. On the bearer the company ID would be the only identifier, so `0xFFFF` cannot serve. |
 | 16-bit service UUID | 4 octets | A Bluetooth SIG assignment |
 | 128-bit Service Data, UUID base slot `0x0100` | 18 octets | Nothing. Many frames exceed one PDU. |
 
-- Recommendation: obtain a company ID, which also fixes the ULCP pairing
-  advertisement.
+- Recommendation: obtain a company ID. The ULCP pairing advertisement can
+  adopt it too, though nothing there depends on it.
 - Fallback: 128-bit Service Data until the assignment arrives. The `VER`
   field cannot paper over an identifier change, so whatever ships first is
   what interoperates.
