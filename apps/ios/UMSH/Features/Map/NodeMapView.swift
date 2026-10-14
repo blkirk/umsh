@@ -37,6 +37,7 @@ struct NodeMapView: View {
     /// store; the typed set is one initializer away and nothing else sees
     /// this number.
     @AppStorage("map.capabilities") private var capabilityFilterBits = 0
+    @AppStorage("map.recency") private var recencyFilter: MapRecencyFilter = .standard
     @State private var camera: MapCameraPosition = .automatic
     /// The map frames itself once. After that the camera belongs to the
     /// reader: an advertisement landing mid-pan must not yank the view.
@@ -71,27 +72,49 @@ struct NodeMapView: View {
         MeshNodeCapabilities(rawValue: UInt8(truncatingIfNeeded: capabilityFilterBits))
     }
 
-    private var nodes: [MapNode] {
-        MapNode.nodes(
-            peers: peers,
-            neighborReports: neighborReports,
-            tier: tierFilter,
-            capabilities: capabilityFilter
-        )
+    /// Whether anything other than the defaults is narrowing the map. The
+    /// default recency is not a filter the reader chose, so it is not one
+    /// to name or to clear.
+    private var isFiltered: Bool {
+        tierFilter != .all || !capabilityFilter.isEmpty || recencyFilter != .standard
     }
-
-    private var hasAnyLocations: Bool {
-        MapNode.anyLocations(peers: peers, neighborReports: neighborReports)
-    }
-
-    private var isFiltered: Bool { tierFilter != .all || !capabilityFilter.isEmpty }
 
     private var selfPosition: MapSelfPosition? {
         MapSelfPosition(radioPosition: radioSnapshot.position)
     }
 
     var body: some View {
-        let nodes = nodes
+        // One clock for the map and its list. The minute tick is what ages a
+        // quiet node off the map and keeps "51m ago" true: nothing else
+        // re-renders a quiet mesh. The timeline pauses off screen, so other
+        // tabs pay nothing.
+        TimelineView(.everyMinute) { context in
+            content(now: context.date)
+        }
+        // The map is the one screen that keeps asking: it draws the radio's
+        // marker and measures every row's distance from it. A radio with no
+        // receiver has nothing to answer with, so it is never asked.
+        .radioPositionPoll(
+            isNeeded: radioSnapshot.provisioning?.supportsGnss == true,
+            sample: refreshPosition
+        )
+        .navigationTitle("Map")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { filterMenu }
+        }
+    }
+
+    private func content(now: Date) -> some View {
+        let drawable = MapNode.nodes(peers: peers, neighborReports: neighborReports)
+        let nodes = drawable.filter {
+            $0.passes(
+                tier: tierFilter,
+                capabilities: capabilityFilter,
+                recency: recencyFilter,
+                now: now
+            )
+        }
 
         // The card is the content and the map is its background, rather than
         // the two being stacked. A `Map` gives up the safe area so it can
@@ -104,7 +127,7 @@ struct NodeMapView: View {
         // The reader supplies the card's ceiling: the card is what would
         // create an inset, so measuring the region from inside it would be
         // circular.
-        GeometryReader { proxy in
+        return GeometryReader { proxy in
             // The reader's child region stops at the floating tab bar; the
             // card opts past that boundary so its glass and its list run to
             // the screen's bottom edge, the way Find My's sheet does—rows
@@ -113,6 +136,8 @@ struct NodeMapView: View {
             let tabBar = proxy.safeAreaInsets.bottom
             card(
                 nodes: nodes,
+                hasAnyLocations: !drawable.isEmpty,
+                now: now,
                 availableHeight: proxy.size.height,
                 bottomInset: tabBar
             )
@@ -149,18 +174,6 @@ struct NodeMapView: View {
             let wasUnknown = viewport.mapSize == .zero
             viewport = newViewport
             if wasUnknown { frameNodesIfNeeded(nodes) }
-        }
-        // The map is the one screen that keeps asking: it draws the radio's
-        // marker and measures every row's distance from it. A radio with no
-        // receiver has nothing to answer with, so it is never asked.
-        .radioPositionPoll(
-            isNeeded: radioSnapshot.provisioning?.supportsGnss == true,
-            sample: refreshPosition
-        )
-        .navigationTitle("Map")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { filterMenu }
         }
         .onAppear {
             frameNodesIfNeeded(nodes)
@@ -222,6 +235,8 @@ struct NodeMapView: View {
 
     private func card(
         nodes: [MapNode],
+        hasAnyLocations: Bool,
+        now: Date,
         availableHeight: CGFloat,
         bottomInset: CGFloat
     ) -> some View {
@@ -235,12 +250,14 @@ struct NodeMapView: View {
         } content: {
             MapNodeListCard(
                 nodes: nodes,
+                now: now,
                 selectedNodeID: $selectedNodeID,
                 selfPosition: selfPosition,
                 hasAnyLocations: hasAnyLocations,
                 isFiltered: isFiltered,
                 isLoading: isLoading,
                 clearFilters: clearFilters,
+                showOlder: { recencyFilter = .any },
                 discoverPeers: discoverPeers,
                 openPeersList: openPeersList,
                 radioSnapshot: $radioSnapshot,
@@ -276,6 +293,7 @@ struct NodeMapView: View {
         if !capabilities.isEmpty {
             parts.append(capabilities.joined(separator: " or "))
         }
+        if recencyFilter != .standard { parts.append(recencyFilter.label) }
         return parts.joined(separator: " · ")
     }
 
@@ -285,6 +303,12 @@ struct NodeMapView: View {
         Menu {
             Picker("Show", selection: $tierFilter) {
                 ForEach(MapTierFilter.allCases) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+            .pickerStyle(.inline)
+            Picker("Heard", selection: $recencyFilter) {
+                ForEach(MapRecencyFilter.allCases) { filter in
                     Text(filter.label).tag(filter)
                 }
             }
@@ -347,6 +371,7 @@ struct NodeMapView: View {
     private func clearFilters() {
         tierFilter = .all
         capabilityFilterBits = 0
+        recencyFilter = .standard
     }
 
     // MARK: - Camera

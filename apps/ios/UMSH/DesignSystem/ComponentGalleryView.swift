@@ -202,10 +202,10 @@ struct MapCardGalleryExample: View {
                     Text("3 nodes").font(.headline)
                 } content: {
                     MapNodeListCard(
-                        nodes: nodes, selectedNodeID: $selectedNodeID,
+                        nodes: nodes, now: .now, selectedNodeID: $selectedNodeID,
                         selfPosition: MapSelfPosition(radioPosition: StagingScenario.radioSnapshot.position),
                         hasAnyLocations: true, isFiltered: false,
-                        clearFilters: {}, discoverPeers: {}, openPeersList: {},
+                        clearFilters: {}, showOlder: {}, discoverPeers: {}, openPeersList: {},
                         radioSnapshot: .constant(.idle), conversations: .constant([]),
                         updateDraft: nil, sendMessage: nil
                     )
@@ -239,7 +239,9 @@ struct MapCardGalleryExample: View {
             reportedBy: reporter,
             latitude: 38.91, longitude: -120.1, cellMeters: 38.2,
             reportedAt: Date.now.addingTimeInterval(-locationAge),
-            lastHeard: Date.now.addingTimeInterval(-300), isAttributable: true
+            lastHeard: Date.now.addingTimeInterval(-300),
+            heardAsOf: Date.now.addingTimeInterval(-300),
+            capabilities: .repeater, isAttributable: true
         )
     }
 }

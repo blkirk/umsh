@@ -758,6 +758,7 @@ final class AppRuntime {
             address: advertisement.peerAddress,
             payload: advertisement.payload
         ), advertisement.isTrustworthy(given: identity.signature) else { return }
+        let heardAt = Date()
         do {
             try await applicationStore.upsertPeer(
                 ownerIdentityID: localIdentity.id,
@@ -768,9 +769,10 @@ final class AppRuntime {
                 // bundle so the recorded role tracks the node.
                 nodeKind: PeerRole(roleCode: identity.roleCode).rawValue,
                 advertisement: advertisement.payload,
-                advertisementAuthenticated: advertisement.sourceAuthenticated
+                advertisementAuthenticated: advertisement.sourceAuthenticated,
+                advertisementReceivedAt: heardAt
             )
-            await touchLastHeard(advertisement.peerAddress)
+            await touchLastHeard(advertisement.peerAddress, at: heardAt)
             // An over-the-air row lands in the transient tier, which stays
             // bounded: oldest-heard evictable transients drop past the cap.
             try await applicationStore.enforceTransientRetention(

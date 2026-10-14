@@ -42,6 +42,7 @@ struct ApplicationStateLoader {
                 storedRole: stored.nodeKind.flatMap(PeerRole.init(rawValue:)) ?? .unknown,
                 advertisedIdentity: advertisedIdentity,
                 advertisedIdentityAuthenticated: stored.advertisementAuthenticated,
+                advertisedIdentityReceivedAt: stored.advertisementReceivedAt,
                 lastHeard: stored.lastHeardAt,
                 isSaved: stored.isSaved,
                 isFavorite: stored.isFavorite,

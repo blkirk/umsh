@@ -17,6 +17,9 @@ struct PeerSummary: Identifiable, Hashable, Sendable {
     /// Whether the MAC authenticated the frame that delivered
     /// `advertisedIdentity`. See `advertisedIdentityIsAttributable`.
     var advertisedIdentityAuthenticated: Bool = false
+    /// When this phone heard `advertisedIdentity` off the air. `nil` for an
+    /// imported bundle, whose arrival says nothing about how current it is.
+    var advertisedIdentityReceivedAt: Date? = nil
     /// When we last heard from this peer by any means—beacon, advertisement,
     /// inbound message, delivery ack, or ping reply. `nil` until the first
     /// evidence.

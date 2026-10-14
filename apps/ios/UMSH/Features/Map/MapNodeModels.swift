@@ -43,6 +43,14 @@ struct MapNode: Identifiable, Hashable {
     /// When the node was last heard—by this phone for its own pins, by the
     /// reporting router for reported ones.
     let lastHeard: Date?
+    /// What the recency filter measures: `lastHeard`, except that a router
+    /// that gave no figure at least had the node in its table when it
+    /// answered. `nil` when nothing places the node on the air at all—a
+    /// node only ever imported, or one the router last heard "long ago".
+    let heardAsOf: Date?
+    /// What the node says it can do, for the capability filter. A router
+    /// lists only repeaters, so a reported neighbor is one.
+    let capabilities: MeshNodeCapabilities
     /// Whether the claims may be attributed to this node at all. A location
     /// that nothing authenticated is one any nearby transmitter could have
     /// written. A router's report is authenticated to the router, and the
@@ -67,6 +75,62 @@ struct MapNode: Identifiable, Hashable {
     func distance(from origin: CLLocationCoordinate2D) -> CLLocationDistance {
         CLLocation(latitude: latitude, longitude: longitude)
             .distance(from: CLLocation(latitude: origin.latitude, longitude: origin.longitude))
+    }
+
+    /// Whether the filters admit this pin. Any one selected capability is
+    /// enough.
+    func passes(
+        tier: MapTierFilter,
+        capabilities wanted: MeshNodeCapabilities,
+        recency: MapRecencyFilter,
+        now: Date
+    ) -> Bool {
+        tier.includes(peer)
+            && (wanted.isEmpty || !wanted.isDisjoint(with: capabilities))
+            && recency.admits(heardAsOf, now: now)
+    }
+}
+
+/// How recently a node must have been heard to be on the map.
+///
+/// A position is only worth drawing while something says the node is still
+/// there; one that has gone quiet for days marks where it was, not where it
+/// is. The narrow default keeps the map about the mesh as it stands, and
+/// the wider choices are there for finding where a node was last seen.
+enum MapRecencyFilter: String, CaseIterable, Identifiable {
+    case hour
+    case day
+    case week
+    case any
+
+    static let standard: Self = .day
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .hour: "Past hour"
+        case .day: "Past day"
+        case .week: "Past week"
+        case .any: "Any time"
+        }
+    }
+
+    private var window: TimeInterval? {
+        switch self {
+        case .hour: 3_600
+        case .day: 86_400
+        case .week: 7 * 86_400
+        case .any: nil
+        }
+    }
+
+    /// Whether a node last heard at `heard` counts. A node never heard
+    /// counts only when any age does.
+    func admits(_ heard: Date?, now: Date) -> Bool {
+        guard let window else { return true }
+        guard let heard else { return false }
+        return now.timeIntervalSince(heard) <= window
     }
 }
 
@@ -154,8 +218,7 @@ struct MapSelfPosition: Equatable {
 }
 
 extension MapNode {
-    /// The one statement of what "has somewhere to be drawn" means, shared by
-    /// the derivation and the emptiness probe so the two cannot drift.
+    /// Where a node says it is, from its own identity.
     ///
     /// The companion radio is left out: it is on the map already as the
     /// operator's own position, and drawing it twice would put two markers on
@@ -171,32 +234,17 @@ extension MapNode {
         return (identity, latitude, longitude)
     }
 
-    /// Whether anything has a location at all, filters aside—what tells an
-    /// empty mesh apart from an over-narrow filter, without deriving and
-    /// sorting the whole array to ask.
-    static func anyLocations(
-        peers: [PeerSummary],
-        neighborReports: [PeerRepeaterNeighborReport]
-    ) -> Bool {
-        peers.contains { location(of: $0) != nil }
-            || neighborReports.contains { $0.neighbor.hasLocation }
-    }
-
-    /// Every node the filters admit that has somewhere to be drawn: nodes
-    /// that placed themselves, then neighbors routers placed that no node
-    /// has placed already.
+    /// Every node that has somewhere to be drawn, filters aside: nodes that
+    /// placed themselves, then neighbors routers placed that no node has
+    /// placed already. Filtering is a second step (``passes``), so the
+    /// unfiltered set is also what tells an empty mesh from an over-narrow
+    /// filter—one derivation, with nothing to drift from it.
     static func nodes(
         peers: [PeerSummary],
-        neighborReports: [PeerRepeaterNeighborReport],
-        tier: MapTierFilter,
-        capabilities: MeshNodeCapabilities
+        neighborReports: [PeerRepeaterNeighborReport]
     ) -> [MapNode] {
         var nodes: [MapNode] = peers.compactMap { peer -> MapNode? in
-            guard let (identity, latitude, longitude) = location(of: peer),
-                  tier.includes(peer),
-                  capabilities.isEmpty
-                      || !capabilities.isDisjoint(with: identity.capabilityBits)
-            else { return nil }
+            guard let (identity, latitude, longitude) = location(of: peer) else { return nil }
             return MapNode(
                 id: .peer(peer.id),
                 peer: peer,
@@ -211,18 +259,16 @@ extension MapNode {
                 reportedAt: identity.timestamp
                     .map { Date(timeIntervalSince1970: TimeInterval($0)) },
                 lastHeard: peer.lastHeard,
+                heardAsOf: peer.lastHeard,
+                capabilities: identity.capabilityBits,
                 isAttributable: peer.advertisedIdentityIsAttributable
             )
         }
-        // Filters aside: a node that could place itself is not also placed
-        // by a router, whether or not the current filter shows it.
-        let selfPlaced = Set(peers.filter { location(of: $0) != nil }.map(\.id))
+        let selfPlaced = Set(nodes.compactMap(\.peer?.id))
         nodes.append(contentsOf: reportedNodes(
             neighborReports,
             peers: peers,
-            selfPlaced: selfPlaced,
-            tier: tier,
-            capabilities: capabilities
+            selfPlaced: selfPlaced
         ))
         // A stable order, so annotation identity survives a reload and the
         // markers do not shuffle when an unrelated node is heard.
@@ -230,21 +276,23 @@ extension MapNode {
     }
 
     /// Pins for neighbors routers have placed. One pin per hint, from the
-    /// freshest report; none for a neighbor that turns out to be a node
-    /// with its own position, or the companion radio, which is the self
+    /// freshest report—which, when it carries no position, means none: the
+    /// router heard the node say less than it once did.
+    ///
+    /// None, either, for a neighbor this phone has heard speak for itself
+    /// since the router answered. A router's position is a copy of what the
+    /// node advertised; the node's own later advertisement is newer than
+    /// anything the router could have known, and one that names no position
+    /// is not overruled by an older copy that does. Likewise none for a node
+    /// with its own position, or for the companion radio, which is the self
     /// marker already.
     private static func reportedNodes(
         _ reports: [PeerRepeaterNeighborReport],
         peers: [PeerSummary],
-        selfPlaced: Set<Int64>,
-        tier: MapTierFilter,
-        capabilities: MeshNodeCapabilities
+        selfPlaced: Set<Int64>
     ) -> [MapNode] {
-        // Neighbors are repeaters by definition, so the capability filter
-        // admits them when it names that or names nothing.
-        guard capabilities.isEmpty || capabilities.contains(.repeater) else { return [] }
         var freshest: [Data: PeerRepeaterNeighborReport] = [:]
-        for report in reports where report.neighbor.hasLocation {
+        for report in reports {
             if let held = freshest[report.neighbor.hint],
                held.neighbor.reportedAt >= report.neighbor.reportedAt
             {
@@ -258,10 +306,14 @@ extension MapNode {
                 return nil
             }
             let resolved = neighbor.resolve(among: peers)
-            if let resolved, selfPlaced.contains(resolved.id) || resolved.isUlcpDevice {
-                return nil
+            if let resolved {
+                if selfPlaced.contains(resolved.id) || resolved.isUlcpDevice { return nil }
+                if let heard = resolved.advertisedIdentityReceivedAt,
+                   heard > neighbor.reportedAt
+                {
+                    return nil
+                }
             }
-            guard tier.includes(resolved) else { return nil }
             return MapNode(
                 id: .neighbor(hint: neighbor.hint),
                 peer: resolved,
@@ -275,6 +327,10 @@ extension MapNode {
                     .flatMap { LocationPresentation.cellMeters(precisionBytes: $0) },
                 reportedAt: neighbor.reportedAt,
                 lastHeard: neighbor.lastHeardAt,
+                heardAsOf: neighbor.lastHeardMinutes == nil
+                    ? neighbor.reportedAt
+                    : neighbor.lastHeardAt,
+                capabilities: .repeater,
                 isAttributable: true
             )
         }

@@ -266,6 +266,7 @@ struct StagingSeeder {
 
     private func writePeers(_ resolved: [ResolvedNode], now: Date) async throws {
         for entry in resolved {
+            let heardAt = now.addingTimeInterval(-Double(entry.node.lastHeardMinutesAgo) * 60)
             try await store.upsertPeer(
                 ownerIdentityID: ownerIdentityID,
                 publicAddress: entry.address,
@@ -277,12 +278,15 @@ struct StagingSeeder {
                 // The bundle carries a signature that verifies, so this only
                 // has to be true for the unsigned case; set it anyway so the
                 // row states what a MAC-authenticated arrival would have.
-                advertisementAuthenticated: true
+                advertisementAuthenticated: true,
+                // Staged as heard, so it dates the bundle the way an
+                // over-the-air arrival would.
+                advertisementReceivedAt: heardAt
             )
             try await store.touchLastHeard(
                 ownerIdentityID: ownerIdentityID,
                 publicAddress: entry.address,
-                at: now.addingTimeInterval(-Double(entry.node.lastHeardMinutesAgo) * 60)
+                at: heardAt
             )
             if entry.node.isFavorite {
                 try await store.setPeerFavorite(

@@ -5,14 +5,19 @@ import SwiftUI
 /// the order they are nearest.
 struct MapNodeListCard: View {
     let nodes: [MapNode]
+    /// The map's clock tick, which the row ages are measured against.
+    let now: Date
     @Binding var selectedNodeID: MapNodeID?
     let selfPosition: MapSelfPosition?
     /// Whether any node at all reported a location, regardless of filters—
     /// the difference between an empty mesh and an empty filter.
     let hasAnyLocations: Bool
+    /// Whether the reader narrowed the map past its defaults.
     let isFiltered: Bool
     var isLoading = false
     let clearFilters: () -> Void
+    /// Widen the map to nodes heard at any time.
+    let showOlder: () -> Void
     let discoverPeers: () -> Void
     let openPeersList: () -> Void
 
@@ -35,27 +40,21 @@ struct MapNodeListCard: View {
                 emptyState
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // The minute tick is what keeps "51m ago" true: nothing else
-                // re-renders a quiet mesh, and a relative time composed once
-                // is frozen at whenever the last advertisement landed. The
-                // timeline pauses off screen, so other tabs pay nothing.
-                TimelineView(.everyMinute) { context in
-                    ScrollViewReader { scroll in
-                        List(orderedNodes) { node in
-                            row(node, now: context.date)
-                                .id(node.id)
-                                .listRowBackground(
-                                    node.id == selectedNodeID
-                                        ? Color.accentColor.opacity(0.12)
-                                        : Color.clear
-                                )
-                        }
-                        .listStyle(.plain)
-                        .scrollContentBackground(.hidden)
-                        .onChange(of: selectedNodeID) { _, selected in
-                            guard let selected else { return }
-                            withAnimation { scroll.scrollTo(selected, anchor: .top) }
-                        }
+                ScrollViewReader { scroll in
+                    List(orderedNodes) { node in
+                        row(node, now: now)
+                            .id(node.id)
+                            .listRowBackground(
+                                node.id == selectedNodeID
+                                    ? Color.accentColor.opacity(0.12)
+                                    : Color.clear
+                            )
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .onChange(of: selectedNodeID) { _, selected in
+                        guard let selected else { return }
+                        withAnimation { scroll.scrollTo(selected, anchor: .top) }
                     }
                 }
             }
@@ -167,7 +166,7 @@ struct MapNodeListCard: View {
     /// all: the bundle's own timestamp is not when it was added, and nothing
     /// records that.
     ///
-    /// `now` is the enclosing timeline's tick—and the reason this is a
+    /// `now` is the map's timeline tick—and the reason this is a
     /// `RelativeDateTimeFormatter` rather than the `.relative` format style
     /// used elsewhere in the app: only the formatter takes a reference date.
     private func subtitle(_ node: MapNode, now: Date) -> String? {
@@ -221,6 +220,15 @@ struct MapNodeListCard: View {
                 Text("Nodes have reported locations, but none of them pass the current filters.")
             } actions: {
                 Button("Clear filters", action: clearFilters)
+                    .buttonStyle(.borderedProminent)
+            }
+        } else if hasAnyLocations {
+            // Unfiltered and still empty: only the default recency is
+            // holding the nodes back, and clearing filters would not help.
+            ContentUnavailableView {
+                Label("No recent locations", systemImage: "clock")
+            } actions: {
+                Button("Show older", action: showOlder)
                     .buttonStyle(.borderedProminent)
             }
         } else {

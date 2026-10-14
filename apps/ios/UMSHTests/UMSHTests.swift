@@ -403,6 +403,159 @@ struct ManualPathTests {
     }
 }
 
+@Suite @MainActor
+struct AdvertisementArrivalTests {
+    @Test func arrivalMovesWithTheBundleItDates() async throws {
+        let fixture = try await StoreFixture()
+        defer { fixture.remove() }
+        let owner = fixture.identity.id
+        let address = fixture.identity.publicIdentity.canonicalAddress
+        let heard = Date(timeIntervalSince1970: 1_800_000_000)
+        func stored() async throws -> StoredNode? {
+            try await fixture.store.listNodes(ownerIdentityID: owner).first
+        }
+
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: nil, advertisement: Data([1]), advertisementReceivedAt: heard)
+        #expect(try await stored()?.advertisementReceivedAt == heard)
+
+        // A write that carries no bundle says nothing about the one held.
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: "Renamed")
+        #expect(try await stored()?.advertisementReceivedAt == heard)
+
+        // An imported bundle replaces it, and has no arrival to date it by.
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: nil, advertisement: Data([2]))
+        #expect(try await stored()?.advertisementReceivedAt == nil)
+    }
+
+    /// The conversation columns are read after the node's; a node column
+    /// added in the middle must not shift them.
+    @Test func conversationColumnsFollowTheNodeColumns() async throws {
+        let fixture = try await StoreFixture()
+        defer { fixture.remove() }
+        let owner = fixture.identity.id
+        let address = fixture.identity.publicIdentity.canonicalAddress
+        try await fixture.store.upsertPeer(ownerIdentityID: owner, publicAddress: address,
+            alias: "Peer", isSaved: true, advertisement: Data([1]),
+            advertisementReceivedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let id = try await fixture.store.ensureDirectConversation(ownerIdentityID: owner,
+            peerAddress: address)
+        try await fixture.store.updateDraft(ownerIdentityID: owner, conversationID: id, text: "Draft")
+        let conversation = try #require(
+            try await fixture.store.listDirectConversations(ownerIdentityID: owner).first)
+        #expect(conversation.node.alias == "Peer")
+        #expect(conversation.node.advertisementReceivedAt != nil)
+        #expect(conversation.draftText == "Draft")
+        #expect(conversation.notificationsEnabled)
+    }
+}
+
+@Suite
+struct MapNodeTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private let hint = Data([0xA1, 0xB2, 0xC3])
+
+    private func peer(id: Int64, ownAdvertisementAt: Date? = nil, heard: Date? = nil) -> PeerSummary {
+        PeerSummary(
+            id: id,
+            identity: MeshPublicIdentity(
+                canonicalAddress: "node-\(id)",
+                hint: MeshNodeHint(bytes: id == 1 ? hint : Data([0, 0, UInt8(id)]), text: "N\(id)")
+            ),
+            alias: nil, advertisedName: nil, systemRole: nil, storedRole: .repeater,
+            advertisedIdentityReceivedAt: ownAdvertisementAt,
+            lastHeard: heard
+        )
+    }
+
+    private func report(
+        by reporter: PeerSummary,
+        at reportedAt: Date,
+        minutesAgo: UInt16? = 5,
+        placed: Bool = true
+    ) -> PeerRepeaterNeighborReport {
+        PeerRepeaterNeighborReport(
+            reporter: reporter,
+            neighbor: PeerRepeaterNeighbor(
+                hint: hint, hintText: "A1B2C3", name: "Ridge", rssiDBm: -90, snrQuarterDB: 20,
+                lastHeardMinutes: minutesAgo,
+                latitude: placed ? 38.9 : nil, longitude: placed ? -120.1 : nil,
+                locationPrecision: nil, regionCodes: [], reportedAt: reportedAt
+            )
+        )
+    }
+
+    @Test func recencyWindowsAdmitWhatWasHeardWithinThem() {
+        let twoDaysAgo = now.addingTimeInterval(-2 * 86_400)
+        #expect(MapRecencyFilter.day.admits(now.addingTimeInterval(-3_600), now: now))
+        #expect(!MapRecencyFilter.day.admits(twoDaysAgo, now: now))
+        #expect(MapRecencyFilter.week.admits(twoDaysAgo, now: now))
+        #expect(MapRecencyFilter.any.admits(twoDaysAgo, now: now))
+        // Never heard counts only when any age does.
+        #expect(!MapRecencyFilter.week.admits(nil, now: now))
+        #expect(MapRecencyFilter.any.admits(nil, now: now))
+    }
+
+    @Test func aRouterPlacesANodeThatHasNotSpokenSinceItAnswered() {
+        let router = peer(id: 2)
+        let neighbor = peer(id: 1, ownAdvertisementAt: now.addingTimeInterval(-7_200))
+        let nodes = MapNode.nodes(
+            peers: [neighbor, router],
+            neighborReports: [report(by: router, at: now.addingTimeInterval(-3_600))]
+        )
+        #expect(nodes.map(\.id) == [.neighbor(hint: hint)])
+        #expect(nodes.first?.peer?.id == 1)
+    }
+
+    /// The node advertised after the router answered, and named no position:
+    /// the router's older copy does not put one back.
+    @Test func theNodesOwnLaterAdvertisementOverrulesTheRouter() {
+        let router = peer(id: 2)
+        let neighbor = peer(id: 1, ownAdvertisementAt: now.addingTimeInterval(-60))
+        let nodes = MapNode.nodes(
+            peers: [neighbor, router],
+            neighborReports: [report(by: router, at: now.addingTimeInterval(-3_600))]
+        )
+        #expect(nodes.isEmpty)
+    }
+
+    @Test func theFreshestReportDecidesEvenWhenItNamesNoPosition() {
+        let first = peer(id: 2)
+        let second = peer(id: 3)
+        let nodes = MapNode.nodes(
+            peers: [first, second],
+            neighborReports: [
+                report(by: first, at: now.addingTimeInterval(-7_200)),
+                report(by: second, at: now.addingTimeInterval(-60), placed: false),
+            ]
+        )
+        #expect(nodes.isEmpty)
+    }
+
+    @Test func aReportAgesByWhenTheRouterLastHeardTheNode() throws {
+        let router = peer(id: 2)
+        func reported(minutesAgo: UInt16?) throws -> MapNode {
+            try #require(MapNode.nodes(
+                peers: [router],
+                neighborReports: [report(by: router, at: now, minutesAgo: minutesAgo)]
+            ).first)
+        }
+        // Two days before the router answered.
+        let quiet = try reported(minutesAgo: 2_880)
+        #expect(!quiet.passes(tier: .all, capabilities: [], recency: .day, now: now))
+        #expect(quiet.passes(tier: .all, capabilities: [], recency: .week, now: now))
+        // No figure: the router still had it when it answered.
+        let unknown = try reported(minutesAgo: nil)
+        #expect(unknown.passes(tier: .all, capabilities: [], recency: .hour, now: now))
+        // The saturated figure is "long ago", older than any window.
+        let longAgo = try reported(minutesAgo: .max)
+        #expect(!longAgo.passes(tier: .all, capabilities: [], recency: .week, now: now))
+        #expect(longAgo.passes(tier: .all, capabilities: [], recency: .any, now: now))
+    }
+}
+
 private struct StoreFixture {
     let url: URL
     let store: SQLiteApplicationStore

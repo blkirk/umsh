@@ -80,6 +80,9 @@ struct StoredNode: Equatable, Sendable {
     /// next time anything is heard from it, then disarm. Cleared by the same
     /// write that records the hearing, so the notice fires exactly once.
     let notifyWhenHeard: Bool
+    /// When `advertisement` was heard off the air. `nil` for a bundle that
+    /// was imported: nothing about how it arrived dates what it says.
+    let advertisementReceivedAt: Date?
 }
 
 /// What a remote device said it is, kept between openings of its settings.
@@ -496,7 +499,7 @@ actor SQLiteApplicationStore {
     /// store refuses to open any database above this constant, so a stale value
     /// lets the new schema apply once and then locks the user out of their own
     /// data on the next launch. ``migrate(_:)`` checks the two agree.
-    static let currentSchemaVersion: Int32 = 24
+    static let currentSchemaVersion: Int32 = 25
 
     nonisolated(unsafe) private let database: OpaquePointer
 
@@ -752,15 +755,17 @@ actor SQLiteApplicationStore {
         systemRole: String? = nil,
         radioIdentifier: String? = nil,
         advertisement: Data? = nil,
-        advertisementAuthenticated: Bool = false
+        advertisementAuthenticated: Bool = false,
+        advertisementReceivedAt: Date? = nil
     ) throws {
         let statement = try prepare(
             """
             INSERT INTO node (
                 owner_identity_id, public_address, alias, alias_search,
                 advertised_name, is_saved, system_role, radio_identifier,
-                node_kind, advertisement, advertisement_authenticated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                node_kind, advertisement, advertisement_authenticated,
+                advertisement_received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_identity_id, public_address) DO UPDATE SET
                 alias = COALESCE(excluded.alias, node.alias),
                 alias_search = CASE WHEN excluded.alias IS NULL
@@ -776,10 +781,13 @@ actor SQLiteApplicationStore {
                 advertisement = COALESCE(excluded.advertisement, node.advertisement),
                 -- Provenance belongs to the bundle it describes, so it moves
                 -- only when the bundle does. A call that carries no
-                -- advertisement leaves both untouched.
+                -- advertisement leaves all three untouched.
                 advertisement_authenticated = CASE WHEN excluded.advertisement IS NULL
                     THEN node.advertisement_authenticated
-                    ELSE excluded.advertisement_authenticated END
+                    ELSE excluded.advertisement_authenticated END,
+                advertisement_received_at = CASE WHEN excluded.advertisement IS NULL
+                    THEN node.advertisement_received_at
+                    ELSE excluded.advertisement_received_at END
             """
         )
         defer { sqlite3_finalize(statement) }
@@ -794,6 +802,11 @@ actor SQLiteApplicationStore {
         try bindOptional(nodeKind, to: statement, at: 9)
         try bindOptional(advertisement, to: statement, at: 10)
         try check(sqlite3_bind_int(statement, 11, advertisementAuthenticated ? 1 : 0))
+        try bindOptionalDouble(
+            advertisementReceivedAt?.timeIntervalSince1970,
+            to: statement,
+            at: 12
+        )
         try stepDone(statement)
     }
 
@@ -2005,10 +2018,7 @@ actor SQLiteApplicationStore {
     func listNodes(ownerIdentityID: String) throws -> [StoredNode] {
         let statement = try prepare(
             """
-            SELECT id, owner_identity_id, public_address, alias, advertised_name,
-                   system_role, node_kind, advertisement,
-                   advertisement_authenticated, last_heard_at,
-                   is_saved, is_favorite, on_dev_identity, notify_when_heard
+            SELECT \(Self.nodeColumns(prefix: ""))
             FROM node WHERE owner_identity_id = ?
             ORDER BY (system_role IS NOT NULL) DESC, alias_search, id
             """
@@ -2116,11 +2126,7 @@ actor SQLiteApplicationStore {
     func listDirectConversations(ownerIdentityID: String) throws -> [StoredDirectConversation] {
         let statement = try prepare(
             """
-            SELECT c.id, n.id, n.owner_identity_id, n.public_address, n.alias,
-                   n.advertised_name, n.system_role, n.node_kind,
-                   n.advertisement, n.advertisement_authenticated, n.last_heard_at,
-                   n.is_saved, n.is_favorite, n.on_dev_identity,
-                   n.notify_when_heard,
+            SELECT c.id, \(Self.nodeColumns(prefix: "n.")),
                    c.draft_text, c.last_read_at_ms, c.created_at_ms,
                    c.notifications_enabled,
                    \(Self.conversationTailColumns(
@@ -2141,15 +2147,17 @@ actor SQLiteApplicationStore {
         while true {
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
-                let tail = Self.conversationTail(statement, at: 19)
+                // The conversation's own columns follow the node's.
+                let own = 1 + Self.nodeColumnCount
+                let tail = Self.conversationTail(statement, at: own + 4)
                 conversations.append(
                     StoredDirectConversation(
                         id: sqlite3_column_int64(statement, 0),
                         node: storedNode(statement, offset: 1),
-                        draftText: Self.stringColumn(statement, at: 15),
-                        lastReadAtMilliseconds: sqlite3_column_int64(statement, 16),
-                        createdAtMilliseconds: sqlite3_column_int64(statement, 17),
-                        notificationsEnabled: sqlite3_column_int(statement, 18) != 0,
+                        draftText: Self.stringColumn(statement, at: own),
+                        lastReadAtMilliseconds: sqlite3_column_int64(statement, own + 1),
+                        createdAtMilliseconds: sqlite3_column_int64(statement, own + 2),
+                        notificationsEnabled: sqlite3_column_int(statement, own + 3) != 0,
                         lastMessage: tail.lastMessage,
                         unreadCount: tail.unreadCount
                     )
@@ -3520,6 +3528,20 @@ actor SQLiteApplicationStore {
         }
     }
 
+    /// The node columns, in the order `storedNode` reads them.
+    private static let nodeColumnNames = [
+        "id", "owner_identity_id", "public_address", "alias", "advertised_name",
+        "system_role", "node_kind", "advertisement", "advertisement_authenticated",
+        "last_heard_at", "is_saved", "is_favorite", "on_dev_identity", "notify_when_heard",
+        "advertisement_received_at",
+    ]
+
+    private static let nodeColumnCount = Int32(nodeColumnNames.count)
+
+    private static func nodeColumns(prefix: String) -> String {
+        nodeColumnNames.map { prefix + $0 }.joined(separator: ", ")
+    }
+
     private func storedNode(_ statement: OpaquePointer, offset: Int32 = 0) -> StoredNode {
         StoredNode(
             id: sqlite3_column_int64(statement, offset),
@@ -3535,7 +3557,8 @@ actor SQLiteApplicationStore {
             isSaved: sqlite3_column_int(statement, offset + 10) != 0,
             isFavorite: sqlite3_column_int(statement, offset + 11) != 0,
             onDeviceIdentity: sqlite3_column_int(statement, offset + 12) != 0,
-            notifyWhenHeard: sqlite3_column_int(statement, offset + 13) != 0
+            notifyWhenHeard: sqlite3_column_int(statement, offset + 13) != 0,
+            advertisementReceivedAt: Self.optionalDateColumn(statement, at: offset + 14)
         )
     }
 
@@ -5011,6 +5034,27 @@ actor SQLiteApplicationStore {
                         ADD COLUMN flood_hops INTEGER NOT NULL DEFAULT 1;
 
                     PRAGMA user_version = 24;
+                    """
+                )
+                try execute(database, sql: "COMMIT")
+            } catch {
+                try? execute(database, sql: "ROLLBACK")
+                throw error
+            }
+        }
+
+        if version < 25 {
+            try execute(database, sql: "BEGIN IMMEDIATE")
+            do {
+                // When the stored advertisement was heard. Bundles stored
+                // before this have no arrival on record, the same as an
+                // imported one.
+                try execute(
+                    database,
+                    sql: """
+                    ALTER TABLE node ADD COLUMN advertisement_received_at REAL;
+
+                    PRAGMA user_version = 25;
                     """
                 )
                 try execute(database, sql: "COMMIT")
