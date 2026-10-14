@@ -36,12 +36,11 @@ extension MapCardDetent {
 /// while the map is open. So the card lives in the tab's own layout, its
 /// glass running under the floating tab bar to the screen's bottom edge.
 ///
-/// The drag follows Find My's rule for who owns a vertical swipe: while the
-/// card is collapsed, the card does—the list cannot scroll at peek or
-/// half, so pulling anywhere on the card moves the card. At tall the list
-/// takes the vertical axis back for scrolling and the grabber and header
-/// remain the card's drag surface. Horizontal swipes are never claimed, so
-/// row swipe actions keep working.
+/// A vertical swipe on the list scrolls the list, at every height: a list
+/// that will only scroll once the card is pulled all the way up makes every
+/// look past the first few rows cost a resize. The grabber and header are
+/// the card's drag surface. Horizontal swipes are never claimed, so row
+/// swipe actions keep working.
 struct MapBottomCard<Header: View, Content: View>: View {
     @Binding var detent: MapCardDetent
     /// How tall the card is allowed to get—the height of the region it is
@@ -94,11 +93,6 @@ struct MapBottomCard<Header: View, Content: View>: View {
 
             content()
                 .frame(maxHeight: .infinity, alignment: .top)
-                // Collapsed, the vertical axis belongs to the card; the
-                // list scrolls only at tall. Without this the two fight
-                // over every swipe and the loser is whoever the reader
-                // expected to win.
-                .scrollDisabled(detent != .tall)
                 // Margins rather than padding: scrollable content may run
                 // under the tab bar—that is the point—but it has to be
                 // able to scroll back out.
@@ -113,11 +107,9 @@ struct MapBottomCard<Header: View, Content: View>: View {
             in: UnevenRoundedRectangle(topLeadingRadius: 16, topTrailingRadius: 16)
         )
         .shadow(color: .black.opacity(0.15), radius: 8, y: -2)
+        // A touch anywhere on the card belongs to the card, never to the
+        // map behind it.
         .contentShape(.rect)
-        // At tall this card-wide gesture stands down (`.subviews`) so the
-        // list can scroll; the header's copy of the gesture is a subview's,
-        // so the grabber still drags from anywhere the card can be.
-        .gesture(dragGesture, including: detent == .tall ? .subviews : .all)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: detent)
     }
 
