@@ -39,10 +39,6 @@ use umsh_ulcp_runtime::lan_bearer::LanPort;
 /// The bearer's port into the radio multiplexer.
 pub static PORT: LanPort<CriticalSectionRawMutex> = LanPort::new(Some(&super::STATS));
 
-/// How often the address is checked while waiting for one, or while
-/// holding one. The stack has no change notification to wait on.
-const NETWORK_POLL_MS: u64 = 250;
-
 /// The mDNS group and port (RFC 6762).
 const MDNS_GROUP: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
@@ -196,12 +192,22 @@ fn address(stack: Stack<'_>) -> Option<Ipv4Address> {
     stack.config_v4().map(|config| config.address.address())
 }
 
-/// Return once the address is no longer `address`: lost with the link,
-/// or replaced.
-async fn address_changes(stack: Stack<'_>, address: Ipv4Address) {
-    while self::address(stack) == Some(address) {
-        Timer::after_millis(NETWORK_POLL_MS).await;
-    }
+/// Return once the station may have an address: a link with an IPv4
+/// configuration. These images carry no IPv6, so a configuration is an
+/// IPv4 one.
+async fn network_up(stack: Stack<'_>) {
+    stack.wait_link_up().await;
+    stack.wait_config_up().await;
+}
+
+/// Return once the address is lost, with the link or the configuration.
+///
+/// A lease renewed onto a different address without the configuration
+/// going down first is not seen until the next loss; the group
+/// membership is the interface's, so only echo suppression, which
+/// nothing depends on, keeps the old address meanwhile.
+async fn network_down(stack: Stack<'_>) {
+    select(stack.wait_link_down(), stack.wait_config_down()).await;
 }
 
 /// Publish `state` if it differs from what was last published.
@@ -236,7 +242,7 @@ pub async fn run(stack: Stack<'static>) -> ! {
         let group = Ipv4Address::from(config.group().address);
         let Some(address) = address(stack) else {
             report(&mut published, State::NoNetwork).await;
-            select(CONFIG_CHANGED.wait(), Timer::after_millis(NETWORK_POLL_MS)).await;
+            select(CONFIG_CHANGED.wait(), network_up(stack)).await;
             continue;
         };
 
@@ -261,7 +267,7 @@ pub async fn run(stack: Stack<'static>) -> ! {
             drop(socket);
             let _ = stack.leave_multicast_group(group);
             report(&mut published, State::NoNetwork).await;
-            select(CONFIG_CHANGED.wait(), address_changes(stack, address)).await;
+            select(CONFIG_CHANGED.wait(), network_down(stack)).await;
             continue;
         }
         // The record is a courtesy to browsers; the bearer runs without it.
@@ -282,7 +288,7 @@ pub async fn run(stack: Stack<'static>) -> ! {
         let destination = IpEndpoint::new(IpAddress::Ipv4(group), config.group().port);
         select4(
             CONFIG_CHANGED.wait(),
-            address_changes(stack, address),
+            network_down(stack),
             join(
                 receive(
                     &socket,
