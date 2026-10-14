@@ -3906,6 +3906,10 @@ mod firmware {
             firmware_version: env!("GIT_DESCRIBE"),
             device_name: core::str::from_utf8(name).unwrap_or(DEFAULT_DEVICE_NAME),
             settings: ui_settings(),
+            #[cfg(feature = "cap-gnss")]
+            gnss_fix: umsh_ulcp_runtime::gnss::has_fix(),
+            #[cfg(not(feature = "cap-gnss"))]
+            gnss_fix: false,
             identity: identity.model(),
             battery: ui_battery(),
             battery_mv: ui_battery_mv(),
@@ -4007,6 +4011,16 @@ mod firmware {
         #[cfg(feature = "cap-battery-saadc")]
         board_power::BATTERY_UI_CHANGED.wait().await;
         #[cfg(not(feature = "cap-battery-saadc"))]
+        core::future::pending::<()>().await
+    }
+
+    /// Completes when the receiver gains or loses a fix, so the panel can
+    /// redraw its position glyph. Never completes on a board without GNSS.
+    #[cfg(feature = "has-display")]
+    async fn gnss_ui_changed() {
+        #[cfg(feature = "cap-gnss")]
+        umsh_ulcp_runtime::gnss::fix_ui_changed().await;
+        #[cfg(not(feature = "cap-gnss"))]
         core::future::pending::<()>().await
     }
 
@@ -4260,8 +4274,9 @@ mod firmware {
                     UI_REFRESH.wait(),
                     UI_NOTICE.wait(),
                     UI_ALERT_CHANGED.wait(),
-                    select(
+                    select3(
                         battery_ui_changed(),
+                        gnss_ui_changed(),
                         display_tick(attention.accepts_redraw(), None),
                     ),
                 ),
@@ -4356,13 +4371,14 @@ mod firmware {
                                 redraw = false;
                             }
                         }
-                        // A battery sample and a minute boundary are the
-                        // two things here nobody asked for, so they
-                        // redraw without counting as attention—waking
-                        // on either would reset the lapse timer forever.
-                        // The panel is bistable and already showing the
-                        // old reading, so the redraw is a partial refresh
-                        // of the indicator or the clock and little else.
+                        // A battery sample, a fix edge, and a minute
+                        // boundary are the things here nobody asked for,
+                        // so they redraw without counting as attention—
+                        // waking on any would reset the lapse timer
+                        // forever. The panel is bistable and already
+                        // showing the old reading, so the redraw is a
+                        // partial refresh of an indicator or the clock and
+                        // little else.
                         Either4::Fourth(_) => {}
                     }
                 }
@@ -4855,7 +4871,7 @@ mod firmware {
                     // to the model, so they share an arm.
                     select3(
                         UI_REFRESH.wait(),
-                        battery_ui_changed(),
+                        select(battery_ui_changed(), gnss_ui_changed()),
                         display_tick(
                             attention.accepts_redraw(),
                             if splash.is_active() {
@@ -4926,9 +4942,9 @@ mod firmware {
                         model.clear_notice();
                         redraw = true;
                     }
-                    // A battery sample and a minute boundary both move
-                    // content without touching the model.
-                    Either4::First(Either3::Second(()) | Either3::Third(())) => redraw = true,
+                    // A battery sample, a fix edge, and a minute boundary
+                    // all move content without touching the model.
+                    Either4::First(Either3::Second(_) | Either3::Third(())) => redraw = true,
                     Either4::Second(notice) => {
                         model.set_notice(notice);
                         transition = attention.wake(Instant::now().as_millis()).or(transition);

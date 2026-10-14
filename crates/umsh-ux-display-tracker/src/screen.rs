@@ -469,6 +469,10 @@ pub struct StatusModel<'a> {
     pub clock: Option<ClockModel>,
     /// The values behind the toggle entries.
     pub settings: SettingsModel,
+    /// Whether the GNSS receiver holds a position fix. Read only while
+    /// [`SettingsModel::gnss`] is on, where it picks between the header's
+    /// searching and fixed position glyphs.
+    pub gnss_fix: bool,
     /// This device's own address, for the Status and Identity screens.
     pub identity: Option<IdentityModel<'a>>,
 }
@@ -1369,7 +1373,8 @@ where
                 .filter(|wifi| wifi.enabled)
                 .map(|wifi| StatusWidget::Wifi(wifi.state)),
         )
-        .chain(bluetooth_widget(status));
+        .chain(bluetooth_widget(status))
+        .chain(gnss_widget(status));
     let left = draw_status_widgets(target, layout, widgets);
     let room = (left - layout.left).max(0) as u32;
     draw_row(target, layout, 0, clip(layout, status.device_name, room));
@@ -1382,6 +1387,13 @@ pub enum StatusWidget {
     Battery(BatteryIndicator),
     Wifi(WifiState),
     Bluetooth { connected: bool, highlighted: bool },
+    Gnss { fixed: bool },
+}
+
+fn gnss_widget(status: &StatusModel<'_>) -> Option<StatusWidget> {
+    (status.settings.gnss == Some(true)).then_some(StatusWidget::Gnss {
+        fixed: status.gnss_fix,
+    })
 }
 
 fn bluetooth_widget(status: &StatusModel<'_>) -> Option<StatusWidget> {
@@ -1421,6 +1433,7 @@ where
             StatusWidget::Wifi(WifiState::Off) => continue,
             StatusWidget::Wifi(_) => Size::new(11 * scale, 8 * scale),
             StatusWidget::Bluetooth { .. } => Size::new(9 * scale, 9 * scale),
+            StatusWidget::Gnss { .. } => Size::new(9 * scale, 9 * scale),
         };
         let left = right - size.width as i32;
         if left < layout.left {
@@ -1440,6 +1453,7 @@ where
                 connected,
                 highlighted,
             } => draw_bluetooth_icon(target, at, scale, connected, highlighted),
+            StatusWidget::Gnss { fixed } => draw_gnss_icon(target, at, scale, fixed),
         }
         right = left - layout.battery.spacing as i32;
     }
@@ -1476,6 +1490,50 @@ where
                 BinaryColor::Off
             }))
             .draw(target);
+        }
+    }
+}
+
+fn draw_gnss_icon<D>(target: &mut D, at: Point, scale: u32, fixed: bool)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    // Crosshairs, closing on a center block once the receiver holds a fix.
+    let rows: [u16; 9] = if fixed {
+        [
+            0b000010000,
+            0b001111100,
+            0b010010010,
+            0b010111010,
+            0b111111111,
+            0b010111010,
+            0b010010010,
+            0b001111100,
+            0b000010000,
+        ]
+    } else {
+        [
+            0b000010000,
+            0b001111100,
+            0b010010010,
+            0b010000010,
+            0b111000111,
+            0b010000010,
+            0b010010010,
+            0b001111100,
+            0b000010000,
+        ]
+    };
+    for (y, row) in rows.iter().enumerate() {
+        for x in 0..9 {
+            if row & (1 << (8 - x)) != 0 {
+                let _ = Rectangle::new(
+                    at + Point::new(x * scale as i32, y as i32 * scale as i32),
+                    Size::new(scale, scale),
+                )
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(target);
+            }
         }
     }
 }
@@ -2139,6 +2197,58 @@ mod tests {
     }
 
     #[test]
+    fn gnss_glyph_follows_the_receiver_switch_and_its_fix() {
+        for layout in layouts() {
+            let mut status = demo_status();
+            status.device_name = "";
+            let mut off = TestPanel::new(layout.size);
+            draw_header(&mut off, &layout, &status);
+            // A fix reading means nothing while the receiver is off.
+            status.gnss_fix = true;
+            let mut off_fixed = TestPanel::new(layout.size);
+            draw_header(&mut off_fixed, &layout, &status);
+            assert_eq!(off.pixels, off_fixed.pixels);
+            for enabled in [None, Some(false)] {
+                status.settings.gnss = enabled;
+                assert!(gnss_widget(&status).is_none());
+            }
+
+            status.settings.gnss = Some(true);
+            status.gnss_fix = false;
+            let mut searching = TestPanel::new(layout.size);
+            draw_header(&mut searching, &layout, &status);
+            status.gnss_fix = true;
+            let mut fixed = TestPanel::new(layout.size);
+            draw_header(&mut fixed, &layout, &status);
+            assert_ne!(off.pixels, searching.pixels);
+            assert_ne!(searching.pixels, fixed.pixels);
+
+            // The glyph sits left of Bluetooth and leaves everything to its
+            // right untouched.
+            let edge = layout.size.width as i32 - layout.battery.margin as i32;
+            let scale = (layout.battery.body.height / 8).max(1);
+            let bluetooth_left = edge
+                - (layout.battery.occupied_width(status.battery)
+                    + layout.battery.spacing
+                    + 9 * scale) as i32;
+            for point in Rectangle::new(
+                Point::new(bluetooth_left, 0),
+                Size::new(
+                    (layout.size.width as i32 - bluetooth_left) as u32,
+                    layout.font.character_size.height + layout.top as u32,
+                ),
+            )
+            .points()
+            {
+                assert_eq!(
+                    fixed.lit(point.x as u32, point.y as u32),
+                    off.lit(point.x as u32, point.y as u32)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pairing_animation_stops_when_the_icon_is_absent() {
         let mut status = demo_status();
         let mut model = UiModel::new(MenuItems::all());
@@ -2301,6 +2411,7 @@ mod tests {
                 share_location: Some(false),
                 forwarding: Some(true),
             },
+            gnss_fix: false,
             identity: Some(IdentityModel {
                 hint: "7bQ*",
                 address: "1BvYtT4nCJmqvKGpZbW8XdRfLhNs2eQaUxAyDzMr6HkP",

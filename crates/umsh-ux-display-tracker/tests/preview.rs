@@ -184,6 +184,7 @@ fn status(
             share_location: Some(false),
             forwarding: Some(true),
         },
+        gnss_fix: false,
         identity: Some(IdentityModel {
             hint: "7bQ*",
             address: "1BvYtT4nCJmqvKGpZbW8XdRfLhNs2eQaUxAyDzMr6HkP",
@@ -277,18 +278,21 @@ fn frames(layout: &Layout) -> Vec<Panel> {
         });
     }
 
-    // Pairing closed, attached to a phone.
+    // Pairing closed, attached to a phone, holding a GNSS fix.
     push(&|p| {
         render_frame(
             p,
             layout,
             &UiModel::new(MenuItems::all()),
-            &status(
-                Some(60),
-                Some(ChargeClass::Discharging),
-                PairingState::Closed,
-                LinkState::Attached,
-            ),
+            &StatusModel {
+                gnss_fix: true,
+                ..status(
+                    Some(60),
+                    Some(ChargeClass::Discharging),
+                    PairingState::Closed,
+                    LinkState::Attached,
+                )
+            },
         )
     });
 

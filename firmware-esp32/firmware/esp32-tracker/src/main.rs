@@ -2268,6 +2268,10 @@ fn ui_status<'a>(name: &'a DeviceName, identity: &'a IdentityText) -> screen::St
             share_location: Some(umsh_ulcp_runtime::gnss::policy().update_identity),
             forwarding: Some(device_node::repeater_enabled()),
         },
+        #[cfg(feature = "gnss")]
+        gnss_fix: umsh_ulcp_runtime::gnss::has_fix(),
+        #[cfg(not(feature = "gnss"))]
+        gnss_fix: false,
         identity: identity.model(),
         battery,
         battery_mv: (mv != 0).then_some(mv),
@@ -2337,6 +2341,15 @@ async fn render_message(
 ) {
     screen::render_message(display, &DISPLAY_LAYOUT, status, title, detail);
     let _ = display.flush().await;
+}
+
+/// Completes when the receiver gains or loses a fix, so the panel can
+/// redraw its position glyph. Never completes on a board without GNSS.
+async fn gnss_ui_changed() {
+    #[cfg(feature = "gnss")]
+    umsh_ulcp_runtime::gnss::fix_ui_changed().await;
+    #[cfg(not(feature = "gnss"))]
+    core::future::pending::<()>().await
 }
 
 /// Redraw an awake panel at the next clock or pairing animation boundary.
@@ -2498,7 +2511,7 @@ async fn display_task(
                 // model, so they share an arm.
                 select3(
                     UI_REFRESH.wait(),
-                    BATTERY_UI_CHANGED.wait(),
+                    select(BATTERY_UI_CHANGED.wait(), gnss_ui_changed()),
                     display_tick(
                         attention.accepts_redraw(),
                         if splash.is_active() {

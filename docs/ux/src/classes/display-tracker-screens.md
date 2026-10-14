@@ -94,7 +94,8 @@ crossed fan means disconnected. Turning WiFi off removes its icon. The icon
 describes the WiFi link, not Internet or bridge availability. Only visible
 indicators consume width: an absent battery body or charging bolt leaves no
 reserved slot, and the remaining icons shift right. Bluetooth sits to the left
-of WiFi, or beside the power indicators when WiFi is off. Lower-priority
+of WiFi, or beside the power indicators when WiFi is off, and the position
+glyph sits to the left of whichever of those is showing. Lower-priority
 widgets are omitted if they cannot fit.
 
 ### The right-hand column
@@ -309,10 +310,11 @@ states are precisely what explains a phone that cannot find the device or a
 check-in with no coordinates in it. A glyph the user can turn off is not
 chrome.
 
-Where the panel can distinguish two forms of the position glyph, use them for
-searching versus holding a fix. That is an honest distinction and the one a
-user waiting on a position actually wants. A board that cannot draw two forms
-shows the one glyph for enabled and says the rest on the Status screen.
+The position glyph is a crosshair in two forms: an open center while the
+receiver is searching, a filled center once it holds a fix. That is an honest
+distinction and the one a user waiting on a position actually wants. Its form
+changes only when a fix is gained or lost, so an e-paper panel refreshes it no
+more often than that.
 
 The Bluetooth symbol gains side dots when a host is connected, including when
 its session is attached. During an open pairing window, emissive panels blink

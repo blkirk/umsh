@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
 use umsh_gnss::{Fix, FixQuality};
 use umsh_hal::wall_clock::{self, TimeSource, Update};
@@ -88,6 +89,12 @@ const ENABLE_RECEIVERS: usize = 1;
 /// this second's satellite count against last second's position.
 static SNAPSHOT: CriticalSectionMutex<Cell<GnssSnapshot>> =
     CriticalSectionMutex::new(Cell::new(GnssSnapshot::SEARCHING));
+
+/// Raised when [`has_fix`] changes, so a panel can redraw its position
+/// glyph. A `Signal` because the one display task re-reads [`has_fix`]
+/// whenever it draws: a missed intermediate edge changes nothing on
+/// screen.
+static FIX_UI_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// `PROP_GNSS_ENABLED`, as the pump sees it.
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -138,6 +145,33 @@ pub fn snapshot() -> GnssSnapshot {
     SNAPSHOT.lock(|cell| cell.get())
 }
 
+/// Whether the receiver holds a position solution.
+pub fn has_fix() -> bool {
+    is_fix(&snapshot())
+}
+
+/// Complete when [`has_fix`] changes.
+///
+/// Single-caller: the board's display task. Only the edge between
+/// searching and fixed raises it; a 2D–3D change is not something the
+/// panel draws.
+pub async fn fix_ui_changed() {
+    FIX_UI_CHANGED.wait().await;
+}
+
+fn is_fix(snapshot: &GnssSnapshot) -> bool {
+    snapshot.fix != umsh_ulcp::gnss::FixKind::None
+}
+
+/// Replace the cached snapshot, returning the one it displaced.
+fn store(current: GnssSnapshot) -> GnssSnapshot {
+    let previous = SNAPSHOT.lock(|cell| cell.replace(current));
+    if is_fix(&previous) != is_fix(&current) {
+        FIX_UI_CHANGED.signal(());
+    }
+    previous
+}
+
 /// A handle on the publication stream, held by whatever drives the ULCP
 /// session's announcement arm.
 pub type Announcer =
@@ -163,7 +197,7 @@ pub fn announcer() -> Option<Announcer> {
 /// claim the operator made, or one they froze by switching auto-update
 /// off, and it lives on the session either way.
 pub fn clear() {
-    SNAPSHOT.lock(|cell| cell.set(GnssSnapshot::SEARCHING));
+    store(GnssSnapshot::SEARCHING);
     offer(None);
     publish(Announce::Gnss(prop::GNSS_FIX, GnssSnapshot::SEARCHING));
 }
@@ -247,10 +281,9 @@ pub fn absorb(fix: &Fix, policy: Policy) -> Outcome {
     let mut outcome = Outcome::default();
 
     // ─── The property surface ────────────────────────────────────────
-    let previous = snapshot();
     let current = to_snapshot(fix);
     let location = fix_location(fix);
-    SNAPSHOT.lock(|cell| cell.set(current));
+    let previous = store(current);
 
     // The fix indicator is what a host watches to know whether the device
     // is located at all, so its transitions are always worth a frame. The
