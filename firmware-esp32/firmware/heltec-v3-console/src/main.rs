@@ -436,6 +436,8 @@ async fn cli_task(
     use umsh_cli::io::CliOutput as _;
     use umsh_cli::logger::NullLogger;
 
+    // Light sleep stops the UART; a console that dozed would drop keys.
+    let _awake = esp_hal::rtc_cntl::WakeLock::new();
     let mut input = cli_io::UartInput::new(rx);
     let mut out = cli_io::UartOutput::new();
 

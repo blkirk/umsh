@@ -4088,6 +4088,8 @@ mod firmware {
             #[cfg(not(feature = "board-techo"))]
             umsh_ulcp_runtime::gnss::FixSink,
             embassy_time::Delay,
+            // The UARTE receives across the nRF's sleep; nothing to hold.
+            (),
         )
         .await
     }

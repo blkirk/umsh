@@ -26,6 +26,8 @@
 //! operation, and is gated on whether the receiver's time is trusted
 //! rather than on whether positioning is enabled.
 
+use core::cell::Cell;
+
 use embassy_futures::select::{Either, select};
 use embedded_hal_async::delay::DelayNs;
 use embedded_io_async::Read;
@@ -55,10 +57,19 @@ pub use embedded_hal_async;
 /// has lost its clock does not hold up a boot.
 pub const RTC_READ_TIMEOUT_MS: u32 = 10_000;
 
-/// Pause before retrying a receiver whose UART stopped making sense, in
-/// milliseconds. Long enough that a receiver failing hard does not become
-/// a busy loop.
-const RETRY_BACKOFF_MS: u32 = 500;
+/// How long the pump lets the board sleep through the receiver's output
+/// before staying awake to hear a cycle, in milliseconds.
+///
+/// A board that is awake for other reasons hears every cycle and never
+/// holds itself awake; one that sleeps hears nothing, and this bounds how
+/// stale its fix becomes.
+pub const QUIET_MS: u32 = 5 * 60 * 1000;
+
+/// How long the pump stays awake waiting for a cycle once it has gone
+/// [`QUIET_MS`] without one, in milliseconds. A receiver that is tracking
+/// completes a cycle every second; one that has lost power or its mind
+/// does not, and the board goes back to sleep rather than wait on it.
+pub const LISTEN_MS: u32 = 10_000;
 
 /// Pause after a read that returned nothing, in milliseconds.
 const IDLE_BACKOFF_MS: u32 = 100;
@@ -104,6 +115,27 @@ pub trait Sink {
     async fn fix(&mut self, fix: &Fix);
 }
 
+/// A way to keep the board awake while the pump needs to hear the
+/// receiver.
+///
+/// A board whose UART loses data while it sleeps lets the pump sleep
+/// through the receiver's output and keeps itself awake only when the fix
+/// has gone stale (see [`QUIET_MS`]). A board whose UART does not, or
+/// that never sleeps, passes `()`.
+pub trait Awake {
+    /// Keep the board awake until [`release`](Self::release).
+    /// Idempotent.
+    fn hold(&self);
+
+    /// Let the board sleep again. Idempotent.
+    fn release(&self);
+}
+
+impl Awake for () {
+    fn hold(&self) {}
+    fn release(&self) {}
+}
+
 /// Whether the receiver should be running, and a way to wait for that to
 /// change.
 ///
@@ -131,26 +163,30 @@ pub trait Enable {
 /// everything it emits, and hands each completed cycle to `sink`. Never
 /// returns.
 ///
-/// Read errors are treated as the receiver having gone away: the pump
-/// powers it down, waits a moment, and brings it back. A UART that
-/// overruns because the executor was busy elsewhere is the common cause,
-/// and it costs one fix cycle rather than a permanently deaf receiver.
-pub async fn run<R, P, E, S, D>(
+/// The board may sleep through the receiver's output; `awake` is held
+/// only when [`QUIET_MS`] pass with no completed cycle, and released at
+/// the next cycle or after [`LISTEN_MS`]. A read error is a stretch of
+/// garbled or lost bytes—a byte cut short by sleep, an overrun while the
+/// executor was busy—and costs only the sentence it fell in.
+pub async fn run<R, P, E, S, D, A>(
     mut uart: R,
     mut power: P,
     mut enable: E,
     mut sink: S,
-    mut delay: D,
+    delay: D,
+    awake: A,
 ) -> !
 where
     R: Read,
     P: Power,
     E: Enable,
     S: Sink,
-    D: DelayNs,
+    D: DelayNs + Clone,
+    A: Awake,
 {
     let mut driver = Driver::new();
     let mut buf = [0u8; 64];
+    let mut idle = delay.clone();
 
     // Park the receiver before anything else. The pump owns its power
     // state from here on, and whatever state it was left in belongs to
@@ -168,37 +204,51 @@ where
         // was, not where it is.
         driver.reset();
 
-        // Read until the receiver is switched off or the link fails.
-        let failed = loop {
-            match select(uart.read(&mut buf), enable.changed()).await {
-                Either::First(Ok(0)) => {
-                    // A closed stream is not something to spin on.
-                    delay.delay_ms(IDLE_BACKOFF_MS).await;
+        // Whether a cycle completed since the watchdog last looked.
+        let heard = Cell::new(false);
+        let mut watchdog_delay = delay.clone();
+        let watchdog = async {
+            loop {
+                watchdog_delay.delay_ms(QUIET_MS).await;
+                if heard.replace(false) {
+                    continue;
                 }
-                Either::First(Ok(len)) => {
-                    for &byte in &buf[..len] {
-                        if let Some(fix) = driver.push(byte) {
-                            sink.fix(&fix).await;
+                awake.hold();
+                watchdog_delay.delay_ms(LISTEN_MS).await;
+                awake.release();
+            }
+        };
+        let reading = async {
+            loop {
+                match select(uart.read(&mut buf), enable.changed()).await {
+                    Either::First(Ok(0)) => {
+                        // A closed stream is not something to spin on.
+                        idle.delay_ms(IDLE_BACKOFF_MS).await;
+                    }
+                    Either::First(Ok(len)) => {
+                        for &byte in &buf[..len] {
+                            if let Some(fix) = driver.push(byte) {
+                                heard.set(true);
+                                awake.release();
+                                sink.fix(&fix).await;
+                            }
                         }
                     }
-                }
-                // Cycle the receiver rather than keep reading a stream
-                // that has stopped making sense.
-                Either::First(Err(_)) => break true,
-                Either::Second(()) => {
-                    if !enable.enabled() {
-                        break false;
+                    // Drop the sentence the error fell in and pick up at
+                    // the next one.
+                    Either::First(Err(_)) => driver.reset(),
+                    Either::Second(()) => {
+                        if !enable.enabled() {
+                            return;
+                        }
                     }
                 }
             }
         };
+        select(reading, watchdog).await;
 
+        awake.release();
         power.power_off().await;
-        if failed {
-            // Pause before trying again, so a receiver that is failing
-            // hard does not become a busy loop.
-            delay.delay_ms(RETRY_BACKOFF_MS).await;
-        }
     }
 }
 
@@ -276,6 +326,8 @@ mod tests {
     enum Event {
         On,
         Off,
+        Hold,
+        Release,
     }
 
     #[derive(Default)]
@@ -312,6 +364,7 @@ mod tests {
     /// A delay that never elapses: the pump's backoffs and the RTC-read
     /// timeout exist to bound real hardware, and a test that let them
     /// fire would be testing the clock rather than the loop.
+    #[derive(Clone)]
     struct StalledDelay;
 
     impl DelayNs for StalledDelay {
@@ -322,10 +375,86 @@ mod tests {
 
     /// A delay that elapses immediately, for the one test that wants the
     /// timeout to win.
+    #[derive(Clone)]
     struct InstantDelay;
 
     impl DelayNs for InstantDelay {
         async fn delay_ns(&mut self, _ns: u32) {}
+    }
+
+    /// A delay that elapses for its first `n` uses, shared by every
+    /// clone, and then never again.
+    #[derive(Clone)]
+    struct CountedDelay(Rc<core::cell::Cell<usize>>);
+
+    impl CountedDelay {
+        fn new(n: usize) -> Self {
+            Self(Rc::new(core::cell::Cell::new(n)))
+        }
+    }
+
+    impl CountedDelay {
+        async fn elapse(&self) {
+            let left = self.0.get();
+            if left == 0 {
+                core::future::pending::<()>().await;
+            }
+            self.0.set(left - 1);
+        }
+    }
+
+    // `delay_ms` is overridden because its provided form splits a long
+    // delay into several `delay_ns` calls, and each is one use here.
+    impl DelayNs for CountedDelay {
+        async fn delay_ns(&mut self, _ns: u32) {
+            self.elapse().await
+        }
+        async fn delay_ms(&mut self, _ms: u32) {
+            self.elapse().await
+        }
+    }
+
+    /// Records holds and releases that change the state.
+    struct MockAwake(Log, core::cell::Cell<bool>);
+
+    impl MockAwake {
+        fn new(log: Log) -> Self {
+            Self(log, core::cell::Cell::new(false))
+        }
+    }
+
+    impl Awake for MockAwake {
+        fn hold(&self) {
+            if !self.1.replace(true) {
+                self.0.0.borrow_mut().events.push(Event::Hold);
+            }
+        }
+        fn release(&self) {
+            if self.1.replace(false) {
+                self.0.0.borrow_mut().events.push(Event::Release);
+            }
+        }
+    }
+
+    /// A port whose first read fails, as a byte cut short by sleep does,
+    /// and which then plays `then`.
+    struct GarbledUart {
+        failed: bool,
+        then: MockUart,
+    }
+
+    impl embedded_io_async::ErrorType for GarbledUart {
+        type Error = embedded_io_async::ErrorKind;
+    }
+
+    impl Read for GarbledUart {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if !self.failed {
+                self.failed = true;
+                return Err(embedded_io_async::ErrorKind::InvalidData);
+            }
+            Ok(self.then.read(buf).await.unwrap_or(0))
+        }
     }
 
     struct MockSink(Log);
@@ -444,6 +573,69 @@ mod tests {
     }
 
     #[test]
+    fn a_read_error_costs_only_its_sentence() {
+        let log = Log::default();
+        poll_until_stalled(async {
+            let _ = run(
+                GarbledUart {
+                    failed: false,
+                    then: MockUart::new(&fix_cycle()),
+                },
+                MockPower(log.clone()),
+                MockEnable::new(&[true]),
+                MockSink(log.clone()),
+                StalledDelay,
+                (),
+            )
+            .await;
+        });
+        assert_eq!(
+            log.events(),
+            [Event::Off, Event::On],
+            "the receiver was cycled"
+        );
+        assert_eq!(log.fixes().len(), 1);
+    }
+
+    #[test]
+    fn a_quiet_receiver_is_listened_for_and_then_let_go() {
+        let log = Log::default();
+        poll_until_stalled(async {
+            let _ = run(
+                MockUart::new(""),
+                MockPower(log.clone()),
+                MockEnable::new(&[true]),
+                MockSink(log.clone()),
+                // The quiet period, then the listening window.
+                CountedDelay::new(2),
+                MockAwake::new(log.clone()),
+            )
+            .await;
+        });
+        assert_eq!(
+            log.events(),
+            [Event::Off, Event::On, Event::Hold, Event::Release]
+        );
+    }
+
+    #[test]
+    fn a_receiver_heard_in_the_quiet_period_keeps_nothing_awake() {
+        let log = Log::default();
+        poll_until_stalled(async {
+            let _ = run(
+                MockUart::new(&fix_cycle()),
+                MockPower(log.clone()),
+                MockEnable::new(&[true]),
+                MockSink(log.clone()),
+                CountedDelay::new(1),
+                MockAwake::new(log.clone()),
+            )
+            .await;
+        });
+        assert_eq!(log.events(), [Event::Off, Event::On]);
+    }
+
+    #[test]
     fn a_disabled_receiver_is_powered_down_and_never_read() {
         let log = Log::default();
         poll_until_stalled(async {
@@ -453,6 +645,7 @@ mod tests {
                 MockEnable::new(&[false]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });
@@ -474,6 +667,7 @@ mod tests {
                 MockEnable::new(&[true]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });
@@ -496,6 +690,7 @@ mod tests {
                 MockEnable::new(&[true, false]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });
@@ -513,6 +708,7 @@ mod tests {
                 MockEnable::new(&[false, true]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });
@@ -539,6 +735,7 @@ mod tests {
                 MockEnable::new(&[true]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });
@@ -567,6 +764,7 @@ mod tests {
                 MockEnable::new(&[true]),
                 MockSink(log.clone()),
                 StalledDelay,
+                (),
             )
             .await;
         });

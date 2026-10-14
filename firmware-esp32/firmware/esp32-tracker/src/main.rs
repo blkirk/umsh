@@ -1630,7 +1630,6 @@ async fn gnss_task(
     let slot = core::cell::RefCell::new(GnssUartSlot {
         boot: Some((uart1, rx, tx)),
         open: None,
-        parked: None,
     });
     umsh_gnss::pump::run(
         GnssPort { slot: &slot },
@@ -1641,30 +1640,41 @@ async fn gnss_task(
         enable,
         umsh_ulcp_runtime::gnss::FixSink,
         Delay,
+        GnssAwake(core::cell::RefCell::new(None)),
     )
     .await
 }
 
-/// The GNSS UART's active and sleep-compatible parked states.
+/// The wake lock the pump holds while it waits to hear the receiver.
+/// Light sleep stops the UART, so the receiver's output is otherwise
+/// heard only while the board is awake for some other reason.
+#[cfg(feature = "gnss")]
+struct GnssAwake(core::cell::RefCell<Option<esp_hal::rtc_cntl::WakeLock>>);
+
+#[cfg(feature = "gnss")]
+impl umsh_gnss::pump::Awake for GnssAwake {
+    fn hold(&self) {
+        self.0
+            .borrow_mut()
+            .get_or_insert_with(esp_hal::rtc_cntl::WakeLock::new);
+    }
+
+    fn release(&self) {
+        self.0.borrow_mut().take();
+    }
+}
+
+/// The GNSS UART, open while the receiver is powered.
 ///
-/// `UartRx` holds a `WakeLock` for its entire lifetime, so a UART that
-/// exists while the receiver is off is a light-sleep veto with nobody
-/// on the other end. The pump's `Power` edges own the driver's
-/// lifecycle instead: opened in `power_on`, RX dropped in `power_off`—
-/// which also makes "GNSS enabled forbids sleep" true by construction,
-/// exactly the right policy while NMEA is streaming (a light-sleeping
-/// UART loses RX bytes).
+/// Closed with the receiver, so that its pins float rather than feed the
+/// unpowered module. Open, it does not keep the board awake: the pump
+/// takes a wake lock of its own when it needs to hear the receiver.
 #[cfg(feature = "gnss")]
 struct GnssUartSlot {
     /// The real peripherals, consumed by the first open; later opens
     /// steal (see `open_port`).
     boot: Option<(esp_hal::peripherals::UART1<'static>, GnssRxPin, GnssTxPin)>,
     open: Option<Uart<'static, Async>>,
-    /// The pinned HAL suspends every UART before light sleep. After the
-    /// UART has been initialized, dropping its last clock guard leaves
-    /// that suspend's register-update handshake waiting on a stopped clock.
-    /// An idle, disconnected TX half retains the clocks but no WakeLock.
-    parked: Option<esp_hal::uart::UartTx<'static, esp_hal::Blocking>>,
 }
 
 #[cfg(feature = "gnss")]
@@ -1673,15 +1683,10 @@ impl GnssUartSlot {
         if self.open.is_some() {
             return;
         }
-        // Prevent sleep in the gap between retiring the parked clock owner
-        // and constructing the next RX driver (which takes its own lock).
-        let _transition = esp_hal::rtc_cntl::WakeLock::new();
-        drop(self.parked.take());
         let (uart1, rx, tx) = self.boot.take().unwrap_or_else(|| {
-            // SAFETY: the previous RX driver was dropped by `park_port`,
-            // and its parked TX half was dropped immediately above,
-            // and the slot (single-task, behind one `RefCell`) is the
-            // sole place they are ever (re)constructed.
+            // SAFETY: the previous driver was dropped by `close_port`, and
+            // the slot (single-task, behind one `RefCell`) is the sole
+            // place it is ever (re)constructed.
             unsafe {
                 (
                     esp_hal::peripherals::UART1::steal(),
@@ -1699,30 +1704,22 @@ impl GnssUartSlot {
         );
     }
 
-    fn park_port(&mut self) {
+    fn close_port(&mut self) {
         let Some(uart) = self.open.take() else {
             return;
         };
         // The pump has canceled its pending read before reaching here.
-        // Leave async mode explicitly so its interrupt ownership flags and
-        // CPU interrupt are retired before any driver clock is released.
-        let (rx, tx) = uart
-            .into_blocking()
-            .with_rx(Level::High)
-            .with_tx(esp_hal::gpio::NoPin)
-            .split();
-        self.parked = Some(tx);
-        // Disconnecting the matrix leaves GPIO's output latch/pull state
+        // Leave async mode explicitly so its interrupt is retired before
+        // the driver is.
+        drop(uart.into_blocking());
+        // Dropping the driver leaves GPIO's output latch/pull state
         // intact. Float both lines so they cannot feed the disabled rail.
-        // SAFETY: neither half is connected to these pins anymore, and
-        // this single-task slot is their only owner across GNSS cycles.
+        // SAFETY: the driver no longer owns these pins, and this
+        // single-task slot is their only owner across GNSS cycles.
         unsafe {
             drop(Input::new(GnssRxPin::steal(), InputConfig::default()));
             drop(Input::new(GnssTxPin::steal(), InputConfig::default()));
         }
-        // Only RX holds the lifetime WakeLock. The parked TX never writes
-        // and has no physical output connection into the unpowered receiver.
-        drop(rx);
     }
 }
 
@@ -1771,9 +1768,7 @@ impl umsh_gnss::pump::Power for GnssPower<'_> {
 
     async fn power_off(&mut self) {
         self.inner.power_off().await;
-        // After the receiver, retire RX and its wake lock while preserving
-        // the clocks needed by the HAL's UART sleep handshake.
-        self.slot.borrow_mut().park_port();
+        self.slot.borrow_mut().close_port();
     }
 }
 
@@ -1887,6 +1882,9 @@ async fn output_pump(tx: &mut WiredTx, panic_report: Option<heapless::String<128
 #[cfg(not(feature = "wired-usb-serial-jtag"))]
 #[embassy_executor::task]
 async fn uart_in_task(mut rx: WiredRx) {
+    // A host can write at any moment and light sleep stops the UART, so
+    // a board with a wired UART stays awake for as long as it listens.
+    let _awake = esp_hal::rtc_cntl::WakeLock::new();
     input_pump(&mut rx).await
 }
 
@@ -3243,8 +3241,8 @@ async fn main(spawner: Spawner) {
     // enough away, the idle hook enters light sleep until that deadline
     // (GPIO wake always armed) instead of spinning `waiti` at 80 MHz.
     // S3 BLE supplies a sleep veto and wake deadline between events.
-    // Wired-transport and UART drivers retain their lifetime wake locks,
-    // and GPIO level waits arm wake sources. Original ESP32 BLE still
+    // Wired transports hold wake locks while they listen, GNSS holds one
+    // briefly when its receiver has been quiet, and GPIO level waits arm wake sources. Original ESP32 BLE still
     // holds a lock from controller initialization to deinitialization.
     // A board whose locks never all clear simply falls back to WFI.
     let sleep = esp_rtos::sleep::configure(peripherals.LPWR);

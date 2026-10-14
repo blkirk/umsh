@@ -134,11 +134,13 @@ starts. The persisted entropy pool seeds software CSPRNGs, so normal
 randomness generation does not keep RF awake. A failed harvest or seed write
 leaves the committed pool usable and is retried; see [Entropy](#entropy).
 
-USB and GNSS/UART wake locks still prevent MCU light sleep when those peripherals
-are active. In particular, Heltec V3 retains its UART0 serial receiver for the
-whole boot, including on battery: it can use BLE modem sleep, but this existing
-wake lock still blocks MCU light sleep. T-Beam and Pager release their native
-USB transport on battery and can light-sleep with GNSS and WiFi disabled.
+USB and wired-serial wake locks still prevent MCU light sleep when those
+transports are active. In particular, Heltec V3 keeps its UART0 serial receiver
+awake for the whole boot, including on battery: it can use BLE modem sleep, but
+that wake lock blocks MCU light sleep. T-Beam and Pager release their native
+USB transport on battery and can light-sleep with WiFi disabled. GNSS does not
+block light sleep; its task wakes the MCU for at most ten seconds after five
+minutes without a fix.
 WiFi remains in `PowerSaveMode::None`; WiFi light-sleep policy and
 CPU/cache-retention optimizations are separate work.
 

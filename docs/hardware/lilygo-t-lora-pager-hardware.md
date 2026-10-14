@@ -550,11 +550,11 @@ illumination follows screen activity.
 
 The XL9555 leaves unused domains disabled. GNSS uses the runtime enable
 setting and UART1 RX=4/TX=12 at 38400 baud. Disabling GNSS cancels RX, powers
-down the receiver, and leaves a disconnected, blocking UART TX half owning
-the UART clocks. RX's wake lock is released. The pinned HAL's light-sleep
-entry suspends every UART; releasing the initialized UART's last clock owner
-can stall its register-update handshake. Reopening GNSS replaces the parked
-TX owner under a temporary wake guard and restores interrupt-driven RX.
+down the receiver, closes the UART, and floats both pins. The UART receiver
+does not hold the chip awake: while GNSS is on, the MCU light-sleeps and
+bytes arriving during sleep are lost. After five minutes without a complete
+fix, the GNSS task holds a wake lock until the next fix or for ten seconds,
+whichever comes first.
 PCF85063 retained time uses its
 own register layout, with oscillator-stop, invalid dates, and implausible
 epochs reported as unknown. The unused RTC clock output is disabled.
