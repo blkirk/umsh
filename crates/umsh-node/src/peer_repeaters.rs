@@ -90,14 +90,15 @@ impl PeerRepeaterTable {
             || identity.role == NodeRole::Repeater
     }
 
-    /// Record what an identity heard directly said, if it came from a
-    /// repeater.
+    /// Record what an identity heard directly said.
     ///
     /// The caller vouches that the identity came off its owner's own
     /// transmitter; `rssi_snr` is that reception's measurement, when the
     /// radio made one. Returns whether the table changed. A repeat identity
     /// replaces the record rather than merging with it: the newest
-    /// advertisement is the node's own account of itself.
+    /// advertisement is the node's own account of itself. The same holds
+    /// when that account no longer claims repeating—the record an earlier
+    /// identity left is withdrawn, name and position with it.
     pub fn observe_identity(
         &mut self,
         from: &PublicKey,
@@ -106,7 +107,14 @@ impl PeerRepeaterTable {
         now_ms: u64,
     ) -> bool {
         if !Self::is_repeater(identity) {
-            return false;
+            let hint = from.hint();
+            let before = self.records.len();
+            self.records.retain(|entry| entry.hint != hint);
+            if self.records.len() == before {
+                return false;
+            }
+            self.generation = self.generation.wrapping_add(1);
+            return true;
         }
         let record = PeerRepeaterRecord {
             hint: from.hint(),
@@ -347,6 +355,32 @@ mod tests {
         forwarding_handset.capabilities |= NodeCapabilities::REPEATER;
         assert!(table.observe_identity(&key(1), &forwarding_handset, None, 0));
         assert_eq!(table.len(), 1);
+    }
+
+    /// The newest identity is the node's own account of itself, so one that
+    /// stops claiming to forward takes back the position an earlier one
+    /// gave—rather than leaving it listed until the table fills or the
+    /// node reboots.
+    #[test]
+    fn an_identity_that_stops_claiming_repeating_withdraws_the_record() {
+        let mut table = PeerRepeaterTable::new();
+        table.observe_identity(&key(1), &repeater_identity("Ridge", &[]), None, 0);
+        table.observe_identity(&key(2), &repeater_identity("Saddle", &[]), None, 0);
+        let generation = table.generation();
+
+        let mut retired = repeater_identity("Ridge", &[]);
+        retired.role = NodeRole::Chat;
+        retired.capabilities = NodeCapabilities::TEXT_MESSAGES;
+        assert!(table.observe_identity(&key(1), &retired, None, 1_000));
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.iter().next().unwrap().hint, key(2).hint());
+        // A cursor into the old listing must not resume into this one.
+        assert_ne!(table.generation(), generation);
+
+        // Nothing left to withdraw is not a change.
+        let generation = table.generation();
+        assert!(!table.observe_identity(&key(1), &retired, None, 2_000));
+        assert_eq!(table.generation(), generation);
     }
 
     #[test]
