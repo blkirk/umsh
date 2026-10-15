@@ -50,7 +50,7 @@ pub enum Command {
     /// (`phy-freq`, `dev-name`); numbers are decimal or `0x`-prefixed.
     /// Several are read in one exchange where the device supports it.
     Get {
-        #[arg(value_name = "PROP", required = true)]
+        #[arg(value_name = "PROP", required = true, hide_possible_values = true)]
         keys: Vec<props::PropArg>,
 
         /// Print values as raw octets rather than reading them.
@@ -69,7 +69,7 @@ pub enum Command {
     /// a switch, a decimal number for a count, an address for a key. A
     /// property whose shape is a structure takes hex.
     Set {
-        #[arg(value_name = "PROP")]
+        #[arg(value_name = "PROP", hide_possible_values = true)]
         key: props::PropArg,
 
         #[arg(value_name = "VALUE")]

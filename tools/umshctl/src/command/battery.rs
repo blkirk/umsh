@@ -35,7 +35,7 @@ pub struct BatteryArgs {
     #[arg(long)]
     pub gauge_telemetry: bool,
     /// Properties to read; default is the scalar battery group (without gauge configuration).
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', hide_possible_values = true)]
     pub properties: Vec<PropArg>,
     /// Stop after this many polls (with --watch).
     #[arg(long, requires = "watch", value_parser = clap::value_parser!(u32).range(1..))]

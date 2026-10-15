@@ -39,13 +39,13 @@ pub enum ManageOp {
 
     /// Read one property, by name or number.
     Get {
-        #[arg(value_name = "PROP")]
+        #[arg(value_name = "PROP", hide_possible_values = true)]
         key: PropArg,
     },
 
     /// Write one property, by name or number.
     Set {
-        #[arg(value_name = "PROP")]
+        #[arg(value_name = "PROP", hide_possible_values = true)]
         key: PropArg,
         #[arg(value_name = "VALUE")]
         value: String,
@@ -53,7 +53,7 @@ pub enum ManageOp {
 
     /// Add an entry to a table property.
     Insert {
-        #[arg(value_name = "PROP")]
+        #[arg(value_name = "PROP", hide_possible_values = true)]
         key: PropArg,
         #[arg(value_name = "HEX")]
         item: BytesArg,
@@ -61,7 +61,7 @@ pub enum ManageOp {
 
     /// Remove an entry from a table property.
     Remove {
-        #[arg(value_name = "PROP")]
+        #[arg(value_name = "PROP", hide_possible_values = true)]
         key: PropArg,
         #[arg(value_name = "HEX")]
         selector: BytesArg,
@@ -69,7 +69,7 @@ pub enum ManageOp {
 
     /// Read several properties in one exchange.
     GetMany {
-        #[arg(value_name = "PROP", required = true)]
+        #[arg(value_name = "PROP", required = true, hide_possible_values = true)]
         keys: Vec<PropArg>,
     },
 

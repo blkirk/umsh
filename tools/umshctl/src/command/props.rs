@@ -45,6 +45,50 @@ impl FromStr for PropArg {
     }
 }
 
+/// Every `PropArg` argument parses through [`PropParser`], so each one
+/// completes property names without saying so where it is declared.
+impl clap::builder::ValueParserFactory for PropArg {
+    type Parser = PropParser;
+
+    fn value_parser() -> Self::Parser {
+        PropParser
+    }
+}
+
+/// Parses a [`PropArg`] and offers the property names as its possible
+/// values, which is what the REPL's completer reads.
+///
+/// The names are a menu, not the whole grammar—numbers and the spec's
+/// spellings still parse. Each argument that takes one sets
+/// `hide_possible_values`, or `--help` would list every property there.
+#[derive(Clone, Copy, Debug)]
+pub struct PropParser;
+
+impl clap::builder::TypedValueParser for PropParser {
+    type Value = PropArg;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<PropArg, clap::Error> {
+        clap::builder::StringValueParser::new()
+            .try_map(|text| text.parse::<PropArg>())
+            .parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            PROPERTIES
+                .iter()
+                .map(|&key| clap::builder::PossibleValue::new(spell(key))),
+        ))
+    }
+}
+
 impl fmt::Display for PropArg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match property_name(self.0) {

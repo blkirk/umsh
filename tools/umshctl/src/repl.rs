@@ -107,9 +107,11 @@ impl Completer for ReplHelper {
             };
 
         // Walk the tree with the finished tokens, tracking whether the
-        // next one will be swallowed as a flag's value.
+        // next one will be swallowed as a flag's value and how many of
+        // the current command's positionals are already filled.
         let mut cmd = ReplCommandLine::command();
         let mut expect_value_for: Option<String> = None;
+        let mut filled = 0;
         for token in &tokens {
             if expect_value_for.take().is_some() {
                 continue;
@@ -124,6 +126,9 @@ impl Completer for ReplHelper {
                 }
             } else if let Some(sub) = cmd.find_subcommand(token) {
                 cmd = sub.clone();
+                filled = 0;
+            } else {
+                filled += 1;
             }
         }
 
@@ -146,7 +151,11 @@ impl Completer for ReplHelper {
                         .chain(sub.get_all_aliases().map(str::to_string))
                 })
                 .collect();
-            candidates.extend(cmd.get_positionals().flat_map(possible_values));
+            candidates.extend(
+                next_positional(&cmd, filled)
+                    .map(possible_values)
+                    .unwrap_or_default(),
+            );
             candidates
         };
 
@@ -167,6 +176,18 @@ fn possible_values(arg: &clap::Arg) -> Vec<String> {
         .iter()
         .map(|value| value.get_name().to_string())
         .collect()
+}
+
+/// The positional the next word fills, once `filled` words have: the
+/// one at that place, or a last positional that takes any number.
+fn next_positional(cmd: &clap::Command, filled: usize) -> Option<&clap::Arg> {
+    let positionals: Vec<&clap::Arg> = cmd.get_positionals().collect();
+    positionals.get(filled).copied().or_else(|| {
+        positionals
+            .last()
+            .copied()
+            .filter(|arg| matches!(arg.get_action(), clap::ArgAction::Append))
+    })
 }
 
 /// Whether a clap argument consumes the next token as its value.
@@ -509,6 +530,52 @@ mod tests {
         assert!(names.contains(&"--beacon"), "{names:?}");
         assert!(names.contains(&"--hops"), "{names:?}");
         assert!(names.contains(&"--channel"), "{names:?}");
+    }
+
+    #[test]
+    fn completion_offers_property_names_for_each_word_of_a_get() {
+        let helper = ReplHelper;
+        let ctx_history = rustyline::history::DefaultHistory::new();
+        let ctx = Context::new(&ctx_history);
+
+        let (start, pairs) = helper.complete("get phy-duty-n", 14, &ctx).unwrap();
+        assert_eq!(start, 4);
+        let names: Vec<&str> = pairs.iter().map(|pair| pair.display.as_str()).collect();
+        assert_eq!(names, ["phy-duty-now"]);
+
+        // A get takes any number, so the next word is a property too.
+        let (_, pairs) = helper.complete("get uptime upt", 14, &ctx).unwrap();
+        let names: Vec<&str> = pairs.iter().map(|pair| pair.display.as_str()).collect();
+        assert_eq!(names, ["uptime"]);
+    }
+
+    #[test]
+    fn completion_offers_property_names_only_where_a_property_goes() {
+        let helper = ReplHelper;
+        let ctx_history = rustyline::history::DefaultHistory::new();
+        let ctx = Context::new(&ctx_history);
+
+        let (_, pairs) = helper.complete("set dev-na", 10, &ctx).unwrap();
+        let names: Vec<&str> = pairs.iter().map(|pair| pair.display.as_str()).collect();
+        assert_eq!(names, ["dev-name"]);
+
+        // The word after the property is its value, not another name.
+        let (_, pairs) = helper.complete("set dev-name ", 13, &ctx).unwrap();
+        let names: Vec<&str> = pairs.iter().map(|pair| pair.display.as_str()).collect();
+        assert!(names.is_empty(), "{names:?}");
+    }
+
+    #[test]
+    fn completion_offers_property_names_to_a_remote_get() {
+        let helper = ReplHelper;
+        let ctx_history = rustyline::history::DefaultHistory::new();
+        let ctx = Context::new(&ctx_history);
+
+        let key = PublicKey([0xC4; 32]).to_string();
+        let line = format!("manage {key} get upt");
+        let (_, pairs) = helper.complete(&line, line.len(), &ctx).unwrap();
+        let names: Vec<&str> = pairs.iter().map(|pair| pair.display.as_str()).collect();
+        assert_eq!(names, ["uptime"]);
     }
 
     #[test]

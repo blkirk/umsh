@@ -29,7 +29,7 @@ rand.workspace = true
 hamaddr.workspace = true
 anyhow = "1"
 serde_json = "1"
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
 rustyline = { version = "18", features = ["derive"] }
 shlex = "1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
