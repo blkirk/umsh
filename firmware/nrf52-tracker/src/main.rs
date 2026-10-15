@@ -7249,15 +7249,36 @@ mod firmware {
     #[cfg(feature = "board-xiao-nrf52")]
     impl StatusLed {
         fn show(&mut self, indication: Indication) {
-            let (red, green, blue) = match indication {
+            self.show_rgb(match indication {
                 Indication::Off => (false, false, false),
                 Indication::Heartbeat => (false, true, false),
                 Indication::Pairing => (false, false, true),
                 Indication::Alert => (true, true, true),
-            };
+            });
+        }
+
+        fn show_rgb(&mut self, (red, green, blue): (bool, bool, bool)) {
             drive_led(&mut self.red, red);
             drive_led(&mut self.green, green);
             drive_led(&mut self.blue, blue);
+        }
+
+        /// Red, green, blue, then white: on a headless board, the one
+        /// unmistakable sign that it has just rebooted.
+        async fn play_boot_sequence(&mut self, wdt: &mut WatchdogHandle) {
+            const STEPS: [((bool, bool, bool), u64); 4] = [
+                ((true, false, false), 250),
+                ((false, true, false), 250),
+                ((false, false, true), 250),
+                ((true, true, true), 1_000),
+            ];
+            for (color, millis) in STEPS {
+                wdt.pet();
+                super::panic::breadcrumb_beat();
+                self.show_rgb(color);
+                Timer::after_millis(millis).await;
+            }
+            self.show(Indication::Off);
         }
     }
 
@@ -7276,6 +7297,8 @@ mod firmware {
     #[cfg(not(feature = "t1000e"))]
     #[embassy_executor::task]
     async fn heartbeat(mut led: StatusLed, mut wdt: WatchdogHandle) -> ! {
+        #[cfg(feature = "board-xiao-nrf52")]
+        led.play_boot_sequence(&mut wdt).await;
         let mut engine = LedEngine::new(LedTimings::default(), Instant::now().as_millis());
         loop {
             wdt.pet();
