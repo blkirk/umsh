@@ -1212,11 +1212,7 @@ pub fn render_temperatures(set: &PropSet) -> Vec<Line> {
             failure.clone()
         } else {
             match readings.as_ref().and_then(|values| values.get(index)) {
-                Some(Some(value)) => format!(
-                    "{:.1} °C ({:.1} K)",
-                    f64::from(*value) / 10.0 - 273.15,
-                    f64::from(*value) / 10.0
-                ),
+                Some(Some(value)) => crate::command::props::format_temperature(*value),
                 Some(None) => "unavailable".into(),
                 None => "not read".into(),
             }

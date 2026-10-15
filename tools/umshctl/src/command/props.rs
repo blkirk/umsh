@@ -168,10 +168,24 @@ pub fn spell(key: u32) -> String {
 /// A property's value as something worth reading.
 ///
 /// The scalar types read as numbers, booleans as on and off, keys as
-/// addresses, text as text. Anything whose shape is a structure rather
-/// than a scalar reads as hex, which is honest: the octets are the
-/// value, and a topic of `info` is where one gets interpreted.
+/// addresses, text as text. A structure reads decoded where this tool
+/// knows its shape, and as hex otherwise, which is honest: the octets
+/// are the value, and a topic of `info` is where one gets interpreted.
 pub fn format_value(key: u32, value: &[u8]) -> String {
+    if key == prop::BATTERY && !value.is_empty() {
+        return umsh::ulcp_wire::battery::BatteryStatus::decode(value)
+            .map(|status| super::info::battery_display(&status))
+            .unwrap_or_else(|_| malformed(value));
+    }
+    if key == prop::TEMPERATURES && !value.is_empty() {
+        return match umsh::ulcp_wire::temperature::readings(value) {
+            Ok(readings) => readings
+                .map(|reading| reading.map_or("unavailable".to_string(), format_temperature))
+                .collect::<Vec<_>>()
+                .join(", "),
+            Err(_) => malformed(value),
+        };
+    }
     if key == prop::BATTERY_GAUGE_TELEMETRY {
         return umsh::ulcp_wire::battery_gauge_telemetry::Telemetry::decode(value)
             .map(|v| v.to_string())
@@ -241,6 +255,10 @@ fn scalar(key: u32, value: u32) -> String {
         prop::PHY_LORA_BW => format!("{value} Hz"),
         prop::PHY_MTU => format!("{value} bytes"),
         prop::PHY_T_FRAME => format!("{value} ms"),
+        prop::PHY_DUTY_NOW => format!(
+            "{value} ({:.2}% of the hour)",
+            super::duty_percent(value as u16)
+        ),
         prop::UPTIME | prop::ADVERT_INTERVAL | prop::BEACON_INTERVAL => {
             format!("{value} s ({})", super::format_duration(value))
         }
@@ -253,6 +271,12 @@ fn scalar(key: u32, value: u32) -> String {
         },
         _ => value.to_string(),
     }
+}
+
+/// A `PROP_TEMPERATURES` reading, in tenths of a kelvin.
+pub fn format_temperature(decikelvin: u16) -> String {
+    let kelvin = f64::from(decikelvin) / 10.0;
+    format!("{:.1} °C ({kelvin:.1} K)", kelvin - 273.15)
 }
 
 fn malformed(value: &[u8]) -> String {
@@ -394,6 +418,43 @@ mod tests {
     use umsh::ulcp_wire::ids::prop;
 
     #[test]
+    fn structured_readings_are_decoded() {
+        // Voltage, level, and charge state all present: 3912 mV, 87%,
+        // charging.
+        assert_eq!(
+            format_value(prop::BATTERY, &[0x07, 0x48, 0x0F, 87, 0x01]),
+            "3912 mV, 87%, charging"
+        );
+        // Two sensors, the second without a reading.
+        assert_eq!(
+            format_value(prop::TEMPERATURES, &[0xA6, 0x0B, 0xFF, 0xFF]),
+            "25.1 °C (298.2 K), unavailable"
+        );
+        assert_eq!(
+            format_value(prop::PHY_DUTY_NOW, &6553u16.to_le_bytes()),
+            "6553 (10.00% of the hour)"
+        );
+        assert_eq!(
+            format_value(prop::UPTIME, &3725u32.to_le_bytes()),
+            format!("3725 s ({})", crate::command::format_duration(3725))
+        );
+    }
+
+    #[test]
+    fn a_malformed_structure_reads_as_hex() {
+        // The flags promise a voltage the value is too short to hold.
+        assert_eq!(
+            format_value(prop::BATTERY, &[0x01, 0x48]),
+            malformed(&[0x01, 0x48])
+        );
+        // Half a reading.
+        assert_eq!(
+            format_value(prop::TEMPERATURES, &[0xA6]),
+            malformed(&[0xA6])
+        );
+    }
+
+    #[test]
     fn a_property_is_named_however_it_is_written() {
         for spelling in [
             "phy-freq",
@@ -464,8 +525,12 @@ mod tests {
             format_value(prop::DEV_KEY, &[0xC4; 32]),
             PublicKey([0xC4; 32]).to_string()
         );
-        // Structured values stay octets rather than being guessed at.
-        assert_eq!(format_value(prop::BATTERY, &[0b101, 0x74, 0x0E]), "05740e");
+        // A structure this tool has no decoder for stays octets rather
+        // than being guessed at.
+        assert_eq!(
+            format_value(prop::GNSS_LOCATION, &[0x05, 0x74, 0x0E]),
+            "05740e"
+        );
         // Empty is a real answer for a great many properties.
         assert_eq!(format_value(prop::GNSS_LOCATION, &[]), "(empty)");
         // A scalar of the wrong width says so rather than reading as
