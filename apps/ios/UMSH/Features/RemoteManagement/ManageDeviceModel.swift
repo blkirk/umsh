@@ -372,8 +372,8 @@ final class ManageDeviceModel {
         writeRefusals[category] = nil
         await run { [self] in
             if category == .sensors {
-                // Bootstrap temperatures and names together, then reuse names
-                // until a later measurement reveals additional sensors.
+                // Read every measurement together, with names until they are
+                // known; reuse names until a measurement reveals more sensors.
                 var reading = RemoteCategoryReading.sensorRefresh(
                     previous: readings[category], properties: properties
                 )

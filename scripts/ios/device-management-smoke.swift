@@ -139,8 +139,8 @@ struct DeviceManagementSmokeTest {
         // Always bootstrap both properties, even before any readings exist.
         var refresh = RemoteCategoryReading.sensorRefresh(previous: nil, properties: temperatureOnly)
         precondition(refresh.sensorRefreshRequests == [[id.temperatures, id.temperatureNames]])
-        let combined = RemoteCategoryReading.sensorRefresh(previous: nil, properties: temperatureOnly + [id.illuminance])
-        precondition(combined.sensorRefreshRequests == [[id.temperatures, id.temperatureNames], [id.illuminance]])
+        let combined = RemoteCategoryReading.sensorRefresh(previous: nil, properties: [id.illuminance] + temperatureOnly)
+        precondition(combined.sensorRefreshRequests == [[id.illuminance, id.temperatures, id.temperatureNames]])
         let lightOnly = RemoteCategoryReading.sensorRefresh(previous: nil, properties: [id.illuminance])
         precondition(lightOnly.sensorRefreshRequests == [[id.illuminance]])
         precondition(!refresh.needsTemperatureNames)
@@ -151,6 +151,8 @@ struct DeviceManagementSmokeTest {
         precondition(refresh.needsTemperatureNames)
         refresh.absorbTemperatureNames(names(["Die"]), at: date)
         precondition(!refresh.needsTemperatureNames)
+        let named = RemoteCategoryReading.sensorRefresh(previous: refresh, properties: [id.illuminance] + temperatureOnly)
+        precondition(named.sensorRefreshRequests == [[id.illuminance, id.temperatures], [id.temperatureNames]])
         for _ in 0..<3 {
             refresh = .sensorRefresh(previous: refresh, properties: temperatureOnly)
             precondition(refresh.sensorRefreshRequests == [[id.temperatures], [id.temperatureNames]])
