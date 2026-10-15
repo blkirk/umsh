@@ -859,6 +859,9 @@ impl From<UlcpDfuMode> for umsh_ulcp::DfuMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExpectedResponse {
     Property(u32),
+    /// A `CMD_PROP_MULTI_GET` issued while synchronizing, each position
+    /// filed exactly as the `Property` read it stands in for.
+    Properties(Vec<u32>),
     Claim,
     Save,
     /// A `CMD_PROP_SET` of this property. The value written is not kept:
@@ -987,6 +990,65 @@ pub enum UlcpItemMutation {
     Remove,
 }
 
+/// The most keys one local `CMD_PROP_MULTI_GET` asks for.
+///
+/// About what one reply has room for, so a read of tens of properties
+/// goes out as several requests at once and comes back in one round
+/// trip, rather than as one request continued a reply at a time. A reply
+/// that does run out of room is continued all the same, so this is not a
+/// correctness bound.
+const MULTI_GET_BATCH: usize = 16;
+
+/// `keys` as the requests that will ask for them, in order.
+fn read_batches(keys: impl IntoIterator<Item = u32>) -> VecDeque<Vec<u32>> {
+    let keys: Vec<u32> = keys.into_iter().collect();
+    keys.chunks(MULTI_GET_BATCH).map(<[u32]>::to_vec).collect()
+}
+
+/// What one `CMD_PROP_MULTI_GET` reply said about the keys it asked for.
+struct MultiGetReply<'a> {
+    /// Each position the reply reached, in request order.
+    answers: Vec<(u32, umsh_ulcp::reply::Answer<'a>)>,
+    /// What to ask for again, one request per entry, ahead of anything
+    /// still queued.
+    retry: Vec<Vec<u32>>,
+}
+
+/// Read a `CMD_PROP_MULTI_GET` reply position by position, the way the
+/// mesh path reads one ([`umsh_ulcp::reply::entries`]).
+///
+/// Whatever stands is kept, and nothing is attributed to a key it does not
+/// name: the read ends at the first entry that is malformed or answers
+/// some other property, exactly as it ends at a short answer, and every
+/// key after that point is asked for again. A reply that reached no key at
+/// all would be asked for forever—as one would be whose first value alone
+/// is more than a reply holds—so that key is asked for on its own and the
+/// rest batched as before. A bare status in place of the entries is that
+/// status for every key.
+fn read_multi_get_reply<'a>(keys: &'a [u32], reply: &'a [u8]) -> MultiGetReply<'a> {
+    let answers: Vec<_> = match umsh_ulcp::reply::entries(keys, reply) {
+        // Entries past the last key asked for name themselves, and answer
+        // nothing this request is waiting on.
+        Ok(entries) => entries.map_while(Result::ok).take(keys.len()).collect(),
+        Err(_) => umsh_ulcp::reply::status_of(reply)
+            .map(|status| {
+                keys.iter()
+                    .map(|&key| (key, umsh_ulcp::reply::Answer::Refused(status)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let retry = match (answers.len(), keys) {
+        (0, [first, rest @ ..]) => [vec![*first], rest.to_vec()]
+            .into_iter()
+            .filter(|keys| !keys.is_empty())
+            .collect(),
+        (answered, _) if answered < keys.len() => vec![keys[answered..].to_vec()],
+        _ => Vec::new(),
+    };
+    MultiGetReply { answers, retry }
+}
+
 /// One local management operation in flight: what is still to ask, what
 /// is still to write, and what the device has answered so far.
 ///
@@ -996,8 +1058,8 @@ pub enum UlcpItemMutation {
 /// than failing the run.
 #[derive(Debug, Default)]
 struct LocalManagement {
-    fetch_queue: VecDeque<u32>,
-    multi_get: bool,
+    /// What is still to ask, one request per entry.
+    fetch_queue: VecDeque<Vec<u32>>,
     write_queue: VecDeque<(u32, Vec<u8>)>,
     /// Item mutations, drained after the writes. A table edit and a
     /// scalar write are different commands, so they cannot share a
@@ -1027,7 +1089,8 @@ struct UlcpSessionState {
     radio_host_key: Option<Vec<u8>>,
     host_key_unsupported: bool,
     responses: HashMap<u32, UlcpPropertyFrameRecord>,
-    inspection_queue: VecDeque<u32>,
+    /// What synchronizing is still to ask, one request per entry.
+    read_queue: VecDeque<Vec<u32>>,
     configuration_queue: VecDeque<(u32, Vec<u8>)>,
     device_key: Option<Vec<u8>>,
     device_name: Option<String>,
@@ -1086,7 +1149,7 @@ impl Default for UlcpSessionState {
             radio_host_key: None,
             host_key_unsupported: false,
             responses: HashMap::new(),
-            inspection_queue: VecDeque::new(),
+            read_queue: VecDeque::new(),
             configuration_queue: VecDeque::new(),
             device_key: None,
             device_name: None,
@@ -1201,18 +1264,21 @@ impl MobileUlcpSession {
             ..UlcpSessionState::default()
         };
 
+        // `PROP_LAST_STATUS` goes on its own: in a multi-get, its value and
+        // a refusal standing in its place would read the same.
+        state.read_queue = VecDeque::from([
+            vec![prop::LAST_STATUS],
+            vec![
+                prop::PROTOCOL_VERSION,
+                prop::CAPS,
+                prop::DEV_KEY,
+                prop::DEV_NAME,
+                prop::BATTERY,
+                prop::HOST_KEY,
+            ],
+        ]);
         let mut outbound = Vec::new();
-        for property in [
-            prop::LAST_STATUS,
-            prop::PROTOCOL_VERSION,
-            prop::CAPS,
-            prop::DEV_KEY,
-            prop::DEV_NAME,
-            prop::BATTERY,
-            prop::HOST_KEY,
-        ] {
-            outbound.push(state.get_property(property)?);
-        }
+        state.issue_reads(&mut outbound)?;
         Ok(state.update(outbound))
     }
 
@@ -1517,7 +1583,7 @@ impl MobileUlcpSession {
             .ok_or(MobileError::InvalidUlcpFrame)?
             .value
             .clone();
-        state.inspection_queue = ulcp_refresh_properties(capabilities)?.into();
+        state.read_queue = read_batches(ulcp_refresh_properties(capabilities)?);
         let mut outbound = Vec::new();
         state.start_refresh(&mut outbound)?;
         Ok(state.update(outbound))
@@ -1550,7 +1616,7 @@ impl MobileUlcpSession {
         if !decode_capabilities(&capabilities).contains(&cap::GNSS) {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        state.inspection_queue = VecDeque::from(vec![
+        state.read_queue = read_batches([
             prop::GNSS_LOCATION,
             prop::GNSS_ALTITUDE,
             prop::GNSS_FIX,
@@ -1574,23 +1640,18 @@ impl MobileUlcpSession {
     /// Values read fold into the session's own snapshot as well, so a
     /// settings screen reading a property does not leave the attached
     /// provisioning stale.
+    ///
+    /// Everything asked for goes out in `CMD_PROP_MULTI_GET`s, as many at
+    /// once as the transaction space holds, continued where a reply ran
+    /// out of room.
     pub fn begin_property_fetch(
         &self,
         property_ids: Vec<u32>,
     ) -> Result<UlcpSessionUpdateRecord, MobileError> {
         let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
         state.begin_local_management()?;
-        let battery_multi = property_ids.len() > 1
-            && property_ids.len() <= 14
-            && property_ids
-                .iter()
-                .all(|key| umsh_ulcp::battery_diagnostics::Fields::ALL.contains(*key));
-        let temperature_multi = property_ids == [prop::TEMPERATURES, prop::TEMPERATURE_NAMES];
-        let multi_get =
-            temperature_multi || (battery_multi && state.has_capability(cap::CMD_MULTI));
         state.management = Some(LocalManagement {
-            fetch_queue: property_ids.into(),
-            multi_get,
+            fetch_queue: read_batches(property_ids),
             ..LocalManagement::default()
         });
         let mut outbound = Vec::new();
@@ -2204,19 +2265,26 @@ impl MobileUlcpSession {
             else {
                 return Ok(state.update(Vec::new()));
             };
-            state.inspection_queue = ulcp_refresh_properties(capabilities)?.into();
+            state.read_queue = read_batches(ulcp_refresh_properties(capabilities)?);
             let mut outbound = Vec::new();
             state.start_refresh(&mut outbound)?;
             return Ok(state.update(outbound));
         }
         {
             let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
-            if let Some(ExpectedResponse::ManagementMultiGet(keys)) =
-                state.expected.get(&parsed.header.tid())
-            {
-                let keys = keys.clone();
-                let tid = parsed.header.tid();
-                let mut update = state.consume_management_multi(tid, &frame, &keys)?;
+            let tid = parsed.header.tid();
+            let update = match state.expected.get(&tid) {
+                Some(ExpectedResponse::ManagementMultiGet(keys)) => {
+                    let keys = keys.clone();
+                    Some(state.consume_management_multi(tid, &frame, &keys)?)
+                }
+                Some(ExpectedResponse::Properties(keys)) => {
+                    let keys = keys.clone();
+                    Some(state.consume_property_reads(tid, &frame, &keys)?)
+                }
+                _ => None,
+            };
+            if let Some(mut update) = update {
                 update.completed_control_transaction = Some(tid);
                 return Ok(update);
             }
@@ -2296,49 +2364,7 @@ impl MobileUlcpSession {
         // reads back what the cache can no longer vouch for.
         match expected {
             ExpectedResponse::Property(property) => {
-                if response.property_id == prop::LAST_STATUS && property != prop::LAST_STATUS {
-                    // A capability-gated property the device declines is one
-                    // unknown setting, not an unusable device: drop any value
-                    // cached from an earlier read so the reduction reports it
-                    // as unreadable, and carry on with the rest of the queue.
-                    let expected_property = matches!(
-                        state.stage,
-                        SessionStage::Inspection | SessionStage::Refreshing
-                    );
-                    if expected_property {
-                        state.responses.remove(&property);
-                    } else {
-                        operation_error =
-                            state.refusal(format!("read property {property}"), &response, None);
-                        let optional = state.stage == SessionStage::Initial
-                            && optional_initial_property(property);
-                        state.stage_failure_pending |= !optional;
-                        if state.stage == SessionStage::Initial
-                            && property == prop::HOST_KEY
-                            && operation_error.is_some()
-                        {
-                            state.host_key_unsupported = true;
-                        }
-                    }
-                } else if response.property_id != property || response.command != Cmd::PropIs as u8
-                {
-                    // An answer to this request that is not about this
-                    // property, or not a whole value: nothing the cache can
-                    // file. Handled like a refusal—the property is unreadable
-                    // by this session and the read carries on—rather than
-                    // read again, since what was just read is what could not
-                    // be used. Attaching is the exception: without the
-                    // properties the handshake is built on there is nothing
-                    // to attach to, which is what a refusal there reports too.
-                    state.responses.remove(&property);
-                    if state.stage == SessionStage::Initial {
-                        state.note_mismatch(format!("read property {property}"), &response);
-                        state.stage_failure_pending |= !optional_initial_property(property);
-                    }
-                } else {
-                    state.responses.insert(property, response.clone());
-                    state.apply_property(&response);
-                }
+                operation_error = state.file_read(property, &response);
             }
             ExpectedResponse::Claim => {
                 if response.property_id == prop::LAST_STATUS {
@@ -2851,7 +2877,7 @@ impl MobileUlcpSession {
                     );
                 }
             }
-            ExpectedResponse::ManagementMultiGet(_) => {
+            ExpectedResponse::ManagementMultiGet(_) | ExpectedResponse::Properties(_) => {
                 return Err(MobileError::UlcpMismatchedResponse);
             }
             ExpectedResponse::ManagementGet(property) => {
@@ -2982,15 +3008,7 @@ impl MobileUlcpSession {
             }
         }
 
-        if state.expected.is_empty() {
-            if state.stage_failure_pending {
-                state.stage_failure_pending = false;
-                state.recover_from_operation_failure(&mut outbound)?;
-            } else {
-                state.advance_completed_stage(&mut outbound)?;
-            }
-            state.start_rereads(&mut outbound)?;
-        }
+        state.continue_after_answer(&mut outbound)?;
         let mut update =
             state.update_with(outbound, Vec::new(), raw_transmit_result, operation_error);
         update.completed_control_transaction = completed_control;
@@ -3112,11 +3130,133 @@ impl UlcpSessionState {
         self.tids.allocate()
     }
 
-    fn get_property(&mut self, property: u32) -> Result<Vec<u8>, MobileError> {
-        let tid = self.allocate_tid();
-        self.expected
-            .insert(tid, ExpectedResponse::Property(property));
-        ulcp_prop_get(tid, property)
+    /// Ask for the next round of queued reads: one request per entry, as
+    /// many as the transaction space holds. A round goes out only once the
+    /// last is answered, so the identifiers it takes are all free.
+    fn issue_reads(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
+        for _ in 0..usize::from(frame::TID_MAX) {
+            let Some(keys) = self.read_queue.pop_front() else {
+                break;
+            };
+            let tid = self.allocate_tid();
+            outbound.push(if let [key] = keys[..] {
+                self.expected.insert(tid, ExpectedResponse::Property(key));
+                ulcp_prop_get(tid, key)?
+            } else {
+                let request = ulcp_prop_multi_get(tid, &keys)?;
+                self.expected
+                    .insert(tid, ExpectedResponse::Properties(keys));
+                request
+            });
+        }
+        Ok(())
+    }
+
+    /// File what the device answered to a read of `property`, returning
+    /// the error a refusal reports.
+    fn file_read(
+        &mut self,
+        property: u32,
+        response: &UlcpPropertyFrameRecord,
+    ) -> Option<UlcpOperationErrorRecord> {
+        let mut operation_error = None;
+        if response.property_id == prop::LAST_STATUS && property != prop::LAST_STATUS {
+            // A capability-gated property the device declines is one
+            // unknown setting, not an unusable device: drop any value
+            // cached from an earlier read so the reduction reports it
+            // as unreadable, and carry on with the rest of the queue.
+            let expected_property = matches!(
+                self.stage,
+                SessionStage::Inspection | SessionStage::Refreshing
+            );
+            if expected_property {
+                self.responses.remove(&property);
+            } else {
+                operation_error = self.refusal(format!("read property {property}"), response, None);
+                let optional =
+                    self.stage == SessionStage::Initial && optional_initial_property(property);
+                self.stage_failure_pending |= !optional;
+                if self.stage == SessionStage::Initial
+                    && property == prop::HOST_KEY
+                    && operation_error.is_some()
+                {
+                    self.host_key_unsupported = true;
+                }
+            }
+        } else if response.property_id != property || response.command != Cmd::PropIs as u8 {
+            // An answer to this request that is not about this
+            // property, or not a whole value: nothing the cache can
+            // file. Handled like a refusal—the property is unreadable
+            // by this session and the read carries on—rather than
+            // read again, since what was just read is what could not
+            // be used. Attaching is the exception: without the
+            // properties the handshake is built on there is nothing
+            // to attach to, which is what a refusal there reports too.
+            self.responses.remove(&property);
+            if self.stage == SessionStage::Initial {
+                self.note_mismatch(format!("read property {property}"), response);
+                self.stage_failure_pending |= !optional_initial_property(property);
+            }
+        } else {
+            self.responses.insert(property, response.clone());
+            self.apply_property(response);
+        }
+        operation_error
+    }
+
+    /// File a synchronizing multi-get's answers, each as the `CMD_PROP_IS`
+    /// a lone get of its key would have drawn: the value, or
+    /// `PROP_LAST_STATUS` carrying the refusal. Only the first refusal's
+    /// error is reported, as only the first mismatch is.
+    fn consume_property_reads(
+        &mut self,
+        tid: u8,
+        reply: &[u8],
+        keys: &[u32],
+    ) -> Result<UlcpSessionUpdateRecord, MobileError> {
+        self.expected.remove(&tid);
+        let read = read_multi_get_reply(keys, reply);
+        let mut operation_error = None;
+        for (key, answer) in read.answers {
+            let (property_id, value) = match answer {
+                umsh_ulcp::reply::Answer::Value(value) => (key, value.to_vec()),
+                umsh_ulcp::reply::Answer::Refused(status) => {
+                    let mut value = [0u8; pui::MAX_LEN];
+                    let len = pui::encode(status.0, &mut value)
+                        .map_err(|_| MobileError::InvalidUlcpFrame)?;
+                    (prop::LAST_STATUS, value[..len].to_vec())
+                }
+            };
+            let response = UlcpPropertyFrameRecord {
+                transaction_id: tid,
+                command: Cmd::PropIs as u8,
+                property_id,
+                value,
+            };
+            let error = self.file_read(key, &response);
+            operation_error = operation_error.or(error);
+        }
+        for keys in read.retry.into_iter().rev() {
+            self.read_queue.push_front(keys);
+        }
+        let mut outbound = Vec::new();
+        self.continue_after_answer(&mut outbound)?;
+        Ok(self.update_with(outbound, Vec::new(), None, operation_error))
+    }
+
+    /// Move on once every answer the current round is waiting for is in:
+    /// past a failed stage, or on to the stage's next round.
+    fn continue_after_answer(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
+        if !self.expected.is_empty() {
+            return Ok(());
+        }
+        if self.stage_failure_pending {
+            self.stage_failure_pending = false;
+            self.recover_from_operation_failure(outbound)?;
+        } else {
+            self.advance_completed_stage(outbound)?;
+        }
+        self.start_rereads(outbound)
     }
 
     fn phase(&self) -> UlcpSessionPhase {
@@ -3413,28 +3553,22 @@ impl UlcpSessionState {
             });
             self.management = Some(op);
         } else if !op.fetch_queue.is_empty() {
-            if op.multi_get {
-                let keys: Vec<_> = op.fetch_queue.drain(..).collect();
-                let tid = self.allocate_management_tid()?;
-                let mut bytes = vec![0; MAX_FRAME];
-                let used = frame::prop_multi_get(&mut bytes, tid, &keys)
-                    .map_err(|_| MobileError::InvalidUlcpFrame)?;
-                bytes.truncate(used);
-                self.expected
-                    .insert(tid, ExpectedResponse::ManagementMultiGet(keys));
-                outbound.push(bytes);
-                self.management = Some(op);
-                return Ok(());
-            }
             let budget = usize::from(frame::TID_MAX).saturating_sub(self.expected.len());
             for _ in 0..budget {
-                let Some(property) = op.fetch_queue.pop_front() else {
+                let Some(keys) = op.fetch_queue.pop_front() else {
                     break;
                 };
                 let tid = self.allocate_management_tid()?;
-                self.expected
-                    .insert(tid, ExpectedResponse::ManagementGet(property));
-                outbound.push(ulcp_prop_get(tid, property)?);
+                outbound.push(if let [key] = keys[..] {
+                    self.expected
+                        .insert(tid, ExpectedResponse::ManagementGet(key));
+                    ulcp_prop_get(tid, key)?
+                } else {
+                    let request = ulcp_prop_multi_get(tid, &keys)?;
+                    self.expected
+                        .insert(tid, ExpectedResponse::ManagementMultiGet(keys));
+                    request
+                });
             }
             self.management = Some(op);
         } else {
@@ -3447,17 +3581,9 @@ impl UlcpSessionState {
         Ok(())
     }
 
-    /// Read a `CMD_PROP_MULTI_GET` answer position by position, the way
-    /// the mesh path reads one ([`umsh_ulcp::reply::entries`]). Statuses
-    /// occupy the position of the property they answer, including empty
-    /// successful readings.
-    ///
-    /// Whatever stands is kept, and nothing is attributed to a key it does
-    /// not name: the read ends at the first entry that is malformed or
-    /// answers some other property, exactly as it ends at a short answer,
-    /// and every key after that point is asked for again. An answer that
-    /// reached no key at all would ask forever, so that batch is asked
-    /// for one property at a time instead.
+    /// Record a management multi-get's answers ([`read_multi_get_reply`]).
+    /// Statuses occupy the position of the property they answer,
+    /// including empty successful readings.
     fn consume_management_multi(
         &mut self,
         tid: u8,
@@ -3465,37 +3591,14 @@ impl UlcpSessionState {
         keys: &[u32],
     ) -> Result<UlcpSessionUpdateRecord, MobileError> {
         self.expected.remove(&tid);
-        let mut answered = 0usize;
-        match umsh_ulcp::reply::entries(keys, reply) {
-            Ok(entries) => {
-                // Entries past the last key asked for name themselves, and
-                // answer nothing this request is waiting on.
-                for (key, answer) in entries.map_while(Result::ok).take(keys.len()) {
-                    answered += 1;
-                    self.record_multi_answer(key, answer);
-                }
-            }
-            Err(_) => {
-                // One status for the whole request. UNIMPLEMENTED is a
-                // device advertising MULTI but declining the command,
-                // which still has a usable single-property interface, as
-                // does one answering in a form this session cannot read;
-                // any other status is that status for every key.
-                let status = umsh_ulcp::reply::status_of(reply)
-                    .filter(|&status| status != umsh_ulcp::Status::UNIMPLEMENTED);
-                if let Some(status) = status {
-                    for &key in keys {
-                        answered += 1;
-                        self.record_multi_answer(key, umsh_ulcp::reply::Answer::Refused(status));
-                    }
-                }
-            }
+        let read = read_multi_get_reply(keys, reply);
+        for (key, answer) in read.answers {
+            self.record_multi_answer(key, answer);
         }
         if let Some(op) = self.management.as_mut() {
-            if answered == 0 {
-                op.multi_get = false;
+            for keys in read.retry.into_iter().rev() {
+                op.fetch_queue.push_front(keys);
             }
-            op.fetch_queue.extend(keys[answered..].iter().copied());
         }
         let mut outbound = Vec::new();
         self.continue_local_management(&mut outbound)?;
@@ -3765,6 +3868,9 @@ impl UlcpSessionState {
 
     fn advance_completed_stage(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
         match self.stage {
+            // What a short reply left unanswered is asked for before the
+            // handshake is judged.
+            SessionStage::Initial if !self.read_queue.is_empty() => self.issue_reads(outbound)?,
             SessionStage::Initial => {
                 let version = self
                     .responses
@@ -3782,20 +3888,20 @@ impl UlcpSessionState {
                     .responses
                     .get(&prop::CAPS)
                     .ok_or(MobileError::InvalidUlcpFrame)?;
-                self.inspection_queue = if self.lazy_inspection {
+                self.read_queue = read_batches(if self.lazy_inspection {
                     // Only what the sync reduction insists on: the
                     // interface check and the radio basics every device
                     // has. The rest is read on demand, which is the whole
                     // point of a lazy session.
-                    VecDeque::from(vec![
+                    vec![
                         prop::INTERFACE_TYPE,
                         prop::PHY_ENABLED,
                         prop::PHY_FREQ,
                         prop::PHY_TX_POWER,
-                    ])
+                    ]
                 } else {
-                    ulcp_inspection_properties(capabilities.value.clone())?.into()
-                };
+                    ulcp_inspection_properties(capabilities.value.clone())?
+                });
                 // Whose radio this is comes from what `PROP_HOST_KEY`
                 // actually answered, not from whether `CAP_HOST_FILTER`
                 // says it should have: a device whose capabilities and
@@ -3890,7 +3996,7 @@ impl UlcpSessionState {
         if self.rereads.is_empty() {
             return Ok(());
         }
-        self.inspection_queue = std::mem::take(&mut self.rereads).into();
+        self.read_queue = read_batches(std::mem::take(&mut self.rereads));
         self.start_refresh(outbound)
     }
 
@@ -3901,7 +4007,7 @@ impl UlcpSessionState {
         outbound: &mut Vec<Vec<u8>>,
     ) -> Result<(), MobileError> {
         self.configuration_queue.clear();
-        self.inspection_queue.clear();
+        self.read_queue.clear();
         match self.stage {
             SessionStage::Claiming => self.stage = SessionStage::AwaitingHost,
             SessionStage::Saving => {
@@ -3968,30 +4074,18 @@ impl UlcpSessionState {
 
     fn start_inspection(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
         self.stage = SessionStage::Inspection;
-        if self.inspection_queue.is_empty() {
+        if self.read_queue.is_empty() {
             return self.settle_snapshot();
         }
-        for _ in 0..usize::from(frame::TID_MAX) {
-            let Some(property) = self.inspection_queue.pop_front() else {
-                break;
-            };
-            outbound.push(self.get_property(property)?);
-        }
-        Ok(())
+        self.issue_reads(outbound)
     }
 
     fn start_refresh(&mut self, outbound: &mut Vec<Vec<u8>>) -> Result<(), MobileError> {
         self.stage = SessionStage::Refreshing;
-        if self.inspection_queue.is_empty() {
+        if self.read_queue.is_empty() {
             return self.settle_snapshot();
         }
-        for _ in 0..usize::from(frame::TID_MAX) {
-            let Some(property) = self.inspection_queue.pop_front() else {
-                break;
-            };
-            outbound.push(self.get_property(property)?);
-        }
-        Ok(())
+        self.issue_reads(outbound)
     }
 
     /// Recompute the attached provisioning snapshot after device state
@@ -6939,6 +7033,16 @@ pub fn ulcp_prop_get(transaction_id: u8, property_id: u32) -> Result<Vec<u8>, Mo
     Ok(output[..length].to_vec())
 }
 
+/// Encode a `CMD_PROP_MULTI_GET` request. Not exported: the session
+/// decides how reads are batched.
+fn ulcp_prop_multi_get(transaction_id: u8, property_ids: &[u32]) -> Result<Vec<u8>, MobileError> {
+    let mut output = vec![0; MAX_FRAME];
+    let length = frame::prop_multi_get(&mut output, transaction_id, property_ids)
+        .map_err(|_| MobileError::InvalidUlcpFrame)?;
+    output.truncate(length);
+    Ok(output)
+}
+
 /// Encode a `CMD_PROP_SET` request with the shared ULCP codec.
 #[uniffi::export]
 pub fn ulcp_prop_set(
@@ -7482,6 +7586,37 @@ mod tests {
         bytes
     }
 
+    /// The keys a read request asks for, whichever form it takes.
+    fn requested_keys(bytes: &[u8]) -> Vec<u32> {
+        if Frame::parse(bytes).unwrap().command() == Some(Cmd::PropMultiGet) {
+            multi_get_request(bytes).1
+        } else {
+            vec![property_request(bytes).1]
+        }
+    }
+
+    fn multi_get_request(bytes: &[u8]) -> (u8, Vec<u32>) {
+        let parsed = Frame::parse(bytes).unwrap();
+        assert_eq!(parsed.command(), Some(Cmd::PropMultiGet));
+        let keys = frame::MultiGetKeys::new(parsed.payload)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        (parsed.header.tid(), keys)
+    }
+
+    /// A `CMD_PROP_ARE` answering `keys` in order with `value`.
+    fn multi_get_response(tid: u8, keys: &[u32], value: impl Fn(u32) -> (u32, Vec<u8>)) -> Vec<u8> {
+        let mut bytes = vec![0; MAX_FRAME];
+        let mut reply = frame::prop_are(&mut bytes, tid).unwrap();
+        for &key in keys {
+            let (returned, value) = value(key);
+            reply.write_entry(returned, &value).unwrap();
+        }
+        let length = reply.finish();
+        bytes.truncate(length);
+        bytes
+    }
+
     /// An unsolicited item notification: one item of a multi-value
     /// property, as a scan or an access point sends it.
     fn notification_frame(command: Cmd, property: u32, item: &[u8]) -> Vec<u8> {
@@ -7507,13 +7642,15 @@ mod tests {
     ) -> UlcpSessionUpdateRecord {
         let mut last = None;
         for request in requests {
-            let (tid, requested) = property_request(&request);
-            let (returned, bytes) = value(requested);
-            last = Some(
-                session
-                    .consume(property_response(tid, returned, &bytes))
-                    .unwrap(),
-            );
+            let response = if Frame::parse(&request).unwrap().command() == Some(Cmd::PropMultiGet) {
+                let (tid, keys) = multi_get_request(&request);
+                multi_get_response(tid, &keys, &value)
+            } else {
+                let (tid, requested) = property_request(&request);
+                let (returned, bytes) = value(requested);
+                property_response(tid, returned, &bytes)
+            };
+            last = Some(session.consume(response).unwrap());
         }
         last.unwrap()
     }
@@ -8058,7 +8195,7 @@ mod tests {
     fn mobile_session_control_deadlines_follow_requests_not_notifications() {
         let session = MobileUlcpSession::new();
         let begin = session.begin(None).unwrap();
-        assert_eq!(begin.pending_control_transactions.len(), 7);
+        assert_eq!(begin.pending_control_transactions.len(), 2);
         let pushed = session
             .consume(property_response(
                 frame::TID_UNSOLICITED,
@@ -8070,18 +8207,11 @@ mod tests {
             pushed.pending_control_transactions,
             begin.pending_control_transactions
         );
-        let tid = begin
-            .outbound_frames
-            .iter()
-            .find_map(|request| {
-                let (tid, property) = property_request(request);
-                (property == prop::PROTOCOL_VERSION).then_some(tid)
-            })
-            .unwrap();
+        let (tid, keys) = multi_get_request(&begin.outbound_frames[1]);
         let answered = session
-            .consume(property_response(tid, prop::PROTOCOL_VERSION, &[6, 0]))
+            .consume(multi_get_response(tid, &keys, tethered_value))
             .unwrap();
-        assert_eq!(answered.pending_control_transactions.len(), 6);
+        assert_eq!(answered.pending_control_transactions.len(), 1);
         assert_eq!(answered.completed_control_transaction, Some(tid));
         assert_eq!(pushed.completed_control_transaction, None);
         assert!(!answered.pending_control_transactions.contains(&tid));
@@ -8094,7 +8224,7 @@ mod tests {
                 .unwrap()
                 .pending_control_transactions
                 .len(),
-            7
+            2
         );
     }
 
@@ -8103,14 +8233,23 @@ mod tests {
         let session = MobileUlcpSession::new();
         let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
         assert_eq!(begin.snapshot.phase, UlcpSessionPhase::Synchronizing);
-        assert_eq!(begin.outbound_frames.len(), 7);
+        let [status, rest] = begin.outbound_frames.as_slice() else {
+            panic!("the last status on its own, then everything else at once");
+        };
+        assert_eq!(property_request(status), (1, prop::LAST_STATUS));
         assert_eq!(
-            begin
-                .outbound_frames
-                .iter()
-                .map(|request| property_request(request).0)
-                .collect::<Vec<_>>(),
-            [1, 2, 3, 4, 5, 6, 7]
+            multi_get_request(rest),
+            (
+                2,
+                vec![
+                    prop::PROTOCOL_VERSION,
+                    prop::CAPS,
+                    prop::DEV_KEY,
+                    prop::DEV_NAME,
+                    prop::BATTERY,
+                    prop::HOST_KEY,
+                ]
+            )
         );
 
         let inspection =
@@ -8124,7 +8263,7 @@ mod tests {
                 prop::HOST_KEY => (prop::LAST_STATUS, vec![2]),
                 _ => unreachable!(),
             });
-        assert_eq!(inspection.outbound_frames.len(), 4);
+        assert_eq!(inspection.outbound_frames.len(), 1);
         assert_eq!(
             inspection.snapshot.host_ownership,
             UlcpHostOwnership::Unsupported
@@ -8150,6 +8289,101 @@ mod tests {
         assert_eq!(
             attached.snapshot.provisioning.unwrap().frequency_khz,
             915_000
+        );
+    }
+
+    /// A commissionable device's own host key, answered for everything else
+    /// by the fixture.
+    fn tethered_value(property: u32) -> (u32, Vec<u8>) {
+        match property {
+            prop::HOST_KEY => (property, vec![0xAA; 32]),
+            _ => commissionable_value(property),
+        }
+    }
+
+    #[test]
+    fn inspection_goes_out_in_batches_all_at_once() {
+        let session = MobileUlcpSession::new();
+        let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+        let inspection = answer_requests(&session, begin.outbound_frames, tethered_value);
+        let expected =
+            ulcp_inspection_properties(encoded_capabilities(&commissionable_capabilities()))
+                .unwrap();
+        assert!(expected.len() > MULTI_GET_BATCH);
+        assert_eq!(
+            inspection.outbound_frames.len(),
+            expected.len().div_ceil(MULTI_GET_BATCH)
+        );
+        let asked: Vec<u32> = inspection
+            .outbound_frames
+            .iter()
+            .flat_map(|request| requested_keys(request))
+            .collect();
+        assert_eq!(asked, expected);
+        let attached = answer_requests(&session, inspection.outbound_frames, tethered_value);
+        assert_eq!(attached.snapshot.phase, UlcpSessionPhase::Attached);
+    }
+
+    #[test]
+    fn a_short_handshake_reply_is_finished_before_the_handshake_is_judged() {
+        let session = MobileUlcpSession::new();
+        let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+        let (status_tid, _) = property_request(&begin.outbound_frames[0]);
+        session
+            .consume(property_response(status_tid, prop::LAST_STATUS, &[0]))
+            .unwrap();
+        let (tid, keys) = multi_get_request(&begin.outbound_frames[1]);
+        // The reply runs out of room after the capabilities.
+        let more = session
+            .consume(multi_get_response(tid, &keys[..2], tethered_value))
+            .unwrap();
+        assert_eq!(more.snapshot.phase, UlcpSessionPhase::Synchronizing);
+        let [request] = more.outbound_frames.as_slice() else {
+            panic!("the rest of the handshake in one request");
+        };
+        assert_eq!(multi_get_request(request).1, keys[2..]);
+        let attached = drive_reads(&session, more.outbound_frames, tethered_value);
+        assert_eq!(attached.snapshot.phase, UlcpSessionPhase::Attached);
+        assert_eq!(
+            attached.snapshot.device_name.as_deref(),
+            Some("Ridge repeater")
+        );
+    }
+
+    #[test]
+    fn a_refresh_batch_that_answers_nothing_asks_its_first_key_alone_next_round() {
+        let session = MobileUlcpSession::new();
+        attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
+        let refresh = session.refresh().unwrap();
+        let [first, second] = refresh.outbound_frames.as_slice() else {
+            panic!("the refresh in two batches");
+        };
+        let (tid, keys) = multi_get_request(first);
+        // The first position names a property that was not asked for there.
+        let mut bytes = vec![0; MAX_FRAME];
+        let mut bad = frame::prop_are(&mut bytes, tid).unwrap();
+        bad.write_entry(keys[1], &[0]).unwrap();
+        let used = bad.finish();
+        let waiting = session.consume(bytes[..used].to_vec()).unwrap();
+        assert!(
+            waiting.outbound_frames.is_empty(),
+            "the next round waits for this one"
+        );
+        let next = answer_requests(&session, vec![second.clone()], tethered_value);
+        let [alone, rest] = next.outbound_frames.as_slice() else {
+            panic!("the first key alone and the rest together");
+        };
+        assert_eq!(property_request(alone).1, keys[0]);
+        assert_eq!(multi_get_request(rest).1, keys[1..]);
+        let refreshed = drive_reads(&session, next.outbound_frames, tethered_value);
+        assert_eq!(refreshed.snapshot.phase, UlcpSessionPhase::Attached);
+        assert!(
+            refreshed
+                .snapshot
+                .provisioning
+                .unwrap()
+                .unreadable_properties
+                .is_empty()
         );
     }
 
@@ -8201,7 +8435,7 @@ mod tests {
                 &[0],
             ))
             .unwrap();
-        assert_eq!(inspection.outbound_frames.len(), 6);
+        assert_eq!(inspection.outbound_frames.len(), 1);
         let attached =
             answer_requests(
                 &session,
@@ -9287,7 +9521,7 @@ mod tests {
                 prop::HOST_KEY => (prop::LAST_STATUS, vec![2]),
                 _ => unreachable!(),
             });
-        let partial =
+        let attached =
             answer_requests(
                 &session,
                 inspection.outbound_frames,
@@ -9299,19 +9533,12 @@ mod tests {
                     prop::PHY_LORA_BW => (property, 125_000u32.to_le_bytes().to_vec()),
                     prop::PHY_LORA_SF => (property, vec![9]),
                     prop::PHY_LORA_CR => (property, vec![5]),
+                    prop::PHY_DUTY_NOW => (property, 65u16.to_le_bytes().to_vec()),
+                    prop::PHY_DUTY_LIMIT => (property, 655u16.to_le_bytes().to_vec()),
+                    prop::SAVED => (property, vec![1]),
                     _ => unreachable!(),
                 },
             );
-        let attached = answer_requests(
-            &session,
-            partial.outbound_frames,
-            |property| match property {
-                prop::PHY_DUTY_NOW => (property, 65u16.to_le_bytes().to_vec()),
-                prop::PHY_DUTY_LIMIT => (property, 655u16.to_le_bytes().to_vec()),
-                prop::SAVED => (property, vec![1]),
-                _ => unreachable!(),
-            },
-        );
         assert_eq!(attached.snapshot.phase, UlcpSessionPhase::Attached);
 
         let configured = session
@@ -9394,33 +9621,24 @@ mod tests {
         let refresh = session.refresh().unwrap();
         assert_eq!(refresh.snapshot.phase, UlcpSessionPhase::Attached);
         assert!(refresh.waiting_for_responses);
-        let refresh_tail =
-            answer_requests(
-                &session,
-                refresh.outbound_frames,
-                |property| match property {
-                    prop::DEV_NAME => (property, b"Fresh name".to_vec()),
-                    prop::INTERFACE_TYPE => (property, vec![INTERFACE_TYPE as u8]),
-                    prop::PHY_ENABLED => (property, vec![1]),
-                    prop::PHY_FREQ => (property, 910_525u32.to_le_bytes().to_vec()),
-                    prop::PHY_TX_POWER => (property, vec![18]),
-                    prop::PHY_LORA_BW => (property, 62_500u32.to_le_bytes().to_vec()),
-                    prop::PHY_LORA_SF => (property, vec![7]),
-                    _ => unreachable!(),
-                },
-            );
-        let refreshed =
-            answer_requests(
-                &session,
-                refresh_tail.outbound_frames,
-                |property| match property {
-                    prop::PHY_LORA_CR => (property, vec![5]),
-                    prop::PHY_DUTY_NOW => (property, 262u16.to_le_bytes().to_vec()),
-                    prop::PHY_DUTY_LIMIT => (property, 655u16.to_le_bytes().to_vec()),
-                    prop::SAVED => (property, vec![1]),
-                    _ => unreachable!(),
-                },
-            );
+        let refreshed = answer_requests(
+            &session,
+            refresh.outbound_frames,
+            |property| match property {
+                prop::DEV_NAME => (property, b"Fresh name".to_vec()),
+                prop::INTERFACE_TYPE => (property, vec![INTERFACE_TYPE as u8]),
+                prop::PHY_ENABLED => (property, vec![1]),
+                prop::PHY_FREQ => (property, 910_525u32.to_le_bytes().to_vec()),
+                prop::PHY_TX_POWER => (property, vec![18]),
+                prop::PHY_LORA_BW => (property, 62_500u32.to_le_bytes().to_vec()),
+                prop::PHY_LORA_SF => (property, vec![7]),
+                prop::PHY_LORA_CR => (property, vec![5]),
+                prop::PHY_DUTY_NOW => (property, 262u16.to_le_bytes().to_vec()),
+                prop::PHY_DUTY_LIMIT => (property, 655u16.to_le_bytes().to_vec()),
+                prop::SAVED => (property, vec![1]),
+                _ => unreachable!(),
+            },
+        );
         assert_eq!(refreshed.snapshot.phase, UlcpSessionPhase::Attached);
         assert!(!refreshed.waiting_for_responses);
         assert_eq!(
@@ -11105,14 +11323,10 @@ mod tests {
         // about a fix a second and noise moves the reading, so a host that
         // wants a position asks for one.
         let poll = session.refresh_positioning().unwrap();
-        let asked: Vec<u32> = poll
-            .outbound_frames
-            .iter()
-            .map(|frame| {
-                let parsed = Frame::parse(frame).unwrap();
-                PropPayload::parse(parsed.payload).unwrap().key
-            })
-            .collect();
+        let [request] = poll.outbound_frames.as_slice() else {
+            panic!("the position in one request");
+        };
+        let (_, asked) = multi_get_request(request);
         assert_eq!(
             asked,
             vec![
@@ -13157,7 +13371,7 @@ mod tests {
     }
 
     #[test]
-    fn temperature_initial_read_uses_multi_without_capability_hint() {
+    fn sensor_read_is_one_multi_get_without_capability_hint() {
         for (temperatures, names) in [
             (
                 vec![0xa5, 0x0b, 0xff, 0xff],
@@ -13168,19 +13382,21 @@ mod tests {
         ] {
             let session = MobileUlcpSession::new();
             attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
-            let keys = vec![prop::TEMPERATURES, prop::TEMPERATURE_NAMES];
+            let keys = vec![
+                prop::ILLUMINANCE,
+                prop::TEMPERATURES,
+                prop::TEMPERATURE_NAMES,
+            ];
             let start = session.begin_property_fetch(keys.clone()).unwrap();
-            assert_eq!(start.outbound_frames.len(), 1);
-            let request = Frame::parse(&start.outbound_frames[0]).unwrap();
-            assert_eq!(request.command(), Some(Cmd::PropMultiGet));
-            assert_eq!(
-                frame::MultiGetKeys::new(request.payload)
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap(),
-                keys
-            );
+            let [request] = start.outbound_frames.as_slice() else {
+                panic!("every sensor property in one request");
+            };
+            let (tid, asked) = multi_get_request(request);
+            assert_eq!(asked, keys);
+            let lux = 320_000u32.to_le_bytes();
             let mut bytes = [0; 100];
-            let mut response = frame::prop_are(&mut bytes, request.header.tid()).unwrap();
+            let mut response = frame::prop_are(&mut bytes, tid).unwrap();
+            response.write_entry(prop::ILLUMINANCE, &lux).unwrap();
             response
                 .write_entry(prop::TEMPERATURES, &temperatures)
                 .unwrap();
@@ -13201,10 +13417,11 @@ mod tests {
                 answers.iter().map(|a| a.property_id).collect::<Vec<_>>(),
                 keys
             );
-            assert_eq!(answers[0].value, Some(temperatures));
-            assert_eq!(answers[1].value, names);
+            assert_eq!(answers[0].value, Some(lux.to_vec()));
+            assert_eq!(answers[1].value, Some(temperatures));
+            assert_eq!(answers[2].value, names);
             assert_eq!(
-                answers[1].status_code,
+                answers[2].status_code,
                 names.is_none().then_some(umsh_ulcp::Status::FAILURE.0)
             );
         }
@@ -13227,20 +13444,11 @@ mod tests {
         let more = session.consume(bytes[..used].to_vec()).unwrap();
         assert!(more.management_event.is_none());
         assert_eq!(more.outbound_frames.len(), 1);
-        let next = Frame::parse(&more.outbound_frames[0]).unwrap();
-        assert_eq!(next.command(), Some(Cmd::PropMultiGet));
-        assert_eq!(
-            frame::MultiGetKeys::new(next.payload)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap(),
-            [prop::TEMPERATURE_NAMES]
-        );
-        let mut response = frame::prop_are(&mut bytes, next.header.tid()).unwrap();
-        response
-            .write_entry(prop::TEMPERATURE_NAMES, b"\x03MCU")
+        let (tid, key) = property_request(&more.outbound_frames[0]);
+        assert_eq!(key, prop::TEMPERATURE_NAMES);
+        let done = session
+            .consume(property_response(tid, prop::TEMPERATURE_NAMES, b"\x03MCU"))
             .unwrap();
-        let used = response.finish();
-        let done = session.consume(bytes[..used].to_vec()).unwrap();
         assert!(done.outbound_frames.is_empty());
         let answers = done.management_event.unwrap().answers;
         assert_eq!(answers.len(), 2);
@@ -13332,13 +13540,10 @@ mod tests {
         let more = session.consume(bytes[..used].to_vec()).unwrap();
         assert!(more.management_event.is_none());
         assert_eq!(more.outbound_frames.len(), 1);
-        let next = Frame::parse(&more.outbound_frames[0]).unwrap();
-        assert_eq!(next.command(), Some(Cmd::PropMultiGet));
-        let mut response = frame::prop_are(&mut bytes, next.header.tid()).unwrap();
-        response.write_entry(prop::BATTERY_PRESENT, &[1]).unwrap();
-        let used = response.finish();
+        let (tid, key) = property_request(&more.outbound_frames[0]);
+        assert_eq!(key, prop::BATTERY_PRESENT);
         let answers = session
-            .consume(bytes[..used].to_vec())
+            .consume(property_response(tid, prop::BATTERY_PRESENT, &[1]))
             .unwrap()
             .management_event
             .unwrap()
@@ -13349,47 +13554,56 @@ mod tests {
         );
     }
 
-    /// An answer that reaches no key at all would be asked for forever, so
-    /// the batch is broken up into single reads rather than failing.
+    /// An answer that reaches no key at all would be asked for forever—
+    /// as one would be whose first value alone overflows a reply—so the
+    /// first key goes on its own and the rest stay batched.
     #[test]
-    fn battery_diagnostics_multi_that_answers_nothing_falls_back_to_single_reads() {
+    fn a_multi_get_that_answers_nothing_asks_its_first_key_alone() {
         let session = battery_multi_session();
-        let start = session
-            .begin_property_fetch(vec![prop::BATTERY_CURRENT, prop::BATTERY_PRESENT])
-            .unwrap();
-        let request = Frame::parse(&start.outbound_frames[0]).unwrap();
+        let keys = vec![
+            prop::BATTERY_CURRENT,
+            prop::BATTERY_PRESENT,
+            prop::BATTERY_DESIGN_CAPACITY,
+        ];
+        let start = session.begin_property_fetch(keys.clone()).unwrap();
+        let (tid, _) = multi_get_request(&start.outbound_frames[0]);
         let mut bytes = [0; 40];
-        let mut bad = frame::prop_are(&mut bytes, request.header.tid()).unwrap();
+        let mut bad = frame::prop_are(&mut bytes, tid).unwrap();
         bad.write_entry(prop::BATTERY_PRESENT, &[1]).unwrap();
         let used = bad.finish();
-        let fallback = session.consume(bytes[..used].to_vec()).unwrap();
-        assert_eq!(fallback.outbound_frames.len(), 2);
-        for frame in &fallback.outbound_frames {
-            assert_eq!(Frame::parse(frame).unwrap().command(), Some(Cmd::PropGet));
-        }
+        let split = session.consume(bytes[..used].to_vec()).unwrap();
+        let [alone, rest] = split.outbound_frames.as_slice() else {
+            panic!("the first key alone and the rest together");
+        };
+        assert_eq!(property_request(alone).1, keys[0]);
+        assert_eq!(multi_get_request(rest).1, keys[1..]);
     }
 
+    /// Every device takes a multi-get, so one declined whole is that
+    /// status for every key rather than a reason to ask one at a time.
     #[test]
-    fn battery_diagnostics_multi_declined_falls_back_to_single_reads() {
+    fn a_multi_get_declined_whole_is_that_status_for_every_key() {
         let session = battery_multi_session();
         let keys = vec![prop::BATTERY_CURRENT, prop::BATTERY_DESIGN_CAPACITY];
         let start = session.begin_property_fetch(keys.clone()).unwrap();
-        let request = Frame::parse(&start.outbound_frames[0]).unwrap();
-        let fallback = session
+        let (tid, _) = multi_get_request(&start.outbound_frames[0]);
+        let done = session
             .consume(property_response(
-                request.header.tid(),
+                tid,
                 prop::LAST_STATUS,
-                &[umsh_ulcp::Status::UNIMPLEMENTED.0 as u8],
+                &[umsh_ulcp::Status::BUSY.0 as u8],
             ))
             .unwrap();
-        assert_eq!(fallback.outbound_frames.len(), 2);
+        assert!(done.outbound_frames.is_empty());
+        let answers = done.management_event.unwrap().answers;
         assert_eq!(
-            fallback
-                .outbound_frames
-                .iter()
-                .map(|f| property_request(f).1)
-                .collect::<Vec<_>>(),
+            answers.iter().map(|a| a.property_id).collect::<Vec<_>>(),
             keys
+        );
+        assert!(
+            answers
+                .iter()
+                .all(|a| a.status_code == Some(umsh_ulcp::Status::BUSY.0))
         );
     }
 
@@ -13409,28 +13623,21 @@ mod tests {
         let update = session
             .begin_property_fetch(vec![prop::DEV_NAME, prop::GNSS_ENABLED])
             .unwrap();
-        assert_eq!(update.outbound_frames.len(), 2);
+        let [request] = update.outbound_frames.as_slice() else {
+            panic!("both properties in one request");
+        };
+        let (tid, keys) = multi_get_request(request);
+        assert_eq!(keys, [prop::DEV_NAME, prop::GNSS_ENABLED]);
 
-        let (name_tid, name_prop) = property_request(&update.outbound_frames[0]);
-        assert_eq!(name_prop, prop::DEV_NAME);
-        let (gnss_tid, gnss_prop) = property_request(&update.outbound_frames[1]);
-        assert_eq!(gnss_prop, prop::GNSS_ENABLED);
-
-        let mid = session
-            .consume(property_response(name_tid, prop::DEV_NAME, b"Ridge"))
-            .unwrap();
-        assert!(
-            mid.management_event.is_none(),
-            "half-answered is not answered"
-        );
         // The device has no receiver, so it refuses the second property.
-        let done = session
-            .consume(property_response(
-                gnss_tid,
-                prop::LAST_STATUS,
-                &[umsh_ulcp::Status::PROP_NOT_FOUND.0 as u8],
-            ))
+        let mut bytes = vec![0; MAX_FRAME];
+        let mut reply = frame::prop_are(&mut bytes, tid).unwrap();
+        reply.write_entry(prop::DEV_NAME, b"Ridge").unwrap();
+        reply
+            .write_status_entry(umsh_ulcp::Status::PROP_NOT_FOUND)
             .unwrap();
+        let used = reply.finish();
+        let done = session.consume(bytes[..used].to_vec()).unwrap();
         let event = done.management_event.expect("both answers are in");
         assert_eq!(
             event.answers,
@@ -13456,13 +13663,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn local_fetch_asks_in_bounded_batches() {
-        let session = MobileUlcpSession::new();
-        attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
-
-        // Nine properties: seven in the first round, two in the second.
-        let properties: Vec<u32> = vec![
+    /// Nine properties a screen might ask for together.
+    fn nine_properties() -> Vec<u32> {
+        vec![
             prop::DEV_NAME,
             prop::PHY_ENABLED,
             prop::PHY_FREQ,
@@ -13472,18 +13675,79 @@ mod tests {
             prop::MAC_REPEATER_ENABLED,
             prop::DEV_PEERS,
             prop::DEV_ADMINS,
-        ];
+        ]
+    }
+
+    #[test]
+    fn local_fetch_asks_once_and_continues_where_the_reply_ran_out() {
+        let session = MobileUlcpSession::new();
+        attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
+
+        let properties = nine_properties();
+        let update = session.begin_property_fetch(properties.clone()).unwrap();
+        let [request] = update.outbound_frames.as_slice() else {
+            panic!("every property in one request");
+        };
+        let (tid, keys) = multi_get_request(request);
+        assert_eq!(keys, properties);
+
+        // The reply has room for six; the other three are asked for again.
+        let more = session
+            .consume(multi_get_response(tid, &keys[..6], commissionable_value))
+            .unwrap();
+        assert!(more.management_event.is_none());
+        let [request] = more.outbound_frames.as_slice() else {
+            panic!("the rest in one request");
+        };
+        let (tid, rest) = multi_get_request(request);
+        assert_eq!(rest, properties[6..]);
+        let done = session
+            .consume(multi_get_response(tid, &rest, commissionable_value))
+            .unwrap();
+        let event = done.management_event.expect("all nine answered");
+        assert_eq!(
+            event
+                .answers
+                .iter()
+                .map(|a| a.property_id)
+                .collect::<Vec<_>>(),
+            properties
+        );
+    }
+
+    #[test]
+    fn local_fetch_asks_in_batches_bounded_by_the_transaction_space() {
+        let session = MobileUlcpSession::new();
+        attach_commissionable(&session, Some(vec![0xAA; 32]), vec![0xAA; 32]);
+
+        // More than a round of batches can carry, in property numbers
+        // nothing has been assigned.
+        let properties: Vec<u32> = (10_000..10_120).collect();
+        let anything = |property| (property, vec![0]);
         let update = session.begin_property_fetch(properties.clone()).unwrap();
         assert_eq!(
             update.outbound_frames.len(),
             usize::from(frame::TID_MAX),
             "a round asks for no more than the transaction space holds"
         );
-        let second = answer_requests(&session, update.outbound_frames, commissionable_value);
-        assert_eq!(second.outbound_frames.len(), 2);
+        let first: Vec<u32> = update
+            .outbound_frames
+            .iter()
+            .flat_map(|request| requested_keys(request))
+            .collect();
+        assert_eq!(
+            first,
+            properties[..usize::from(frame::TID_MAX) * MULTI_GET_BATCH]
+        );
+
+        let second = answer_requests(&session, update.outbound_frames, anything);
         assert!(second.management_event.is_none());
-        let done = answer_requests(&session, second.outbound_frames, commissionable_value);
-        let event = done.management_event.expect("all nine answered");
+        let [request] = second.outbound_frames.as_slice() else {
+            panic!("what is left in one request");
+        };
+        assert_eq!(multi_get_request(request).1, properties[first.len()..]);
+        let done = answer_requests(&session, second.outbound_frames, anything);
+        let event = done.management_event.expect("all answered");
         assert_eq!(event.answers.len(), properties.len());
     }
 
@@ -13815,6 +14079,7 @@ mod tests {
         let session = MobileUlcpSession::administrative_lazy();
         let begin = session.begin(None).unwrap();
         let mut asked = Vec::new();
+        let mut requests = 0;
         let mut pending = begin.outbound_frames;
         let mut last = None;
         while !pending.is_empty() {
@@ -13824,8 +14089,9 @@ mod tests {
                 prop::HOST_KEY => (property, vec![0xBB; 32]),
                 _ => commissionable_value(property),
             });
+            requests += pending.len();
             for request in &pending {
-                asked.push(property_request(request).1);
+                asked.extend(requested_keys(request));
             }
             pending = update.outbound_frames.clone();
             last = Some(update);
@@ -13836,6 +14102,10 @@ mod tests {
             asked.len(),
             11,
             "the seven-property preamble and the four the sync reduction insists on"
+        );
+        assert_eq!(
+            requests, 3,
+            "the preamble in two requests and the reduction's four in one"
         );
         assert!(
             !asked.contains(&prop::MAC_REPEATER_ENABLED),
