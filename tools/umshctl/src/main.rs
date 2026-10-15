@@ -434,7 +434,11 @@ async fn run(args: ToolArgs) -> Result<()> {
         match resolve(&args, &app.prefs).await? {
             Some(target) => {
                 let session = connection::connect(target, app.trace).await?;
-                announce_attached(&session);
+                // The shell says what it is talking to before its first
+                // prompt; a one-shot's output is the command's own.
+                if interactive {
+                    announce_attached(&session);
+                }
                 app.session = Some(session);
             }
             // The shell can still scan and connect; a one-shot cannot.
