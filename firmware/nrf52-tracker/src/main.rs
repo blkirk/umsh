@@ -6105,12 +6105,16 @@ mod firmware {
         // Wio Tracker L1: the user LED (D11 / P1.01) is active-high.
         #[cfg(feature = "board-wio-tracker-l1")]
         let led = Output::new(p.P1_01, Level::Low, OutputDrive::Standard);
-        // XIAO nRF52840: blue segment of the common-anode RGB LED (P0.06),
-        // **active-low**—Level::High is off. Blue is the status color
-        // here (MeshCore's choice on this board); red stays free as a TX
-        // indicator and green is the 10 kΩ leg, noticeably dimmer.
+        // XIAO nRF52840: all three cathodes of the common-anode RGB LED,
+        // **active-low**—Level::High is off.
         #[cfg(feature = "board-xiao-nrf52")]
-        let led = Output::new(p.P0_06, Level::High, OutputDrive::Standard);
+        let led = StatusLed {
+            red: Output::new(p.P0_26, Level::High, OutputDrive::Standard),
+            green: Output::new(p.P0_30, Level::High, OutputDrive::Standard),
+            blue: Output::new(p.P0_06, Level::High, OutputDrive::Standard),
+        };
+        #[cfg(not(any(feature = "t1000e", feature = "board-xiao-nrf52")))]
+        let led = StatusLed(led);
         #[cfg(feature = "t1000e")]
         let led = {
             let mut config = SimpleConfig::default();
@@ -7212,9 +7216,66 @@ mod firmware {
 
     // ─── Heartbeat + WDT pet ─────────────────────────────────────────────────
 
+    /// What the heartbeat task's LED is showing. Only a board with a
+    /// color LED tells these apart; elsewhere every one but `Off` is on.
+    #[cfg(not(feature = "t1000e"))]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Indication {
+        Off,
+        Heartbeat,
+        Pairing,
+        Alert,
+    }
+
+    /// The heartbeat task's single-color LED.
+    #[cfg(not(any(feature = "t1000e", feature = "board-xiao-nrf52")))]
+    struct StatusLed(Output<'static>);
+
+    #[cfg(not(any(feature = "t1000e", feature = "board-xiao-nrf52")))]
+    impl StatusLed {
+        fn show(&mut self, indication: Indication) {
+            drive_led(&mut self.0, indication != Indication::Off);
+        }
+    }
+
+    /// The XIAO's RGB LED, one pin per cathode.
+    #[cfg(feature = "board-xiao-nrf52")]
+    struct StatusLed {
+        red: Output<'static>,
+        green: Output<'static>,
+        blue: Output<'static>,
+    }
+
+    #[cfg(feature = "board-xiao-nrf52")]
+    impl StatusLed {
+        fn show(&mut self, indication: Indication) {
+            let (red, green, blue) = match indication {
+                Indication::Off => (false, false, false),
+                Indication::Heartbeat => (false, true, false),
+                Indication::Pairing => (false, false, true),
+                Indication::Alert => (true, true, true),
+            };
+            drive_led(&mut self.red, red);
+            drive_led(&mut self.green, green);
+            drive_led(&mut self.blue, blue);
+        }
+    }
+
+    /// Drive one LED pin, honoring the board's polarity: active-low
+    /// (T-Echo P0.14, the XIAO's cathodes) inverts; active-high (Solar P1
+    /// LED_B P0.19) drives directly.
+    #[cfg(not(feature = "t1000e"))]
+    fn drive_led(pin: &mut Output<'static>, on: bool) {
+        if on == cfg!(feature = "led-active-low") {
+            pin.set_low();
+        } else {
+            pin.set_high();
+        }
+    }
+
     #[cfg(not(feature = "t1000e"))]
     #[embassy_executor::task]
-    async fn heartbeat(mut led: Output<'static>, mut wdt: WatchdogHandle) -> ! {
+    async fn heartbeat(mut led: StatusLed, mut wdt: WatchdogHandle) -> ! {
         let mut engine = LedEngine::new(LedTimings::default(), Instant::now().as_millis());
         loop {
             wdt.pet();
@@ -7255,36 +7316,22 @@ mod firmware {
                 } else {
                     phase < 100 || (200..300).contains(&phase) || (400..500).contains(&phase)
                 };
-                #[cfg(feature = "led-active-low")]
-                if on {
-                    led.set_low();
+                led.show(if on {
+                    Indication::Pairing
                 } else {
-                    led.set_high();
-                }
-                #[cfg(not(feature = "led-active-low"))]
-                if on {
-                    led.set_high();
-                } else {
-                    led.set_low();
-                }
+                    Indication::Off
+                });
                 Timer::after_millis(50).await;
                 continue;
             }
             let decision = engine.tick(Instant::now().as_millis());
-            // Active-low (T-Echo P0.14) inverts; active-high (Solar P1 LED_B
-            // P0.19) drives directly.
-            #[cfg(feature = "led-active-low")]
-            if decision.on {
-                led.set_low()
+            led.show(if !decision.on {
+                Indication::Off
+            } else if engine.alert_active() {
+                Indication::Alert
             } else {
-                led.set_high()
-            }
-            #[cfg(not(feature = "led-active-low"))]
-            if decision.on {
-                led.set_high()
-            } else {
-                led.set_low()
-            }
+                Indication::Heartbeat
+            });
             // An alert edge must reach the LED without waiting out the
             // heartbeat's multi-second deadline. A `Signal` has one useful
             // consumer, so on the Solar P1 this arm is gone entirely and
