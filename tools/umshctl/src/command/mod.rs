@@ -286,6 +286,16 @@ pub enum Command {
         #[command(subcommand)]
         op: Option<DefaultOp>,
     },
+
+    /// Print a completion script for a shell. Needs no radio.
+    ///
+    /// For zsh, save it as `_umshctl` in a directory on `$fpath`:
+    ///
+    ///   umshctl completions zsh > ~/.zfunc/_umshctl
+    Completions {
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -309,6 +319,7 @@ impl Command {
             // The administrator identity is this tool's own; no radio is
             // involved in reading it out.
             Self::AdminKey => false,
+            Self::Completions { .. } => false,
             // Learned routes are this tool's own notes, and reading them
             // is exactly what you want to do with nothing attached.
             Self::Routes { .. } => false,
@@ -442,6 +453,16 @@ impl Command {
             Self::Capture(args) => capture::run(app, args).await,
             Self::BleScan { timeout } => ble_scan(app, timeout).await,
             Self::Default { op } => default(app, op.unwrap_or(DefaultOp::Show)),
+            Self::Completions { shell } => {
+                use clap::CommandFactory;
+                clap_complete::generate(
+                    shell,
+                    &mut crate::ToolArgs::command(),
+                    "umshctl",
+                    &mut std::io::stdout(),
+                );
+                Ok(())
+            }
         }
     }
 }
