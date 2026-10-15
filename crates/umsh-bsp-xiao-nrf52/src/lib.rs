@@ -74,25 +74,16 @@
 //!
 //! ## Pairing without a button
 //!
-//! The missing force-pairing gesture is the one absence that would
-//! otherwise be fatal rather than merely inconvenient: with pairing mode
-//! normally opening only when no bonds exist, the first host to bond
-//! would own the radio permanently, and nothing short of a full security
-//! wipe over that host's own link could ever let a second one in.
+//! As on every board, a pairing window opens at boot only while no bonds
+//! are retained. The missing force-pairing gesture costs nothing more:
+//! once bonded, another host is let in by writing `PROP_BLE_PAIRING`
+//! from a bonded host or from any host over USB-CDC. A board whose last
+//! bonded host is lost is recovered the same way, over USB.
 //!
-//! So the firmware for this board builds with `boot-pairing-window`: a
-//! **BLE pairing window opens on every boot**, lasting five minutes with
-//! no bonds or two minutes with retained bonds.
-//! Pressing RESET is the physical-presence ceremony here, standing in for
-//! the button hold the other boards use. A configured PIN still gates the
-//! pairing itself and the repeated-failure lockout still applies, so the
-//! window enables attempts rather than granting access.
-//!
-//! This is an interim measure, not a designed answer—it trades a
-//! recurring 20 s exposure on every reset for not locking users out, and
-//! a board whose reset button is reachable by anyone is a board whose
-//! pairing window is reachable by anyone. Revisit alongside the
-//! retrofitted-button profile.
+//! The firmware's `boot-pairing-window` feature, which opens a window on
+//! every boot so that RESET stands in for the gesture, is deliberately
+//! off here: a board whose reset button is reachable by anyone would be a
+//! board whose pairing window is reachable by anyone.
 //!
 //! `P0.02` is left as a **disconnected** input in this configuration. It
 //! has no external pull of any kind, and a floating pin with the input
