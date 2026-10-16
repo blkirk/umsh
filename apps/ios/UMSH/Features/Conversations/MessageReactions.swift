@@ -22,6 +22,17 @@ struct ReactionBadgeView: View {
     /// dot trail—inside the reserved space, where nothing can clip them.
     static let topInset: CGFloat = 6
     static let cornerInset: CGFloat = 15
+    /// How far neighboring chips tuck under one another.
+    private static let chipOverlap: CGFloat = 8
+
+    /// How far a cluster of these reactions reaches in from the outer edge of
+    /// the reserved space, halos included—what a sender label sharing the
+    /// cluster's row has to stay clear of.
+    static func reach(for reactions: [MessageReaction]) -> CGFloat {
+        let count = CGFloat(chips(for: reactions).count)
+        guard count > 0 else { return 0 }
+        return cornerInset + count * ThoughtChip.diameter - (count - 1) * chipOverlap + 2
+    }
 
     let reactions: [MessageReaction]
     /// The direction of the message being reacted to. Chips sit over its
@@ -41,7 +52,7 @@ struct ReactionBadgeView: View {
         let style: ChipStyle
     }
 
-    private var chips: [Chip] {
+    private static func chips(for reactions: [MessageReaction]) -> [Chip] {
         var grouped: [(glyph: String, count: Int, mine: Bool)] = []
         var failed: [Chip] = []
         for reaction in reactions {
@@ -69,7 +80,7 @@ struct ReactionBadgeView: View {
         // trail per chip reads as several thoughts instead of one.
         let ordered = orderedChips
         let cornerIndex = isOutbound ? 0 : ordered.count - 1
-        HStack(spacing: -8) {
+        HStack(spacing: -Self.chipOverlap) {
             ForEach(Array(ordered.enumerated()), id: \.element.id) { index, chip in
                 ThoughtChip(
                     glyph: chip.glyph,
@@ -99,7 +110,7 @@ struct ReactionBadgeView: View {
     /// Chips arranged so ours ends up nearest the bubble's corner: leading
     /// for an outbound message, trailing for an inbound one.
     private var orderedChips: [Chip] {
-        let all = chips
+        let all = Self.chips(for: reactions)
         let mine = all.filter { $0.style != .theirs }
         let theirs = all.filter { $0.style == .theirs }
         return isOutbound ? mine + theirs : theirs + mine
@@ -114,7 +125,7 @@ struct ReactionBadgeView: View {
 private struct ThoughtChip: View {
     /// A thought bubble is round. The glyph is sized to fit rather than the
     /// bubble stretched to hold it, so a chip is never a pill.
-    private static let diameter: CGFloat = 34
+    static let diameter: CGFloat = 34
 
     let glyph: String
     let count: Int

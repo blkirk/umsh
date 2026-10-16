@@ -281,47 +281,62 @@ struct ChatMessageBubble: View, @MainActor Equatable {
                     gutter
                 }
                 VStack(alignment: message.isOutbound ? .trailing : .leading, spacing: 2) {
-                    // Named once at the top of a run: the following lines are
-                    // the same person still talking, and repeating them on
-                    // every bubble is what makes a group chat unreadable.
-                    if let senderLabel, presentation.isFirstInRun {
-                        Text(senderLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12)
+                    SenderLabelStack(spacing: 2) {
+                        // Named once at the top of a run: the following lines
+                        // are the same person still talking, and repeating
+                        // them on every bubble is what makes a group chat
+                        // unreadable.
+                        if let senderLabel, presentation.isFirstInRun {
+                            senderLabelText(senderLabel)
+                        }
+                        reactionsAndBubble
+                            // The whole group—bubble and chips—is what the
+                            // context menu lifts. The preview mask must cover
+                            // the chips too or they are sliced at the bubble
+                            // outline the moment the menu opens; a full-rect
+                            // mask works because the lift keeps transparent
+                            // pixels transparent, so the gaps around the chips
+                            // show the dimmed transcript—and the sender label
+                            // the chips may share a row with—rather than a
+                            // platter. (A custom preview view is NOT
+                            // equivalent: those are backed by an opaque system
+                            // platter.)
+                            .contentShape(.contextMenuPreview, Rectangle())
+                            .contextMenu {
+                                menuItems
+                            }
+                            .alert("Original Message", isPresented: $showsOriginalBody) {
+                                Button("OK", role: .cancel) {}
+                            } message: {
+                                Text(message.originalBody ?? "")
+                            }
+                            // The row's frame changes size when its first
+                            // reaction arrives or its last one leaves—the
+                            // reserved chip strips appear and disappear with
+                            // them. The context-menu interaction UIKit hangs on
+                            // this view caches the lift geometry it was born
+                            // with, and reopening the menu after such a resize
+                            // lifts a stale-sized snapshot: the bubble clipped
+                            // to a rectangle, the chip drawn into it. Changing
+                            // identity on exactly that toggle rebuilds the view
+                            // and its interaction at the new size. So does a
+                            // chip joining or leaving a bubble widened to clear
+                            // its sender label, which can change its width. A
+                            // reaction merely replacing another keeps the
+                            // size, the identity, and the open menu.
+                            .id(
+                                LiftGeometry(
+                                    isReacted: !message.reactions.isEmpty,
+                                    labelClearance: labelClearance
+                                )
+                            )
+                            .layoutValue(
+                                key: ReactionClusterReach.self,
+                                value: message.reactions.isEmpty
+                                    ? nil
+                                    : ReactionBadgeView.reach(for: message.reactions)
+                            )
                     }
-                    reactionsAndBubble
-                        // The whole group—bubble and chips—is what the
-                        // context menu lifts. The preview mask must cover the
-                        // chips too or they are sliced at the bubble outline
-                        // the moment the menu opens; a full-rect mask works
-                        // because the lift keeps transparent pixels
-                        // transparent, so the gaps around the chips show the
-                        // dimmed transcript rather than a platter. (A custom
-                        // preview view is NOT equivalent: those are backed by
-                        // an opaque system platter.)
-                        .contentShape(.contextMenuPreview, Rectangle())
-                        .contextMenu {
-                            menuItems
-                        }
-                        .alert("Original Message", isPresented: $showsOriginalBody) {
-                            Button("OK", role: .cancel) {}
-                        } message: {
-                            Text(message.originalBody ?? "")
-                        }
-                        // The row's frame changes size when its first
-                        // reaction arrives or its last one leaves—the
-                        // reserved chip strips appear and disappear with
-                        // them. The context-menu interaction UIKit hangs on
-                        // this view caches the lift geometry it was born
-                        // with, and reopening the menu after such a resize
-                        // lifts a stale-sized snapshot: the bubble clipped
-                        // to a rectangle, the chip drawn into it. Changing
-                        // identity on exactly that toggle rebuilds the view
-                        // and its interaction at the new size. A reaction
-                        // merely replacing another keeps the size, the
-                        // identity, and the open menu.
-                        .id(message.reactions.isEmpty)
                     if let caption {
                         Text(caption)
                             .font(.caption2)
@@ -362,6 +377,24 @@ struct ChatMessageBubble: View, @MainActor Equatable {
         } else {
             Color.clear.frame(width: Self.avatarGutter, height: 1)
         }
+    }
+
+    private func senderLabelText(_ label: String) -> some View {
+        Text(label)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+    }
+
+    /// How far the reaction cluster reaches past the bubble's outer edge into
+    /// the sender label's row—what the bubble widens by, beyond the label, to
+    /// keep the chips clear of the name. Absent unless this bubble carries both
+    /// a label and reactions.
+    private var labelClearance: CGFloat? {
+        guard senderLabel != nil, presentation.isFirstInRun, !message.reactions.isEmpty else {
+            return nil
+        }
+        return max(0, ReactionBadgeView.reach(for: message.reactions) - ReactionBadgeView.outset)
     }
 
     private var shape: BubbleShape {
@@ -518,15 +551,33 @@ struct ChatMessageBubble: View, @MainActor Equatable {
     }
 
     private var bubble: some View {
-        SelectableMessageText(
-            text: message.body,
-            textColor: message.isOutbound ? .white : .label
-        )
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            // The tail eats into the bubble's own side, so keep its width
-            // clear of the text on whichever side it hangs off.
-            .padding(message.isOutbound ? .trailing : .leading, BubbleShape.tailWidth)
+        ZStack(alignment: .leading) {
+            SelectableMessageText(
+                text: message.body,
+                textColor: message.isOutbound ? .white : .label
+            )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                // The tail eats into the bubble's own side, so keep its width
+                // clear of the text on whichever side it hangs off.
+                .padding(message.isOutbound ? .trailing : .leading, BubbleShape.tailWidth)
+            if let senderLabel, let labelClearance {
+                // A short bubble under a long name is widened until its
+                // reaction chips clear the name, so the two can share a row.
+                // An invisible copy of the label sets the floor: it is the
+                // label's own width however the text is sized, and as a
+                // ZStack layer it is offered the same width as the body, so
+                // it takes nothing away from the body's width negotiation.
+                // It gives way by wrapping where the row is too narrow, and
+                // the label stack then keeps the chips' row apart.
+                senderLabelText(senderLabel)
+                    .padding(.trailing, labelClearance)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: 0)
+                    .hidden()
+                    .accessibilityHidden(true)
+            }
+        }
             .background(
                 message.isOutbound ? security.tint : Color(uiColor: .systemGray5),
                 in: shape
@@ -561,6 +612,94 @@ struct ChatMessageBubble: View, @MainActor Equatable {
             return isMostRecentOutbound ? "Sent" : nil
         default: return "Sending…"
         }
+    }
+}
+
+/// What a bubble's context-menu lift geometry depends on; see the note on
+/// `.id` in ``ChatMessageBubble``.
+private struct LiftGeometry: Hashable {
+    var isReacted: Bool
+    var labelClearance: CGFloat?
+}
+
+/// How far a bubble's reaction cluster reaches in from the outer edge of its
+/// group; absent when the message has no reactions.
+private struct ReactionClusterReach: LayoutValueKey {
+    static let defaultValue: CGFloat? = nil
+}
+
+/// A sender label stacked over its bubble, sharing its row with the bubble's
+/// reaction chips when they fit beside it.
+///
+/// The label is on the leading side and an inbound cluster hangs over the
+/// trailing corner, so where the two clear each other the label sits in the
+/// group's reserved chip strip, just as close to the bubble as ever. A short
+/// bubble widens until they do; only where the row is too narrow for that
+/// does the strip keep its own row. The group overlaps the label rather than taking it in: the label
+/// stays out of the context-menu lift, and the lift's full-rect mask still
+/// spans the whole strip, so the chips are never sliced.
+///
+/// A layout rather than a measured offset so the choice is made in the same
+/// pass that sizes the bubble: nothing redraws, and the row's height never
+/// changes under a held scroll position. Every child is proposed exactly what
+/// a `VStack` would propose, which keeps the bubble's width negotiation as it
+/// was.
+private struct SenderLabelStack: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(proposal, subviews).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let child = ProposedViewSize(width: proposal.width, height: nil)
+        for (subview, origin) in zip(subviews, arrange(proposal, subviews).origins) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
+                proposal: child
+            )
+        }
+    }
+
+    private func arrange(
+        _ proposal: ProposedViewSize,
+        _ subviews: Subviews
+    ) -> (size: CGSize, origins: [CGPoint]) {
+        let child = ProposedViewSize(width: proposal.width, height: nil)
+        let sizes = subviews.map { $0.sizeThatFits(child) }
+        // The label's own trailing padding is the gap it keeps from the
+        // cluster. A bubble widened to clear its label lands exactly on the
+        // boundary, so the comparison allows for the rounding of two
+        // separately measured copies of the same text.
+        if sizes.count == 2,
+           let reach = subviews[1][ReactionClusterReach.self],
+           sizes[0].width <= sizes[1].width - reach + 1 {
+            let label = sizes[0], group = sizes[1]
+            // The label keeps the same distance from the bubble it has on an
+            // unreacted message, at the foot of the chip strip. The strip
+            // reaches above it; a label taller than the strip pushes the
+            // group down instead.
+            let groupY = max(0, label.height + spacing - ReactionBadgeView.overhang)
+            let labelY = groupY + ReactionBadgeView.overhang - spacing - label.height
+            return (
+                CGSize(width: max(label.width, group.width), height: groupY + group.height),
+                [CGPoint(x: 0, y: labelY), CGPoint(x: 0, y: groupY)]
+            )
+        }
+        var origins: [CGPoint] = []
+        var size = CGSize.zero
+        for subviewSize in sizes {
+            let y = origins.isEmpty ? 0 : size.height + spacing
+            origins.append(CGPoint(x: 0, y: y))
+            size.width = max(size.width, subviewSize.width)
+            size.height = y + subviewSize.height
+        }
+        return (size, origins)
     }
 }
 
