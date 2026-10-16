@@ -296,6 +296,37 @@ quirks = [
 ]
 
 [[boards]]
+id = "xiao-esp32s3"
+name = "XIAO ESP32S3 + Wio-SX1262 Kit"
+vendor = "Seeed Studio"
+category = "devkit"
+status = "proven"
+status_note = "Validated on hardware, including Bluetooth pairing and over-the-air radio work."
+blurb = """
+The ESP32-S3 version of the XIAO kit, with 8 MB of PSRAM—enough to run \
+Bluetooth and Wi-Fi at once. One image is a phone companion, a repeater, or \
+an internet bridge, depending only on how it is set up. A user button sends \
+a beacon and turns the node off and on."""
+mcu = "Espressif ESP32-S3"
+radio = "Semtech SX1262"
+gnss = "None"
+display = "None"
+battery = "LiPo via solder pads, with onboard charger; no level reporting"
+extras = "User button, status LED, Wi-Fi"
+vendor_url = "https://www.seeedstudio.com/Wio-SX1262-with-XIAO-ESP32S3-p-5982.html"
+photo = "xiao-esp32s3.jpg"
+
+[boards.flash]
+make_target = "flash-xiao-esp32s3"
+methods = ["esp-serial"]
+chip = "ESP32-S3"
+dfu_entry = "None needed—the board enters its ROM bootloader on its own when the flashing tool asserts the USB serial control lines. Over the factory firmware it reappears on a different port, so the first attempt fails: flash again on the new port."
+quirks = [
+  "Building this board needs Espressif's Xtensa Rust toolchain, installed with <code>espup</code>.",
+  "The XIAO's BOOT and RESET buttons are under the radio board. The factory firmware leaves the chip latched into update mode after the first flash; unplug it, and any battery, once to clear it.",
+]
+
+[[boards]]
 id = "tlora-pager"
 name = "T-LoRa Pager"
 vendor = "LilyGO"

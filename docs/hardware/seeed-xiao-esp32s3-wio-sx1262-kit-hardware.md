@@ -160,7 +160,8 @@ flash fails to connect and has to be rerun on the new port. The latch then
 survives every reset short of power loss, so the freshly written image boots
 back into the ROM (`boot:0x23 (DOWNLOAD(USB/UART0))`). esptool clears the
 latch before its hard reset; espflash does not. Removing power (USB and any
-battery) clears it.
+battery) clears it. The web flasher clears the latch as esptool does, and
+follows the board to the ROM's new port.
 
 ## 7. Power
 
