@@ -40,6 +40,9 @@ pub enum LedSequence {
     /// The GNSS receiver was switched off: a long hold breaking into
     /// two pips—the mirror of [`GnssOn`](Self::GnssOn).
     GnssOff,
+    /// The button was held through boot to open the pairing window: two
+    /// firm flashes before the pairing blink takes over.
+    PairingHold,
 }
 
 impl LedSequence {
@@ -51,6 +54,7 @@ impl LedSequence {
             Self::LocationAdvert => &patterns::LOCATION_ADVERT,
             Self::GnssOn => &patterns::GNSS_ON,
             Self::GnssOff => &patterns::GNSS_OFF,
+            Self::PairingHold => &patterns::PAIRING_HOLD,
         }
     }
 }
@@ -132,6 +136,25 @@ fn dim_decision(decision: BrightnessDecision, dim_permille: u16) -> BrightnessDe
 /// the same energy spread over 20 ms would read as a dim smudge.
 fn dim_pulse_ms(pulse_ms: u64, dim_permille: u16) -> u64 {
     (pulse_ms * u64::from(dim_permille) / 1_000).max(1)
+}
+
+/// The BLE pairing-window indication: two 100 ms blinks, 500 ms apart,
+/// every two seconds. It replaces the heartbeat while the window is open.
+///
+/// Returns whether the LED is lit at `now_ms`, and when that next changes.
+/// A free function for the same reason as [`ambient_dim_permille`]: the
+/// firmware draws it outside the engine.
+pub fn pairing_blink(now_ms: u64) -> (bool, u64) {
+    const PERIOD_MS: u64 = 2_000;
+    // On 0–100, off 100–500, on 500–600, off 600–2000.
+    const EDGES_MS: [u64; 4] = [100, 500, 600, PERIOD_MS];
+    let phase = now_ms % PERIOD_MS;
+    let on = phase < 100 || (500..600).contains(&phase);
+    let next = EDGES_MS
+        .into_iter()
+        .find(|&edge| edge > phase)
+        .unwrap_or(PERIOD_MS);
+    (on, now_ms - phase + next)
 }
 
 /// State-aware T1000-E LED policy. One-shot confirmations preempt persistent
@@ -427,6 +450,15 @@ mod patterns {
         ],
     };
 
+    /// Pairing hold acknowledged: ON 120, OFF 120, ON 120.
+    pub static PAIRING_HOLD: Pattern = Pattern {
+        steps: &[
+            Duration::from_millis(120),
+            Duration::from_millis(120),
+            Duration::from_millis(120),
+        ],
+    };
+
     /// Locate alert: an urgent triple-blink, replayed on a period by
     /// [`LedEngine::start_alert`](super::LedEngine::start_alert). On a
     /// board with no buzzer this *is* the alert, so it is deliberately
@@ -542,6 +574,14 @@ impl LedEngine {
             pattern: seq.pattern(),
             started_at_ms: now_ms,
         });
+    }
+
+    /// Whether a one-shot sequence is still playing at `now_ms`, for a
+    /// caller that has to let one finish before taking the board down.
+    pub fn sequence_running(&self, now_ms: u64) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|seq| seq.resolve(now_ms).is_some())
     }
 
     /// Compute the LED state to apply at `now_ms` and the next deadline.
@@ -768,6 +808,48 @@ mod tests {
         // After 500ms, sequence done → heartbeat. At t=500 we're past
         // the heartbeat ON pulse (0..50), in the off-gap → false.
         assert_eq!(e.tick(500).on, false);
+    }
+
+    #[test]
+    fn pairing_hold_flashes_twice() {
+        // ON 120, OFF 120, ON 120.
+        let mut e = engine(1_000);
+        e.play(LedSequence::PairingHold, 1_000);
+        assert_eq!(e.tick(1_000).on, true);
+        assert_eq!(e.tick(1_120).on, false);
+        assert_eq!(e.tick(1_240).on, true);
+        assert_eq!(e.tick(1_359).on, true);
+        // Done: back to the heartbeat's off-gap.
+        assert_eq!(e.tick(1_360).on, false);
+    }
+
+    #[test]
+    fn pairing_blink_is_two_blinks_every_two_seconds() {
+        assert_eq!(pairing_blink(4_000), (true, 4_100));
+        assert_eq!(pairing_blink(4_099), (true, 4_100));
+        assert_eq!(pairing_blink(4_100), (false, 4_500));
+        assert_eq!(pairing_blink(4_550), (true, 4_600));
+        assert_eq!(pairing_blink(4_600), (false, 6_000));
+        assert_eq!(pairing_blink(5_999), (false, 6_000));
+        assert_eq!(pairing_blink(6_000), (true, 6_100));
+    }
+
+    #[test]
+    fn sequence_running_spans_the_whole_pattern_off_gaps_included() {
+        let mut e = engine(0);
+        assert!(!e.sequence_running(0));
+        e.play(LedSequence::PowerOff, 0);
+        assert!(e.sequence_running(0));
+        // An off-gap between flashes is still the sequence.
+        assert!(e.sequence_running(150));
+        assert!(e.sequence_running(499));
+        assert!(!e.sequence_running(500));
+        // Shadowed by an alert, it still runs on its own clock.
+        e.play(LedSequence::PowerOff, 1_000);
+        e.start_alert(1_000);
+        let _ = e.tick(1_050);
+        assert!(e.sequence_running(1_050));
+        assert!(!e.sequence_running(1_500));
     }
 
     #[test]
