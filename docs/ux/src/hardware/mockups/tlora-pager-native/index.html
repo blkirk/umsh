@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pager Native Renders</title>
+<style>
+:root { --bg:#ECECEF; --ink:#1C1C1E; --ink2:#55555B; --card:#FFFFFF; --rule:#D6D6DB; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg:#141518; --ink:#EEF0F3; --ink2:#9AA0A8; --card:#1E2024; --rule:#2C2F35; }
+}
+:root[data-theme="dark"] { --bg:#141518; --ink:#EEF0F3; --ink2:#9AA0A8; --card:#1E2024; --rule:#2C2F35; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.45 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+main { max-width:1180px; margin:0 auto; padding:32px 16px 64px; }
+h1 { font-size:28px; margin:0 0 6px; }
+p.lede { color:var(--ink2); margin:0 0 28px; max-width:70ch; }
+section { background:var(--card); border:1px solid var(--rule); border-radius:12px;
+  padding:16px 18px 18px; margin:0 0 20px; }
+h2 { font-size:16px; margin:0 0 12px; }
+.pair { display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; }
+figure { margin:0; }
+figcaption { color:var(--ink2); font-size:12px; margin-top:6px; }
+figure img { display:block; background:#000; border-radius:3px; }
+.native img { width:calc(480px / var(--dpr, 1)); height:auto; }
+.zoom { max-width:100%; overflow-x:auto; }
+.zoom img { width:calc(1920px / var(--dpr, 1)); max-width:none; height:auto;
+  image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<main>
+  <h1>T-LoRa Pager screens at panel density</h1>
+  <p class="lede">Each screen as 480×222 RGB565 pixels. The left copy puts one panel
+  pixel on one physical pixel of this display, which on a Retina Mac (218–254 ppi) is
+  close to the panel's roughly 227 ppi and so close to true size. The right copy
+  enlarges the same pixels 4× without smoothing.</p>
+  
+<section>
+  <h2>1 · Chats</h2>
+  <div class="pair">
+    <figure class="native"><img src="01-chats.png" alt="1 · Chats, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="01-chats.png" alt="1 · Chats, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>2 · Find</h2>
+  <div class="pair">
+    <figure class="native"><img src="02-find.png" alt="2 · Find, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="02-find.png" alt="2 · Find, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>3 · Conversation typing</h2>
+  <div class="pair">
+    <figure class="native"><img src="03-conversation-typing.png" alt="3 · Conversation typing, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="03-conversation-typing.png" alt="3 · Conversation typing, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>4 · Conversation not typing</h2>
+  <div class="pair">
+    <figure class="native"><img src="04-conversation-not-typing.png" alt="4 · Conversation not typing, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="04-conversation-not-typing.png" alt="4 · Conversation not typing, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>5 · Reading</h2>
+  <div class="pair">
+    <figure class="native"><img src="05-reading.png" alt="5 · Reading, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="05-reading.png" alt="5 · Reading, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>6 · Tall message</h2>
+  <div class="pair">
+    <figure class="native"><img src="06-tall-message.png" alt="6 · Tall message, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="06-tall-message.png" alt="6 · Tall message, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>7 · Long draft</h2>
+  <div class="pair">
+    <figure class="native"><img src="07-long-draft.png" alt="7 · Long draft, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="07-long-draft.png" alt="7 · Long draft, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>8 · Message actions</h2>
+  <div class="pair">
+    <figure class="native"><img src="08-message-actions.png" alt="8 · Message actions, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="08-message-actions.png" alt="8 · Message actions, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>9 · Message details</h2>
+  <div class="pair">
+    <figure class="native"><img src="09-message-details.png" alt="9 · Message details, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="09-message-details.png" alt="9 · Message details, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>10 · Reply</h2>
+  <div class="pair">
+    <figure class="native"><img src="10-reply.png" alt="10 · Reply, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="10-reply.png" alt="10 · Reply, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>11 · Send trouble</h2>
+  <div class="pair">
+    <figure class="native"><img src="11-send-trouble.png" alt="11 · Send trouble, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="11-send-trouble.png" alt="11 · Send trouble, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>12 · Message while writing</h2>
+  <div class="pair">
+    <figure class="native"><img src="12-message-while-writing.png" alt="12 · Message while writing, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="12-message-while-writing.png" alt="12 · Message while writing, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>13 · Waking to messages</h2>
+  <div class="pair">
+    <figure class="native"><img src="13-waking-to-messages.png" alt="13 · Waking to messages, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="13-waking-to-messages.png" alt="13 · Waking to messages, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>14 · Channel</h2>
+  <div class="pair">
+    <figure class="native"><img src="14-channel.png" alt="14 · Channel, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="14-channel.png" alt="14 · Channel, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>15 · Channel message actions</h2>
+  <div class="pair">
+    <figure class="native"><img src="15-channel-message-actions.png" alt="15 · Channel message actions, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="15-channel-message-actions.png" alt="15 · Channel message actions, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>16 · Member</h2>
+  <div class="pair">
+    <figure class="native"><img src="16-member.png" alt="16 · Member, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="16-member.png" alt="16 · Member, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>17 · Channel invite</h2>
+  <div class="pair">
+    <figure class="native"><img src="17-channel-invite.png" alt="17 · Channel invite, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="17-channel-invite.png" alt="17 · Channel invite, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>18 · Join channel</h2>
+  <div class="pair">
+    <figure class="native"><img src="18-join-channel.png" alt="18 · Join channel, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="18-join-channel.png" alt="18 · Join channel, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>19 · Add channel</h2>
+  <div class="pair">
+    <figure class="native"><img src="19-add-channel.png" alt="19 · Add channel, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="19-add-channel.png" alt="19 · Add channel, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>20 · Emergency</h2>
+  <div class="pair">
+    <figure class="native"><img src="20-emergency.png" alt="20 · Emergency, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="20-emergency.png" alt="20 · Emergency, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>21 · Peers rail focused</h2>
+  <div class="pair">
+    <figure class="native"><img src="21-peers-rail-focused.png" alt="21 · Peers rail focused, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="21-peers-rail-focused.png" alt="21 · Peers rail focused, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>22 · Add peer</h2>
+  <div class="pair">
+    <figure class="native"><img src="22-add-peer.png" alt="22 · Add peer, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="22-add-peer.png" alt="22 · Add peer, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>23 · Peer detail</h2>
+  <div class="pair">
+    <figure class="native"><img src="23-peer-detail.png" alt="23 · Peer detail, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="23-peer-detail.png" alt="23 · Peer detail, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>24 · Share</h2>
+  <div class="pair">
+    <figure class="native"><img src="24-share.png" alt="24 · Share, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="24-share.png" alt="24 · Share, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>25 · Device</h2>
+  <div class="pair">
+    <figure class="native"><img src="25-device.png" alt="25 · Device, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="25-device.png" alt="25 · Device, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>26 · Battery low</h2>
+  <div class="pair">
+    <figure class="native"><img src="26-battery-low.png" alt="26 · Battery low, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="26-battery-low.png" alt="26 · Battery low, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>27 · Battery empty</h2>
+  <div class="pair">
+    <figure class="native"><img src="27-battery-empty.png" alt="27 · Battery empty, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="27-battery-empty.png" alt="27 · Battery empty, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>28 · First run name</h2>
+  <div class="pair">
+    <figure class="native"><img src="28-first-run-name.png" alt="28 · First run name, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="28-first-run-name.png" alt="28 · First run name, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+<section>
+  <h2>29 · First run region</h2>
+  <div class="pair">
+    <figure class="native"><img src="29-first-run-region.png" alt="29 · First run region, panel pixels">
+      <figcaption>Panel pixels</figcaption></figure>
+    <figure class="zoom"><img src="29-first-run-region.png" alt="29 · First run region, enlarged 4×">
+      <figcaption>Enlarged 4×</figcaption></figure>
+  </div>
+</section>
+</main>
+<script>
+// Map one image pixel to one physical display pixel.
+document.documentElement.style.setProperty("--dpr", window.devicePixelRatio || 1);
+</script>
+</body>
+</html>
