@@ -489,12 +489,76 @@ def chevron(x, cy, col=None):
              sw=2)
 
 
+# Reaction glyphs follow the iOS palette (🩷 👍 👎 🤣 ‼️ ❓) in emoji colors.
+# They are drawn, not set: the panel has no color emoji font, and a font
+# glyph is a few pixels at this size. Each fills about a 20 px box at k=1.
+REACTIONS = ["<3", "+1", "-1", "ha", "!", "?"]
+E_PINK = "#FF8FC4"
+E_YELLOW = "#FFC83D"
+E_SHADE = "#B87A0E"
+E_INK = "#4A2E08"
+E_TEAR = "#5AB8FF"
+E_RED = "#F0453A"
+
+
 def heart(cx, cy, k=1.0):
     return P(f"M{cx} {cy+5.5*k} C{cx-8*k} {cy+0.5*k} {cx-6.5*k} {cy-6*k} "
              f"{cx-3.2*k} {cy-6*k} C{cx-1.4*k} {cy-6*k} {cx} {cy-4.6*k} "
              f"{cx} {cy-3.4*k} C{cx} {cy-4.6*k} {cx+1.4*k} {cy-6*k} "
              f"{cx+3.2*k} {cy-6*k} C{cx+6.5*k} {cy-6*k} {cx+8*k} {cy+0.5*k} "
-             f"{cx} {cy+5.5*k} Z", fill=C["red"])
+             f"{cx} {cy+5.5*k} Z", fill=E_PINK)
+
+
+def thumb(cx, cy, down=False):
+    """A fist with the thumb up, or turned over for down."""
+    hand = ("M-8 -0.3 L-4 -0.3 L-2 -6.3 Q-1 -9.3 1.5 -8.3 Q3 -7.3 2.5 -4.3 "
+            "L1.5 -0.8 L6 -0.8 Q8 -0.8 8 1.2 Q8 2.7 7 3.2 Q8.2 4 7.6 5.4 "
+            "Q8 6.6 7 7.4 Q7.6 8.6 6 9.2 L-5 9.2 Q-8 9.2 -8 6.7 Z")
+    turn = " rotate(180)" if down else ""
+    return [f'<g transform="translate({cx:.1f},{cy:.1f}){turn}">',
+            P(hand, E_SHADE, E_YELLOW, sw=0.9),
+            P("M3 3.2 H7 M3 5.4 H7.4 M3 7.4 H6.8", E_SHADE, sw=0.9),
+            "</g>"]
+
+
+def laugh(cx, cy):
+    """Rolling on the floor laughing: a tilted face, eyes shut, tears."""
+    return [f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-20)">',
+            CIRC(0, 0, 8.6, E_YELLOW),
+            P("M-6 -4.8 L-2.6 -3.2 L-6 -1.6 M6 -4.8 L2.6 -3.2 L6 -1.6",
+              E_INK, sw=1.5),
+            P("M-5.6 0.6 H5.6 Q5.6 7 0 7 Q-5.6 7 -5.6 0.6 Z", fill=E_INK),
+            P("M-4.9 0.6 H4.9 L4.7 2.2 H-4.7 Z", fill="#fff"),
+            P("M-8.4 -2.4 Q-12.2 1.4 -10 3.2 Q-7.8 4 -8.4 -2.4 Z",
+              fill=E_TEAR),
+            P("M8.4 -2.4 Q12.2 1.4 10 3.2 Q7.8 4 8.4 -2.4 Z", fill=E_TEAR),
+            "</g>"]
+
+
+def bangs(cx, cy):
+    o = []
+    for x in (cx - 3.6, cx + 3.6):
+        o.append(P(f"M{x-2:.1f} {cy-8.6:.1f} H{x+2:.1f} L{x+1.1:.1f} "
+                   f"{cy+3:.1f} H{x-1.1:.1f} Z", E_RED, E_RED, sw=1))
+        o.append(CIRC(x, cy + 7, 1.9, E_RED))
+    return o
+
+
+def question(cx, cy):
+    return [P(f"M{cx-4.6} {cy-4.2} C{cx-4.6} {cy-10.2} {cx+5} {cy-10.2} "
+              f"{cx+5} {cy-4.6} C{cx+5} {cy-1.2} {cx} {cy-1.2} {cx} {cy+2.8}",
+              E_RED, sw=3.2),
+            CIRC(cx, cy + 7.2, 2, E_RED)]
+
+
+def reaction_glyph(tok, cx, cy, k=1.0):
+    g = {"<3": lambda: [heart(cx, cy + 0.5, 1.35)],
+         "+1": lambda: thumb(cx, cy),
+         "-1": lambda: thumb(cx, cy, down=True),
+         "ha": lambda: laugh(cx, cy),
+         "!": lambda: bangs(cx, cy),
+         "?": lambda: question(cx, cy)}[tok]()
+    return g if k == 1 else scaled(g, cx, cy, k)
 
 
 def menu_card(mx, my, mw, mh):
@@ -586,6 +650,63 @@ B_PY = 4
 B_MAX = 330
 
 
+# Reactions on a message, after the iOS ReactionBadgeView: round chips over
+# the bubble's outer top corner (top-left on a sent message, top-right on a
+# received one), overlapping like a hand of cards. Ours is in the bubble color
+# and sits frontmost at the corner; matching reactions share a chip with a
+# count; one dot trail per cluster falls outside the bubble.
+CHIP_R = 14
+CHIP_STEP = 21
+CHIP_RISE = 6  # chip center above the bubble's top edge
+CHIP_THEIRS = "#323A45"
+
+
+def reaction_reserve(it):
+    """Space a reacted message keeps above its bubble for the chips, and for
+    a count badge when there is one. A sender label beside the cluster
+    shares it."""
+    if not it.get("reactions"):
+        return 0
+    counted = any(n > 1 for _, n, _ in it["reactions"])
+    need = CHIP_RISE + CHIP_R + 2 + (6 if counted else 0)
+    return max(0, need - (18 if it.get("sender") else 0))
+
+
+def reaction_cluster(bx, by, bw, outbound, reactions):
+    """reactions: (token, count, includes mine) per chip, in arrival order."""
+    mine = [r for r in reactions if r[2]]
+    theirs = [r for r in reactions if not r[2]]
+    chips = mine + theirs if outbound else theirs + mine
+    n = len(chips)
+    cy = by - CHIP_RISE
+    side = -1 if outbound else 1  # toward the outer side
+    corner = bx if outbound else bx + bw
+    # (cx, chip) from back to front.
+    placed = [(corner + i * CHIP_STEP if outbound
+               else corner - (n - 1 - i) * CHIP_STEP, c)
+              for i, c in enumerate(chips)]
+    if outbound:
+        placed.reverse()
+    o = []
+    for j, (cx, (tok, count, is_mine)) in enumerate(placed):
+        fill = C["out"] if is_mine else CHIP_THEIRS
+        if j == n - 1:
+            # The thought-dot trail, from the corner chip only.
+            for d, r in ((14.8, 4.1), (20.5, 2.1)):
+                o.append(CIRC(cx + side * d, cy + d, r + 2, C["bg"]))
+                o.append(CIRC(cx + side * d, cy + d, r, fill))
+        o.append(CIRC(cx, cy, CHIP_R + 2, C["bg"]))
+        o.append(CIRC(cx, cy, CHIP_R, fill))
+        o += reaction_glyph(tok, cx, cy, 0.78)
+    for cx, (tok, count, is_mine) in placed:
+        if count > 1:
+            bx_ = cx + side * 11
+            o.append(CIRC(bx_, cy - 11, 9, C["bg"]))
+            o.append(T(bx_, cy - 5.5, str(count), F_SMALL, C["text"], 700,
+                       "middle"))
+    return o
+
+
 def layout_items(items):
     """Return a list of (item, height, gap_before)."""
     out = []
@@ -602,6 +723,7 @@ def layout_items(items):
             h = len(lines) * B_LH + 2 * B_PY
             if it.get("sender"):
                 h += 18
+            h += reaction_reserve(it)
         if prev is None or k in ("date", "status"):
             gap = 0 if k == "status" else 3
         else:
@@ -664,6 +786,7 @@ def transcript(items, top, bottom, channel=False):
                 o.append(T(in_x + 4, y + 14, it["sender"], F_SMALL,
                            C["text2"], 700))
                 by += 18
+            by += reaction_reserve(it)
             bh = len(lines) * B_LH + 2 * B_PY
             if k == "out":
                 bx = W - 8 - bw
@@ -682,12 +805,9 @@ def transcript(items, top, bottom, channel=False):
             for li, line in enumerate(lines):
                 o.append(T(bx + B_PX, by + B_PY + 18 + li * B_LH, line,
                            B_FS, "#fff" if k == "out" else C["text"]))
-            if it.get("reaction"):
-                rx = bx + bw - 8
-                ry = by + bh - 2
-                o.append(R(rx - 14, ry - 11, 30, 22, "#2A313B", rx=11,
-                           stroke=C["bg"], sw=2))
-                o.append(heart(rx + 1, ry + 0.5, 0.95))
+            if it.get("reactions"):
+                o += reaction_cluster(bx, by, bw, k == "out",
+                                      it["reactions"])
             pos[idx] = (bx, by, bw, bh)
         y += h
     return clip(o, 0, top, W, bottom - top), pos
@@ -932,18 +1052,25 @@ def screen_actions():
     return o
 
 
+def screen_reacted():
+    o = [R(0, 0, W, H, C["bg"])]
+    tr, _ = transcript(ridge_items(i1={"focused": True,
+                                       "reactions": [("<3", 1, False)]}),
+                       TOP, BAR_Y)
+    o += tr
+    o += ridge_header()
+    o += composer_bar(DRAFT)
+    o += status()
+    return o
+
+
 def reaction_menu(mx, my, mw, labels, focus=0, ih=32):
     mh = 44 + len(labels) * ih + 6
     o = menu_card(mx, my, mw, mh)
-    toks = ["<3", "+1", "−1", "ha", "!", "?"]
     cx, cy = mx + 8 + 17, my + 22
-    for t in toks:
+    for t in REACTIONS:
         o.append(CIRC(cx, cy, 17, "#2A313B"))
-        if t == "<3":
-            # Drawn, not set: a font heart is a few pixels at this size.
-            o.append(heart(cx, cy + 0.5, 1.35))
-        else:
-            o.append(T(cx, cy + 6, t, F_SMALL, C["text"], 700, "middle"))
+        o += reaction_glyph(t, cx, cy)
         cx += 37
     o.append(LINE(mx, my + 44.5, mx + mw, my + 44.5, C["menuline"]))
     o += menu_items(mx, my + 47, mw, labels, focus, ih)
@@ -1050,6 +1177,19 @@ def screen_channel_actions():
     o += reaction_menu(W - 8 - mw, STRIP + 4, mw,
                        ["Reply", "View member", "Copy", "Details"], focus=1,
                        ih=30)
+    o += status()
+    return o
+
+
+def screen_channel_reactions():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [dict(i) for i in CREW]
+    items[1].update(focused=True,
+                    reactions=[("+1", 2, True), ("!", 1, False)])
+    tr, _ = transcript(items, TOP, BAR_Y, channel=True)
+    o += tr
+    o += screen_header("Trail Crew", "channel", "Channel")
+    o += composer_bar(placeholder="Message Trail Crew")
     o += status()
     return o
 
@@ -1707,10 +1847,14 @@ def main(path, native_dir=None):
              "Pressing a focused message opens what the iOS long-press "
              "gives, reactions first. Typing closes the menu and goes to the "
              "composer."),
+            ("Reaction", screen_reacted(),
+             "A chip over the bubble’s outer top corner, as on iOS: top-left "
+             "on a sent message, top-right on a received one, gray when "
+             "it is someone else’s."),
             ("Message details", screen_details(),
-             "From Details. The rows of the iOS sheet that a pager reader "
-             "needs; the list continues to the source check. Delivery state "
-             "lives under the bubble, not here."),
+             "From Details. The rows of the iOS sheet that a reader on a "
+             "communicator needs; the list continues to the source check. "
+             "Delivery state lives under the bubble, not here."),
             ("Reply", screen_reply(),
              "The quoted message sits above the composer. Backspace only "
              "erases while typing; after Done, the first Backspace drops the "
@@ -1736,6 +1880,10 @@ def main(path, native_dir=None):
             ("Channel message actions", screen_channel_actions(),
              "A member’s message adds View member, the way to reach someone "
              "you have only heard in a channel."),
+            ("Several reactions", screen_channel_reactions(),
+             "Matching reactions share a chip with a count. Yours takes the "
+             "bubble color and sits in front at the corner, with the "
+             "cluster’s one trail of dots."),
             ("Member", screen_member(),
              "A channel message carries only a hint. Request identity asks "
              "over the channel; when the identity arrives the address fills "
