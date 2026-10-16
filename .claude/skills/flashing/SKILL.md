@@ -1,6 +1,6 @@
 ---
 name: flashing
-description: Flash UMSH firmware to a board. Per-board `make flash-*` targets, DFU entry, UF2 drive names and family IDs, app base addresses, and the flash-layout gotchas for T-Echo, T1000-E, Wio Tracker L1, SenseCAP Solar P1, XIAO nRF52840, Heltec V3, and Heltec V2.
+description: Flash UMSH firmware to a board. Per-board `make flash-*` targets, DFU entry, UF2 drive names and family IDs, app base addresses, and the flash-layout gotchas for T-Echo, T1000-E, Wio Tracker L1, SenseCAP Solar P1, XIAO nRF52840, Heltec V3, Heltec V2, T-Beam Supreme, T-LoRa Pager, and XIAO ESP32S3.
 ---
 
 # Flashing UMSH firmware
@@ -40,4 +40,7 @@ cannot be bricked, stays attached as monitor.
 - `make flash-heltec-v3`, `make flash-heltec-v3-console` (override `ESPFLASH_PORT=...`)
 - `make flash-heltec-v3-bridge`—the Heltec V3's second image: Wi-Fi and the bridge client, no BLE. Same board, same journals.
 - `make flash-heltec-v2` (classic ESP32; same CP2102 flow, `--chip esp32`)
+- `make flash-tbeam-supreme`—native USB-Serial-JTAG (`303a:1001`), no bridge chip; espflash resets it into the ROM bootloader on its own
+- `make flash-tlora-pager`—native USB like the T-Beam; restarts by watchdog after the write instead of staying attached as a monitor
+- `make flash-xiao-esp32s3` (Seeed XIAO ESP32S3 + Wio-SX1262 kit)—native USB like the T-Beam. **Over the factory Meshtastic image** (TinyUSB, `2886:0059`): the first run fails to connect because the board reboots into the ROM on a *new* port (`303a:1001`); rerun with that `ESPFLASH_PORT`. The factory image also latched `RTC_CNTL_OPTION1.FORCE_DOWNLOAD_BOOT`, which espflash never clears, so the new image boots back into the ROM (`boot:0x23 (DOWNLOAD(USB/UART0))`, `waiting for download`) until the board loses power: unplug USB and any battery once. `esptool.py --chip esp32s3 --before no_reset --after hard_reset read_mem 0x6000812C` also clears it. BOOT and RESET are under the carrier and cannot be pressed; the carrier's **USR** button is not BOOT
 - ESP32 flashes rewrite the partition table (`partitions-umsh.csv`, carries the 64 KB `umsh` data partition)—reflashing loses data past the old factory partition.

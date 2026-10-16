@@ -21,11 +21,13 @@
 	build-heltec-v2 flash-heltec-v2 \
 	build-tbeam-supreme flash-tbeam-supreme \
 	build-tlora-pager flash-tlora-pager \
+	build-xiao-esp32s3 flash-xiao-esp32s3 \
 	esp-toolchain-check espflash-check \
 	dfu-zip-techo dfu-zip-t1000e dfu-zip-sensecap-solar \
 	dfu-zip-wio-tracker-l1 dfu-zip-xiao-nrf52 \
 	merged-bin-heltec-v3 merged-bin-heltec-v3-bridge \
 	merged-bin-tbeam-supreme merged-bin-tlora-pager \
+	merged-bin-xiao-esp32s3 \
 	release-artifacts release-stage release-publish release-mirror \
 	ios-mobile-core ios-archive ios-upload \
 	install-umshctl install-umsh-bridge install-dissector install-extcap \
@@ -120,7 +122,8 @@ RELEASE_BOARDS_NRF52 = techo t1000e sensecap-solar wio-tracker-l1 xiao-nrf52
 # entirely. These are ESP32-S3, which `merged-bin-%` assumes. heltec-v2 is
 # not here—it is a classic ESP32 and has no working image yet.
 # heltec-v3-bridge is a second image for the Heltec V3, not another board.
-RELEASE_BOARDS_ESP32 = heltec-v3 heltec-v3-bridge tbeam-supreme tlora-pager
+RELEASE_BOARDS_ESP32 = heltec-v3 heltec-v3-bridge tbeam-supreme tlora-pager \
+	xiao-esp32s3
 
 build-techo-console:
 	cd firmware/techo-console && cargo build --release
@@ -344,7 +347,9 @@ dfu-zip-xiao-nrf52: build-xiao-nrf52
 # `.cargo/config.toml` (target triple + chip-quirk env overrides) is
 # picked up—`-p` from the workspace root picks a wrong target.
 # Flashing goes through the ROM serial bootloader via espflash over the
-# CP2102 port—no UF2/DFU machinery, and the flasher cannot be bricked.
+# board's USB port (a CP2102 bridge on the Heltecs, the chip's own
+# USB-Serial-JTAG elsewhere)—no UF2/DFU machinery, and the flasher cannot
+# be bricked.
 # `flash-*` targets stay attached as a serial monitor after flashing;
 # override port autodetection with: make ... ESPFLASH_PORT=/dev/cu.usbserial-<N>
 
@@ -474,6 +479,20 @@ flash-tbeam-supreme: espflash-check build-tbeam-supreme
 	espflash flash --monitor $(ESPFLASH_PORT_ARG) $(ESPFLASH_PARTITIONS) \
 		$(ESP32S3_TARGET_DIR)/firmware-tbeam-supreme
 
+# Same single-image shape as the T-Beam: BLE, Wi-Fi coex, and PSRAM.
+build-xiao-esp32s3: esp-toolchain-check
+	$(ESP_ENV) cd firmware-esp32/firmware/xiao-esp32s3 && cargo build --release $(ESP32_CARGO_FLAGS)
+	$(ESP_ENV) python3 scripts/check_xtensa_stack.py $(ESP32S3_TARGET_DIR)/firmware-xiao-esp32s3 --reserve 20480
+
+# Over the factory Meshtastic image the first run fails: the reset makes it
+# re-enumerate as the ROM on a new port, so run it again on that port. That
+# reset also latches the S3's force-download flag, which espflash never
+# clears, so the image then boots back into the ROM until the board loses
+# power. Unplug it (and any battery) once after that first flash.
+flash-xiao-esp32s3: espflash-check build-xiao-esp32s3
+	espflash flash --monitor $(ESPFLASH_PORT_ARG) $(ESPFLASH_PARTITIONS) \
+		$(ESP32S3_TARGET_DIR)/firmware-xiao-esp32s3
+
 # The single-file image the web flasher writes at offset 0: second-stage
 # bootloader, partition table, and application merged together.
 #
@@ -484,7 +503,7 @@ flash-tbeam-supreme: espflash-check build-tbeam-supreme
 # the application and 0x300000 is never touched.
 #
 # `-s 4mb` is the partition table's layout, not the chip's flash size—
-# both boards fit 8 MiB and neither claims past 0x310000.
+# every board fits 8 MiB or more and no image claims past 0x310000.
 $(addprefix merged-bin-,$(RELEASE_BOARDS_ESP32)): merged-bin-%: espflash-check build-%
 	@mkdir -p $(FW_DIR)
 	espflash save-image --chip esp32s3 --merge --skip-padding -s 4mb \

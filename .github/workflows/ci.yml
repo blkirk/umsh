@@ -319,6 +319,7 @@ jobs:
             build-heltec-v2,
             build-tbeam-supreme,
             build-tlora-pager,
+            build-xiao-esp32s3,
           ]
     steps:
       - uses: actions/checkout@v4

@@ -127,6 +127,19 @@ RELEASE_BOARDS = {
             "partition_table": "partitions-umsh.csv",
         },
     },
+    "xiao-esp32s3": {
+        "chip": "esp32s3",
+        "elf": "firmware-xiao-esp32s3",
+        "name": "Seeed XIAO ESP32S3 + Wio-SX1262 Kit",
+        "flash_methods": ["esp-serial"],
+        "esp": {
+            # 8 MiB fitted; the shared 4 MB layout, as on the T-Beam.
+            "chip": "esp32s3",
+            "offset": "0x0",
+            "flash_size": "4MB",
+            "partition_table": "partitions-umsh.csv",
+        },
+    },
 }
 
 
