@@ -7,6 +7,8 @@ import SwiftUI
 /// the hint their message claimed.
 struct ChannelMember: Identifiable, Hashable, Sendable {
     let hint: Data
+    /// The hint as the core renders it, when it has been.
+    let nodeHint: MeshNodeHint?
     let address: String?
     /// The name this member attached to their message—their own claim,
     /// which the channel key authenticates as coming from *a* member and
@@ -14,7 +16,7 @@ struct ChannelMember: Identifiable, Hashable, Sendable {
     let handle: String?
     let displayName: String
 
-    var id: String { hint.map { String(format: "%02x", $0) }.joined() }
+    var id: Data { hint }
 }
 
 /// Start a group chat in a channel already joined, or join one to chat in.
@@ -146,11 +148,13 @@ struct ChannelMemberSheet: View {
                     LabeledContent("Calls themselves", value: handle)
                         .copyable(handle)
                 }
-                LabeledContent("Hint") {
-                    Text(member.id)
-                        .font(.body.monospaced())
+                if let hint = member.nodeHint?.text {
+                    LabeledContent("Hint") {
+                        Text(hint)
+                            .font(.body.monospaced())
+                    }
+                    .copyable(hint)
                 }
-                .copyable(member.id)
                 if let address = member.address {
                     LabeledContent("Address") {
                         Text(address)
@@ -193,7 +197,11 @@ struct ChannelMemberSheet: View {
 /// arrived says how it got here: how far, by what route, and how strong.
 struct MessageDetailsSheet: View {
     let message: ChatMessageSummary
+    var renderRouterHint: ((Data) async -> MeshRouterHint?)? = nil
     let dismiss: () -> Void
+
+    /// The route's hints as the core renders them, sender toward this phone.
+    @State private var route: [MeshRouterHint] = []
 
     var body: some View {
         Form {
@@ -249,19 +257,13 @@ struct MessageDetailsSheet: View {
                         "Source",
                         value: reception.sourceAuthenticated ? "Authenticated" : "Unauthenticated"
                     )
-                    if !reception.routeHints.isEmpty {
-                        // Stored in trace-route order, nearest us first;
-                        // reversed here so the arrows read the way the message
-                        // travelled—sender toward this phone.
-                        let route = reception.routeHints
-                            .reversed()
-                            .map { $0.map { String(format: "%02x", $0) }.joined() }
-                            .joined(separator: " → ")
+                    if !route.isEmpty {
+                        let text = route.map(\.text).joined(separator: " → ")
                         LabeledContent("Route") {
-                            Text(route)
+                            Text(text)
                                 .font(.caption.monospaced())
                         }
-                        .copyable(route)
+                        .copyable(text)
                     }
                 }
             } else if !message.isOutbound {
@@ -274,6 +276,21 @@ struct MessageDetailsSheet: View {
         }
         .navigationTitle("Message Details")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: message.reception?.routeHints) {
+            guard let hints = message.reception?.routeHints, let renderRouterHint else {
+                route = []
+                return
+            }
+            // Stored in trace-route order, nearest us first; reversed here so
+            // the arrows read the way the message traveled—sender toward this
+            // phone.
+            var rendered: [MeshRouterHint] = []
+            for hint in hints.reversed() {
+                guard let value = await renderRouterHint(hint) else { return }
+                rendered.append(value)
+            }
+            route = rendered
+        }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") { dismiss() }

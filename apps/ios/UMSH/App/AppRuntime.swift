@@ -3796,7 +3796,7 @@ final class AppRuntime {
                     displayName: channel.title,
                     // A group message is from someone in particular, and the
                     // banner is unreadable without saying who.
-                    sender: memberName(
+                    sender: await memberName(
                         address: target.senderAddress,
                         handle: target.senderHandle,
                         hint: target.senderHint
@@ -3942,7 +3942,7 @@ final class AppRuntime {
     /// A message-borne name is the sender's unverified claim—anyone holding
     /// the channel key can write anything there—so it never displaces a
     /// name this phone established for a peer it actually knows.
-    private func memberName(address: String?, handle: String?, hint: Data?) -> String {
+    private func memberName(address: String?, handle: String?, hint: Data?) async -> String {
         if let address, let peer = peers.first(where: {
             $0.identity.canonicalAddress == address
         }) {
@@ -3950,8 +3950,10 @@ final class AppRuntime {
         }
         if let handle, !handle.isEmpty { return handle }
         if let address { return String(address.prefix(10)) }
-        guard let hint else { return "Unknown member" }
-        return "Member \(hint.map { String(format: "%02x", $0) }.joined())"
+        guard let hint, let rendered = try? await meshEngine.renderNodeHint(hint) else {
+            return "Unknown member"
+        }
+        return "Member \(rendered.text)"
     }
 
     /// Whatever a notifying mutation turned out to be, reduced to the four

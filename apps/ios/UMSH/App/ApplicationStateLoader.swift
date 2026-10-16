@@ -78,7 +78,7 @@ struct ApplicationStateLoader {
                     id: stored.id,
                     peer: peer,
                     draftText: stored.draftText,
-                    lastMessage: Self.previewMessage(from: stored.lastMessage),
+                    lastMessage: await previewMessage(from: stored.lastMessage),
                     unreadCount: stored.unreadCount,
                     createdAtMilliseconds: stored.createdAtMilliseconds,
                     notificationsEnabled: stored.notificationsEnabled,
@@ -107,7 +107,7 @@ struct ApplicationStateLoader {
                     channel: channel,
                     conversationAddress: stored.conversationAddress,
                     draftText: stored.draftText,
-                    lastMessage: Self.previewMessage(from: stored.lastMessage),
+                    lastMessage: await previewMessage(from: stored.lastMessage),
                     unreadCount: stored.unreadCount,
                     createdAtMilliseconds: stored.createdAtMilliseconds,
                     messageRevision: chatRevisions[
@@ -141,18 +141,22 @@ struct ApplicationStateLoader {
         )
     }
 
-    static func previewMessage(
+    private func previewMessage(
         from stored: StoredConversationPreview?
-    ) -> ConversationPreviewMessage? {
-        stored.map { preview in
-            ConversationPreviewMessage(
-                createdAtMilliseconds: preview.createdAtMilliseconds,
-                body: preview.body,
-                isOutbound: preview.isOutbound,
-                isDeleted: preview.isDeleted,
-                senderAddress: preview.senderAddress,
-                senderHint: preview.senderHint
-            )
+    ) async -> ConversationPreviewMessage? {
+        guard let preview = stored else { return nil }
+        var senderNodeHint: MeshNodeHint?
+        if let hint = preview.senderHint {
+            senderNodeHint = try? await meshEngine.renderNodeHint(hint)
         }
+        return ConversationPreviewMessage(
+            createdAtMilliseconds: preview.createdAtMilliseconds,
+            body: preview.body,
+            isOutbound: preview.isOutbound,
+            isDeleted: preview.isDeleted,
+            senderAddress: preview.senderAddress,
+            senderHint: preview.senderHint,
+            senderNodeHint: senderNodeHint
+        )
     }
 }

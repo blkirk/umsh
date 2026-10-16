@@ -224,13 +224,14 @@ struct ConversationPreviewMessage: Hashable, Sendable {
     /// and the hint the wire always carries.
     let senderAddress: String?
     let senderHint: Data?
+    /// The sender's hint as the core renders it, resolved when the list is
+    /// loaded.
+    var senderNodeHint: MeshNodeHint? = nil
 
-    /// A short, stable label for a member known only by their hint. Mirrors
+    /// A short label for a member known only by their hint. Mirrors
     /// ``ChatMessageSummary/senderHintLabel`` so a list row and a bubble name
     /// the same member the same way.
-    var senderHintLabel: String? {
-        senderHint.map { hint in hint.map { String(format: "%02x", $0) }.joined() }
-    }
+    var senderHintLabel: String? { senderNodeHint?.text }
 }
 
 struct DirectConversationSummary: Identifiable, Hashable, Sendable {
@@ -410,10 +411,8 @@ struct ChatMessageSummary: Identifiable, Hashable, Sendable {
     /// shows as chosen, and what tapping the same emoji again withdraws.
     var myReaction: MessageReaction? { reactions.first(where: \.isMine) }
 
-    /// A short, stable label for a member known only by their hint.
-    var senderHintLabel: String? {
-        senderHint.map { hint in hint.map { String(format: "%02x", $0) }.joined() }
-    }
+    /// A short label for a member known only by their hint.
+    var senderHintLabel: String? { senderNodeHint?.text }
 
     /// When this was written, or nil for a record carrying no usable time—
     /// a gap placeholder standing in for a message nobody has seen yet.

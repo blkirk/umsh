@@ -33,6 +33,7 @@ struct ConversationThreadView: View {
     /// the sheet is never older than what the transcript knows.
     private struct InspectedMember: Identifiable, Equatable {
         let hint: Data
+        let nodeHint: MeshNodeHint?
         var id: Data { hint }
     }
 
@@ -239,8 +240,9 @@ struct ConversationThreadView: View {
                                         onShowDetails: { inspectedMessage = message },
                                         onShowSender: isChannel && !message.isOutbound
                                             ? {
-                                                inspectedMember = message.senderHint
-                                                    .map(InspectedMember.init)
+                                                inspectedMember = message.senderHint.map {
+                                                    InspectedMember(hint: $0, nodeHint: message.senderNodeHint)
+                                                }
                                             }
                                             : nil,
                                         // No reacting to one's own failed
@@ -507,7 +509,7 @@ struct ConversationThreadView: View {
         .sheet(item: $inspectedMember) { inspected in
             // Resolved here rather than at the tap, so an identity arriving
             // while the sheet is open reaches it.
-            let member = member(hint: inspected.hint)
+            let member = member(hint: inspected.hint, nodeHint: inspected.nodeHint)
             NavigationStack {
                 ChannelMemberSheet(
                     member: member,
@@ -531,7 +533,10 @@ struct ConversationThreadView: View {
         }
         .sheet(item: $inspectedMessage) { message in
             NavigationStack {
-                MessageDetailsSheet(message: message) { inspectedMessage = nil }
+                MessageDetailsSheet(
+                    message: message,
+                    renderRouterHint: peerActions.renderRouterHint
+                ) { inspectedMessage = nil }
             }
         }
         .alert(messageWasSubmitted ? "Message submitted" : "Message not sent", isPresented: $showsBlockedReason) {
@@ -1187,7 +1192,7 @@ struct ConversationThreadView: View {
     /// the same hint and bumps the conversation's revision, so re-reading the
     /// window is what lets an answer turn into a peer while the sheet is still
     /// open—a value captured at the tap never could.
-    private func member(hint: Data) -> ChannelMember {
+    private func member(hint: Data, nodeHint: MeshNodeHint?) -> ChannelMember {
         // Any of their messages will do once resolution has landed, since it
         // fills them all in; preferring one that names an address keeps a
         // straggler stored before that from hiding a resolved sibling.
@@ -1203,16 +1208,17 @@ struct ConversationThreadView: View {
         guard let chosen else {
             // Everything they said has left the window while the sheet was
             // open. The hint is still theirs, and still worth asking about.
-            let label = hint.map { String(format: "%02x", $0) }.joined()
             return ChannelMember(
                 hint: hint,
+                nodeHint: nodeHint,
                 address: nil,
                 handle: nil,
-                displayName: "Member \(label)"
+                displayName: nodeHint.map { "Member \($0.text)" } ?? "Unknown member"
             )
         }
         return ChannelMember(
             hint: hint,
+            nodeHint: chosen.senderNodeHint ?? nodeHint,
             address: chosen.senderAddress,
             handle: chosen.senderHandle,
             displayName: memberName(for: chosen)

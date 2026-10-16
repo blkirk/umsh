@@ -198,8 +198,11 @@ struct TranscriptWindow: Equatable {
         if message.isOutbound { return "out" }
         // In a direct chat every inbound message answers to the same key; in a
         // group the address distinguishes members, and the hint stands in
-        // until one is resolved.
-        return message.senderAddress ?? message.senderHintLabel ?? "in"
+        // until one is resolved. The raw hint, not its rendering: a
+        // star-truncated rendering can name two different hints alike.
+        return message.senderAddress
+            ?? message.senderHint.map { "hint:" + $0.base64EncodedString() }
+            ?? "in"
     }
 
     /// Group the messages into display rows: runs by sender, separators where
