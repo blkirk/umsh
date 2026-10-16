@@ -1,15 +1,15 @@
 # LilyGO T-Deck
 
 The T-Deck represents keyboard-equipped, screen-based hardware and therefore
-belongs to the full-pager class. The repository currently contains no audited
+belongs to the communicator class. The repository currently contains no audited
 T-Deck hardware reference and no UMSH T-Deck interface implementation. This
 chapter intentionally records only the class mapping, not unverified control or
 pin details.
 
 ## Proposed mapping
 
-- The device must provide the full pager information architecture and remain
-  usable without a phone.
+- The device must provide the communicator information architecture and
+  remain usable without a phone.
 - Text entry belongs to the keyboard; navigation belongs to the board's
   confirmed navigation controls.
 - Touch, trackball, speaker, microphone, haptic, or other model-specific

@@ -4,8 +4,9 @@
 
 UMSH standardizes user intentions such as **Send**, **Pair**, **Back**,
 **Silence**, and **Sleep**. It does not require every board to use the same
-physical gesture. A pager can show a Pair command; a screenless tracker can
-offer it in the phone application and require physical presence at the device.
+physical gesture. A communicator can show a Pair command; a screenless tracker
+can offer it in the phone application and require physical presence at the
+device.
 
 Changing hardware should require learning where an action lives, not what the
 action means.
@@ -14,8 +15,8 @@ action means.
 
 Use the most expressive surface available for a task:
 
-1. A pager handles messaging and ordinary settings on the device. A phone is
-   optional and must not be required for normal operation.
+1. A communicator handles messaging and ordinary settings on the device. A
+   phone is optional and must not be required for normal operation.
 2. A tracker with a display shows status and makes sensitive local actions
    visible, while the phone remains the primary interface.
 3. A screenless tracker reserves its button for a very small set of frequent or
@@ -26,9 +27,9 @@ match a screenless device.
 
 ## Preserve self-contained operation
 
-A pager must provide its complete core experience without a phone: setup,
-messaging, status, settings, and recovery. A tracker may use a phone for its
-interactive experience, but its tracking function should continue
+A communicator must provide its complete core experience without a phone:
+setup, messaging, status, settings, and recovery. A tracker may use a phone for
+its interactive experience, but its tracking function should continue
 autonomously whenever the use case and hardware allow it. It must also remain
 safe and legible enough to wake, identify its basic state, request help or check
 in, and recover pairing without already having a working phone connection.
@@ -37,8 +38,8 @@ in, and recover pairing without already having a working phone connection.
 
 The shortest gesture or most prominent control should perform the device's
 frequent, non-destructive action. On a tracker this will usually be a check-in,
-location advertisement, or status acknowledgment. On a pager it will usually
-be opening or sending a message.
+location advertisement, or status acknowledgment. On a communicator it will
+usually be opening or sending a message.
 
 Rare, destructive, or maintenance actions must never displace the primary
 action.

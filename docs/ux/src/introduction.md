@@ -1,17 +1,17 @@
 # UMSH User Interface Guidelines
 
-UMSH runs on devices ranging from keyboard-equipped pagers to sealed trackers
-with one button and no screen. This guide defines a common user-interface
+UMSH runs on devices ranging from keyboard-equipped communicators to sealed
+trackers with one button and no screen. This guide defines a common user-interface
 philosophy for that range. Its goal is not to make unlike hardware behave
 identically. Its goal is to make UMSH devices feel related: the same concepts,
 the same safety rules, and feedback that means the same thing even when it is
 expressed through a screen, LED, buzzer, haptic motor, or companion phone.
 
-The primary division is functional, not merely physical: a **pager** is a
-self-contained UMSH device, while a **tracker** may perform tracking
+The primary division is functional, not merely physical: a **communicator** is
+a self-contained UMSH device, while a **tracker** may perform tracking
 autonomously but is typically operated and configured through a phone. A
-keyboard is a strong pager signal because it makes direct messaging practical;
-a screen by itself does not make a device a pager.
+keyboard is a strong communicator signal because it makes direct messaging
+practical; a screen by itself does not make a device a communicator.
 
 The intended readers are developers bringing UMSH to new boards and product
 teams designing companion applications. For hardware, begin with [Device

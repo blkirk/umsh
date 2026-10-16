@@ -4,12 +4,12 @@ Use this checklist when assigning a UMSH experience to a new board.
 
 ## 1. Classify
 
-- Does the complete core experience live on the device? If yes, it is a pager;
-  if rich interaction normally requires a phone, it is a tracker.
-- For a pager, can setup, messaging, status, settings, and recovery all work
-  without a phone?
+- Does the complete core experience live on the device? If yes, it is a
+  communicator; if rich interaction normally requires a phone, it is a tracker.
+- For a communicator, can setup, messaging, status, settings, and recovery all
+  work without a phone?
 - For a tracker, which tracking functions continue without a live phone?
-- Is this a full pager, display tracker, or headless tracker?
+- Is this a communicator, display tracker, or headless tracker?
 - Which firmware roles will run, and can the physical vocabulary remain stable
   across them?
 

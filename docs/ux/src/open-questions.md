@@ -19,9 +19,9 @@ and hardware testing.
 - What unambiguous local feedback should distinguish request accepted,
   transmitted, and failed?
 
-## Full pager conventions
+## Communicator conventions
 
-- Which keys form the minimum portable pager navigation set?
+- Which keys form the minimum portable communicator navigation set?
 - How should drafts, queued messages, acknowledgments, and delivery evidence
   be named and displayed?
 - What status information belongs in the always-visible strip on small screens?

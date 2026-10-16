@@ -1,8 +1,8 @@
-# Full Pagers
+# Communicators
 
-Pagers are self-contained UMSH clients. A phone is never part of the critical
-path for setup, reading, composing, sending, status, settings, or recovery.
-Their default screen should answer:
+Communicators are self-contained UMSH clients. A phone is never part of the
+critical path for setup, reading, composing, sending, status, settings, or
+recovery. Their default screen should answer:
 
 - What conversation or activity needs attention?
 - Is the radio/device connected and able to send?
@@ -41,11 +41,11 @@ every keystroke by default.
 
 ## Optional phone integration
 
-A pager may optionally pair with a phone for synchronization, backup, maps,
-bulk configuration, or accessibility. That connection is an enhancement, not
-the pager's primary UI and not a prerequisite for UMSH messaging.
+A communicator may optionally pair with a phone for synchronization, backup,
+maps, bulk configuration, or accessibility. That connection is an enhancement,
+not the communicator's primary UI and not a prerequisite for UMSH messaging.
 
 If phone integration exists, pairing and bond management are visible
-Maintenance actions. A pager with a screen must not require users to memorize
-click counts to clear trust or enter pairing. Loss of the phone or its bond must
-not impair standalone pager operation.
+Maintenance actions. A communicator with a screen must not require users to
+memorize click counts to clear trust or enter pairing. Loss of the phone or its
+bond must not impair standalone communicator operation.

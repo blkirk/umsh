@@ -118,6 +118,6 @@ subtle. Reserve repeating sound, haptics, or bright patterns for events that
 need action. A user-selected silence or low-attention preference should persist
 when feasible and be inspectable from the companion.
 
-Full pagers may provide richer notifications, but should still offer per-source
-or global quiet modes and preserve critical system feedback through a
+Communicators may provide richer notifications, but should still offer
+per-source or global quiet modes and preserve critical system feedback through a
 non-audible channel.

@@ -6,19 +6,19 @@ simply by screen size or peripheral count.
 
 | Product class | Interaction profile | Primary interface | Typical hardware |
 |---|---|---|---|
-| Pager | Full pager | Device; phone optional | Screen, text keyboard, navigation controls; often sound or haptics |
+| Communicator | Communicator | Device; phone optional | Screen, text keyboard, navigation controls; often sound or haptics |
 | Tracker | Display tracker | Phone, with local status/configuration | Small or e-paper screen, one or a few controls, limited indicators |
 | Tracker | Headless tracker | Phone | One button, LED, buzzer or haptic; no screen |
 
 The class is determined by the intended user experience, not by the number of
 peripherals. A T-Echo has a screen, but no text keyboard and is normally used
-with a phone, so it is a **display tracker**, not a pager. Conversely, a pager
-does not become companion-dependent merely because it can optionally connect to
-a phone.
+with a phone, so it is a **display tracker**, not a communicator. Conversely, a
+communicator does not become companion-dependent merely because it can
+optionally connect to a phone.
 
-## Full pagers
+## Communicators
 
-Pagers support the core UMSH experience directly: reading conversations,
+Communicators support the core UMSH experience directly: reading conversations,
 composing and sending text, inspecting delivery state, managing contacts or
 channels, and changing ordinary settings. A phone connection may improve the
 experience or provide backup/synchronization, but cannot be required for setup,
@@ -41,7 +41,7 @@ documented vocabulary into its controls and feedback channels.
 
 ## Class boundaries are intentional
 
-Do not implement the pager navigation model on a one-button tracker, and do not
-copy a headless tracker's click counts onto a pager. Share semantic models and
-pure state machines where they fit; use class-specific interaction mechanisms
-where the hardware changes the nature of the task.
+Do not implement the communicator navigation model on a one-button tracker, and
+do not copy a headless tracker's click counts onto a communicator. Share
+semantic models and pure state machines where they fit; use class-specific
+interaction mechanisms where the hardware changes the nature of the task.

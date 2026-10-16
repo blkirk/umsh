@@ -105,11 +105,11 @@ The remaining keyboard keys do not enter text in this mode.
 The screens these intents drive, and what each one shows, are in
 [Display Tracker Screens](../classes/display-tracker-screens.md).
 
-## Keyboard and pager navigation
+## Keyboard and communicator navigation
 
-Full pagers should provide predictable focus and visible selection. A user must
-be able to operate every screen without guessing whether typing edits text or
-triggers commands.
+Communicators should provide predictable focus and visible selection. A user
+must be able to operate every screen without guessing whether typing edits text
+or triggers commands.
 
 - Typing goes to the focused text field.
 - Select opens the highlighted item or sends only when Send is visibly focused.

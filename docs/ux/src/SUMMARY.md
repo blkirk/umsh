@@ -28,7 +28,7 @@
 
 # Device-Class Guidance
 
-- [Full Pagers](classes/full-pagers.md)
+- [Communicators](classes/communicators.md)
 - [Trackers](classes/trackers.md)
   - [Display Tracker Screens](classes/display-tracker-screens.md)
 
