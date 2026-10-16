@@ -26,6 +26,11 @@ sources, fitted to the accessory picker's 180×120-point canvas at 2× and 3×.
 The website preserves the supplied product images; the app versions are resized
 onto transparent canvases.
 
+The iOS `board-xiao-esp32s3` image set is cut out from a product photograph of
+the [XIAO ESP32S3 + Wio-SX1262 kit](https://www.seeedstudio.com/Wio-SX1262-with-XIAO-ESP32S3-p-5982.html)
+supplied by the project maintainer; its original publication source is not
+recorded.
+
 ## Hero composite
 
 The landing page hero, `../hero.png`, is not a board card but carries a vendor
