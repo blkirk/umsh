@@ -3510,6 +3510,10 @@ public protocol MobileUlcpSessionProtocol: AnyObject, Sendable {
      * Values read fold into the session's own snapshot as well, so a
      * settings screen reading a property does not leave the attached
      * provisioning stale.
+     *
+     * Everything asked for goes out in `CMD_PROP_MULTI_GET`s, as many at
+     * once as the transaction space holds, continued where a reply ran
+     * out of room.
      */
     func beginPropertyFetch(propertyIds: [UInt32]) throws  -> UlcpSessionUpdateRecord
 
@@ -4068,6 +4072,10 @@ open func begin(selectedHostKey: Data?)throws  -> UlcpSessionUpdateRecord  {
      * Values read fold into the session's own snapshot as well, so a
      * settings screen reading a property does not leave the attached
      * provisioning stale.
+     *
+     * Everything asked for goes out in `CMD_PROP_MULTI_GET`s, as many at
+     * once as the transaction space holds, continued where a reply ran
+     * out of room.
      */
 open func beginPropertyFetch(propertyIds: [UInt32])throws  -> UlcpSessionUpdateRecord  {
     return try  FfiConverterTypeUlcpSessionUpdateRecord_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
@@ -19863,7 +19871,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_begin() != 7480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_begin_property_fetch() != 22103) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_begin_property_fetch() != 52669) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_begin_property_items() != 50342) {
