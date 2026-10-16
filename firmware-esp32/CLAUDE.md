@@ -1,6 +1,7 @@
 # firmware-esp32
 
-A **separate cargo workspace** for Xtensa boards (Heltec LoRa32 V2 and V3).
+A **separate cargo workspace** for Xtensa boards (Heltec LoRa32 V2 and V3,
+LILYGO T-Beam Supreme and T-LoRa Pager, Seeed XIAO ESP32S3 kit).
 Own `rust-toolchain.toml` pinning `channel = "esp"`.
 
 - You may run into problems building ESP32 targets unless you source the file

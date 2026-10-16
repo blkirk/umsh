@@ -83,8 +83,9 @@ Seeed's specification table for the kit:
 
 The two boards mate through the XIAO's standard 2×7 2.54 mm through-hole
 header; the kit ships as two boards plus pin headers and is soldered by the
-user. There is no board-to-board connector on this variant (that is the XIAO
-ESP32S3 kit—see [Pinout variants](#pinout-variants-do-not-mix-them)).
+user. There is no board-to-board connector on this variant (that is the
+[XIAO ESP32S3 kit](seeed-xiao-esp32s3-wio-sx1262-kit-hardware.md)—see
+[Pinout variants](#pinout-variants-do-not-mix-them)).
 
 ## Relationship to the SenseCAP Solar Node P1-Pro
 
@@ -184,6 +185,12 @@ products and for a legacy DIY build, and every one of them moves the radio.
 A UMSH image built for the wrong column will not talk to the radio at all, and
 in the legacy case will drive `D0` (a net with a button to ground) as chip
 select.
+
+The B2B row is Meshtastic's nRF52840 build for that carrier, in its own
+Arduino numbering. On the ESP32S3 kit the same carrier's radio lines land on
+ESP32-S3 pads that have no D-number (NSS GPIO41, DIO1 GPIO39, BUSY GPIO40,
+RESET GPIO42, RXEN GPIO38, button GPIO21); see
+[its hardware reference](seeed-xiao-esp32s3-wio-sx1262-kit-hardware.md).
 
 ## Reconstructed pin map
 

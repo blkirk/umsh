@@ -38,6 +38,7 @@
 - [LilyGO T-Echo](hardware/t-echo.md)
 - [Seeed Wio Tracker L1](hardware/wio-tracker-l1.md)
 - [SenseCAP Solar Node P1](hardware/sensecap-solar-p1.md)
+- [Seeed XIAO ESP32S3 + Wio-SX1262](hardware/xiao-esp32s3.md)
 - [Heltec WiFi LoRa 32 V3](hardware/heltec-lora32-v3.md)
 - [LilyGO T-Beam Supreme](hardware/t-beam-supreme.md)
 - [LilyGO T-LoRa Pager](hardware/tlora-pager.md)

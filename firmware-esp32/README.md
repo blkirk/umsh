@@ -1,9 +1,12 @@
 # firmware-esp32—Espressif (Xtensa) sibling workspace
 
 Firmware and BSPs for Espressif targets: the
-[Heltec WiFi LoRa 32 V3](../docs/hardware/heltec-lora32-v3-hardware.md) and the
-[LILYGO T-Beam Supreme](../docs/hardware/lilygo-t-beam-supreme-hardware.md)
-(both ESP32-S3), and the
+[Heltec WiFi LoRa 32 V3](../docs/hardware/heltec-lora32-v3-hardware.md), the
+[LILYGO T-Beam Supreme](../docs/hardware/lilygo-t-beam-supreme-hardware.md),
+the [LILYGO T-LoRa Pager](../docs/hardware/lilygo-t-lora-pager-hardware.md),
+and the
+[Seeed XIAO ESP32S3 + Wio-SX1262 kit](../docs/hardware/seeed-xiao-esp32s3-wio-sx1262-kit-hardware.md)
+(all ESP32-S3), and the
 [Heltec WiFi LoRa 32 V2](../docs/hardware/heltec-lora32-v2-hardware.md)
 (classic ESP32). This is a separate cargo workspace because the
 Xtensa chips need the Xtensa Rust fork (`rust-toolchain.toml` here pins
@@ -35,6 +38,8 @@ make build-heltec-v2
 make flash-heltec-v2
 make build-tbeam-supreme
 make flash-tbeam-supreme     # espflash over native USB, then monitor
+make build-xiao-esp32s3
+make flash-xiao-esp32s3      # likewise
 ```
 
 The workspace `.cargo/config.toml` carries only chip-agnostic settings
@@ -62,6 +67,7 @@ when a copy drifts.
 | `heltec-v2` | Heltec V2 | BLE |
 | `tbeam-supreme` | T-Beam Supreme | BLE, Wi-Fi, bridge client |
 | `tlora-pager` | T-LoRa Pager | BLE, Wi-Fi, bridge client |
+| `xiao-esp32s3` | XIAO ESP32S3 kit | BLE, Wi-Fi, bridge client, LAN bearer |
 
 The radio features:
 
@@ -76,6 +82,25 @@ The radio features:
   security trace and keeps advertising open.
 
 At least one of `ble` and `wifi` is required: the TRNG needs a live radio.
+
+Each `board-*` feature is a list of what the board has, and the shared
+sources test for those capabilities rather than for board names:
+
+- `display`—a panel and its menu. Implied by the panel drivers
+  (`display-ssd1306`, `display-sh1106`, `display-st7796`). Without it the
+  button and the status LED are the whole interface (`ui_headless.rs`).
+- `vext`—a switched peripheral rail. `vext-gates-battery` adds that the
+  battery divider hangs off it (Heltec V2).
+- `battery-telemetry`—something measures the battery: `battery-adc` (a
+  divider on an ADC pin) or `pmic-axp2101`. Without it the board reports
+  that it cannot.
+- `status-led`—one LED for the heartbeat, pairing window, locate alert, and
+  confirmations.
+- `power-off-deep-sleep`—a long press powers off into deep sleep, and the
+  user button wakes it. Boards with a PMIC power off through it instead.
+- `radio-rxen`—a host-driven RF-switch line beside the radio.
+- `usb-presence-sof`—USB host presence from the start-of-frame stream, for
+  native-USB boards with no VBUS sense.
 
 The Heltec V3 has no PSRAM, and the BLE host and the bridge client do not fit
 in its internal RAM together. `heltec-v3-bridge` is the same board built with
@@ -119,7 +144,7 @@ whose ADC1 is free then. Neither is trusted alone.
 
 ### Bluetooth power management
 
-The Heltec V3, T-Beam Supreme, and T-LoRa Pager enable BLE modem sleep.
+The ESP32-S3 boards enable BLE modem sleep.
 The controller turns the PHY off between events and coordinates automatic MCU
 light sleep through its wake source, sleep veto, and next-event deadline. The
 CPU runs at 80 MHz while awake. BLE timing uses the main crystal, which remains
@@ -138,7 +163,10 @@ USB and wired-serial wake locks still prevent MCU light sleep when those
 transports are active. In particular, Heltec V3 keeps its UART0 serial receiver
 awake for the whole boot, including on battery: it can use BLE modem sleep, but
 that wake lock blocks MCU light sleep. T-Beam and Pager release their native
-USB transport on battery and can light-sleep with WiFi disabled. GNSS does not
+USB transport on battery and can light-sleep with WiFi disabled. The XIAO
+ESP32S3 cannot sense VBUS, so it releases its transport when the host's
+start-of-frame stream stops (unplugged, or the bus suspended), then holds
+itself awake for 20 ms once a second to look for one. GNSS does not
 block light sleep; its task wakes the MCU for at most ten seconds after five
 minutes without a fix.
 WiFi remains in `PowerSaveMode::None`; WiFi light-sleep policy and
@@ -184,7 +212,7 @@ equivalent fixes.
 
 ### WiFi on ESP32-S3
 
-The normal T-Beam Supreme build includes WiFi and PSRAM. On the Heltec V3,
+The normal T-Beam Supreme and XIAO ESP32S3 builds include WiFi and PSRAM. On the Heltec V3,
 WiFi is in the bridge image, and opt-in alongside BLE in the standard one.
 From the repo root:
 
@@ -198,16 +226,21 @@ Add `debug-log` (`--features=debug-log`) for serial connection diagnostics,
 sampled heap minima, largest free allocation, and a main-stack watermark.
 These measurements do not replace sustained load and radio-task stack testing.
 The build targets reject individual Xtensa frames that exceed the available
-main stack minus a nested-call reserve: 20 KiB on T-Beam and the Heltec V3
-bridge image, 32 KiB on Pager, and 8 KiB on the standard Heltec image. These
+main stack minus a nested-call reserve: 20 KiB on the T-Beam, the XIAO
+ESP32S3, and the Heltec V3 bridge image, 32 KiB on Pager, and 8 KiB on the
+standard Heltec image. These
 checks do not replace stack measurements under load.
 
 The Heltec V3 uses internal session storage. Its standard image has a 72 KiB
 internal heap (8 KiB ordinary plus 64 KiB reclaimed from the bootloader), and
-its bridge image a 104 KiB one. The T-Beam uses a 104 KiB internal heap
-(108 KiB without the MeshCore forwarder). With their default `psram` feature,
-the T-Beam and the Pager keep the protocol session, the snapshot buffer, and
-the device node's MAC in explicit PSRAM storage. WiFi
+its bridge image a 104 KiB one. The T-Beam and the XIAO ESP32S3 share one
+sizing: 108 KiB of internal heap without the MeshCore forwarder; with it,
+104 KiB less 4 KiB each for the LAN bearer and `debug-log` (100 KiB in the
+default images). With their default `psram`
+feature, the T-Beam, the Pager, and the XIAO keep the protocol session, the
+snapshot buffer, and the device node's MAC in explicit PSRAM storage. The
+XIAO's PSRAM is octal, the others' quad; each BSP names its own
+`PSRAM_MODE`. WiFi
 does not require PSRAM as a feature dependency. Neither WiFi nor PSRAM is
 enabled in the standard Heltec build; WiFi is unsupported on the Heltec V2.
 

@@ -99,6 +99,7 @@ bringup harnesses, not products.
 | `heltec-v3-bridge` | ESP32-S3 | `.bin` (merged, written at `0x0`; Heltec V3, Wi-Fi and bridge client, no BLE) |
 | `tbeam-supreme` | ESP32-S3 | `.bin` (merged, written at `0x0`) |
 | `tlora-pager` | ESP32-S3 | `.bin` (merged, written at `0x0`; SX1262 only) |
+| `xiao-esp32s3` | ESP32-S3 | `.bin` (merged, written at `0x0`) |
 
 Named `umsh-<image>-<version>.<ext>`. An image id is the board's id, except
 where a board has a second image. Ids match the `BOARDS` presets in
@@ -142,7 +143,7 @@ espflash save-image --chip esp32s3 --merge --skip-padding -s 4mb \
 ```
 
 `-s 4mb` is the partition table's layout rather than the chip's flash size.
-Both released Espressif boards fit 8 MiB and neither claims past `0x310000`;
+Every released Espressif board fits 8 MiB or more and no image claims past `0x310000`;
 widening the table is a separate, deliberate change.
 
 `--skip-padding` is load-bearing. Without it espflash pads the image out to

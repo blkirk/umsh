@@ -132,8 +132,9 @@ The Wireshark integration has its own targets, covered below.
 | Heltec WiFi LoRa 32 V3 | ESP32-S3 | `make flash-heltec-v3` |
 | LilyGO T-Beam Supreme (SX1262) | ESP32-S3 | `make flash-tbeam-supreme` |
 | LilyGO T-LoRa Pager (SX1262, bring-up) | ESP32-S3 | `make flash-tlora-pager` |
+| Seeed XIAO ESP32S3 + Wio-SX1262 (bring-up) | ESP32-S3 | `make flash-xiao-esp32s3` |
 
-The two Espressif boards are the odd ones out: Xtensa chips need a Rust fork rustup does
+The Espressif boards are the odd ones out: Xtensa chips need a Rust fork rustup does
 not carry, installed once per machine with `cargo install espup espflash && espup install`
 ([firmware-esp32/README.md](firmware-esp32/README.md)). Their `make` targets check for that
 first and say what to run, so a machine without it fails before the build rather than

@@ -49,6 +49,7 @@ Heltec V3's entry, not a board of its own.
 | Heltec V3 | ESP32-S3 | `heltec-v3-bridge` | UART, Wi-Fi | 1599/270 KiB (3008/512) | bridge verified on hardware; qualification open |
 | Heltec V2 | ESP32 | `heltec-v2` | BLE, UART | 1260/191 KiB (3008/see below) | bringup complete, hw validation open |
 | T-LoRa Pager SX1262 | ESP32-S3 | `tlora-pager` | BLE, native USB, Wi-Fi | 4 MiB image layout; PSRAM | hardware qualification in progress |
+| XIAO ESP32S3 kit | ESP32-S3 | `xiao-esp32s3` | BLE, native USB, Wi-Fi | 4 MiB image layout; octal PSRAM | not yet run on hardware |
 
 The Pager shares the ESP32 tracker entry point. Its BSP serializes ST7796
 display and SX1262 transactions on SPI2, while `umsh-pager-peripherals`
@@ -423,8 +424,9 @@ If the chip is new, you also need a chip-BSP. Otherwise just a board-BSP.
    application base address against the board's SoftDevice version rather than
    copying a sibling's.
 7. **Register it** in root `members` but not `default-members`.
-8. **Add Makefile targets** (`build-<board>`, `flash-<board>`) and a
-   `scripts/firmware_image.py` entry for the UF2 family ID and base address.
+8. **Add Makefile targets** (`build-<board>`, `flash-<board>`), a
+   `scripts/firmware_image.py` entry for the UF2 family ID and base address,
+   and a `RELEASE_BOARDS` entry in `scripts/release.py`.
 9. **Set the USB identity** (boards with native USB). Two places, two
    different pairs:
    - The board-BSP's `pub const USB: UsbIdentity` (from
@@ -446,7 +448,16 @@ If the chip is new, you also need a chip-BSP. Otherwise just a board-BSP.
    A vendor's IDs belong on that vendor's boards only. Never use a shared or
    example pair, or one vendor's IDs on another vendor's board. A board whose vendor has no USB vendor ID of its own takes the
    project's pid.codes allocation.
-10. **Add it to the CI matrix**—both the shipping image and the console
+10. **Register the pairing identity** (boards with BLE). Give the board the
+    next free model ID in `ble_privacy::model` (`umsh-ulcp-runtime`) and in
+    [`hardware/boards.json`](hardware/boards.json) (`id`, `model_id`,
+    `name`, `vendor`, `photo`); a test holds the two in step. Then add the
+    picture the iOS AccessorySetupKit picker shows,
+    `apps/ios/UMSH/Assets.xcassets/board-<id>.imageset`: a cutout photo on
+    a transparent background at 180×120 pt (`@2x` 360×240 and `@3x`
+    540×360 PNGs). Without it the picker shows the board's name over a
+    generic antenna symbol, and nothing fails to say so.
+11. **Add it to the CI matrix**—both the shipping image and the console
     harness.
 
 A board on a new MCU family that cannot share the existing sources needs its

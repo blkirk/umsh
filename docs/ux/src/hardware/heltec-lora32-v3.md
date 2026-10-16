@@ -65,6 +65,18 @@ answering it should not also move the menu. Waking happens on the press, and the
 panel is redrawn before it is switched on, so a stale frame is never visible.
 Waking always lands on the status page.
 
+### Status LED and locate alert
+
+The white LED on GPIO35 flicks every four seconds as a heartbeat, blinks twice
+every two seconds while the pairing window is open, flashes once when the MAC
+accepts a beacon, and flashes three times on the power-off hold.
+
+It also carries the locate alert (`PROP_ALERT`): a triple blink every 1.5
+seconds, replacing the heartbeat and the pairing blink until it ends. The
+panel shows nothing for it. A PRG press during an alert silences it and does
+nothing else; the panel still wakes, and the four-second hold still powers
+off.
+
 ### Power off
 
 The four-second hold passes through regardless of display state—a dark board
@@ -73,7 +85,8 @@ still has to be switchable off. The sequence is ordered:
 1. The radio enters chip sleep. It is powered from the board's main rail rather
    than from `Vext`, so it survives deep sleep and would otherwise sit in
    receive and dominate the sleeping current.
-2. The display renders “Powering off / hold to wake”, blanks, and drops `Vext`.
+2. The display renders “Powering off / hold to wake”, blanks, and drops `Vext`,
+   while the LED plays its three flashes.
 3. The board waits for the button to be released before arming the wake source,
    feeding the watchdog throughout. Arming under a still-held button would wake
    the board from the very press that put it to sleep.
@@ -93,8 +106,8 @@ the sources every ESP32 board shares, with this board selected by its
   board is address text alone.
 - Messages is not implemented on any board in the class: there is no
   device-side text store for the page to read.
-- No locate alert. The board's only conspicuous output is the OLED, and its
-  permanent wired attach means a second host can be present while an alert runs.
+- The locate alert is the LED alone. The board has no sounder, and the OLED
+  lapses dark like any other time.
 - `Vext` stays powered while the display is merely lapsed. Only power-off drops
   the rail, because bringing it back requires a full reset and controller
   re-init rather than a resumed draw.
