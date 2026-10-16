@@ -1,0 +1,26 @@
+[package]
+name = "umsh-bsp-xiao-esp32s3"
+description = "Board BSP for the Seeed XIAO ESP32S3 + Wio-SX1262 kit: pin map, octal PSRAM, SX1262 wiring with a host-driven receive enable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+ulcp-i2c = ["dep:umsh-ulcp", "dep:umsh-ulcp-device", "dep:umsh-ulcp-runtime"]
+# Every device image forwards `ble` to its board BSP. Nothing on this
+# board depends on it.
+ble = []
+
+[dependencies]
+umsh-ulcp = { path = "../../../crates/umsh-ulcp", default-features = false, optional = true }
+umsh-ulcp-device = { path = "../../../crates/umsh-ulcp-device", default-features = false, optional = true }
+umsh-ulcp-runtime = { path = "../../../crates/umsh-ulcp-runtime", default-features = false, features = ["i2c"], optional = true }
+umsh-bsp-esp32 = { path = "../umsh-bsp-esp32", features = ["esp32s3"] }
+esp-hal = { version = "1.2", default-features = false, features = ["esp32s3", "rt", "unstable"] }
+embassy-time = { version = "0.5", default-features = false }
+# SX1262 driver; resolves to ../../lora-rs via the workspace [patch].
+lora-phy = { version = "3.0.2-alpha", default-features = false }
+embedded-hal-bus = { version = "0.3", default-features = false, features = ["async"] }
+embassy-sync = { version = "0.8", default-features = false }
+embassy-embedded-hal = { version = "0.6", default-features = false }

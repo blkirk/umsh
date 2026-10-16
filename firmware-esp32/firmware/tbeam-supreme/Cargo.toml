@@ -45,8 +45,8 @@ entropy-sar-adc = []
 # For images plausibly left in place as infrastructure.
 meshcore-forwarder = ["umsh-ulcp-runtime/meshcore-forwarder"]
 # The LAN bearer: the device node's frames over IP multicast on the
-# station's network, and the DNS-SD record that describes them. Only the
-# T-Beam Supreme carries it by default.
+# station's network, and the DNS-SD record that describes them. The
+# T-Beam Supreme and the XIAO ESP32S3 carry it by default.
 lan-bearer = [
     "wifi",
     "dep:umsh-lan-bearer",
@@ -62,9 +62,44 @@ lan-bearer = [
 # `scripts/check_esp32_manifests.py`; `default` and BSP feature
 # forwarding select the image.
 default = ["board-tbeam-supreme", "ble", "psram", "coex", "bridge-client", "meshcore-forwarder", "lan-bearer"]
-board-heltec-v2 = ["ulcp-i2c", "chip-esp32", "radio-sx127x", "vext-gates-battery"]
-board-heltec-v3 = ["ulcp-i2c", "chip-esp32s3", "radio-sx126x"]
-board-tlora-pager = ["chip-esp32s3", "radio-sx126x", "display-st7796", "wired-usb-serial-jtag", "gnss", "external-rtc"]
+board-heltec-v2 = [
+    "ulcp-i2c",
+    "chip-esp32",
+    "radio-sx127x",
+    "vext-gates-battery",
+    "display-ssd1306",
+    "battery-adc",
+    "status-led",
+    "power-off-deep-sleep",
+]
+board-heltec-v3 = [
+    "ulcp-i2c",
+    "chip-esp32s3",
+    "radio-sx126x",
+    "vext",
+    "display-ssd1306",
+    "battery-adc",
+    "status-led",
+    "power-off-deep-sleep",
+]
+board-tlora-pager = [
+    "chip-esp32s3",
+    "radio-sx126x",
+    "display-st7796",
+    "wired-usb-serial-jtag",
+    "gnss",
+    "external-rtc",
+    "battery-telemetry",
+]
+board-xiao-esp32s3 = [
+    "ulcp-i2c",
+    "chip-esp32s3",
+    "radio-sx126x",
+    "radio-rxen",
+    "status-led",
+    "power-off-deep-sleep",
+    "usb-presence-sof",
+]
 board-tbeam-supreme = [
     "ulcp-i2c",
     "chip-esp32s3",
@@ -91,27 +126,54 @@ radio-sx127x = []
 # SX126x family: BUSY handshake, DIO1 for IRQs, DIO2 drives the RF switch
 # and DIO3 the TCXO supply.
 radio-sx126x = []
+# A GPIO-switched `Vext` rail powers the panel. The display task owns it
+# and drops it on the way into power-off.
+vext = []
 # The `Vext` rail gates the battery divider as well as the panel, so the
 # battery sampler and the display share one owned rail handle and a
 # battery reading forces the rail up. Boards with an independent divider
 # gate leave this off.
-vext-gates-battery = []
+vext-gates-battery = ["vext"]
+# The firmware can measure the battery: `PROP_BATTERY` reports it and the
+# panel draws it. A board without this still advertises `CAP_BATTERY`,
+# answering with the empty value.
+battery-telemetry = []
+# Battery voltage through a SAR ADC divider, the level estimated from it.
+# No charge state reaches the MCU.
+battery-adc = ["battery-telemetry"]
 # Power comes through an AXP2101 PMIC instead of MCU GPIOs: rails are
 # brought up over I²C before any peripheral is probed, the battery is
 # read from the PMIC's gauge (no SAADC divider), the charge LED belongs
 # to the charger, and "off" is a PMIC power-off rather than deep sleep.
 # Replaces Vext, the battery sampler, and the status LED wholesale.
-pmic-axp2101 = []
+pmic-axp2101 = ["battery-telemetry"]
+# One firmware-owned status LED: the heartbeat, the pairing blink, action
+# confirmations, and the locate alert (`CAP_ALERT`).
+status-led = []
+# Power-off is deep sleep, and the user button wakes the board.
+power-off-deep-sleep = []
+# The RF switch takes a receive-enable line from the MCU; DIO2 still
+# drives the transmit side.
+radio-rxen = []
+# A panel, whichever driver runs it. Without one the board is headless and
+# `ui_headless.rs` stands in for `ui.rs`.
+display = []
+# SSD1306 panel through the `ssd1306` crate, with a reset GPIO and the
+# full power-up sequence after every `Vext` cycle.
+display-ssd1306 = ["display"]
 # SH1106 panel (shared `umsh-display-sh1106` driver) instead of the
 # ssd1306 crate: the I²C address is probed (0x3D first—0x3C may be a
 # magnetometer), and there is no reset GPIO—the panel's rail is its
 # reset.
-display-sh1106 = []
+display-sh1106 = ["display"]
 # The wired ULCP transport is the chip's native USB-Serial-JTAG port
 # rather than UART0 behind an external USB-UART bridge. Writes are
 # bounded: with no host attached the FIFO drains nowhere, and an unbound
 # write would wedge the session.
 wired-usb-serial-jtag = []
+# No VBUS sense reaches the MCU, so whether a host is on the wire is read
+# from the USB start-of-frame stream instead.
+usb-presence-sof = ["wired-usb-serial-jtag"]
 # On-board GNSS receiver on UART1, powered through the pump's rail/wake
 # gate; positioning flows through `umsh-ulcp-runtime`'s gnss feature.
 gnss = []
@@ -119,7 +181,7 @@ gnss = []
 # ExternalRtc) and written back on manual set and trusted GNSS time.
 rtc-pcf8563 = ["external-rtc"]
 external-rtc = []
-display-st7796 = []
+display-st7796 = ["display"]
 
 # Multiplex driver diagnostics as ASCII lines onto the wired output
 # stream (HDLC hosts resynchronize past them).

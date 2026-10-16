@@ -13,6 +13,8 @@ pub const I2C_SCL: u8 = 2;
 pub const SPI_SCK: u8 = 35;
 pub const SPI_MOSI: u8 = 34;
 pub const SPI_MISO: u8 = 33;
+/// The module's PSRAM, on the quad SPI bus.
+pub const PSRAM_MODE: esp_hal::psram::PsramMode = esp_hal::psram::PsramMode::QuadSpi;
 
 use embassy_embedded_hal::shared_bus::asynch::{i2c::I2cDevice, spi::SpiDeviceWithConfig};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};

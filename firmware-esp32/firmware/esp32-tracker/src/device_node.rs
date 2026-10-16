@@ -139,10 +139,14 @@ fn meshcore_storage(
 
 // ─── Bring-up ────────────────────────────────────────────────────────────────
 
-/// This board has no battery-level estimator to feed and no indicator
-/// to confirm a beacon on, so both hooks stay at their no-op defaults.
+/// No ESP32 board has a battery-level estimator to feed. A board with a
+/// status LED flashes it when a button check-in is accepted.
 fn hooks() -> node::NodeHooks {
-    node::NodeHooks::default()
+    node::NodeHooks {
+        #[cfg(feature = "status-led")]
+        beacon_confirm: crate::status_led::confirm_action,
+        ..node::NodeHooks::default()
+    }
 }
 
 /// Construct the node around the device identity and spawn its tasks.

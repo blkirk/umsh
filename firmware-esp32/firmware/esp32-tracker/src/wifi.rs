@@ -34,6 +34,7 @@ static UI: Mutex<CriticalSectionRawMutex, RefCell<WifiMenu>> = Mutex::new(RefCel
     networks: [None; 4],
 }));
 
+#[cfg(feature = "display")]
 pub fn ui_snapshot() -> WifiMenu {
     UI.lock(|cell| *cell.borrow())
 }

@@ -1,5 +1,6 @@
 //! ULCP firmware for the ESP32 tracker boards (Heltec LoRa 32 V2/V3,
-//! LILYGO T-Beam Supreme), selected by `board-*` features.
+//! LILYGO T-Beam Supreme and T-LoRa Pager, Seeed XIAO ESP32S3 +
+//! Wio-SX1262), selected by `board-*` features.
 //!
 //! The protocol brain is the shared board-agnostic driver
 //! (`umsh_ulcp_runtime::driver`)—the same session loop the T-Echo
@@ -9,8 +10,8 @@
 //!   UART0 behind a CP2102 bridge on the Heltecs, the native
 //!   USB-Serial-JTAG peripheral where `wired-usb-serial-jtag` is on.
 //!   Attachment is lazy: the first valid HDLC frame attaches. Native
-//!   USB detaches when VBUS disappears; UART bridges cannot detect
-//!   host disconnection. A board nobody serials into stays detached
+//!   USB detaches when the host goes (VBUS drops, or start-of-frame
+//!   packets stop); UART bridges cannot detect host disconnection. A board nobody serials into stays detached
 //!   and autonomous.
 //! - **BLE transport**: the `UlcpService` GATT shape over the
 //!   esp-radio controller, with the same pairing/bonding lattice the
@@ -65,17 +66,23 @@ use core::fmt::Write as _;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
+// Every fixed I²C device here is a panel or hangs off a PMU bus.
+#[cfg(any(feature = "display", feature = "pmic-axp2101"))]
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 
 #[cfg(feature = "board-tbeam-supreme")]
 mod bme280;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
+use embassy_futures::select::{Either, Either3, select, select3};
+#[cfg(feature = "display")]
+use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+#[cfg(any(feature = "display", feature = "debug-log"))]
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::signal::Signal;
+#[cfg(feature = "battery-telemetry")]
 use embassy_sync::watch::Watch;
 use embassy_time::{Delay, Duration, Instant, Timer, with_timeout};
 #[cfg(not(feature = "board-tlora-pager"))]
@@ -89,6 +96,7 @@ use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
+#[cfg(any(not(feature = "wired-usb-serial-jtag"), feature = "gnss"))]
 use esp_hal::uart::{Config as UartConfig, Uart};
 #[cfg(not(feature = "wired-usb-serial-jtag"))]
 use esp_hal::uart::{UartRx, UartTx};
@@ -109,20 +117,18 @@ use umsh_bsp_heltec_lora32_v3 as board;
 use umsh_bsp_tbeam_supreme as board;
 #[cfg(feature = "board-tlora-pager")]
 use umsh_bsp_tlora_pager as board;
+#[cfg(feature = "board-xiao-esp32s3")]
+use umsh_bsp_xiao_esp32s3 as board;
 
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 use board::battery as board_battery;
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 use board::battery::BatterySampler;
-#[cfg(feature = "display-sh1106")]
+#[cfg(any(feature = "display-sh1106", feature = "display-ssd1306"))]
 use board::display;
-#[cfg(any(feature = "display-sh1106", feature = "display-st7796"))]
-use board::display::{Brightness, Display, brightness_from_permille};
 // `DisplayConfigAsync` is the ssd1306 trait carrying `init()`.
-#[cfg(not(any(feature = "display-sh1106", feature = "display-st7796")))]
-use board::display::{
-    self, Brightness, Display, DisplayConfigAsync as _, brightness_from_permille,
-};
+#[cfg(feature = "display-ssd1306")]
+use board::display::DisplayConfigAsync as _;
 #[cfg(feature = "pmic-axp2101")]
 use board::gnss::{PmuI2cDevice, SharedPmic};
 #[cfg(feature = "pmic-axp2101")]
@@ -135,11 +141,7 @@ use board::radio as board_radio;
 // AXP2101 and drops in the shutdown path instead.
 #[cfg(feature = "board-tlora-pager")]
 use board::I2cHandle as PmuI2cDevice;
-#[cfg(not(any(
-    feature = "vext-gates-battery",
-    feature = "pmic-axp2101",
-    feature = "board-tlora-pager"
-)))]
+#[cfg(all(feature = "vext", not(feature = "vext-gates-battery")))]
 use board::vext::Vext;
 #[cfg(feature = "vext-gates-battery")]
 use board::vext::VextHandle as Vext;
@@ -154,7 +156,7 @@ use umsh_pmic_axp2101::{Axp2101, ChargeDirection, ChargeState, IrqMask};
 use umsh_radio_loraphy::{DeviceControl, MAX_PAYLOAD};
 #[cfg(feature = "rtc-pcf8563")]
 use umsh_rtc_pcf8563::Pcf8563 as RtcChip;
-use umsh_ulcp::stats::{Counter, StatsLedger};
+use umsh_ulcp::stats::StatsLedger;
 use umsh_ulcp::{Status, hdlc};
 #[cfg(feature = "gnss")]
 use umsh_ulcp_device::GnssConfig;
@@ -162,20 +164,17 @@ use umsh_ulcp_device::GnssConfig;
 use umsh_ulcp_device::TimeConfig;
 use umsh_ulcp_device::{BatteryFields, MAX_DEVICE_NAME_LEN, RadioSettings, SessionConfig};
 use umsh_ulcp_runtime::driver::{
-    self, DeviceEnv, DeviceRuntime, InEvent, InputChannel, Setting, TransportChannels,
+    self, DeviceEnv, DeviceRuntime, InEvent, InputChannel, TransportChannels,
 };
 use umsh_ulcp_runtime::{radio_mux, transport_policy};
-use umsh_ux_display_tracker::attention::{
-    Attention, AttentionConfig, DisplayKind, HoldReason, Transition,
-};
 #[cfg(not(feature = "board-tlora-pager"))]
 use umsh_ux_display_tracker::gate::{Disposition, Gate, GateReason};
-use umsh_ux_display_tracker::menu::MenuItem;
-use umsh_ux_display_tracker::menu::{MenuItems, ToggleId, UiEffect, UiInput, UiModel, UiNotice};
-use umsh_ux_display_tracker::screen;
+use umsh_ux_display_tracker::menu::UiNotice;
+#[cfg(feature = "display")]
+use umsh_ux_display_tracker::{menu::UiInput, screen};
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 use umsh_ux_tracker::battery::ChargeClass;
-#[cfg(not(feature = "board-tlora-pager"))]
+#[cfg(any(feature = "battery-adc", feature = "pmic-axp2101"))]
 use umsh_ux_tracker::battery::soc_from_ocv;
 #[cfg(not(feature = "board-tlora-pager"))]
 use umsh_ux_tracker::button::{ButtonEdge, ButtonEvent, ButtonFsm};
@@ -198,8 +197,14 @@ mod journals;
 mod lan;
 #[cfg(feature = "board-tlora-pager")]
 mod pager;
+#[cfg(feature = "status-led")]
+mod status_led;
 #[cfg(feature = "chip-esp32s3")]
 mod temperature;
+// The same split for the panel: the menu and its renderer, or a board
+// with nothing to draw on.
+#[cfg_attr(not(feature = "display"), path = "ui_headless.rs")]
+mod ui;
 #[cfg(feature = "wifi")]
 mod wifi;
 #[cfg(all(feature = "wifi", feature = "debug-log"))]
@@ -212,11 +217,36 @@ compile_error!("WiFi alongside Bluetooth needs the `coex` feature: build with `w
 // no radio driver could never bootstrap its entropy pool.
 #[cfg(not(any(feature = "wifi", feature = "ble")))]
 compile_error!("enable `ble` or `wifi`: with neither radio there is no trusted entropy source");
+// The USB-Serial-JTAG driver forbids light sleep for as long as it exists,
+// so it exists only while a host may be on the wire, and exactly one
+// source says when that is.
 #[cfg(all(
-    feature = "psram",
-    not(any(feature = "board-tbeam-supreme", feature = "board-tlora-pager"))
+    feature = "wired-usb-serial-jtag",
+    not(any(
+        feature = "pmic-axp2101",
+        feature = "board-tlora-pager",
+        feature = "usb-presence-sof"
+    ))
 ))]
-compile_error!("PSRAM wiring is only defined for T-Beam Supreme and T-LoRa Pager");
+compile_error!(
+    "`wired-usb-serial-jtag` needs a host-presence source: VBUS sense or `usb-presence-sof`"
+);
+#[cfg(all(
+    feature = "usb-presence-sof",
+    any(feature = "pmic-axp2101", feature = "board-tlora-pager")
+))]
+compile_error!("`usb-presence-sof` is for boards that cannot sense VBUS");
+#[cfg(not(any(
+    feature = "power-off-deep-sleep",
+    feature = "pmic-axp2101",
+    feature = "board-tlora-pager"
+)))]
+compile_error!("no power-off path: enable `power-off-deep-sleep` or `pmic-axp2101`");
+#[cfg(all(
+    feature = "power-off-deep-sleep",
+    any(feature = "pmic-axp2101", feature = "board-tlora-pager")
+))]
+compile_error!("one power-off path per board: deep sleep or the PMIC, not both");
 
 #[cfg(feature = "wifi")]
 type SnapshotStore = umsh_ulcp_runtime::wifi_journal::WifiStore<
@@ -247,9 +277,9 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// RWDT timeout. The PMIC board runs a longer leash: its heartbeat's
 /// feed cadence is the ceiling on light-sleep residency (the RWDT runs
 /// through light sleep and the feed is a timer wake), so the pair is
-/// 20 s feeds under a 30 s timeout there, against the Heltecs' 4 s LED
-/// blink under the original 8 s.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+/// 20 s feeds under a 30 s timeout there, against the status LED's 4 s
+/// heartbeat under the original 8 s.
+#[cfg(not(feature = "pmic-axp2101"))]
 const WDT_TIMEOUT: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(8);
 #[cfg(feature = "pmic-axp2101")]
 const WDT_TIMEOUT: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(30);
@@ -281,8 +311,8 @@ const DEFAULT_DEVICE_NAME: &str = "UMSH Heltec V3";
 const DEFAULT_DEVICE_NAME: &str = "UMSH T-Beam";
 #[cfg(feature = "board-tlora-pager")]
 const DEFAULT_DEVICE_NAME: &str = "UMSH Pager";
-#[cfg(feature = "board-tlora-pager")]
-const WDT_TIMEOUT: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(8);
+#[cfg(feature = "board-xiao-esp32s3")]
+const DEFAULT_DEVICE_NAME: &str = "UMSH XIAO S3";
 
 /// `PROP_DEV_VERSION`: the stack name and the release version from the
 /// build script, in the `STACK-NAME/STACK-VERSION` form the spec
@@ -369,7 +399,7 @@ fn session_config() -> SessionConfig {
         // charger-status signal (the charge LED is charger-driven), so
         // voltage and the OCV level estimate are reported and charge
         // state is not advertised.
-        #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+        #[cfg(feature = "battery-adc")]
         battery: Some(BatteryFields {
             voltage: true,
             level: true,
@@ -384,9 +414,16 @@ fn session_config() -> SessionConfig {
             level: true,
             charge_state: true,
         }),
-        #[cfg(feature = "board-tlora-pager")]
+        // A cell can be fitted and charged, but nothing on the board lets
+        // the MCU read it, so the battery is reported as present with
+        // nothing measured.
+        #[cfg(not(feature = "battery-telemetry"))]
+        battery: Some(BatteryFields::NONE),
+        // The locate alert sounds on the Pager and blinks the status LED
+        // elsewhere; a board with neither cannot be found by it.
+        #[cfg(any(feature = "board-tlora-pager", feature = "status-led"))]
         alert: Some(umsh_ulcp_device::AlertConfig::DEFAULT),
-        #[cfg(not(feature = "board-tlora-pager"))]
+        #[cfg(not(any(feature = "board-tlora-pager", feature = "status-led")))]
         alert: None,
         // No clock. A permanently-wired bench board reads the time from
         // the host it is wired to.
@@ -553,15 +590,17 @@ static ADC2_ARBITER: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 #[cfg(feature = "board-heltec-v2")]
 static ADC2_RADIO_UP: AtomicBool = AtomicBool::new(false);
 
-/// Whether USB power is present, per the PMIC's last word (its IRQ
-/// pokes an immediate re-read on plug/unplug, so this trails the cable
-/// by milliseconds). Starts optimistic so the wired console exists
-/// from the first instruction of a USB-powered boot; the first reading
-/// corrects a battery boot.
-#[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
-static VBUS_PRESENT: AtomicBool = AtomicBool::new(true);
-#[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
-static VBUS_EDGE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Whether a USB host may be on the wire. Where VBUS reaches a sensor
+/// this is USB power per the PMIC's (or the Pager charger's) last word,
+/// whose IRQ pokes an immediate re-read on plug and unplug; elsewhere it
+/// is the start-of-frame stream (`usb-presence-sof`). Starts optimistic
+/// so the wired console exists from the first instruction of a
+/// USB-powered boot; the first reading corrects a battery boot.
+#[cfg(feature = "wired-usb-serial-jtag")]
+static USB_PRESENT: AtomicBool = AtomicBool::new(true);
+/// Raised whenever [`USB_PRESENT`] changes.
+#[cfg(feature = "wired-usb-serial-jtag")]
+static USB_PRESENT_EDGE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// OLED redraw trigger for content that changed without the user asking
 ///—a battery sample, a bond count. Deliberately *not* a wake event:
@@ -577,22 +616,12 @@ static QUEUED_FRAMES: AtomicU16 = AtomicU16::new(0);
 /// panel that has gone dark.
 static UI_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// Motion has its own notification and never extends an active/dim timeout.
-async fn motion_wake() {
-    #[cfg(all(feature = "board-tlora-pager", not(feature = "motion-qualification")))]
-    loop {
-        let wake = pager::motion::SERVICE.display_wake.wait().await;
-        if pager::motion::SERVICE.accept(wake, Instant::now().as_millis()) {
-            return;
-        }
-    }
-    #[cfg(any(not(feature = "board-tlora-pager"), feature = "motion-qualification"))]
-    core::future::pending::<()>().await;
-}
 /// Resolved menu gestures, button task → display task.
+#[cfg(feature = "display")]
 static UI_INPUT_CH: Channel<CriticalSectionRawMutex, UiInput, 8> = Channel::new();
 /// Latched at the first press, including before display initialization.
-static BOOT_SPLASH_ACTIVE: AtomicBool = AtomicBool::new(true);
+/// A headless board has no splash for a press to dismiss.
+static BOOT_SPLASH_ACTIVE: AtomicBool = AtomicBool::new(cfg!(feature = "display"));
 static UI_SPLASH_DISMISS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// Result of a menu action, to be shown on the status page.
 static UI_NOTICE: Signal<CriticalSectionRawMutex, UiNotice> = Signal::new();
@@ -609,11 +638,14 @@ static SHUTDOWN_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// Shutdown sequence → display task. Distinct from `SHUTDOWN_REQUEST`
 /// so the two consumers cannot race for one signal: whichever awaited
 /// first would consume it and leave the other waiting forever.
+#[cfg(feature = "display")]
 static DISPLAY_SHUTDOWN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// The display task has rendered its farewell and powered the panel
 /// down (dropping `Vext` where it owns the rail).
+#[cfg(feature = "display")]
 static DISPLAY_SHUTDOWN_DONE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// Last battery sample in millivolts (0 = never sampled). Display only.
+#[cfg(feature = "battery-telemetry")]
 static BATTERY_MV: AtomicU16 = AtomicU16::new(0);
 /// Last battery level percent (0xFF = unknown). Display only.
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
@@ -624,8 +656,9 @@ static BATTERY_LEVEL: AtomicU8 = AtomicU8::new(0xFF);
 static BATTERY_CHARGE: AtomicU8 = AtomicU8::new(0);
 /// Battery request/reply pair between the session env and the sampler
 /// task, which owns the ADC (or the PMIC telemetry cadence).
+#[cfg(feature = "battery-telemetry")]
 static BATTERY_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 static BATTERY_REPLY: Signal<CriticalSectionRawMutex, u16> = Signal::new();
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 static BATTERY_REPLY: Signal<CriticalSectionRawMutex, board_battery::Reading> = Signal::new();
@@ -633,7 +666,7 @@ static BATTERY_REPLY: Signal<CriticalSectionRawMutex, board_battery::Reading> = 
 /// `PROP_BATTERY` publication. A `Watch` rather than a `Signal`: the
 /// driver's select drops and re-creates the wait on every other
 /// iteration, and a receiver must not lose an update to that.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 static BATTERY_ANNOUNCE: Watch<CriticalSectionRawMutex, u16, 1> = Watch::new();
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 static BATTERY_ANNOUNCE: Watch<CriticalSectionRawMutex, board_battery::Reading, 1> = Watch::new();
@@ -792,7 +825,7 @@ async fn rtc_writeback(rtc: &'static RtcMutex, epoch: u32) {
 /// perpetually-discharging samples the clamp would never lift, so a fully
 /// recharged pack would keep reporting the level it bottomed out at until
 /// the next reboot.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 const BATTERY_LEVEL_STEP: u8 = 5;
 
 /// Smallest level movement worth announcing, in percentage points.
@@ -811,11 +844,12 @@ const BATTERY_LEVEL_STEP: u8 = 5;
 /// A redraw prompt, never a wake: an unrequested sample must not light an
 /// emissive panel, or a board left on a desk would glow every minute
 /// forever.
+#[cfg(feature = "battery-telemetry")]
 static BATTERY_UI_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Owns the ADC divider. Samples on a slow cadence for the OLED and
 /// immediately on session request (`Effect::SampleBattery`).
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 #[embassy_executor::task]
 async fn battery_task(mut sampler: BatterySampler) {
     let announce = BATTERY_ANNOUNCE.sender();
@@ -877,7 +911,7 @@ async fn battery_task(mut sampler: BatterySampler) {
 /// request/reply round trip into [`battery_task`], the sole ADC owner.
 /// No charger-status signal exists on this board, so charge state is
 /// never reported (and `SessionConfig::battery` does not advertise it).
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 async fn sample_battery_snapshot() -> Result<umsh_ulcp::battery::BatteryStatus, ()> {
     BATTERY_REPLY.reset();
     BATTERY_REQUEST.signal(());
@@ -893,7 +927,7 @@ async fn sample_battery_snapshot() -> Result<umsh_ulcp::battery::BatteryStatus, 
 /// Shared by the on-demand read (`Effect::SampleBattery`) and the
 /// asynchronous publication (`DeviceEnv::battery_event`) so the two can
 /// never report the same reading differently.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "battery-adc")]
 fn battery_snapshot(mv: u16) -> umsh_ulcp::battery::BatteryStatus {
     umsh_ulcp::battery::BatteryStatus {
         voltage_mv: Some(mv),
@@ -971,10 +1005,10 @@ async fn battery_task(pmic: &'static SharedPmic) {
             Err(_) => continue,
         };
         BATTERY_MV.store(reading.voltage_mv.unwrap_or(0), Ordering::Release);
-        if VBUS_PRESENT.swap(reading.vbus, Ordering::AcqRel) != reading.vbus {
+        if USB_PRESENT.swap(reading.vbus, Ordering::AcqRel) != reading.vbus {
             // The wired-transport supervisor keys the USB-Serial-JTAG
             // driver's existence off this.
-            VBUS_EDGE.signal(());
+            USB_PRESENT_EDGE.signal(());
         }
         BATTERY_LEVEL.store(battery_level(&reading).unwrap_or(0xFF), Ordering::Release);
         BATTERY_CHARGE.store(
@@ -1116,7 +1150,7 @@ struct BoardDeviceEnv {
     i2c: board::i2c::Buses,
     /// Announce-worthy readings from [`battery_task`], for unsolicited
     /// `PROP_BATTERY` publication.
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+    #[cfg(feature = "battery-adc")]
     battery: embassy_sync::watch::DynReceiver<'static, u16>,
     #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
     battery: embassy_sync::watch::DynReceiver<'static, board_battery::Reading>,
@@ -1135,8 +1169,8 @@ struct BoardDeviceEnv {
 
 /// One battery reading as the session reports it, taking the reading by
 /// value so callers need not know that the PMIC boards carry a struct
-/// where the rest carry millivolts.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+/// where the ADC boards carry millivolts.
+#[cfg(feature = "battery-adc")]
 fn battery_reading_snapshot(mv: u16) -> umsh_ulcp::battery::BatteryStatus {
     battery_snapshot(mv)
 }
@@ -1157,16 +1191,24 @@ impl BoardDeviceEnv {
     /// select drops this future whenever another arm wins.
     async fn sensor_event(&mut self) -> driver::PublishEvent {
         // Disjoint field borrows, not method calls: two `&mut self`
-        // futures cannot coexist in one select.
+        // futures cannot coexist in one select. A source this board does
+        // not fit is an arm that never completes.
+        #[cfg(feature = "battery-telemetry")]
+        let battery = self.battery.changed();
+        #[cfg(not(feature = "battery-telemetry"))]
+        let battery = core::future::pending::<core::convert::Infallible>();
         #[cfg(feature = "gnss")]
-        let event = select(self.battery.changed(), self.gnss_announce.changed()).await;
+        let gnss = self.gnss_announce.changed();
         #[cfg(not(feature = "gnss"))]
-        let event = Either::First(self.battery.changed().await) as Either<_, ()>;
+        let gnss = core::future::pending::<core::convert::Infallible>();
 
-        match event {
+        match select(battery, gnss).await {
+            #[cfg(feature = "battery-telemetry")]
             Either::First(reading) => {
                 driver::PublishEvent::Battery(battery_reading_snapshot(reading))
             }
+            #[cfg(not(feature = "battery-telemetry"))]
+            Either::First(never) => match never {},
             #[cfg(feature = "gnss")]
             Either::Second(umsh_ulcp_runtime::gnss::Announce::Gnss(key, snapshot)) => {
                 driver::PublishEvent::Gnss(key, snapshot)
@@ -1193,7 +1235,7 @@ impl BoardDeviceEnv {
                 altitude_m,
             ),
             #[cfg(not(feature = "gnss"))]
-            Either::Second(()) => unreachable!("no receiver on this board"),
+            Either::Second(never) => match never {},
         }
     }
 }
@@ -1212,6 +1254,10 @@ impl DeviceEnv for BoardDeviceEnv {
     #[cfg(feature = "board-tlora-pager")]
     fn set_alert(&mut self, state: umsh_ulcp::alert::AlertState) {
         pager::alert::set(state.is_active());
+    }
+    #[cfg(feature = "status-led")]
+    fn set_alert(&mut self, state: umsh_ulcp::alert::AlertState) {
+        status_led::set_alert(state.is_active());
     }
     #[cfg(feature = "bridge-client")]
     fn apply_bridge_config(
@@ -1309,6 +1355,7 @@ impl DeviceEnv for BoardDeviceEnv {
         Ok(())
     }
 
+    #[cfg(feature = "battery-telemetry")]
     async fn sample_battery(&mut self) -> Result<umsh_ulcp::battery::BatteryStatus, ()> {
         sample_battery_snapshot().await
     }
@@ -1336,22 +1383,6 @@ impl DeviceEnv for BoardDeviceEnv {
         out: &mut [u8],
     ) -> Result<usize, Status> {
         self.i2c.scan(request, out).await
-    }
-
-    /// Publish the reading [`battery_task`] flagged, reduced the same way
-    /// the on-demand read reduces it.
-    #[cfg(not(feature = "gnss"))]
-    async fn battery_event(&mut self) -> umsh_ulcp::battery::BatteryStatus {
-        #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
-        {
-            let mv = self.battery.changed().await;
-            battery_snapshot(mv)
-        }
-        #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
-        {
-            let reading = self.battery.changed().await;
-            battery_snapshot(&reading)
-        }
     }
 
     #[cfg(feature = "external-rtc")]
@@ -1949,17 +1980,17 @@ async fn input_pump(rx: &mut WiredRx) {
     }
 }
 
-/// Owns the USB-Serial-JTAG driver for exactly as long as USB power is
-/// present.
+/// Owns the USB-Serial-JTAG driver for exactly as long as a USB host may
+/// be on the wire ([`USB_PRESENT`]).
 ///
 /// Both halves of the driver hold a `WakeLock` for their entire
 /// lifetime—the peripheral cannot receive across light sleep—so a
 /// driver that exists on battery is a driver that forbids sleep
-/// forever. Keying its existence off VBUS turns that lock into policy:
-/// on USB power the transport is up and the board never sleeps (there
-/// is nothing to save), on battery the transport does not exist and
-/// its locks with it. Wired ULCP attach loses nothing—with no VBUS
-/// there is no host on the other end of the pins.
+/// forever. Keying its existence off host presence turns that lock into
+/// policy: with a host the transport is up and the board never sleeps
+/// (there is nothing to save), without one the transport does not exist
+/// and its locks with it. Wired ULCP attach loses nothing—with no host
+/// there is nobody on the other end of the pins.
 #[cfg(feature = "wired-usb-serial-jtag")]
 #[embassy_executor::task]
 async fn wired_transport_task(
@@ -1969,8 +2000,8 @@ async fn wired_transport_task(
     let mut usb = Some(usb);
     let mut panic_report = panic_report;
     loop {
-        if !VBUS_PRESENT.load(Ordering::Acquire) {
-            VBUS_EDGE.wait().await;
+        if !USB_PRESENT.load(Ordering::Acquire) {
+            USB_PRESENT_EDGE.wait().await;
             continue;
         }
         let device = usb.take().unwrap_or_else(|| {
@@ -1981,14 +2012,14 @@ async fn wired_transport_task(
             unsafe { esp_hal::peripherals::USB_DEVICE::steal() }
         });
         let (mut rx, mut tx) = UsbSerialJtag::new(device).into_async().split();
-        debug_log(format_args!("wired transport: up (VBUS)"));
+        debug_log(format_args!("wired transport: up (host present)"));
         select3(
             output_pump(&mut tx, panic_report.take()),
             input_pump(&mut rx),
             async {
                 loop {
-                    VBUS_EDGE.wait().await;
-                    if !VBUS_PRESENT.load(Ordering::Acquire) {
+                    USB_PRESENT_EDGE.wait().await;
+                    if !USB_PRESENT.load(Ordering::Acquire) {
                         break;
                     }
                 }
@@ -2001,7 +2032,54 @@ async fn wired_transport_task(
         drop(rx);
         drop(tx);
         INPUT_CH.send(InEvent::Detached(Transport::Usb)).await;
-        debug_log(format_args!("wired transport: down (no VBUS)"));
+        debug_log(format_args!("wired transport: down (no host)"));
+    }
+}
+
+/// With a host present: how often its start-of-frame stream is checked,
+/// and how many silent checks in a row mean it is gone.
+#[cfg(feature = "usb-presence-sof")]
+const USB_SOF_CHECK: Duration = Duration::from_millis(250);
+#[cfg(feature = "usb-presence-sof")]
+const USB_SOF_MISSES: u8 = 4;
+/// With no host: how long each probe holds the chip awake to listen,
+/// and how long it sleeps between probes.
+#[cfg(feature = "usb-presence-sof")]
+const USB_SOF_PROBE_WINDOW: Duration = Duration::from_millis(20);
+#[cfg(feature = "usb-presence-sof")]
+const USB_SOF_PROBE_PERIOD: Duration = Duration::from_secs(1);
+
+/// Decides [`USB_PRESENT`] from the host's start-of-frame stream on a
+/// board that cannot sense VBUS.
+///
+/// While a host is present the transport's wake locks keep the
+/// controller clocked, so the stream is checked in place; a run of
+/// silent checks (cable pulled, or bus suspended) declares the host
+/// gone. With no host the chip may light-sleep, which stops the
+/// controller's clock, so the bus is probed with the chip held awake
+/// instead. A host that attaches meanwhile has reset the bus and keeps
+/// sending frames while it retries the requests the sleeping controller
+/// missed, so the next probe finds it.
+#[cfg(feature = "usb-presence-sof")]
+#[embassy_executor::task]
+async fn usb_presence_task() {
+    use umsh_bsp_esp32::usb_sof;
+    loop {
+        if USB_PRESENT.load(Ordering::Acquire) {
+            let mut misses = 0;
+            while misses < USB_SOF_MISSES {
+                usb_sof::clear();
+                Timer::after(USB_SOF_CHECK).await;
+                misses = if usb_sof::seen() { 0 } else { misses + 1 };
+            }
+            USB_PRESENT.store(false, Ordering::Release);
+        } else {
+            while !usb_sof::sample(USB_SOF_PROBE_WINDOW).await {
+                Timer::after(USB_SOF_PROBE_PERIOD).await;
+            }
+            USB_PRESENT.store(true, Ordering::Release);
+        }
+        USB_PRESENT_EDGE.signal(());
     }
 }
 
@@ -2099,6 +2177,7 @@ async fn device_task(
             i2c,
             // The driver is the only receiver; the slot count is sized
             // for exactly that, so this cannot fail.
+            #[cfg(feature = "battery-telemetry")]
             battery: BATTERY_ANNOUNCE
                 .dyn_receiver()
                 .expect("BATTERY_ANNOUNCE receiver slot"),
@@ -2112,674 +2191,20 @@ async fn device_task(
     .await
 }
 
-// ─── UI: OLED, button, LED ───────────────────────────────────────────────
+// ─── Button, status LED, power-off ───────────────────────────────────────
 
-/// What this board's menu can do.
-///
-/// Everything the class defines—minus the receiver entries on a board
-/// with no GNSS fitted, where both come out and the submenu that led to
-/// them goes with them. Clearing bonds is a menu item rather than a
-/// bare gesture because the confirmation page in front of it is what
-/// makes it safe.
-fn board_menu_items() -> MenuItems {
-    #[allow(unused_mut)]
-    let mut items = MenuItems::all();
-    #[cfg(not(feature = "board-tlora-pager"))]
-    {
-        items = items.without(MenuItem::Battery);
-    }
-    #[cfg(not(feature = "gnss"))]
-    {
-        items = items
-            .without(MenuItem::GnssToggle)
-            .without(MenuItem::ShareLocation);
-    }
-    #[cfg(not(feature = "wifi"))]
-    {
-        items = items
-            .without(MenuItem::WifiToggle)
-            .without(MenuItem::WifiNetworks);
-    }
-    #[cfg(not(feature = "ble"))]
-    {
-        items = items
-            .without(MenuItem::BluetoothToggle)
-            .without(MenuItem::StartPairing)
-            .without(MenuItem::ClearBonds);
-    }
-    #[cfg(any(not(feature = "board-tlora-pager"), feature = "motion-qualification"))]
-    {
-        items = items.without(MenuItem::MotionWake);
-    }
-    items
-}
-
-/// Which device-domain switch a menu toggle names.
-const fn ulcp_setting(id: ToggleId) -> Setting {
-    match id {
-        ToggleId::Radio => Setting::Radio,
-        ToggleId::Wifi => Setting::Wifi,
-        ToggleId::Bluetooth => Setting::Bluetooth,
-        ToggleId::Gnss => Setting::Gnss,
-        ToggleId::MotionWake => Setting::MotionWake,
-        ToggleId::ShareLocation => Setting::ShareLocation,
-        ToggleId::Forwarding => Setting::Forwarding,
-    }
-}
-
-/// Backing store for the identity page's two strings, which
-/// [`screen::StatusModel`] only borrows.
-#[derive(Default)]
-struct IdentityText {
-    hint: heapless::String<8>,
-    address: heapless::String<{ umsh_core::base58::ENCODED_LEN }>,
-}
-
-impl IdentityText {
-    /// The running node's address, or empty before bring-up.
-    fn current() -> Self {
-        use core::fmt::Write as _;
-        let Some(key) = device_node::node_key() else {
-            return Self::default();
-        };
-        let mut text = Self::default();
-        let _ = write!(
-            text.hint,
-            "{}",
-            umsh_core::NodeHint::from_public_key(&umsh_core::PublicKey(key))
-        );
-        for digit in umsh_core::base58::encode(&key) {
-            let _ = text.address.push(digit as char);
-        }
-        text
-    }
-
-    fn model(&self) -> Option<screen::IdentityModel<'_>> {
-        if self.address.is_empty() {
-            return None;
-        }
-        Some(screen::IdentityModel {
-            hint: &self.hint,
-            address: &self.address,
-        })
-    }
-}
-
-/// Everything the shared renderer draws that is not menu state.
-///
-/// The device name is passed in rather than read here: reading it is
-/// async and the model borrows it, so the display task snapshots it once
-/// per frame and lends it to this.
-fn ui_status<'a>(name: &'a DeviceName, identity: &'a IdentityText) -> screen::StatusModel<'a> {
-    #[cfg(feature = "wifi")]
-    let wifi = Some(wifi::ui_snapshot());
-    #[cfg(not(feature = "wifi"))]
-    let wifi: Option<umsh_ux_display_tracker::wifi::WifiMenu> = None;
-    let mv = BATTERY_MV.load(Ordering::Acquire);
-    // No charger telemetry reaches the MCU on the ADC boards, so their
-    // indicator says nothing about charging rather than asserting the
-    // pack is discharging; the PMIC boards know which way current flows,
-    // and unknown (no cell, or before the first sample) draws nothing
-    // rather than a guess.
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
-    let battery = screen::BatteryIndicator {
-        level_percent: (mv != 0).then(|| soc_from_ocv(mv)),
-        charge: None,
-    };
-    #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
-    let battery = {
-        let level = BATTERY_LEVEL.load(Ordering::Acquire);
-        screen::BatteryIndicator {
-            level_percent: (level != 0xFF).then_some(level),
-            charge: match BATTERY_CHARGE.load(Ordering::Acquire) {
-                1 => Some(ChargeClass::Discharging),
-                2 => Some(ChargeClass::Charging),
-                3 => Some(ChargeClass::Charged),
-                4 => Some(ChargeClass::NotCharging),
-                _ => None,
-            },
-        }
-    };
-    let bluetooth = ble::panel();
-    screen::StatusModel {
-        wifi,
-        pairing_highlight: (Instant::now().as_millis() / screen::PAIRING_BLINK_MS) % 2 == 0,
-        firmware_version: env!("GIT_DESCRIBE"),
-        device_name: core::str::from_utf8(name).unwrap_or(DEFAULT_DEVICE_NAME),
-        // Boards with no receiver report nothing on both positioning
-        // switches rather than a guess—and neither is on their menu.
-        settings: screen::SettingsModel {
-            radio: device_node::radio_enabled(),
-            #[cfg(all(feature = "board-tlora-pager", not(feature = "motion-qualification")))]
-            motion_wake: Some(pager::motion::SERVICE.control().display()),
-            #[cfg(any(not(feature = "board-tlora-pager"), feature = "motion-qualification"))]
-            motion_wake: None,
-            wifi: wifi.map(|wifi| wifi.enabled),
-            bluetooth: bluetooth.enabled,
-            #[cfg(not(feature = "gnss"))]
-            gnss: None,
-            #[cfg(not(feature = "gnss"))]
-            share_location: None,
-            #[cfg(feature = "gnss")]
-            gnss: Some(umsh_ulcp_runtime::gnss::enabled()),
-            #[cfg(feature = "gnss")]
-            share_location: Some(umsh_ulcp_runtime::gnss::policy().update_identity),
-            forwarding: Some(device_node::repeater_enabled()),
-        },
-        #[cfg(feature = "gnss")]
-        gnss_fix: umsh_ulcp_runtime::gnss::has_fix(),
-        #[cfg(not(feature = "gnss"))]
-        gnss_fix: false,
-        identity: identity.model(),
-        battery,
-        battery_mv: (mv != 0).then_some(mv),
-        #[cfg(feature = "board-tlora-pager")]
-        battery_details: pager::battery_diagnostics(),
-        #[cfg(not(feature = "board-tlora-pager"))]
-        battery_details: None,
-        queued: Some(QUEUED_FRAMES.load(Ordering::Acquire)),
-        link: bluetooth.link,
-        bonds: bluetooth.bonds,
-        pairing: bluetooth.pairing,
-        stats: ui_stats(),
-        // Boards without `CAP_TIME` never know what time it is and must
-        // not indicate one. On the rest, `None` whenever the device does
-        // not know, which the renderer draws as nothing at all—there
-        // is deliberately no fallback, because a placeholder would be an
-        // indication of the current time.
-        #[cfg(not(feature = "external-rtc"))]
-        clock: None,
-        #[cfg(feature = "external-rtc")]
-        clock: umsh_hal::wall_clock::local_hhmm()
-            .map(|(hour, minute)| screen::ClockModel { hour, minute }),
-    }
-}
-
-/// Radio activity for the stats page.
-///
-/// Sampled when a frame is drawn rather than pushed: the counters move
-/// with every frame on the air, and a redraw per frame would burn the
-/// panel's power budget reporting numbers nobody is looking at.
-fn ui_stats() -> screen::StatsModel {
-    // The same ledger the host reads over ULCP, so a reset from the phone
-    // clears this page too. `rx_frames` is everything the radio handed up,
-    // UMSH or not, which is what the page has always meant.
-    screen::StatsModel {
-        tx_frames: STATS.get(Counter::TxPackets),
-        rx_frames: STATS.get(Counter::RxPackets) + STATS.get(Counter::RxNonUmsh),
-        rx_accepted: STATS.get(Counter::RxAccepted),
-        forwarded: STATS.get(Counter::Forwarded),
-        tx_power_dbm: device_node::tx_power_dbm(),
-        // The ledger's scale is 0-65535 for 0-100%; the page shows tenths
-        // of a percent, which is the range a tracker lives in.
-        duty_permille: (u32::from(DUTY_LEDGER.usage(Instant::now().as_millis())) * 1_000 / 65_535)
-            as u16,
-    }
-}
-
-#[cfg(feature = "board-tlora-pager")]
-const DISPLAY_LAYOUT: screen::Layout = screen::Layout::TFT_480X222;
-#[cfg(not(feature = "board-tlora-pager"))]
-const DISPLAY_LAYOUT: screen::Layout = screen::Layout::OLED_128X64;
-
-/// Render the current page. Best-effort—a display error just leaves the
-/// panel stale; it never blocks the protocol paths.
-async fn render_frame(display: &mut Display, model: &UiModel, status: &screen::StatusModel<'_>) {
-    screen::render_frame(display, &DISPLAY_LAYOUT, model, status);
-    let _ = display.flush().await;
-}
-
-/// Center a short message, keeping the header so the battery stays
-/// readable while the board is busy saying something else.
-async fn render_message(
-    display: &mut Display,
-    status: &screen::StatusModel<'_>,
-    title: &str,
-    detail: &str,
-) {
-    screen::render_message(display, &DISPLAY_LAYOUT, status, title, detail);
-    let _ = display.flush().await;
-}
-
-/// Completes when the receiver gains or loses a fix, so the panel can
-/// redraw its position glyph. Never completes on a board without GNSS.
-async fn gnss_ui_changed() {
-    #[cfg(feature = "gnss")]
-    umsh_ulcp_runtime::gnss::fix_ui_changed().await;
-    #[cfg(not(feature = "gnss"))]
-    core::future::pending::<()>().await
-}
-
-/// Redraw an awake panel at the next clock or pairing animation boundary.
-/// A sleeping panel never arms a timer and catches up when woken.
-async fn display_tick(awake: bool, pairing_delay: Option<u64>) {
-    if !awake {
-        core::future::pending::<()>().await;
-    }
-    let clock_delay = umsh_hal::wall_clock::millis_to_next_minute().map(u64::from);
-    match clock_delay.into_iter().chain(pairing_delay).min() {
-        Some(millis) => Timer::after_millis(millis).await,
-        None => core::future::pending().await,
-    }
-}
-
-/// Draw the boot-only artwork without needing journals, identity, or radio.
-/// Return its original visible deadline so later ownership handoff cannot
-/// blank the panel or restart the splash dwell.
-async fn show_boot_splash(display: &mut Display) -> umsh_ux_display_tracker::boot::BootSplash {
-    // Pager backlights provide immediate startup feedback, including while
-    // the panel resets and its first frame is being drawn.
-    #[cfg(not(feature = "board-tlora-pager"))]
-    let _ = display.set_display_on(false).await;
-    let _ = display.set_brightness(Brightness::NORMAL).await;
-    let mut splash = umsh_ux_display_tracker::boot::BootSplash::new();
-    screen::render_splash(display, &DISPLAY_LAYOUT, env!("GIT_DESCRIBE"));
-    for attempt in 1..=3 {
-        match display.flush().await {
-            Ok(()) => {
-                if display.set_display_on(true).await.is_ok() {
-                    let now = Instant::now().as_millis();
-                    splash.shown(now);
-                    println!("display: boot logo visible at {now} ms (attempt {attempt})");
-                    return splash;
-                }
-            }
-            Err(error) => {
-                debug_log(format_args!(
-                    "display: boot splash transfer failed: {error:?}"
-                ));
-            }
-        }
-        Timer::after_millis(20).await;
-    }
-    // Never time a partially written frame as a successful splash.
-    splash.dismiss();
-    BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
-    splash
-}
-
-/// Owns the OLED, the `Vext` rail that powers it (where one exists—
-/// on a PMIC board the panel's rail drops in the shutdown path
-/// instead), and the display attention policy.
-///
-/// The panel is emissive, so attention lapsing actually turns it off:
-/// full brightness for 20 s, a second-long fall into the dim warning,
-/// dark at 30 s. It stays lit for as long as a pairing window is open,
-/// because its PIN is the only place that number is shown.
-#[embassy_executor::task]
-async fn display_task(
-    mut display: Display,
-    #[cfg(feature = "board-tlora-pager")] mut splash: umsh_ux_display_tracker::boot::BootSplash,
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))] mut vext: Vext,
-) {
-    #[cfg(feature = "board-tlora-pager")]
-    let pager_capture_epoch = pager::input::interactive().await;
-    let mut model = UiModel::new(board_menu_items());
-    #[cfg(not(feature = "board-tlora-pager"))]
-    let mut splash = show_boot_splash(&mut display).await;
-    if !splash.is_active() {
-        render_frame(
-            &mut display,
-            &model,
-            &ui_status(&device_name_snapshot().await, &IdentityText::current()),
-        )
-        .await;
-        let _ = display.set_display_on(true).await;
-    }
-    let mut attention = Attention::new(
-        DisplayKind::Emissive,
-        AttentionConfig::EMISSIVE,
-        Instant::now().as_millis(),
-    );
-    #[cfg(feature = "board-tlora-pager")]
-    pager::input::shown(pager_capture_epoch);
-
-    #[cfg(feature = "board-tlora-pager")]
-    let mut was_alerting = false;
-
-    loop {
-        #[cfg(feature = "board-tlora-pager")]
-        pager::set_battery_details_visible(
-            attention.accepts_redraw()
-                && !splash.is_active()
-                && !pager::alert::active()
-                && matches!(
-                    model.page(),
-                    umsh_ux_display_tracker::menu::Page::Detail(
-                        MenuItem::BatteryCharge
-                            | MenuItem::BatteryCapacity
-                            | MenuItem::BatteryGauge
-                    )
-                ),
-        );
-        // The name changes rarely but every frame this pass might draw
-        // needs it, so it is snapshotted once and lent out; the rest of
-        // the status is rebuilt at each draw. The identity is rendered
-        // the same way, and is empty until node bring-up runs.
-        let name = device_name_snapshot().await;
-        let identity = IdentityText::current();
-
-        // Asserting the hold is itself a wake, and on a dark panel that
-        // wake is the whole event: a pairing window a host opened has no
-        // press behind it. So the transition is carried into this pass
-        // rather than dropped. Dropping it leaves the policy believing the
-        // panel is lit while the glass stays dark, and every later wake is
-        // then a no-op against an already-active state—the panel cannot
-        // be brought back at all until a lapse puts the two back in
-        // agreement.
-        let now = Instant::now().as_millis();
-        let mut transition =
-            attention.set_hold(HoldReason::Pairing, ble::pairing_window_open(), now);
-        #[cfg(feature = "board-tlora-pager")]
-        {
-            let active = pager::alert::active();
-            transition = attention
-                .set_hold(HoldReason::Alert, active, now)
-                .or(transition);
-            if active && splash.dismiss() {
-                BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
-            }
-            if was_alerting && !active {
-                transition = attention.wake(now).or(transition);
-            }
-        }
-        SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
-
-        // A panel about to be powered on needs a frame drawn into it
-        // first, whether or not an arm below asks for one.
-        let mut redraw = transition.is_some();
-
-        let lapse = async {
-            match splash.next_deadline().or_else(|| attention.next_deadline()) {
-                // A hold pins the panel awake, so there is no deadline to
-                // wait for—but a wake it just produced still has to be
-                // applied. Falling through to the arm below is what gets
-                // this pass to the power-on; blocking here would hold it
-                // until some unrelated event arrived.
-                None if transition.is_some() => {}
-                Some(deadline) => Timer::at(Instant::from_millis(deadline)).await,
-                None => core::future::pending().await,
-            }
-        };
-        match select4(
-            UI_INPUT_CH.receive(),
-            select3(
-                // All three are "content moved, redraw if the panel is
-                // already lit"; they differ only in what they do to the
-                // model, so they share an arm.
-                select3(
-                    UI_REFRESH.wait(),
-                    select(BATTERY_UI_CHANGED.wait(), gnss_ui_changed()),
-                    display_tick(
-                        attention.accepts_redraw(),
-                        if splash.is_active() {
-                            None
-                        } else {
-                            screen::pairing_animation_delay_ms(
-                                &model,
-                                &ui_status(&name, &identity),
-                                Instant::now().as_millis(),
-                            )
-                        },
-                    ),
-                ),
-                async {
-                    #[cfg(feature = "board-tlora-pager")]
-                    {
-                        match select(UI_NOTICE.wait(), pager::alert::DISPLAY_CHANGED.wait()).await {
-                            Either::First(notice) => Some(notice),
-                            Either::Second(()) => None,
-                        }
-                    }
-                    #[cfg(not(feature = "board-tlora-pager"))]
-                    Some(UI_NOTICE.wait().await)
-                },
-                select(UI_WAKE.wait(), motion_wake()),
-            ),
-            DISPLAY_SHUTDOWN.wait(),
-            select(UI_SPLASH_DISMISS.wait(), lapse),
-        )
-        .await
-        {
-            // Do not skip the rest of this pass: it may own the alert's
-            // one-shot Woke transition and still need to light the panel.
-            #[cfg(feature = "board-tlora-pager")]
-            Either4::First(_) if pager::alert::active() => redraw = true,
-            Either4::First(input) => {
-                let now = Instant::now().as_millis();
-                transition = attention.wake(now).or(transition);
-                redraw = true;
-                #[cfg(feature = "wifi")]
-                let effect = model.apply_with_wifi(input, &wifi::ui_snapshot());
-                #[cfg(not(feature = "wifi"))]
-                let effect = model.apply(input);
-                match effect {
-                    Some(UiEffect::SelectWifiNetwork(name)) => {
-                        #[cfg(feature = "wifi")]
-                        {
-                            let mut selected = umsh_ulcp_device::net::SelectedNetwork::default();
-                            if selected.set(name.as_bytes()).is_ok() {
-                                INPUT_CH.send(InEvent::SelectWifiNetwork(selected)).await;
-                                redraw = false;
-                            }
-                        }
-                        #[cfg(not(feature = "wifi"))]
-                        {
-                            let _ = name;
-                            model.set_notice(UiNotice::NetworkUnavailable);
-                        }
-                    }
-                    Some(UiEffect::CheckIn) => {
-                        device_node::request_beacon(device_node::BeaconTrigger::Button);
-                        model.set_notice(UiNotice::CheckInRequested);
-                    }
-                    Some(UiEffect::StartPairing) => ble::request_pairing(),
-                    Some(UiEffect::ClearBonds) => ble::request_clear_bonds(),
-                    Some(UiEffect::Toggle(id)) => {
-                        // Applied by the ULCP session, so the property, an
-                        // attached host and the saved snapshot all see the
-                        // same flip.
-                        //
-                        // Which is also why the frame is *not* drawn here.
-                        // The session runs in another task and has not
-                        // moved the value yet, so a redraw on this pass
-                        // would push the old state back onto the panel and
-                        // call it fresh. The frame that shows the flip is
-                        // the one `UI_REFRESH` will drive out of
-                        // `publish_dev_domain`. Nothing else on screen
-                        // needed this press: a notice only ever lives on
-                        // the status page, and a toggle entry never does.
-                        INPUT_CH.send(InEvent::Toggle(ulcp_setting(id))).await;
-                        redraw = false;
-                    }
-                    None => {}
-                }
-            }
-            Either4::Second(event) => match event {
-                // Content the user did not ask for: redraw if the panel
-                // is already lit, but never light it. That rule is what
-                // keeps a battery sample from waking a board left on a
-                // desk every minute.
-                Either3::First(_) => redraw = true,
-                Either3::Second(None) => redraw = true,
-                Either3::Second(Some(notice)) => {
-                    model.set_notice(notice);
-                    transition = attention.wake(Instant::now().as_millis()).or(transition);
-                    redraw = true;
-                }
-                // A wake on its own changes no content—a lit panel is
-                // already showing the truth, and the events that do
-                // change something raise `UI_REFRESH` alongside this.
-                Either3::Third(Either::First(())) => {
-                    transition = attention.wake(Instant::now().as_millis()).or(transition);
-                    redraw = transition.is_some();
-                }
-                Either3::Third(Either::Second(())) => {
-                    if attention.is_lapsed() {
-                        transition = attention
-                            .wake_from_motion(Instant::now().as_millis())
-                            .or(transition);
-                        redraw = transition.is_some();
-                        debug_log(format_args!("motion: display wake"));
-                    } else {
-                        debug_log(format_args!(
-                            "motion: consumed while {:?}",
-                            attention.state()
-                        ));
-                    }
-                }
-            },
-            Either4::Third(()) => {
-                render_message(
-                    &mut display,
-                    &ui_status(&name, &identity),
-                    "Powering off",
-                    if cfg!(feature = "board-tlora-pager") {
-                        ""
-                    } else {
-                        "hold to wake"
-                    },
-                )
-                .await;
-                let _ = display.set_display_on(true).await;
-                Timer::after_millis(1_200).await;
-                let _ = display.set_display_on(false).await;
-                #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
-                vext.disable();
-                DISPLAY_SHUTDOWN_DONE.signal(());
-                core::future::pending::<()>().await;
-            }
-            Either4::Fourth(event) => {
-                if matches!(event, Either::First(())) && splash.dismiss() {
-                    redraw = true;
-                } else {
-                    transition = attention.poll(Instant::now().as_millis()).or(transition);
-                }
-            }
-        }
-
-        redraw |= splash.poll(Instant::now().as_millis());
-        #[cfg(feature = "board-tlora-pager")]
-        {
-            let active = pager::alert::active();
-            let now = Instant::now().as_millis();
-            transition = attention
-                .set_hold(HoldReason::Alert, active, now)
-                .or(transition);
-            if active {
-                splash.dismiss();
-                BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
-            } else if was_alerting {
-                transition = attention.wake(now).or(transition);
-            }
-        }
-        #[cfg(feature = "board-tlora-pager")]
-        let pager_capture_epoch = if matches!(transition, Some(Transition::Woke)) {
-            Some(pager::input::interactive().await)
-        } else {
-            None
-        };
-        match transition {
-            Some(Transition::Lapsed) => {
-                // Waking always lands on the status page rather than on
-                // whatever was abandoned here.
-                model.go_home();
-                #[cfg(feature = "board-tlora-pager")]
-                let before_display_off = pager::input::activity();
-                let off = display.set_display_on(false).await;
-                #[cfg(feature = "board-tlora-pager")]
-                if off.is_ok() {
-                    pager::input::dark(before_display_off);
-                }
-                #[cfg(not(feature = "board-tlora-pager"))]
-                let _ = off;
-                redraw = false;
-            }
-            // One step of the fall, not the whole of it: the policy sends
-            // one of these per ramp step and says where between the
-            // panel's two contrasts to sit. Nothing is redrawn—a
-            // contrast write leaves the framebuffer alone, which is what
-            // makes a fade affordable on a panel that redraws only on
-            // events.
-            Some(Transition::Dimming) => {
-                let _ = display
-                    .set_brightness(brightness_from_permille(attention.brightness_permille()))
-                    .await;
-                redraw = false;
-            }
-            Some(Transition::Woke) | None => {}
-        }
-
-        #[cfg(feature = "board-tlora-pager")]
-        {
-            redraw |= pager::alert::active() || was_alerting;
-        }
-        if redraw && !splash.is_active() && attention.accepts_redraw() {
-            let status = ui_status(&name, &identity);
-            if let Some(wifi) = &status.wifi {
-                model.refresh_wifi(wifi);
-            }
-            #[cfg(feature = "board-tlora-pager")]
-            if pager::alert::active() {
-                screen::render_message(
-                    &mut display,
-                    &DISPLAY_LAYOUT,
-                    &status,
-                    "Locate alert",
-                    "Press any key to stop.",
-                );
-                if pager::alert::bright() {
-                    display.invert();
-                }
-                let _ = display.flush().await;
-            } else {
-                render_frame(&mut display, &model, &status).await;
-            }
-            #[cfg(not(feature = "board-tlora-pager"))]
-            render_frame(&mut display, &model, &status).await;
-            if BOOT_SPLASH_ACTIVE.swap(false, Ordering::AcqRel) {
-                let _ = attention.wake(Instant::now().as_millis());
-            }
-        }
-        // Ordered after the redraw so the panel never lights on a stale
-        // frame.
-        if matches!(transition, Some(Transition::Woke)) {
-            let _ = display.set_brightness(Brightness::NORMAL).await;
-            let on = display.set_display_on(true).await;
-            #[cfg(feature = "board-tlora-pager")]
-            if on.is_ok() {
-                pager::input::shown(pager_capture_epoch.unwrap());
-            }
-            #[cfg(not(feature = "board-tlora-pager"))]
-            let _ = on;
-        }
-        #[cfg(feature = "board-tlora-pager")]
-        {
-            let active = pager::alert::active();
-            if active || was_alerting {
-                let _ = display
-                    .set_brightness(if active && pager::alert::bright() {
-                        Brightness::ALERT
-                    } else {
-                        Brightness::NORMAL
-                    })
-                    .await;
-            }
-            was_alerting = active;
-        }
-    }
-}
-
-/// PRG button (GPIO0, active low), resolved into the display-tracker
-/// vocabulary: single advances the menu, double selects, a 1–4 second
-/// hold released by the user goes back, and a continuing four-second
-/// hold powers the board off.
+/// The user button (active low), resolved into gestures. A continuing
+/// four-second hold powers the board off; the shorter gestures are the
+/// panel's business ([`ui::gesture`]), and on a board with no panel a
+/// press sends a check-in.
 ///
 /// A gesture that begins once the panel has started to fade only brings
 /// it back to full: against a dark panel the user cannot have meant to
 /// act on something they could not see, and against a fading one the
-/// press is the answer to the fade's own question. The power-off hold is
-/// the sole exception, since a device that has gone dark still has to be
+/// press is the answer to the fade's own question. One that begins during
+/// a locate alert cancels the alert instead—whoever found the board
+/// meant to silence it. The power-off hold is the sole exception to
+/// both, since a device that has gone dark still has to be
 /// switchable-off.
 #[embassy_executor::task]
 #[cfg(not(feature = "board-tlora-pager"))]
@@ -2832,6 +2257,8 @@ async fn button_task(mut button: Input<'static>) {
                             GateReason::BootSplash,
                             BOOT_SPLASH_ACTIVE.load(Ordering::Acquire),
                         );
+                        #[cfg(feature = "status-led")]
+                        gate.set(GateReason::AlertActive, status_led::alert_active());
                         gate.on_press();
                         UI_WAKE.signal(());
                     }
@@ -2843,25 +2270,17 @@ async fn button_task(mut button: Input<'static>) {
 
         if let Some(event) = event {
             match gate.disposition(event) {
-                Disposition::ConsumedByWake | Disposition::CancelAlert | Disposition::Discard => {}
+                Disposition::ConsumedByWake | Disposition::Discard => {}
+                // The session owns the alert; it answers with the
+                // `set_alert` edge that stops the blink.
+                Disposition::CancelAlert => INPUT_CH.send(InEvent::CancelAlert).await,
                 Disposition::DismissSplash => UI_SPLASH_DISMISS.signal(()),
-                Disposition::Deliver => {
-                    let input = match event {
-                        ButtonEvent::Single => Some(UiInput::Forward),
-                        ButtonEvent::Double => Some(UiInput::Select),
-                        ButtonEvent::Long => Some(UiInput::Backward),
-                        ButtonEvent::VeryLong => {
-                            pressed = false;
-                            fsm = ButtonFsm::new(umsh_ux_display_tracker::button_timings());
-                            SHUTDOWN_REQUEST.signal(());
-                            None
-                        }
-                        ButtonEvent::Triple | ButtonEvent::Quad => None,
-                    };
-                    if let Some(input) = input {
-                        UI_INPUT_CH.send(input).await;
-                    }
+                Disposition::Deliver if matches!(event, ButtonEvent::VeryLong) => {
+                    pressed = false;
+                    fsm = ButtonFsm::new(umsh_ux_display_tracker::button_timings());
+                    SHUTDOWN_REQUEST.signal(());
                 }
+                Disposition::Deliver => ui::gesture(event).await,
             }
         }
 
@@ -2869,55 +2288,49 @@ async fn button_task(mut button: Input<'static>) {
     }
 }
 
-/// Heartbeat LED plus the RWDT feed. Sharing one task keeps the
-/// watchdog tied to something visibly alive: if the LED stops, the
-/// reset follows. Pairing mode switches to a fast blink.
+/// Longest the deep-sleep heartbeat parks between RWDT feeds: half of
+/// [`WDT_TIMEOUT`], leaving the other half as the margin for a late wake.
+#[cfg(feature = "power-off-deep-sleep")]
+const HEARTBEAT_FEED: Duration = Duration::from_secs(4);
+
+/// The RWDT feed, driving the status LED where there is one. Sharing one
+/// task keeps the watchdog tied to something visibly alive: if the LED
+/// stops, the reset follows.
 ///
 /// It also owns the shutdown sequence, because it owns the `Rtc` that
 /// deep sleep is entered through.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "power-off-deep-sleep")]
 #[embassy_executor::task]
 async fn heartbeat_task(
-    mut led: Output<'static>,
+    #[cfg(feature = "status-led")] mut led: status_led::StatusLed,
     mut rtc: Rtc<'static>,
     mut deep_sleep: esp_rtos::sleep::DeepSleep,
 ) -> ! {
     loop {
         rtc.rwdt.feed();
-        // The idle blink spends four seconds dark, so the shutdown hold
-        // has to interrupt the wait rather than be noticed after it.
-        let (on_ms, off_ms) = if ble::pairing_indicated() {
-            (100, 300)
-        } else {
-            // Four seconds apart matches the nRF boards' heartbeat
-            // (`LedTimings::default`). The pulse does not: the white LED
-            // on both Heltec boards is far brighter than their status
-            // LEDs, so it takes a bare flick to read as alive rather
-            // than their 20 ms.
-            //
-            // Four seconds is also as slow as this loop may go—it
-            // carries the `WDT_TIMEOUT` feed, and half of eight seconds
-            // is the margin the watchdog has left for a late wake.
-            (3, 4_000)
-        };
-        led.set_high();
-        if with_timeout(Duration::from_millis(on_ms), SHUTDOWN_REQUEST.wait())
-            .await
-            .is_ok()
-        {
-            shutdown(&mut led, &mut rtc, &mut deep_sleep).await;
-        }
-        led.set_low();
-        if with_timeout(Duration::from_millis(off_ms), SHUTDOWN_REQUEST.wait())
-            .await
-            .is_ok()
-        {
-            shutdown(&mut led, &mut rtc, &mut deep_sleep).await;
+        // The idle heartbeat spends four seconds dark, so the shutdown
+        // hold has to interrupt the wait rather than be noticed after it.
+        let feed_by = Instant::now() + HEARTBEAT_FEED;
+        #[cfg(feature = "status-led")]
+        let wait = led.show_until(feed_by);
+        #[cfg(not(feature = "status-led"))]
+        let wait = Timer::at(feed_by);
+        if matches!(
+            select(SHUTDOWN_REQUEST.wait(), wait).await,
+            Either::First(())
+        ) {
+            shutdown(
+                #[cfg(feature = "status-led")]
+                &mut led,
+                &mut rtc,
+                &mut deep_sleep,
+            )
+            .await;
         }
     }
 }
 
-/// Quiesce the board and enter deep sleep, waking on the PRG button.
+/// Quiesce the board and enter deep sleep, waking on the user button.
 ///
 /// Ordering matters at every step:
 ///
@@ -2925,34 +2338,35 @@ async fn heartbeat_task(
 ///   main rail rather than from `Vext`, so it survives deep sleep and
 ///   would otherwise sit in receive and dominate the sleeping current.
 /// - The display task renders its farewell and drops `Vext` on its own,
-///   since it owns both; a bounded wait keeps a wedged panel from
-///   stranding a board the user has asked to turn off.
+///   since it owns both, while the LED flashes its three; a bounded wait
+///   keeps a wedged panel from stranding a board the user has asked to
+///   turn off.
 /// - The wake source is armed only after the button is released.
 ///   Arming it under a still-held button wakes the board immediately
 ///   from the very press that put it to sleep.
 ///
 /// Counter persistence needs nothing here: `MacHandle::next_event`
 /// flushes it as it goes, so there is no buffered state to lose.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "power-off-deep-sleep")]
 async fn shutdown(
-    led: &mut Output<'static>,
+    #[cfg(feature = "status-led")] led: &mut status_led::StatusLed,
     rtc: &mut Rtc<'static>,
     deep_sleep: &mut esp_rtos::sleep::DeepSleep,
 ) -> ! {
     debug_log(format_args!("shutdown: power-off hold"));
     DEVICE_CTL.shutdown();
-    DISPLAY_SHUTDOWN_DONE.reset();
-    DISPLAY_SHUTDOWN.signal(());
-    let _ = with_timeout(Duration::from_secs(2), DISPLAY_SHUTDOWN_DONE.wait()).await;
-    led.set_low();
+    #[cfg(feature = "status-led")]
+    embassy_futures::join::join(ui::farewell(), led.power_off()).await;
+    #[cfg(not(feature = "status-led"))]
+    ui::farewell().await;
 
-    // `button_task` owns GPIO0 for the life of the board. Temporarily
-    // duplicate its input to await release; neither handle drives it.
-    // After the final await, arm low-power wake and enter deep sleep
-    // without letting another task change the pin configuration.
+    // `button_task` owns the button for the life of the board.
+    // Temporarily duplicate its input to await release; neither handle
+    // drives it. After the final await, arm low-power wake and enter deep
+    // sleep without letting another task change the pin configuration.
     {
         let button = Input::new(
-            unsafe { esp_hal::peripherals::GPIO0::steal() },
+            unsafe { board::UserButtonPin::steal() },
             InputConfig::default().with_pull(Pull::Up),
         );
         // Feed the watchdog across the release wait: a user may lean on
@@ -2969,11 +2383,11 @@ async fn shutdown(
 
     rtc.rwdt.disable();
     let mut wake = Input::new(
-        unsafe { esp_hal::peripherals::GPIO0::steal() },
+        unsafe { board::UserButtonPin::steal() },
         InputConfig::default().with_pull(Pull::Up),
     );
     wake.apply_wakeup_config(&esp_hal::gpio::WakeupConfig::default().with_low_power_path(true))
-        .expect("GPIO0 supports low-power wake");
+        .expect("the user button is an RTC GPIO");
     wake.listen(Event::LowLevel);
     deep_sleep.deep_sleep();
 }
@@ -3028,9 +2442,7 @@ async fn heartbeat_task(mut rtc: Rtc<'static>, pmic: &'static SharedPmic) -> ! {
 async fn shutdown(rtc: &mut Rtc<'static>, pmic: &'static SharedPmic) -> ! {
     debug_log(format_args!("shutdown: power-off hold"));
     DEVICE_CTL.shutdown();
-    DISPLAY_SHUTDOWN_DONE.reset();
-    DISPLAY_SHUTDOWN.signal(());
-    let _ = with_timeout(Duration::from_secs(2), DISPLAY_SHUTDOWN_DONE.wait()).await;
+    ui::farewell().await;
 
     // GPIO0 is stolen rather than handed over: `button_task` holds an
     // `Input` on it for the life of the board. Both uses are read-only,
@@ -3299,12 +2711,12 @@ async fn main(spawner: Spawner) {
             .await
             .unwrap_or_else(|e| panic!("pmu bring-up failed: {e:?}"));
         println!("pmu: rails up (cold_boot={cold_boot})");
-        // Seed the VBUS mirror from a direct read, so a battery boot
+        // Seed the host-presence mirror from a direct VBUS read, so a battery boot
         // does not spend its first minute pretending to have USB (the
         // optimistic initial value) while the battery task waits out
         // its first cadence.
         if let Ok(vbus) = pmic.vbus_present().await {
-            VBUS_PRESENT.store(vbus, Ordering::Release);
+            USB_PRESENT.store(vbus, Ordering::Release);
         }
         PMIC_CELL.init(Mutex::new(pmic))
     };
@@ -3341,7 +2753,7 @@ async fn main(spawner: Spawner) {
             pager_boot_lights,
         );
         if panel.init().await.is_ok() {
-            let splash = show_boot_splash(&mut panel).await;
+            let splash = ui::show_boot_splash(&mut panel).await;
             Some((panel, splash))
         } else {
             let _ = panel.set_display_on(false).await;
@@ -3426,18 +2838,43 @@ async fn main(spawner: Spawner) {
         spawner.spawn(heartbeat_task(rtc, pmic).unwrap());
     }
 
+    // The status LED, active high.
     #[cfg(feature = "board-heltec-v3")]
     let led = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     #[cfg(feature = "board-heltec-v2")]
     let led = Output::new(peripherals.GPIO25, Level::Low, OutputConfig::default());
-    // The Heltecs' power-off is deep sleep, entered through the same
-    // `Sleep` handle whose idle hook was installed above—LPWR has one
-    // owner now. A PMIC board powers off through the PMIC instead and
-    // has no use for the deep-sleep half.
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
-    spawner.spawn(heartbeat_task(led, rtc, sleep.deep_sleep).unwrap());
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let led = Output::new(peripherals.GPIO48, Level::Low, OutputConfig::default());
+    // Power-off is deep sleep here, entered through the same `Sleep`
+    // handle whose idle hook was installed above—LPWR has one owner now.
+    // A PMIC board powers off through the PMIC instead and has no use for
+    // the deep-sleep half.
+    #[cfg(feature = "power-off-deep-sleep")]
+    spawner.spawn(
+        heartbeat_task(
+            #[cfg(feature = "status-led")]
+            status_led::StatusLed::new(led),
+            rtc,
+            sleep.deep_sleep,
+        )
+        .unwrap(),
+    );
     #[cfg(feature = "pmic-axp2101")]
     let _ = sleep;
+
+    // The user button, read only once boot is over: on most boards it is
+    // also a strapping pin. Held through boot, it can ask for the pairing
+    // window before the bond journal mounts.
+    #[cfg(not(any(feature = "board-tlora-pager", feature = "board-xiao-esp32s3")))]
+    let button_pin = peripherals.GPIO0;
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let button_pin = peripherals.GPIO21;
+    #[cfg(not(feature = "board-tlora-pager"))]
+    let mut button = Input::new(button_pin, InputConfig::default().with_pull(Pull::Up));
+    #[cfg(not(feature = "board-tlora-pager"))]
+    let force_pairing = ui::boot_gesture(&mut button).await;
+    #[cfg(feature = "board-tlora-pager")]
+    let force_pairing = false;
 
     // ── Vext rail and battery ADC ────────────────────────────────────────
     // The classic ESP32 shares ADC2 exclusively between the battery
@@ -3504,7 +2941,9 @@ async fn main(spawner: Spawner) {
     // restored (and the PHY re-applied) and the persisted device
     // identity installed before the first host command.
     #[cfg(feature = "ble")]
-    let ble_store_handle = ble::mount(shared, &partition, &mut pool_draw).await;
+    let ble_store_handle = ble::mount(shared, &partition, &mut pool_draw, force_pairing).await;
+    #[cfg(not(feature = "ble"))]
+    let _ = force_pairing;
     let (proto_store, boot_snapshot) =
         SnapshotStore::mount(shared, journals::proto_page0(&partition)).await;
     let (mut identity_store, identity_payload) =
@@ -3573,7 +3012,7 @@ async fn main(spawner: Spawner) {
         "journals: snapshot={} identity={} bonds={}",
         boot_snapshot.is_some(),
         boot_identity_keys.is_some(),
-        ble::panel().bonds,
+        ble::bond_count(),
     );
 
     // Seed the identity-generation and device-node CSPRNGs from the
@@ -3687,6 +3126,18 @@ async fn main(spawner: Spawner) {
     .with_mosi(peripherals.GPIO11)
     .with_miso(peripherals.GPIO13)
     .into_async();
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let spi = Spi::new(
+        peripherals.SPI2,
+        SpiConfig::default()
+            .with_frequency(Rate::from_mhz(16))
+            .with_mode(Mode::_0),
+    )
+    .unwrap()
+    .with_sck(peripherals.GPIO7)
+    .with_mosi(peripherals.GPIO9)
+    .with_miso(peripherals.GPIO8)
+    .into_async();
 
     #[cfg(feature = "board-heltec-v3")]
     let radio_cs = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
@@ -3694,6 +3145,8 @@ async fn main(spawner: Spawner) {
     let radio_cs = Output::new(peripherals.GPIO18, Level::High, OutputConfig::default());
     #[cfg(feature = "board-tbeam-supreme")]
     let radio_cs = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let radio_cs = Output::new(peripherals.GPIO41, Level::High, OutputConfig::default());
     #[cfg(not(feature = "board-tlora-pager"))]
     let radio_spi = ExclusiveDevice::new(spi, radio_cs, Delay).unwrap();
     #[cfg(feature = "board-tlora-pager")]
@@ -3711,6 +3164,8 @@ async fn main(spawner: Spawner) {
     let radio_reset = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
     #[cfg(feature = "board-tbeam-supreme")]
     let radio_reset = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let radio_reset = Output::new(peripherals.GPIO42, Level::High, OutputConfig::default());
 
     #[cfg(feature = "board-tlora-pager")]
     let radio_reset = Output::new(peripherals.GPIO47, Level::High, OutputConfig::default());
@@ -3722,11 +3177,24 @@ async fn main(spawner: Spawner) {
     let (radio_dio1, radio_busy) = (peripherals.GPIO14, peripherals.GPIO13);
     #[cfg(feature = "board-tbeam-supreme")]
     let (radio_dio1, radio_busy) = (peripherals.GPIO1, peripherals.GPIO4);
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let (radio_dio1, radio_busy) = (peripherals.GPIO39, peripherals.GPIO40);
+    // The RF switch's receive enable, low (the switch off) until the
+    // driver first enters receive.
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let radio_rx_enable = Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default());
     #[cfg(feature = "radio-sx126x")]
     let kind = {
         let radio_dio1 = Input::new(radio_dio1, InputConfig::default().with_pull(Pull::None));
         let radio_busy = Input::new(radio_busy, InputConfig::default().with_pull(Pull::None));
-        board_radio::new_radio_kind(radio_spi, radio_reset, radio_dio1, radio_busy)
+        board_radio::new_radio_kind(
+            radio_spi,
+            radio_reset,
+            radio_dio1,
+            radio_busy,
+            #[cfg(feature = "radio-rxen")]
+            radio_rx_enable,
+        )
     }
     .unwrap_or_else(|e| panic!("radio init failed: {e:?}"));
 
@@ -3776,11 +3244,13 @@ async fn main(spawner: Spawner) {
         spawner.spawn(uart_in_task(wired_rx).unwrap());
     }
     // Pinless: the peripheral owns GPIO19/20 itself. The supervisor
-    // constructs and drops the driver as USB power comes and goes.
+    // constructs and drops the driver as a host comes and goes.
     #[cfg(feature = "wired-usb-serial-jtag")]
     spawner.spawn(wired_transport_task(peripherals.USB_DEVICE, panic_report.clone()).unwrap());
+    #[cfg(feature = "usb-presence-sof")]
+    spawner.spawn(usb_presence_task().unwrap());
 
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+    #[cfg(feature = "vext")]
     vext.enable().await;
 
     // Construct shared buses before the session can accept host requests.
@@ -3811,17 +3281,28 @@ async fn main(spawner: Spawner) {
     .with_sda(peripherals.GPIO17)
     .with_scl(peripherals.GPIO18)
     .into_async();
+    // The header's D4/D5 pair, with nothing fitted. 100 kHz: whatever a
+    // host hangs off it comes with its own wiring and pull-ups.
+    #[cfg(feature = "board-xiao-esp32s3")]
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(100)),
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO5)
+    .with_scl(peripherals.GPIO6)
+    .into_async();
 
     #[cfg(not(feature = "board-tlora-pager"))]
-    let display_bus: &'static board::I2cBus = {
-        static DISPLAY_BUS: StaticCell<board::I2cBus> = StaticCell::new();
-        DISPLAY_BUS.init(Mutex::new(i2c))
+    let i2c_bus: &'static board::I2cBus = {
+        static I2C_BUS: StaticCell<board::I2cBus> = StaticCell::new();
+        I2C_BUS.init(Mutex::new(i2c))
     };
     #[cfg(all(feature = "ulcp-i2c", feature = "board-tbeam-supreme"))]
     let (boot_oled, i2c_inventory) = {
         static INVENTORY: StaticCell<board::i2c::Inventory> = StaticCell::new();
         let inventory = INVENTORY.init_with(board::i2c::Inventory::new);
-        let mut handle = I2cDevice::new(display_bus);
+        let mut handle = I2cDevice::new(i2c_bus);
         // Bound startup even if a peripheral holds SCL. This HAL stops
         // the controller on cancellation; retain only completed probes.
         if embassy_time::with_timeout(Duration::from_millis(500), inventory.discover(&mut handle))
@@ -3851,7 +3332,7 @@ async fn main(spawner: Spawner) {
     let host_buses = board::i2c::Buses { bus: pmu_bus };
     #[cfg(all(feature = "ulcp-i2c", feature = "pmic-axp2101"))]
     let host_buses = board::i2c::Buses {
-        sensor: display_bus,
+        sensor: i2c_bus,
         pmu: pmu_bus,
         inventory: i2c_inventory,
     };
@@ -3859,10 +3340,10 @@ async fn main(spawner: Spawner) {
         feature = "ulcp-i2c",
         not(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))
     ))]
-    let host_buses = board::i2c::Buses { bus: display_bus };
+    let host_buses = board::i2c::Buses { bus: i2c_bus };
 
     #[cfg(feature = "board-tbeam-supreme")]
-    bme280::start(spawner, display_bus, pmu_bus).await;
+    bme280::start(spawner, i2c_bus, pmu_bus).await;
 
     // ── The ULCP session ─────────────────────────────────────────────────
     spawner.spawn(
@@ -3920,15 +3401,10 @@ async fn main(spawner: Spawner) {
     // ── Battery, button ──────────────────────────────────────────────────
     // The sampler was constructed above, before the radio controller;
     // on a PMIC board the telemetry comes off the PMU bus instead.
-    #[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+    #[cfg(feature = "battery-adc")]
     spawner.spawn(battery_task(sampler).unwrap());
     #[cfg(feature = "pmic-axp2101")]
     spawner.spawn(battery_task(pmic).unwrap());
-    #[cfg(not(feature = "board-tlora-pager"))]
-    let button = Input::new(
-        peripherals.GPIO0,
-        InputConfig::default().with_pull(Pull::Up),
-    );
     #[cfg(not(feature = "board-tlora-pager"))]
     spawner.spawn(button_task(button).unwrap());
 
@@ -3963,7 +3439,7 @@ async fn main(spawner: Spawner) {
             .unwrap(),
         );
         if let Some((panel, splash)) = pager_boot_display {
-            spawner.spawn(display_task(panel, splash).unwrap());
+            spawner.spawn(ui::display_task(panel, splash).unwrap());
         }
     }
 
@@ -3973,19 +3449,17 @@ async fn main(spawner: Spawner) {
     // lapses and drops the rail entirely on the way into deep sleep. On
     // a PMIC board the panel's rail came up with the sensor rails and
     // drops in the shutdown path.
-    #[cfg(not(any(feature = "display-sh1106", feature = "display-st7796")))]
     #[cfg(feature = "board-heltec-v3")]
     let mut oled_reset = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
-    #[cfg(not(any(feature = "display-sh1106", feature = "display-st7796")))]
     #[cfg(feature = "board-heltec-v2")]
     let mut oled_reset = Output::new(peripherals.GPIO16, Level::High, OutputConfig::default());
 
-    #[cfg(not(any(feature = "display-sh1106", feature = "display-st7796")))]
+    #[cfg(feature = "display-ssd1306")]
     {
-        let mut oled = display::new_display(I2cDevice::new(display_bus));
+        let mut oled = display::new_display(I2cDevice::new(i2c_bus));
         display::reset(&mut oled_reset).await;
         if oled.init().await.is_ok() {
-            spawner.spawn(display_task(oled, vext).unwrap());
+            spawner.spawn(ui::display_task(oled, vext).unwrap());
         } else {
             BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
         }
@@ -3997,7 +3471,7 @@ async fn main(spawner: Spawner) {
     #[cfg(all(feature = "display-sh1106", feature = "ulcp-i2c"))]
     {
         if let Some(oled) = boot_oled {
-            spawner.spawn(display_task(oled).unwrap());
+            spawner.spawn(ui::display_task(oled).unwrap());
         } else {
             BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
             debug_log(format_args!("oled: no initialized panel"));
@@ -4005,13 +3479,13 @@ async fn main(spawner: Spawner) {
     }
     #[cfg(all(feature = "display-sh1106", not(feature = "ulcp-i2c")))]
     {
-        let mut i2c = I2cDevice::new(display_bus);
+        let mut i2c = I2cDevice::new(i2c_bus);
         match display::probe(&mut i2c).await {
             Some(addr) => {
                 debug_log(format_args!("oled: sh1106 at 0x{addr:02x}"));
                 let mut oled = display::new_display(i2c, addr);
                 if oled.init().await.is_ok() {
-                    spawner.spawn(display_task(oled).unwrap());
+                    spawner.spawn(ui::display_task(oled).unwrap());
                 } else {
                     BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
                 }

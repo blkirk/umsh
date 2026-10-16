@@ -9,9 +9,15 @@
 //! code that calls them needs no feature gates of its own.
 
 use umsh_ulcp_runtime::driver;
+#[cfg(feature = "display")]
 use umsh_ux_display_tracker::screen;
 
+pub(crate) fn bond_count() -> u8 {
+    0
+}
+
 /// What the panel shows of this transport: nothing.
+#[cfg(feature = "display")]
 pub(crate) struct Panel {
     pub enabled: Option<bool>,
     pub link: screen::LinkState,
@@ -19,6 +25,7 @@ pub(crate) struct Panel {
     pub pairing: screen::PairingState,
 }
 
+#[cfg(feature = "display")]
 pub(crate) fn panel() -> Panel {
     Panel {
         enabled: None,
@@ -28,17 +35,20 @@ pub(crate) fn panel() -> Panel {
     }
 }
 
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+#[cfg(feature = "status-led")]
 pub(crate) fn pairing_indicated() -> bool {
     false
 }
 
+#[cfg(feature = "display")]
 pub(crate) fn pairing_window_open() -> bool {
     false
 }
 
+#[cfg(feature = "display")]
 pub(crate) fn request_pairing() {}
 
+#[cfg(feature = "display")]
 pub(crate) fn request_clear_bonds() {}
 
 pub(crate) fn device_name_changed() {}

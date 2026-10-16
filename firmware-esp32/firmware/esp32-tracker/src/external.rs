@@ -2,7 +2,7 @@
 //! The global heap, radio buffers, stacks, and executor stay internal.
 use core::alloc::Layout;
 use esp_alloc::{EspHeap, HeapRegion, MemoryCapability};
-use esp_hal::psram::{Psram, PsramConfig, PsramMode};
+use esp_hal::psram::{Psram, PsramConfig};
 
 static EXTERNAL: EspHeap = EspHeap::empty();
 
@@ -14,8 +14,11 @@ pub fn used() -> usize {
 pub fn init(peripheral: esp_hal::peripherals::PSRAM<'static>) {
     let ram = Psram::new(
         peripheral,
+        // Quad or octal is how the part is wired, and esp-hal's
+        // autodetection of it is documented as unreliable, so the board
+        // says.
         PsramConfig {
-            mode: PsramMode::QuadSpi,
+            mode: crate::board::PSRAM_MODE,
             ..Default::default()
         },
     );

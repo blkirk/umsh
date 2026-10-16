@@ -45,9 +45,15 @@ pub const OLED_I2C_ADDR: u8 = 0x3C;
 
 /// User button: active low, external pull-up, shared with the boot strap.
 pub const USER_BUTTON: u8 = 0;
+/// The user button's pin, which the shutdown path borrows to await its
+/// release and arm the deep-sleep wake.
+pub type UserButtonPin = esp_hal::peripherals::GPIO0<'static>;
 
 /// White status LED, active high.
 pub const STATUS_LED: u8 = 25;
+/// Heartbeat pulse, in milliseconds. The white LED is far brighter than
+/// the usual status LED, so a bare flick reads as alive.
+pub const STATUS_LED_PULSE_MS: u64 = 3;
 
 /// Vext enable, active high. Gates the OLED supply AND the battery divider.
 pub const VEXT_ENABLE: u8 = 21;

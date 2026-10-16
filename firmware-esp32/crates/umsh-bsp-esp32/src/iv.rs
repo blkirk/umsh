@@ -5,9 +5,14 @@
 //! the sub-millisecond wake latency loses nothing. BUSY waits keep an
 //! explicit wake lock across one command's short setup interval.
 //!
-//! None of the boards this workspace supports put RF-switch control on
-//! host GPIOs (DIO2 does it internally on the SX126x boards; the V2's
-//! SX1276 module needs none), so the switch hooks are no-ops.
+//! Most boards here keep RF-switch control off the host's GPIOs: DIO2
+//! does it inside the radio on the SX126x boards, and the V2's SX1276
+//! module needs none. A board whose switch also takes a receive-enable
+//! line from the MCU hands it over with [`with_rx_enable`]; DIO2 still
+//! drives the transmit side. The line follows lora-phy's generic SX126x
+//! variant: high in receive, low in transmit and when idle.
+//!
+//! [`with_rx_enable`]: EspInterfaceVariant::with_rx_enable
 
 use embedded_hal_async::delay::DelayNs;
 use esp_hal::gpio::{Event, Input, Output};
@@ -20,6 +25,7 @@ pub struct EspInterfaceVariant {
     reset: Output<'static>,
     irq: Input<'static>,
     busy: Option<Input<'static>>,
+    rx_enable: Option<Output<'static>>,
 }
 
 impl EspInterfaceVariant {
@@ -29,6 +35,7 @@ impl EspInterfaceVariant {
             reset,
             irq: dio1,
             busy: Some(busy),
+            rx_enable: None,
         }
     }
 
@@ -38,6 +45,23 @@ impl EspInterfaceVariant {
             reset,
             irq: dio0,
             busy: None,
+            rx_enable: None,
+        }
+    }
+
+    /// The RF switch's receive enable, driven high only while the radio
+    /// receives. Light sleep keeps the digital pads powered, so the line
+    /// holds while the chip sleeps in receive.
+    pub fn with_rx_enable(self, rx_enable: Output<'static>) -> Self {
+        Self {
+            rx_enable: Some(rx_enable),
+            ..self
+        }
+    }
+
+    fn set_rx_enable(&mut self, on: bool) {
+        if let Some(pin) = &mut self.rx_enable {
+            pin.set_level(on.into());
         }
     }
 }
@@ -70,14 +94,17 @@ impl InterfaceVariant for EspInterfaceVariant {
     }
 
     async fn enable_rf_switch_rx(&mut self) -> Result<(), RadioError> {
+        self.set_rx_enable(true);
         Ok(())
     }
 
     async fn enable_rf_switch_tx(&mut self) -> Result<(), RadioError> {
+        self.set_rx_enable(false);
         Ok(())
     }
 
     async fn disable_rf_switch(&mut self) -> Result<(), RadioError> {
+        self.set_rx_enable(false);
         Ok(())
     }
 }

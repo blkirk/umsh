@@ -31,6 +31,7 @@ use umsh_ulcp_runtime::ble_security::{PairingFailureClass, PairingRuntime, pairi
 use umsh_ulcp_runtime::driver::{self, InEvent, OutFrame};
 use umsh_ulcp_runtime::transport_policy::{Transport, generation_checked};
 use umsh_ux_display_tracker::menu::UiNotice;
+#[cfg(feature = "display")]
 use umsh_ux_display_tracker::screen;
 
 use super::journals::SharedFlash;
@@ -47,7 +48,13 @@ use store::{BleStore, StoredBond, bond_identity_is_persistable, trouble_bond};
 /// The mounted bond journal, held by `main` between [`mount`] and [`run`].
 pub(crate) type Store = BleStore;
 
+/// How many bonds the journal holds.
+pub(crate) fn bond_count() -> u8 {
+    BLE_BOND_COUNT.load(Ordering::Acquire)
+}
+
 /// What the panel shows of this transport.
+#[cfg(feature = "display")]
 pub(crate) struct Panel {
     /// The operator's switch.
     pub enabled: Option<bool>,
@@ -56,6 +63,7 @@ pub(crate) struct Panel {
     pub pairing: screen::PairingState,
 }
 
+#[cfg(feature = "display")]
 pub(crate) fn panel() -> Panel {
     Panel {
         enabled: Some(BLE_ENABLED.load(Ordering::Acquire)),
@@ -69,7 +77,7 @@ pub(crate) fn panel() -> Panel {
             _ if !BLE_ENABLED.load(Ordering::Acquire) => screen::LinkState::Disabled,
             _ => screen::LinkState::OffWired,
         },
-        bonds: BLE_BOND_COUNT.load(Ordering::Acquire),
+        bonds: bond_count(),
         // Bluetooth off outranks everything—a lockout on a transport
         // that is off is not a state anyone can act on—then lockout
         // outranks the window: while locked out there is no window to
@@ -91,18 +99,22 @@ pub(crate) fn panel() -> Panel {
     }
 }
 
-/// Whether the LED shows the pairing blink rather than the heartbeat.
-#[cfg(not(any(feature = "pmic-axp2101", feature = "board-tlora-pager")))]
+/// Whether the status LED shows the pairing blink rather than the
+/// heartbeat: exactly while the panel would show the window open, so a
+/// window opened before the transport came up blinks as soon as it does.
+#[cfg(feature = "status-led")]
 pub(crate) fn pairing_indicated() -> bool {
-    BLE_LED_MODE.load(Ordering::Acquire) == 1
+    pairing_window_open() && !PAIRING_LOCKED_OUT.load(Ordering::Acquire)
 }
 
 /// The menu's Start pairing. Fires and forgets; the notice is the answer.
+#[cfg(feature = "display")]
 pub(crate) fn request_pairing() {
     PAIRING_MODE_REQUEST.signal(true);
 }
 
 /// The menu's Clear bonds, likewise.
+#[cfg(feature = "display")]
 pub(crate) fn request_clear_bonds() {
     BLE_WIPE_REQUEST.signal(false);
 }
@@ -180,10 +192,15 @@ pub(crate) async fn set_pairing(open: bool) -> bool {
 /// pairing window stuck open, which held the panel awake forever and
 /// announced "pairing" on a transport that is off. Seeded here, at
 /// the mount, exactly as the nRF image seeds them.
+///
+/// `force_pairing` is the user asking at boot for the window whatever
+/// the bonds say, with Bluetooth switched on for it if need be
+/// ([`run`] carries that part out).
 pub(crate) async fn mount(
     shared: &'static SharedFlash,
     partition: &core::ops::Range<u32>,
     mut draw: impl FnMut(&[u8], &mut [u8]),
+    force_pairing: bool,
 ) -> Store {
     let mut store = BleStore::mount(shared, partition).await;
     if store.snapshot().privacy_migration_pending {
@@ -201,7 +218,11 @@ pub(crate) async fn mount(
     }
     set_bond_count(store.snapshot().bonds.len() as u8);
     PAIRING_PIN.store(store.snapshot().pin.unwrap_or(u32::MAX), Ordering::Release);
-    PAIRING_MODE.store(store.snapshot().bonds.is_empty(), Ordering::Release);
+    PAIRING_MODE.store(
+        store.snapshot().bonds.is_empty() || force_pairing,
+        Ordering::Release,
+    );
+    FORCE_BLUETOOTH_AT_BOOT.store(force_pairing, Ordering::Release);
     BLE_PAIRING_CHANGED.signal(pairing_window_open());
     if !store.snapshot().privacy_migration_pending && store.snapshot().local_irk.is_none() {
         let mut local_irk = [0u8; 16];
@@ -248,6 +269,8 @@ const BLE_MODEL_ID: u16 = ble_privacy::model::HELTEC_LORA32_V3;
 const BLE_MODEL_ID: u16 = ble_privacy::model::LILYGO_T_BEAM_SUPREME;
 #[cfg(feature = "board-tlora-pager")]
 const BLE_MODEL_ID: u16 = ble_privacy::model::LILYGO_T_LORA_PAGER;
+#[cfg(feature = "board-xiao-esp32s3")]
+const BLE_MODEL_ID: u16 = ble_privacy::model::SEEED_XIAO_ESP32S3_KIT;
 
 /// Stable random-static BLE identity address derived from the factory
 /// eFuse MAC (top two bits forced to `11` per the random-static rule),
@@ -426,6 +449,9 @@ static PAIRING_PIN: AtomicU32 = AtomicU32::new(u32::MAX);
 /// on one that does.
 static BLE_BOND_COUNT: AtomicU8 = AtomicU8::new(0);
 static PAIRING_MODE: AtomicBool = AtomicBool::new(true);
+/// The user held the button through boot for the pairing window; seeded
+/// at the mount, acted on once the supervisor starts.
+static FORCE_BLUETOOTH_AT_BOOT: AtomicBool = AtomicBool::new(false);
 static PAIRING_LOCKED_OUT: AtomicBool = AtomicBool::new(false);
 static PAIRING_FAILURES: AtomicU8 = AtomicU8::new(0);
 static PAIRING_CONFIG_CH: Channel<CriticalSectionRawMutex, Option<u32>, 1> = Channel::new();
@@ -521,10 +547,6 @@ static ADV_POLICY_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// waker—the advertiser loop and the supervisor cannot share one.
 static BLE_LIFECYCLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// 0 = normal heartbeat, 1 = pairing mode (fast LED blink). On a board
-/// with no firmware LED the state reaches the user through the panel's
-/// pairing page instead.
-static BLE_LED_MODE: AtomicU8 = AtomicU8::new(0);
 /// How far the BLE link has got, for the status page and for
 /// `PROP_BLE_LINK`. Holds a [`BleLinkState`] code rather than an encoding
 /// of its own: the panel and the property are two readings of one fact,
@@ -756,7 +778,6 @@ async fn pairing_timeout<C: Controller, P: PacketPool>(stack: &Stack<'_, C, P>) 
         };
         if let Either::First(()) = select(expires, PAIRING_TIMER_RESET.wait()).await {
             set_pairing_mode(false);
-            BLE_LED_MODE.store(0, Ordering::Release);
             UI_REFRESH.signal(());
             apply_pairing_gate(stack);
         }
@@ -881,7 +902,6 @@ async fn pairing_config_task<C: Controller, P: PacketPool>(
             PairingRequest::Window(false) => {
                 debug_log(format_args!("pairing window closed on request"));
                 set_pairing_mode(false);
-                BLE_LED_MODE.store(0, Ordering::Release);
                 UI_REFRESH.signal(());
                 apply_pairing_gate(stack);
                 // Closing always lands: there is no state the device can
@@ -900,7 +920,6 @@ async fn pairing_config_task<C: Controller, P: PacketPool>(
                 // operator without failing the request.
                 if !locked_out {
                     set_pairing_mode(true);
-                    BLE_LED_MODE.store(1, Ordering::Release);
                     PAIRING_TIMER_RESET.signal(());
                 }
                 let unavailable = locked_out
@@ -929,7 +948,6 @@ async fn pairing_config_task<C: Controller, P: PacketPool>(
                     }
                     let _ = stack.set_fixed_passkey(None);
                     stack.set_io_capabilities(IoCapabilities::NoInputNoOutput);
-                    BLE_LED_MODE.store(1, Ordering::Release);
                     PAIRING_TIMER_RESET.signal(());
                     apply_pairing_gate(stack);
                     debug_log(format_args!("security wipe complete"));
@@ -1167,7 +1185,6 @@ async fn gatt_connection<C: Controller, P: PacketPool>(
                 // protected GATT edge. Pairing success still resets the
                 // failure counter and closes the window in that case.
                 publish_pairing_runtime(pairing_runtime().pairing_succeeded());
-                BLE_LED_MODE.store(0, Ordering::Release);
                 apply_pairing_gate(stack);
             }
             Either3::First(GattConnectionEvent::Encrypted { bond, .. }) => {
@@ -1189,7 +1206,6 @@ async fn gatt_connection<C: Controller, P: PacketPool>(
                         Err(()) => debug_log(format_args!("bond lru touch=FAILED")),
                     }
                     publish_pairing_runtime(pairing_runtime().bonded_reconnect());
-                    BLE_LED_MODE.store(0, Ordering::Release);
                     apply_pairing_gate(stack);
                 }
                 // A bonded client caches attributes across connections, so a
@@ -1609,8 +1625,13 @@ pub(crate) async fn run(
     let resources = BLE_RESOURCES.init_with(HostResources::new);
     *BLE_PRIVACY_RNG.lock().await =
         Some(IdentityRng::new(privacy_seed, &entropy::BLE_PRIVACY_RESEED));
+    // A window asked for at boot is no use on a transport the operator
+    // switched off, so the same gesture switches it back on. Queued, not
+    // yet applied: the window opens now and becomes visible when it does.
+    if FORCE_BLUETOOTH_AT_BOOT.load(Ordering::Acquire) {
+        INPUT_CH.send(InEvent::ForceBluetoothOn).await;
+    }
     initialize_pairing_deadline().await;
-    BLE_LED_MODE.store(u8::from(pairing_window_open()), Ordering::Release);
     UI_REFRESH.signal(());
     // The service macro allocates the large ULCP characteristics in
     // one-shot StaticCells. Keep the attribute server for the supervisor's
@@ -1638,7 +1659,6 @@ pub(crate) async fn run(
         }
         if !BLE_ENABLED.load(Ordering::Acquire) {
             bt = Some(device);
-            BLE_LED_MODE.store(0, Ordering::Release);
             UI_REFRESH.signal(());
             debug_log(format_args!("ble supervisor: controller down"));
             // Parked, but not deaf. Bond clearing and PIN writes are

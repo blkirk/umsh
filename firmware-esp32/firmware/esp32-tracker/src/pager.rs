@@ -178,7 +178,7 @@ pub async fn power_up(
         voltage_mv: None,
         percent: None,
         charge: None,
-        vbus: VBUS_PRESENT.load(Ordering::Acquire),
+        vbus: USB_PRESENT.load(Ordering::Acquire),
     });
     publish_battery_reading(&reading);
     println!("pager: I2C power domains and battery telemetry ready");
@@ -198,8 +198,8 @@ fn publish_battery_reading(reading: &board_battery::Reading) {
         },
         Ordering::Release,
     );
-    if VBUS_PRESENT.swap(reading.vbus, Ordering::AcqRel) != reading.vbus {
-        VBUS_EDGE.signal(());
+    if USB_PRESENT.swap(reading.vbus, Ordering::AcqRel) != reading.vbus {
+        USB_PRESENT_EDGE.signal(());
     }
 }
 
@@ -286,7 +286,7 @@ pub fn display(
     cs: Output<'static>,
     dc: peripherals::GPIO37<'static>,
     lights: board::display::BootBacklights,
-) -> Display {
+) -> board::display::Display {
     let spi = board::SpiHandle::new(
         bus,
         cs,
@@ -294,7 +294,7 @@ pub fn display(
             .with_frequency(Rate::from_mhz(40))
             .with_mode(Mode::_0),
     );
-    Display::new(
+    board::display::Display::new(
         spi,
         Output::new(dc, Level::High, OutputConfig::default()),
         lights,
@@ -538,7 +538,7 @@ pub async fn battery_task(bus: &'static board::I2cBus, initial: board_battery::R
                     voltage_mv: None,
                     percent: None,
                     charge: None,
-                    vbus: VBUS_PRESENT.load(Ordering::Acquire),
+                    vbus: USB_PRESENT.load(Ordering::Acquire),
                 };
                 if requested {
                     BATTERY_REPLY.signal(unknown);
@@ -583,9 +583,7 @@ pub async fn heartbeat_task(
         rtc.rwdt.feed();
     }
     DEVICE_CTL.shutdown();
-    DISPLAY_SHUTDOWN_DONE.reset();
-    DISPLAY_SHUTDOWN.signal(());
-    let _ = with_timeout(Duration::from_secs(2), DISPLAY_SHUTDOWN_DONE.wait()).await;
+    ui::farewell().await;
     // Journal writes are synchronous on this executor; no flash operation can
     // be suspended halfway here. MAC counters are persisted before transmission.
     // Inputs are reborrowed only for the terminal shutdown path; never driven.

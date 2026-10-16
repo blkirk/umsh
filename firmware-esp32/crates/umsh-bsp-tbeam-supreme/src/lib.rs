@@ -86,6 +86,9 @@ pub const GNSS_BAUD: u32 = 9600;
 /// BOOT button: active low, shared with the boot strap.
 pub const USER_BUTTON: u8 = 0;
 
+/// The module's PSRAM, on the quad SPI bus.
+pub const PSRAM_MODE: esp_hal::psram::PsramMode = esp_hal::psram::PsramMode::QuadSpi;
+
 // SD card + QMI8658 IMU shared SPI bus (§12)—out of scope, pins
 // recorded so nothing repurposes them: SCK=36, MOSI=35, MISO=37,
 // SD CS=47 (rail BLDO1), IMU CS=34, IMU INT=33.

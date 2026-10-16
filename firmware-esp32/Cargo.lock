@@ -1832,6 +1832,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "firmware-xiao-esp32s3"
+version = "0.1.0"
+dependencies = [
+ "bt-hci",
+ "edge-mdns",
+ "embassy-embedded-hal 0.6.0",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "embedded-graphics",
+ "embedded-hal-bus",
+ "embedded-io-async 0.7.0",
+ "embedded-tls",
+ "esp-alloc",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-phy",
+ "esp-println",
+ "esp-radio",
+ "esp-rtos",
+ "esp-storage",
+ "esp-wifi-sys-esp32s3",
+ "heapless 0.8.0",
+ "heapless 0.9.3",
+ "lora-phy",
+ "rand 0.10.2",
+ "rand_chacha",
+ "rand_core 0.6.4",
+ "static_cell",
+ "trouble-host",
+ "umsh-bridge-client",
+ "umsh-bsp-esp32",
+ "umsh-bsp-xiao-esp32s3",
+ "umsh-core",
+ "umsh-crypto",
+ "umsh-hal",
+ "umsh-journal-store",
+ "umsh-lan-bearer",
+ "umsh-mac",
+ "umsh-node",
+ "umsh-radio-loraphy",
+ "umsh-sync",
+ "umsh-ulcp",
+ "umsh-ulcp-device",
+ "umsh-ulcp-runtime",
+ "umsh-ux-display-tracker",
+ "umsh-ux-tracker",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3301,6 +3353,22 @@ dependencies = [
  "umsh-bsp-esp32",
  "umsh-gnss",
  "umsh-pager-peripherals",
+ "umsh-ulcp",
+ "umsh-ulcp-device",
+ "umsh-ulcp-runtime",
+]
+
+[[package]]
+name = "umsh-bsp-xiao-esp32s3"
+version = "0.1.0"
+dependencies = [
+ "embassy-embedded-hal 0.6.0",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "embedded-hal-bus",
+ "esp-hal",
+ "lora-phy",
+ "umsh-bsp-esp32",
  "umsh-ulcp",
  "umsh-ulcp-device",
  "umsh-ulcp-runtime",

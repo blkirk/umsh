@@ -2,8 +2,9 @@
 //!
 //! Chip-generic building blocks live here: the flash storage backend, the
 //! RF-gated `CryptoRng` wrapper, timing samples for the entropy pool,
-//! deep-sleep helpers, and panic capture to RTC slow RAM. Board wiring
-//! (pins, display, power topology) belongs in the per-board BSP crates.
+//! deep-sleep helpers, USB host presence, and panic capture to RTC slow
+//! RAM. Board wiring (pins, display, power topology) belongs in the
+//! per-board BSP crates.
 #![no_std]
 
 pub mod flash_store;
@@ -14,3 +15,5 @@ pub mod panic_capture;
 pub mod rng;
 #[cfg(feature = "esp32s3")]
 pub mod temperature;
+#[cfg(feature = "esp32s3")]
+pub mod usb_sof;
