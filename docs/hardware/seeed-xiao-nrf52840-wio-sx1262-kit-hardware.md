@@ -816,6 +816,14 @@ UMSH exposes bus 0 on D6/P1.11 as SDA and D7/P1.12 as SCL at 100 kHz.
 This uses the otherwise unclaimed GNSS UART pads and leaves NFC unchanged.
 Third-party accessories wired for the opposite assignment need a swap.
 
+Nothing on the carrier pulls `D6`/`D7` up, so UMSH enables the nRF52840's
+internal pull-ups (~13 kΩ) on both lines. Without them an empty bus, or one
+whose device has no pull-ups of its own, floats, and a scan can fail with
+`STATUS_BUS_ERROR` instead of finding nothing. The internal pull-ups are
+weak: they suffice for short wiring at 100 kHz, but a long run or a heavily
+loaded bus still wants external 4.7 kΩ resistors, which simply sit in
+parallel with them.
+
 MeshCore also declares `PIN_LSM6DS3TR_C_POWER (15)` and the PDM microphone pins,
 inherited from the Sense variant. **The kit's XIAO nRF52840 has neither the IMU
 nor the microphone**—those pins (`P1.08`, `P0.27`, `P0.07`, `P0.11`, `P1.10`,

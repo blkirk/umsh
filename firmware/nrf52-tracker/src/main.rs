@@ -6730,15 +6730,15 @@ mod firmware {
                 TwimConfig::default(),
                 TX.init([0; 256]),
             );
+            // D6/D7 are bare pads on the radio carrier, so the internal
+            // pull-ups keep an empty or unpulled bus from floating.
             #[cfg(feature = "board-xiao-nrf52")]
-            let controller = Twim::new(
-                p.TWISPI0,
-                Irqs,
-                p.P1_11,
-                p.P1_12,
-                TwimConfig::default(),
-                TX.init([0; 256]),
-            );
+            let controller = {
+                let mut config = TwimConfig::default();
+                config.sda_pullup = true;
+                config.scl_pullup = true;
+                Twim::new(p.TWISPI0, Irqs, p.P1_11, p.P1_12, config, TX.init([0; 256]))
+            };
             BUS.init(umsh_bsp_nrf52840::i2c::Bus::new(controller))
         };
         #[cfg(feature = "board-techo")]
