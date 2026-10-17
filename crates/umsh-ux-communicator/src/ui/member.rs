@@ -28,7 +28,7 @@ const INSET: u32 = 12;
 
 /// What an action row shows at its end.
 #[derive(Clone, Copy)]
-enum End {
+pub(super) enum End {
     Nothing,
     /// It goes to another screen.
     Chevron,
@@ -130,7 +130,7 @@ pub(super) fn detail_head(
 }
 
 /// A row that does something when pressed.
-fn action(
+pub(super) fn action(
     text: &'static str,
     key: buoyant::focus::FocusKey,
     act: fn(&mut State),

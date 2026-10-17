@@ -3803,6 +3803,7 @@ dependencies = [
  "heapless 0.9.3",
  "libm",
  "swash",
+ "umsh-core",
 ]
 
 [[package]]

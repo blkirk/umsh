@@ -99,6 +99,30 @@ impl ChatSummary {
     }
 }
 
+/// What the text typed into Add peer names, as far as it goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerEntry {
+    /// Nothing yet.
+    Empty,
+    /// Not the start of an address or an invitation.
+    Invalid,
+    /// The start of an address, and how many characters it lacks. The avatar
+    /// and hint show once the characters settle them.
+    Partial {
+        avatar: Option<AvatarStyle>,
+        hint: String<8>,
+        missing: u8,
+    },
+    /// A whole address, typed or in an invitation, with the name the
+    /// invitation gives.
+    Complete {
+        avatar: AvatarStyle,
+        hint: String<8>,
+        address: String<44>,
+        name: Option<String<32>>,
+    },
+}
+
 /// Names a saved peer.
 pub type PeerId = u32;
 
@@ -379,9 +403,12 @@ pub trait History {
     /// `message`.
     fn request_identity(&self, chat: ChatId, message: MessageId);
 
-    /// The direct chat with `member`, whose identity is known, made if there
-    /// is none yet. `None` when there is no room for it.
-    fn direct_chat(&self, member: &Member) -> Option<ChatSummary>;
+    /// The direct chat with the peer at `address`, made if there is none yet,
+    /// named `name` and drawn as `avatar`. `None` when there is no room for it.
+    fn direct_chat(&self, address: &str, name: &str, avatar: &AvatarStyle) -> Option<ChatSummary>;
+
+    /// What `text`, typed as an address or a peer invitation, names so far.
+    fn inspect_peer(&self, text: &str) -> PeerEntry;
 
     /// Keeps `member`, whose identity is known, among my peers, and returns
     /// them as the Peers list shows them. `None` when there is no room.

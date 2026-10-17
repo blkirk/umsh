@@ -16,8 +16,9 @@ repository.workspace = true
 # fonts/OFL.txt); build.rs rasterizes them into anti-aliased glyph tables.
 
 [features]
-# The mockup's chats, for a device with nothing behind it yet.
-fixture = []
+# The mockup's chats, for a device with nothing behind it yet. It reads
+# typed addresses as a node would.
+fixture = ["dep:umsh-core"]
 
 [dependencies]
 # The fork carries a prerendered anti-aliased font backend, line-limited
@@ -28,6 +29,7 @@ buoyant = { git = "https://github.com/darconeous/buoyant", rev = "1a7daa0c7b2b1f
 embedded-graphics = { version = "0.8", default-features = false }
 heapless = { version = "0.9", default-features = false }
 libm = "0.2"
+umsh-core = { path = "../umsh-core", default-features = false, optional = true }
 
 [dev-dependencies]
 # The tests drive the fixture's chats.

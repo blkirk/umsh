@@ -62,11 +62,6 @@ const SCROLL_STEP: u32 = 24;
 type Placeholder = heapless::String<48>;
 /// An action in the actions menu, which can name a channel.
 type MenuText = heapless::String<40>;
-/// The field's fill while it is edited.
-const ACTIVE_FIELD: Rgb565 = Rgb565::new(0x1A >> 3, 0x23 >> 2, 0x33 >> 3);
-/// The field's fill while it is edited in an open channel.
-const ACTIVE_FIELD_OPEN: Rgb565 = Rgb565::new(0x15 >> 3, 0x2B >> 2, 0x1F >> 3);
-
 /// Indices `ForEach` can hold without borrowing the state.
 static INDICES: [usize; MAX_MESSAGES] = {
     let mut a = [0; MAX_MESSAGES];
@@ -640,9 +635,9 @@ fn field_look(
     // Editing, the field takes the color of what it will send: green where
     // anyone can read it.
     let (active_fill, active_ring) = if open {
-        (ACTIVE_FIELD_OPEN, theme::ACCENT_OPEN)
+        (theme::ACTIVE_FIELD_OPEN, theme::ACCENT_OPEN)
     } else {
-        (ACTIVE_FIELD, theme::ACCENT)
+        (theme::ACTIVE_FIELD, theme::ACCENT)
     };
     let (fill, line_width) = if status.is_active() {
         (active_fill, 2)

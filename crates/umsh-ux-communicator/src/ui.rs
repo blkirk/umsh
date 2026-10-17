@@ -15,6 +15,7 @@ use crate::model::{Section, State};
 use crate::nav::{Screen, keys};
 use crate::theme;
 
+mod add_peer;
 mod avatar;
 mod banner;
 mod chats;
@@ -73,6 +74,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
                     .map_or("", |s| &s.name),
             ),
             Screen::Join { invite, name, .. } => join::view(invite, name),
+            Screen::AddPeer { text, .. } => add_peer::view(state, text),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),

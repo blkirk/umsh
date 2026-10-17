@@ -10,11 +10,14 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerId, Reaction, Section, State,
+    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerEntry, PeerId, Reaction, Section,
+    State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
 pub type JoinName = EditBuffer<String<32>>;
+/// An address or a peer invitation, as it is typed into Add peer.
+pub type PeerText = EditBuffer<String<64>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -45,6 +48,9 @@ pub mod keys {
     pub const SAVE_PEER: FocusKey = FocusKey(0x0700_0002);
     /// The Peers list's Add peer, which heads it.
     pub const ADD_PEER: FocusKey = FocusKey(0x0A00_0000);
+    /// Add peer's field, and its Message.
+    pub const PEER_FIELD: FocusKey = FocusKey(0x0B00_0000);
+    pub const MESSAGE_PEER: FocusKey = FocusKey(0x0B00_0001);
     /// The join screen's Name and Join channel.
     pub const JOIN_NAME: FocusKey = FocusKey(0x0800_0000);
     pub const JOIN_CHANNEL: FocusKey = FocusKey(0x0800_0001);
@@ -148,6 +154,8 @@ pub enum Screen {
         requested: bool,
         focus: FocusState,
     },
+    /// A peer's address or invitation, being typed.
+    AddPeer { text: PeerText, focus: FocusState },
     /// A channel an invitation offers, before it is joined.
     Join {
         invite: Invite,
@@ -178,6 +186,7 @@ impl Screen {
             | Self::Details { focus, .. }
             | Self::Member { focus, .. }
             | Self::Join { focus, .. }
+            | Self::AddPeer { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -189,6 +198,7 @@ impl Screen {
             | Self::Details { focus, .. }
             | Self::Member { focus, .. }
             | Self::Join { focus, .. }
+            | Self::AddPeer { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -359,6 +369,50 @@ impl State {
         }
     }
 
+    /// Shows Add peer, its field focused, so typing starts the address.
+    pub fn open_add_peer(&mut self) {
+        _ = self.screens.push(Screen::AddPeer {
+            text: PeerText::new(),
+            focus: FocusState::requesting(keys::PEER_FIELD),
+        });
+    }
+
+    /// The address or invitation being typed into Add peer.
+    pub fn peer_text_mut(&mut self) -> Option<&mut PeerText> {
+        match self.screens.last_mut() {
+            Some(Screen::AddPeer { text, .. }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// What has been typed into Add peer names so far.
+    #[must_use]
+    pub fn peer_entry(&self) -> PeerEntry {
+        match self.screens.last() {
+            Some(Screen::AddPeer { text, .. }) => self.history.inspect_peer(text.text()),
+            _ => PeerEntry::Empty,
+        }
+    }
+
+    /// Opens the direct chat with the peer Add peer names, once it names one
+    /// whole, called by the name its invitation gives, or by their hint.
+    pub fn message_entry(&mut self) {
+        let PeerEntry::Complete {
+            avatar,
+            hint,
+            address,
+            name,
+        } = self.peer_entry()
+        else {
+            return;
+        };
+        let name = name.as_ref().map_or(hint.as_str(), String::as_str);
+        if let Some(summary) = self.history.direct_chat(&address, name, &avatar) {
+            let chat = self.add_chat(summary);
+            self.go_to_chat(chat);
+        }
+    }
+
     /// Lists `summary` first, unless its chat is listed already, and returns
     /// its chat. The oldest gives way when the list is full.
     fn add_chat(&mut self, summary: ChatSummary) -> ChatId {
@@ -503,10 +557,13 @@ impl State {
         let Some(Screen::Member { member, .. }) = self.screens.last() else {
             return;
         };
-        if member.address.is_none() {
+        let Some(address) = member.address.as_ref() else {
             return;
-        }
-        let Some(summary) = self.history.direct_chat(member) else {
+        };
+        let Some(summary) =
+            self.history
+                .direct_chat(address, &member.sender.name, &member.sender.avatar)
+        else {
             return;
         };
         let chat = self.add_chat(summary);

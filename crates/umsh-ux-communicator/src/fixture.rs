@@ -6,8 +6,8 @@ use core::cell::{Cell, RefCell};
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerId, PeerSummary, Reacted, Reaction,
-    Reactions, Sender, State, StatusStrip, push_newest,
+    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerEntry, PeerId, PeerSummary, Reacted,
+    Reaction, Reactions, Sender, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -284,6 +284,9 @@ impl Store {
     }
 }
 
+/// How a node URI begins.
+const PEER_INVITATION: &str = "umsh:n:";
+
 /// Where direct chats made with members are numbered from, above the
 /// fixture's own chats.
 const FIRST_DIRECT: ChatId = 0x100;
@@ -449,22 +452,81 @@ impl History for Store {
         self.asked.set(true);
     }
 
-    fn direct_chat(&self, member: &Member) -> Option<ChatSummary> {
-        let address = member.address.as_ref()?;
+    fn direct_chat(&self, address: &str, name: &str, avatar: &AvatarStyle) -> Option<ChatSummary> {
         let mut direct = self.direct.borrow_mut();
         let index = match direct.iter().position(|a| a == address) {
             Some(index) => index,
             None => {
-                direct.push(address.clone()).ok()?;
+                direct.push(String::try_from(address).ok()?).ok()?;
                 direct.len() - 1
             }
         };
         Some(ChatSummary::new(
             FIRST_DIRECT + index as ChatId,
-            member.sender.avatar.clone(),
-            &member.sender.name,
+            avatar.clone(),
+            name,
             self.heap,
         ))
+    }
+
+    fn inspect_peer(&self, text: &str) -> PeerEntry {
+        use umsh_core::NodeHint;
+        use umsh_core::base58::{ENCODED_LEN, prefix_bounds};
+
+        let text = text.trim();
+        if text.is_empty() {
+            return PeerEntry::Empty;
+        }
+        // An invitation carries the address, and may carry an identity after
+        // it, whose name a node would read; the fixture does not.
+        let (digits, name) = match text.strip_prefix(PEER_INVITATION) {
+            Some(rest) => (
+                rest.split_once(':').map_or(rest, |(digits, _)| digits),
+                None,
+            ),
+            // An invitation still being typed.
+            None if PEER_INVITATION.starts_with(text) => {
+                return PeerEntry::Partial {
+                    avatar: None,
+                    hint: String::new(),
+                    missing: ENCODED_LEN as u8,
+                };
+            }
+            None => (text, None),
+        };
+        if digits.is_empty() {
+            return PeerEntry::Partial {
+                avatar: None,
+                hint: String::new(),
+                missing: ENCODED_LEN as u8,
+            };
+        }
+        let Ok((low, high)) = prefix_bounds(digits.as_bytes()) else {
+            return PeerEntry::Invalid;
+        };
+        let bytes = [low[0], low[1], low[2]];
+        let mut hint: String<8> = String::new();
+        _ = core::fmt::write(&mut hint, format_args!("{}", NodeHint(bytes)));
+        if digits.len() == ENCODED_LEN {
+            // The whole address settles every character of the hint.
+            let hint: String<8> = s(&digits[..4]);
+            let avatar = AvatarStyle::peer(bytes, &hint, PeerShape::Hexagon);
+            return PeerEntry::Complete {
+                avatar,
+                hint,
+                address: s(digits),
+                name,
+            };
+        }
+        // A peer known by nothing but their address is drawn as a hexagon.
+        let avatar = AvatarStyle::peer(bytes, &hint, PeerShape::Hexagon);
+        // The avatar shows once the characters settle the hint.
+        let settled = low[..3] == high[..3];
+        PeerEntry::Partial {
+            avatar: settled.then_some(avatar),
+            hint: if settled { hint } else { String::new() },
+            missing: (ENCODED_LEN - digits.len()) as u8,
+        }
     }
 
     fn join(&self, invite: &Invite, name: &str) -> Option<ChatSummary> {

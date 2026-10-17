@@ -96,27 +96,24 @@ fn focused_row<V: View<Rgb565, State>>(
 }
 
 fn add_row() -> impl View<Rgb565, State> + use<> {
-    Button::new(
-        |_: &mut State| {},
-        |button: ButtonState| {
-            focused_row(
-                label::<16>("Add peer", &font::SEMIBOLD, theme::BODY, theme::ACCENT)
-                    .padding(Edges::Leading, TEXT_X)
-                    .flex_infinite_width(HorizontalAlignment::Leading)
-                    .frame()
-                    .with_height(ROW)
-                    .overlay(
-                        Alignment::Leading,
-                        Image::new(&icon::ADD)
-                            .as_template()
-                            .foreground_color(theme::ACCENT)
-                            .frame()
-                            .with_width(TEXT_X),
-                    ),
-                button.is_focused(),
-            )
-        },
-    )
+    Button::new(State::open_add_peer, |button: ButtonState| {
+        focused_row(
+            label::<16>("Add peer", &font::SEMIBOLD, theme::BODY, theme::ACCENT)
+                .padding(Edges::Leading, TEXT_X)
+                .flex_infinite_width(HorizontalAlignment::Leading)
+                .frame()
+                .with_height(ROW)
+                .overlay(
+                    Alignment::Leading,
+                    Image::new(&icon::ADD)
+                        .as_template()
+                        .foreground_color(theme::ACCENT)
+                        .frame()
+                        .with_width(TEXT_X),
+                ),
+            button.is_focused(),
+        )
+    })
     .focus_key(keys::ADD_PEER)
 }
 

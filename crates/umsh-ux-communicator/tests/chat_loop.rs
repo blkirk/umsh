@@ -936,3 +936,64 @@ fn the_rail_switches_to_peers_which_open_on_add_peer() {
     assert_eq!(app.state().section, Section::Chats);
     assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
 }
+
+#[test]
+fn add_peer_unlocks_message_once_the_address_is_whole() {
+    use umsh_ux_communicator::model::PeerEntry;
+    let mut app = app!();
+    run(
+        &mut app,
+        &[Input::Backspace, Input::Turn(1), Input::Press, Input::Press],
+    );
+    assert!(matches!(app.state().screen(), Screen::AddPeer { .. }));
+    assert_eq!(focus(app.state()), Some(keys::PEER_FIELD));
+    run(&mut app, &typed("7cQRwjEyMJRDQCrtkgvaKiXfJ2CrUi"));
+    assert!(matches!(
+        app.state().peer_entry(),
+        PeerEntry::Partial {
+            avatar: Some(_),
+            missing: 14,
+            ..
+        }
+    ));
+    // Not whole: Enter only ends the edit, and Message cannot be reached.
+    run(&mut app, &[Input::Enter, Input::Turn(1)]);
+    assert!(matches!(app.state().screen(), Screen::AddPeer { .. }));
+    assert_ne!(focus(app.state()), Some(keys::MESSAGE_PEER));
+
+    run(&mut app, &[Input::Turn(-1)]);
+    run(&mut app, &typed("8pTn4kWsYbHd9e"));
+    assert!(matches!(
+        app.state().peer_entry(),
+        PeerEntry::Complete { .. }
+    ));
+    run(&mut app, &[Input::Enter]);
+    let chat = joined_chat(app.state());
+    assert_in_conversation(app.state(), chat);
+    assert_eq!(
+        app.state().chat(chat).map(|c| c.name.as_str()),
+        Some("7cQR")
+    );
+    assert_eq!(app.state().section, Section::Chats);
+}
+
+#[test]
+fn add_peer_reads_an_invitation_and_refuses_what_is_not_an_address() {
+    use umsh_ux_communicator::model::PeerEntry;
+    let mut app = app!();
+    run(
+        &mut app,
+        &[Input::Backspace, Input::Turn(1), Input::Press, Input::Press],
+    );
+    run(
+        &mut app,
+        &typed("umsh:n:7cQRwjEyMJRDQCrtkgvaKiXfJ2CrUi8pTn4kWsYbHd9e"),
+    );
+    assert!(matches!(
+        app.state().peer_entry(),
+        PeerEntry::Complete { .. }
+    ));
+    run(&mut app, &[Input::Backspace; 51]);
+    run(&mut app, &typed("0O"));
+    assert_eq!(app.state().peer_entry(), PeerEntry::Invalid);
+}
