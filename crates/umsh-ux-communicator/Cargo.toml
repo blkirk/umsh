@@ -1,0 +1,31 @@
+[package]
+name = "umsh-ux-communicator"
+description = "The standalone messenger UI for communicator-class UMSH devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The interface of a communicator: a self-contained UMSH device with a color
+# screen, a text keyboard, and navigation controls (T-LoRa Pager, T-Deck).
+# It renders through Buoyant into any embedded-graphics Rgb565 target and
+# takes input as abstract events, so the same code runs on the device and in
+# the host communicator. See docs/ux/src/classes/communicators.md.
+#
+# The bundled fonts are Latin subsets of M+ FONTS (SIL OFL 1.1, see
+# fonts/OFL.txt); build.rs rasterizes them into anti-aliased glyph tables.
+
+[features]
+# The mockup's chats, for a device with nothing behind it yet.
+fixture = []
+
+[dependencies]
+# The fork carries a prerendered anti-aliased font backend and
+# line-limited text. Branch `umsh` of darconeous/buoyant.
+buoyant = { git = "https://github.com/darconeous/buoyant", rev = "ef934005da6629f5df1ab5b3696ed8b3fd124dec", default-features = false, features = ["embedded-graphics"] }
+embedded-graphics = { version = "0.8", default-features = false }
+heapless = { version = "0.9", default-features = false }
+libm = "0.2"
+
+[build-dependencies]
+swash = "0.2.7"

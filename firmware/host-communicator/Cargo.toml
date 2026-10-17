@@ -1,0 +1,28 @@
+[package]
+name = "firmware-host-communicator"
+description = "A communicator that runs on the host: the device UI in a window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A communicator-class device whose screen is a window and whose radio will
+# be the LAN bearer. It runs the same umsh-ux-communicator code as the
+# T-LoRa Pager, at the Pager's 480x222.
+#
+# Without the `window` feature it needs no SDL and runs only headless:
+# a scripted input sequence, with screenshots written as PNG.
+
+[[bin]]
+name = "host-communicator"
+path = "src/main.rs"
+
+[features]
+default = ["window"]
+window = ["embedded-graphics-simulator/with-sdl"]
+
+[dependencies]
+umsh-ux-communicator = { path = "../../crates/umsh-ux-communicator", features = ["fixture"] }
+embedded-graphics = "0.8"
+embedded-graphics-simulator = { version = "0.8", default-features = false }
+heapless = "0.9"

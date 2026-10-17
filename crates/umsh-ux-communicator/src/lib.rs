@@ -1,0 +1,30 @@
+#![no_std]
+
+//! The standalone messenger interface for communicator-class UMSH devices.
+//!
+//! A communicator provides the whole UMSH experience on the device: it has
+//! a color screen, a text keyboard, and navigation controls, and a phone is
+//! optional. The T-LoRa Pager is the first target; its mockup in
+//! `docs/ux/src/hardware/mockups/` is the reference design.
+//!
+//! - [`model`]: what the screens show, filled in by the device.
+//! - [`ui`]: the screens themselves, as Buoyant views.
+//! - [`input`]: the inputs a board reports, and what they mean.
+//! - [`avatar`]: peer and channel avatars, following the iOS rules.
+//! - [`font`], [`icon`], [`theme`]: typefaces, icons, colors, and sizes.
+//! - [`fixture`]: stand-in content (the `fixture` feature).
+//!
+//! [`buoyant`] is re-exported so a device drives the interface with the
+//! same version it was built against.
+
+pub use buoyant;
+
+pub mod avatar;
+#[cfg(feature = "fixture")]
+pub mod fixture;
+pub mod font;
+pub mod icon;
+pub mod input;
+pub mod model;
+pub mod theme;
+pub mod ui;
