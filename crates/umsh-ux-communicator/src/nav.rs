@@ -10,8 +10,9 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Invite, MAX_CHATS, Member, MessageId,
-    PeerDetail, PeerEntry, PeerId, Preset, RadioSettings, Reaction, Section, Shareable, State,
+    ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Found, FoundKind, Invite, MAX_CHATS,
+    MAX_FOUND, Member, MessageId, PeerDetail, PeerEntry, PeerId, Preset, RadioSettings, Reaction,
+    Section, Shareable, State, word_match,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -22,6 +23,8 @@ pub type PeerText = EditBuffer<String<64>>;
 pub type ChannelText = EditBuffer<String<96>>;
 /// This node's name, as it is typed on first run.
 pub type NameText = EditBuffer<String<24>>;
+/// What Find looks for, as it is typed.
+pub type FindText = EditBuffer<String<24>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -38,6 +41,7 @@ pub mod keys {
     const PRESET: u32 = 0x0E00_0010;
     const SHARE: u32 = 0x0F00_0000;
     const REGION_ROW: u32 = 0x1300_0000;
+    const FOUND: u32 = 0x1500_0000;
     /// Set in a share key that names a channel.
     const SHARE_CHANNEL: u32 = 0x0080_0000;
 
@@ -74,6 +78,8 @@ pub mod keys {
     /// Add channel's field, and its Join.
     pub const CHANNEL_FIELD: FocusKey = FocusKey(0x1100_0000);
     pub const JOIN_ENTRY: FocusKey = FocusKey(0x1100_0001);
+    /// Find's field.
+    pub const FIND_FIELD: FocusKey = FocusKey(0x1400_0000);
     /// First run's name field and Continue.
     pub const NAME_FIELD: FocusKey = FocusKey(0x1200_0000);
     pub const CONTINUE: FocusKey = FocusKey(0x1200_0001);
@@ -137,6 +143,12 @@ pub mod keys {
         } else {
             Some(Shareable::Channel(key.0 & (SHARE_CHANNEL - 1)))
         }
+    }
+
+    /// One of Find's results, by its place among them.
+    #[must_use]
+    pub const fn found(index: usize) -> FocusKey {
+        FocusKey(FOUND | (index as u32 & !KIND))
     }
 
     /// A region in the list of them, by its place there.
@@ -209,6 +221,18 @@ pub mod keys {
     }
 }
 
+/// How far away a peer is, as Find says it.
+fn distance(hops: Option<u8>) -> String<12> {
+    let mut text = String::new();
+    match hops {
+        Some(0) => _ = text.push_str("Direct"),
+        Some(1) => _ = text.push_str("1 hop"),
+        Some(n) => _ = core::fmt::write(&mut text, format_args!("{n} hops")),
+        None => {}
+    }
+    text
+}
+
 /// A screen under Device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DevicePage {
@@ -244,6 +268,8 @@ pub enum Screen {
         focus: FocusState,
         /// The row to return to from the rail.
         row: Option<FocusKey>,
+        /// What the Chats list is filtered by, while Find is open.
+        find: Option<FindText>,
     },
     Conversation {
         chat: ChatId,
@@ -301,6 +327,7 @@ impl Screen {
         Self::Chats {
             focus: FocusState::new(),
             row: None,
+            find: None,
         }
     }
 
@@ -403,10 +430,119 @@ impl State {
             .focus()
             .current()
             .filter(|key| self.lists(*key));
-        if let Some(Screen::Chats { focus, row }) = self.screens.last_mut() {
+        if let Some(Screen::Chats { focus, row, .. }) = self.screens.last_mut() {
             *row = left;
             focus.request(keys::rail(section));
         }
+    }
+
+    /// Opens Find over the Chats list, its field focused to take what is
+    /// typed.
+    pub fn start_find(&mut self) {
+        if let Some(Screen::Chats { focus, find, .. }) = self.screens.last_mut() {
+            *find = Some(FindText::new());
+            focus.request(keys::FIND_FIELD);
+        }
+    }
+
+    /// What Find looks for, while it is open.
+    #[must_use]
+    pub fn find_query(&self) -> Option<&str> {
+        match self.screens.first() {
+            Some(Screen::Chats {
+                find: Some(find), ..
+            }) => Some(find.text().trim()),
+            _ => None,
+        }
+    }
+
+    /// What is being typed into Find.
+    pub fn find_text_mut(&mut self) -> Option<&mut FindText> {
+        match self.screens.last_mut() {
+            Some(Screen::Chats { find, .. }) => find.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// Closes Find, returning to the whole list.
+    pub fn end_find(&mut self) {
+        if let Some(Screen::Chats { find, row, .. }) = self.screens.first_mut() {
+            *find = None;
+            *row = None;
+        }
+        if matches!(self.screens.last(), Some(Screen::Chats { .. })) {
+            self.focus_list();
+        }
+    }
+
+    /// What Find finds, up to as many as it lists, and how many there are
+    /// in all: chats, then saved peers, then nodes heard nearby.
+    #[must_use]
+    pub fn found(&self) -> (heapless::Vec<Found, MAX_FOUND>, usize) {
+        let mut found = heapless::Vec::new();
+        let Some(query) = self.find_query().filter(|q| !q.is_empty()) else {
+            return (found, 0);
+        };
+        let mut count = 0;
+        let mut add = |item: Found| {
+            count += 1;
+            _ = found.push(item);
+        };
+        for chat in self.chats.iter() {
+            if word_match(&chat.name, query).is_some() {
+                add(Found {
+                    kind: FoundKind::Chat(chat.id),
+                    avatar: chat.avatar.clone(),
+                    name: chat.name.clone(),
+                    distance: String::new(),
+                    age: chat.age.clone(),
+                });
+            }
+        }
+        for peer in self.peers.iter() {
+            if word_match(&peer.name, query).is_some() {
+                add(Found {
+                    kind: FoundKind::Peer(peer.id),
+                    avatar: peer.avatar.clone(),
+                    name: peer.name.clone(),
+                    distance: distance(peer.hops),
+                    age: peer.heard.clone(),
+                });
+            }
+        }
+        for heard in self.node.find_heard(query) {
+            add(Found {
+                kind: FoundKind::Heard(heard.address),
+                avatar: heard.avatar,
+                name: heard.name,
+                distance: heard.distance,
+                age: heard.age,
+            });
+        }
+        (found, count)
+    }
+
+    /// Opens Find's result at `index`, and closes Find.
+    pub fn open_found(&mut self, index: usize) {
+        let Some(found) = self.found().0.get(index).cloned() else {
+            return;
+        };
+        self.end_find();
+        match found.kind {
+            FoundKind::Chat(chat) => self.open_chat(chat),
+            FoundKind::Peer(peer) => self.open_peer(peer),
+            FoundKind::Heard(address) => {
+                if let Some(chat) = self.node.direct_chat(&address, &found.name, &found.avatar) {
+                    let chat = self.add_chat(chat);
+                    self.go_to_chat(chat);
+                }
+            }
+        }
+    }
+
+    /// Opens Find's top result, as Enter in its field does.
+    pub fn open_top_found(&mut self) {
+        self.open_found(0);
     }
 
     /// Shows `section` and moves from the rail into its list.

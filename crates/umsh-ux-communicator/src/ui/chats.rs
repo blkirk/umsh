@@ -33,8 +33,8 @@ static INDICES: [usize; MAX_CHATS] = {
     a
 };
 
-/// The list. Backspace moves to the rail, and Enter opens the focused chat,
-/// as a press does.
+/// The list. Backspace moves to the rail, Enter opens the focused chat, as a
+/// press does, and a letter starts Find with it.
 pub fn view(chats: &Vec<ChatSummary, MAX_CHATS>) -> impl View<Rgb565, State> + use<> {
     let rows = chats.clone();
     let ids: Vec<u32, MAX_CHATS> = chats.iter().map(|c| c.id).collect();
@@ -57,6 +57,11 @@ pub fn view(chats: &Vec<ChatSummary, MAX_CHATS>) -> impl View<Rgb565, State> + u
             }
             None => KeyResponse::Ignored,
         },
+        // Find's field, focused as it opens, takes the key.
+        Key::Character(c) if !c.is_whitespace() => {
+            s.start_find();
+            KeyResponse::Redirect
+        }
         _ => KeyResponse::Ignored,
     })
 }

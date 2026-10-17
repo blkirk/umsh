@@ -6,9 +6,9 @@ use core::cell::{Cell, RefCell};
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction,
-    Invite, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
-    PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender, ShareUri, Shareable,
-    State, StatusStrip, push_newest,
+    Heard, Invite, MAX_HEARD, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail,
+    PeerEntry, PeerId, PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender,
+    ShareUri, Shareable, State, StatusStrip, push_newest, word_match,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -301,6 +301,37 @@ impl Store {
         }
     }
 }
+
+/// A node heard nearby but not saved.
+struct HeardNode {
+    address: &'static str,
+    color: [u8; 3],
+    shape: PeerShape,
+    name: &'static str,
+    distance: &'static str,
+    age: &'static str,
+}
+
+/// Nodes heard nearby but not saved, most recently heard first. Find's
+/// mockup board has these two.
+const HEARD: [HeardNode; 2] = [
+    HeardNode {
+        address: "8UQWMASi45ub7Qe4ZE36UT5G6cU4ud8Fhhe4deS4F3cw",
+        color: [61, 214, 140],
+        shape: PeerShape::Triangle,
+        name: "Riverbend Camp",
+        distance: "Nearby",
+        age: "12m",
+    },
+    HeardNode {
+        address: "6aNt9KTAb8dLcukC7edhDQ7cn5d4gEYkbUrMWeWQLGsC",
+        color: [26, 92, 64],
+        shape: PeerShape::Circle,
+        name: "Ridge Runner",
+        distance: "2 hops",
+        age: "1d",
+    },
+];
 
 /// The fixture's saved peers' addresses, how they are reached, when they
 /// were last heard, and the chat with them, by peer.
@@ -678,6 +709,21 @@ impl Node for Store {
 
     fn forget_peer(&self, peer: PeerId) {
         _ = self.forgotten.borrow_mut().push(peer);
+    }
+
+    fn find_heard(&self, query: &str) -> Vec<Heard, MAX_HEARD> {
+        HEARD
+            .iter()
+            .filter(|node| word_match(node.name, query).is_some())
+            .map(|node| Heard {
+                address: s(node.address),
+                avatar: AvatarStyle::peer(node.color, &node.address[..4], node.shape),
+                name: s(node.name),
+                distance: s(node.distance),
+                age: s(node.age),
+            })
+            .take(MAX_HEARD)
+            .collect()
     }
 
     fn address(&self) -> String<44> {

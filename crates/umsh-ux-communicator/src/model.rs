@@ -114,6 +114,65 @@ pub struct PeerDetail {
     pub ping: Option<String<8>>,
 }
 
+/// A node heard nearby but not saved, as Find shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heard {
+    pub address: String<44>,
+    pub avatar: AvatarStyle,
+    pub name: String<32>,
+    /// How far away it is, such as `Nearby` or `2 hops`.
+    pub distance: String<12>,
+    /// How long ago it was heard, such as `12m`.
+    pub age: String<6>,
+}
+
+/// One of Find's results.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub kind: FoundKind,
+    pub avatar: AvatarStyle,
+    pub name: String<32>,
+    /// How far away a peer or a heard node is.
+    pub distance: String<12>,
+    pub age: String<6>,
+}
+
+/// What a result of Find is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FoundKind {
+    Chat(ChatId),
+    Peer(PeerId),
+    /// A node heard but not saved, at its address.
+    Heard(String<44>),
+}
+
+/// The most results Find lists.
+pub const MAX_FOUND: usize = 8;
+
+/// The most heard nodes Find lists.
+pub const MAX_HEARD: usize = 4;
+
+/// Where `query` starts a word of `name`, ignoring ASCII case: the byte
+/// offset of the match. An empty query matches nothing.
+#[must_use]
+pub fn word_match(name: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return None;
+    }
+    let mut at_word = true;
+    for (i, c) in name.char_indices() {
+        if at_word
+            && name
+                .get(i..i + query.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(query))
+        {
+            return Some(i);
+        }
+        at_word = !c.is_alphanumeric();
+    }
+    None
+}
+
 /// What the text typed into Add channel names, as far as it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelEntry {
@@ -518,6 +577,10 @@ pub trait Node {
     /// the one already joined, if it is. `None` when `text` names no channel
     /// or there is no room for it.
     fn add_channel(&self, text: &str) -> Option<ChatSummary>;
+
+    /// Nodes heard but not saved whose names have a word starting with
+    /// `query`, most recently heard first.
+    fn find_heard(&self, query: &str) -> Vec<Heard, MAX_HEARD>;
 
     /// This node's address.
     fn address(&self) -> String<44>;

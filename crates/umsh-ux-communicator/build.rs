@@ -415,6 +415,15 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
     ("BACK", 14, 1.0, &[stroke("M3 -6 L-3 0 L3 6", 2.0)]),
     ("CHEVRON", 14, 1.0, &[stroke("M-3 -6 L3 0 L-3 6", 2.0)]),
     ("CHECK", 16, 1.0, &[stroke("M-5 0 L-1.5 4 L5 -4", 2.2)]),
+    (
+        "SEARCH",
+        18,
+        1.4,
+        &[
+            stroke("M-5 -1 A4 4 0 1 0 3 -1 A4 4 0 1 0 -5 -1 Z", 1.3),
+            stroke("M2 2 L5 5", 1.4),
+        ],
+    ),
     // A battery with only its last cell left: the banner's at 22, and the
     // screen's when it is empty at five times that.
     ("BATTERY_LOW", 22, 1.0, BATTERY),

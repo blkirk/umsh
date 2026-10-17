@@ -9,8 +9,8 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Notice, Preset, Reaction, Section,
-    Shareable, State,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, FoundKind, Notice, Preset,
+    Reaction, Section, Shareable, State,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
@@ -1294,4 +1294,46 @@ fn the_region_is_chosen_from_radio_too() {
     run(&mut app, &[Input::Turn(2), Input::Press]);
     assert_eq!(radio(app.state()).0.region.as_str(), "European Union");
     assert_eq!(focus(app.state()), Some(keys::REGION));
+}
+
+#[test]
+fn typing_on_the_list_finds_and_enter_opens_the_top_result() {
+    let mut app = app!();
+    run(&mut app, &typed("ri"));
+    assert_eq!(focus(app.state()), Some(keys::FIND_FIELD));
+    assert_eq!(app.state().find_query(), Some("ri"));
+    let (found, count) = app.state().found();
+    // Ridge Medic; Rick Alvarez; Riverbend Camp and Ridge Runner, heard.
+    assert_eq!(count, 4);
+    assert_eq!(found[0].kind, FoundKind::Chat(RIDGE));
+    assert_eq!(found[1].kind, FoundKind::Peer(app.state().peers[2].id));
+    assert_eq!(found[2].name.as_str(), "Riverbend Camp");
+    run(&mut app, &[Input::Enter]);
+    assert_in_conversation(app.state(), RIDGE);
+    // Find closed behind it.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(app.state().find_query(), None);
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+}
+
+#[test]
+fn backspace_ends_find_and_turning_moves_into_the_results() {
+    let mut app = app!();
+    run(&mut app, &typed("cr"));
+    // Trail Crew matches at its second word.
+    assert_eq!(app.state().found().0[0].kind, FoundKind::Chat(2));
+    // Press ends the edit; turning then moves into the results.
+    run(&mut app, &[Input::Press, Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::found(0)));
+    run(&mut app, &[Input::Press]);
+    assert_in_conversation(app.state(), 2);
+    run(&mut app, &[Input::Backspace]);
+    // Typing again and erasing it all, then Backspace closes Find.
+    run(&mut app, &typed("x"));
+    assert_eq!(app.state().found().1, 0);
+    run(&mut app, &[Input::Backspace, Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::FIND_FIELD));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(app.state().find_query(), None);
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
 }

@@ -24,6 +24,7 @@ mod chats;
 mod conversation;
 mod details;
 mod device;
+mod find;
 mod join;
 mod member;
 mod peer;
@@ -118,20 +119,40 @@ fn empty_battery(lit: bool) -> impl View<Rgb565, State> + use<> {
 }
 
 /// The rail and the list beside it. Turning on the rail shows each section
-/// as it is reached.
+/// as it is reached; Find, while it is open, takes the Chats list's place.
 fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
     let focus = state.screen().focus().current();
     let shown = focus.and_then(keys::section).unwrap_or(state.section);
+    let find = match state.screen() {
+        Screen::Chats { find, .. } => find.as_ref().filter(|_| shown == Section::Chats),
+        _ => None,
+    };
+    let list = match (shown, find) {
+        (Section::Chats, Some(_)) => List::Find,
+        (Section::Chats, None) => List::Chats,
+        (Section::Peers, _) => List::Peers,
+        (Section::Device, _) => List::Device,
+    };
     ZStack::new((
         rail::view(shown, state.unread_chats()),
-        match_view!(shown, {
-            Section::Chats => chats::view(&state.chats),
-            Section::Peers => peers::view(&state.peers),
-            Section::Device => device::view(state),
+        match_view!(list, {
+            List::Chats => chats::view(&state.chats),
+            List::Find => find.map(|text| find::view(state, text)),
+            List::Peers => peers::view(&state.peers),
+            List::Device => device::view(state),
         })
         .padding(Edges::Leading, RAIL),
     ))
     .with_alignment(Alignment::TopLeading)
+}
+
+/// What shows beside the rail.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum List {
+    Chats,
+    Find,
+    Peers,
+    Device,
 }
 
 /// One line of text, cut short with an ellipsis when it does not fit, and
