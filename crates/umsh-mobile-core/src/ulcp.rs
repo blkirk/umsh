@@ -4915,10 +4915,9 @@ pub fn ulcp_category_properties(
             ],
         ),
         UlcpManageCategory::Time => {
-            // Ungated: a device with no wall clock may still know how
-            // long it has been up, and a refusal costs one slot.
-            when(true, &[prop::UPTIME]);
-            when(has(cap::TIME), &[prop::TIME, prop::TZ_OFFSET]);
+            // Uptime is every device's, so it rides with the clock rather
+            // than offering a Time screen on a device that keeps no time.
+            when(has(cap::TIME), &[prop::UPTIME, prop::TIME, prop::TZ_OFFSET]);
             // Whether the receiver may set the clock is the clock's
             // business, so it lives here rather than with the receiver.
             when(has(cap::GNSS), &[prop::GNSS_TIME_TRUST]);
@@ -4997,12 +4996,14 @@ pub fn ulcp_category_properties(
             );
             when(
                 has(cap::LAN_BEARER),
-                &[
-                    prop::LAN_BEARER_ENABLED,
-                    prop::LAN_BEARER_GROUP,
-                    prop::LAN_BEARER_INGRESS_LIMIT,
-                    prop::LAN_BEARER_STATE,
-                ],
+                &[prop::LAN_BEARER_GROUP, prop::LAN_BEARER_STATE],
+            );
+            // The switch and the ingress limit belong to a device that
+            // forwards between the LAN and its LoRa radio. One whose PHY
+            // is the group turns it on and off with the PHY.
+            when(
+                has(cap::LAN_BEARER) && has(cap::REPEATER),
+                &[prop::LAN_BEARER_ENABLED, prop::LAN_BEARER_INGRESS_LIMIT],
             );
         }
         UlcpManageCategory::Repeater => {

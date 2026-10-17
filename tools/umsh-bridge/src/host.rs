@@ -93,11 +93,12 @@ fn session_config() -> SessionConfig {
         // hardware for `CMD_REBOOT` to restart, and restarting the
         // bridge is the operator's business.
         reboot: false,
+        dev_identity: true,
         // A soft device on the bridge has no antenna of its own.
         stats: None,
         mac_node: false,
         meshcore_forwarder: false,
-        lan_bearer: false,
+        lan_bearer: umsh_ulcp_simdev::LanBearerRole::None,
         wifi: None,
         ip: None,
         bridge_client: false,

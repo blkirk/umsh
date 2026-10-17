@@ -133,17 +133,22 @@ impl<P: SoftPlatform> SoftDevice<P> {
         );
         self.platform.on_boot(&mut self.session);
         // The identity before the snapshot: a restore keeps the PHY off
-        // unless the snapshot was taken under the live identity.
-        let secret = match self.platform.load_identity() {
-            Some(secret) => Some(secret),
-            None if self.platform.generates_identity_at_boot() => {
-                let secret = self.platform.generate_secret();
-                self.platform
-                    .store_identity(Some(&secret))
-                    .ok()
-                    .map(|_| secret)
+        // unless the snapshot was taken under the live identity. A device
+        // configured without one neither keeps nor makes one.
+        let secret = if !self.config.dev_identity {
+            None
+        } else {
+            match self.platform.load_identity() {
+                Some(secret) => Some(secret),
+                None if self.platform.generates_identity_at_boot() => {
+                    let secret = self.platform.generate_secret();
+                    self.platform
+                        .store_identity(Some(&secret))
+                        .ok()
+                        .map(|_| secret)
+                }
+                None => None,
             }
-            None => None,
         };
         if let Some(secret) = secret {
             let public = SoftwareIdentity::from_secret_bytes(&secret).public_key().0;
@@ -245,6 +250,15 @@ impl<P: SoftPlatform> SoftDevice<P> {
                 emitted.push(frame.to_vec())
             });
         self.execute(effect, &mut emitted);
+        self.queue_emitted(emitted);
+    }
+
+    /// Report what became of the LAN bearer's configuration, announcing a
+    /// change to an attached host.
+    pub fn set_lan_bearer_state(&mut self, state: umsh_ulcp::lan::State) {
+        let mut emitted = Vec::new();
+        self.session
+            .set_lan_bearer_state(state, &mut |frame| emitted.push(frame.to_vec()));
         self.queue_emitted(emitted);
     }
 

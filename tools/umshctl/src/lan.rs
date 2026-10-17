@@ -11,19 +11,17 @@
 //! its bearer enabled hears it; what any participant sends to the group
 //! is received unmeasured, since nothing here measured it.
 
-use std::fs::File;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use umsh::tokio_support::{LanConfig, LanSocket};
-use umsh::ulcp_wire::profiles;
-use umsh_lan_bearer::{Datagram, MAX_FRAME};
+use tokio::sync::mpsc;
+use umsh::tokio_support::LanConfig;
 use umsh_ulcp_simdev::host::HostPlatform;
+use umsh_ulcp_simdev::lan::{self, DeviceOutput, HostEvent, StateLock};
 use umsh_ulcp_simdev::soft::SoftDevice;
-use umsh_ulcp_simdev::{DutyLedger, RadioRxInfo, RadioSettings, SessionConfig};
 
 /// How much of the pipe to take in one read. ULCP frames are small; this
 /// only bounds a burst.
@@ -33,63 +31,6 @@ const READ_CHUNK: usize = 4096;
 /// to let go of its state.
 const LOCK_PATIENCE: Duration = Duration::from_secs(2);
 
-/// The shape of the virtual radio.
-///
-/// Spare, like a bridge's host interface: no hardware to describe and no
-/// node behind it. The PHY settings it reports are the default profile's,
-/// fixed; the frames it sends are transmitted later by whichever LoRa
-/// radios forward them, so the frame time a host's MAC derives from these
-/// is an estimate either way. The duty limit is left open—sending to the
-/// group spends no airtime—and the radios' ingress limits are the
-/// control that means something.
-fn session_config() -> SessionConfig {
-    SessionConfig {
-        dev_version: concat!("umshctl-lan/", env!("CARGO_PKG_VERSION")),
-        dev_model: None,
-        default_device_name: "LAN virtual radio",
-        mtu: MAX_FRAME as u16,
-        tx_preamble_symbols: 32,
-        sync_word: profiles::DEFAULT.sync_word,
-        min_tx_power_dbm: -9,
-        max_tx_power_dbm: 22,
-        freq_khz_min: 150_000,
-        freq_khz_max: 960_000,
-        defaults: RadioSettings {
-            enabled: false,
-            freq_khz: profiles::DEFAULT.freq_khz,
-            bw_hz: profiles::DEFAULT.bw_hz,
-            sf: profiles::DEFAULT.sf,
-            cr_denom: profiles::DEFAULT.cr_denom,
-            tx_power_dbm: profiles::DEFAULT_TX_POWER_DBM,
-        },
-        default_duty_limit: 0xFFFF,
-        duty: Box::leak(Box::new(DutyLedger::new())),
-        battery_diagnostics: Default::default(),
-        battery: None,
-        alert: None,
-        time: None,
-        gnss: None,
-        display_motion_wake: false,
-        illuminance: false,
-        temperatures: false,
-        ble: false,
-        ble_pairing: false,
-        ble_pin: false,
-        // The device is a task in this process; there is nothing for
-        // `CMD_REBOOT` to restart.
-        reboot: false,
-        stats: None,
-        mac_node: false,
-        meshcore_forwarder: false,
-        lan_bearer: false,
-        wifi: None,
-        ip: None,
-        bridge_client: false,
-        i2c_buses: &[],
-        i2c_devices: &[],
-    }
-}
-
 /// Where the virtual radio keeps its identity and saved configuration.
 fn device_dir() -> Result<PathBuf> {
     crate::connection::state_dir()
@@ -97,30 +38,21 @@ fn device_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("no HOME directory to keep the LAN device's state in"))
 }
 
-/// Hold the state directory for one virtual radio at a time. Two
-/// devices sharing an identity would send under one key with two frame
-/// counters, and each would see the other's frames as replays.
-fn lock(dir: &std::path::Path) -> Result<Option<File>> {
-    use std::os::fd::AsRawFd;
-    let file = File::create(dir.join("lock"))
-        .with_context(|| format!("opening {}", dir.join("lock").display()))?;
-    // SAFETY: `flock` on a descriptor this function owns.
-    let held = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    Ok(held.then_some(file))
-}
-
-/// Start a virtual radio on `group` and return the host's end of the
-/// link to it.
+/// Start a virtual radio and return the host's end of the link to it.
+/// A `group` stands in for the radio's own until it exits, as an unsaved
+/// write of `PROP_LAN_BEARER_GROUP` would.
 ///
 /// The device runs on this thread's `LocalSet` until the host's end is
 /// dropped.
-pub async fn open(group: SocketAddrV4) -> Result<DuplexStream> {
+pub async fn open(group: Option<SocketAddrV4>) -> Result<DuplexStream> {
     let dir = device_dir()?;
     let platform =
         HostPlatform::new(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let deadline = tokio::time::Instant::now() + LOCK_PATIENCE;
     let lock = loop {
-        if let Some(lock) = lock(&dir)? {
+        if let Some(lock) =
+            StateLock::try_acquire(&dir).with_context(|| format!("locking {}", dir.display()))?
+        {
             break lock;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -131,64 +63,65 @@ pub async fn open(group: SocketAddrV4) -> Result<DuplexStream> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let config = LanConfig {
-        group,
-        ..LanConfig::lan()
-    };
-    let socket = LanSocket::bind(config).with_context(|| format!("joining {group}"))?;
     let (host, device_end) = tokio::io::duplex(READ_CHUNK);
-    let mut device = SoftDevice::new(session_config(), platform);
+    let mut device = SoftDevice::new(
+        lan::session_config(concat!("umshctl-lan/", env!("CARGO_PKG_VERSION"))),
+        platform,
+    );
     // Asking for the LAN is asking for it on. A LoRa radio comes up off
     // so that a throwaway identity never reaches the air; this one has no
     // node of its own and sends only its host's frames.
     if !device.session().settings().enabled {
         let _ = device.session_mut().toggle_radio(&mut |_| {});
     }
+    if let Some(group) = group {
+        device
+            .session_mut()
+            .set_lan_bearer_group(Some(umsh::ulcp_wire::lan::Group {
+                address: group.ip().octets(),
+                port: group.port(),
+            }));
+    }
+    let (events, host_events) = mpsc::unbounded_channel();
+    let (wire_tx, wire_rx) = mpsc::unbounded_channel();
+    let _ = events.send(HostEvent::Attach);
     tokio::task::spawn_local(async move {
-        drive(device, socket, device_end).await;
+        lan::run(device, LanConfig::lan(), host_events, move |output| {
+            // Nobody is told of a queued frame: the tool is attached for
+            // as long as the device runs.
+            if let DeviceOutput::Wire(wire) = output {
+                let _ = wire_tx.send(wire);
+            }
+        })
+        .await;
         drop(lock);
     });
+    tokio::task::spawn_local(relay(device_end, events, wire_rx));
     Ok(host)
 }
 
-/// Relay between the pipe, the device, and the group until the host
-/// lets go.
-async fn drive(mut device: SoftDevice<HostPlatform>, socket: LanSocket, mut pipe: DuplexStream) {
-    let started = tokio::time::Instant::now();
-    let now_ms = || started.elapsed().as_millis() as u64;
+/// Carry the pipe to the device and back until the host lets go, which
+/// stops the device.
+async fn relay(
+    mut pipe: DuplexStream,
+    events: mpsc::UnboundedSender<HostEvent>,
+    mut wire: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
     let mut buf = vec![0u8; READ_CHUNK];
-    let mut datagram = [0u8; MAX_FRAME + 1];
-    device.attach();
     loop {
-        // Whatever the device has to say goes out first: the attach's
-        // own notice, then each reply in turn.
-        while let Some(wire) = device.take_outbound() {
-            if pipe.write_all(&wire).await.is_err() {
-                return;
-            }
-        }
-        for frame in device.take_transmitted() {
-            // A send that fails is a frame lost on the medium, which
-            // the protocol above already tolerates.
-            let _ = socket.send(&frame).await;
-        }
         tokio::select! {
             read = pipe.read(&mut buf) => match read {
                 Ok(0) | Err(_) => break,
-                // A garbled frame costs one frame: the decoder
-                // resynchronizes on the next flag.
                 Ok(len) => {
-                    let _ = device.ingest(&buf[..len], now_ms());
+                    if events.send(HostEvent::Bytes(buf[..len].to_vec())).is_err() {
+                        break;
+                    }
                 }
             },
-            received = socket.recv(&mut datagram) => {
-                if let Ok((len, _)) = received
-                    && umsh_lan_bearer::classify(&datagram[..len]) == Datagram::Umsh
-                {
-                    device.inject_radio_rx(&datagram[..len], &RadioRxInfo::default(), now_ms());
-                }
-            }
+            frame = wire.recv() => match frame {
+                Some(frame) if pipe.write_all(&frame).await.is_ok() => {}
+                _ => break,
+            },
         }
     }
-    device.detach();
 }

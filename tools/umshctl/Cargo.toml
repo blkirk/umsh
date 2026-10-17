@@ -20,7 +20,7 @@ umsh-gnss = { path = "../../crates/umsh-gnss" }
 # `--lan` hosts a soft device in this process on the LAN bearer's group,
 # and `lan browse` reads the participants' DNS-SD records.
 umsh-lan-bearer = { path = "../../crates/umsh-lan-bearer", features = ["tokio", "dnssd"] }
-umsh-ulcp-simdev = { path = "../../crates/umsh-ulcp-simdev", features = ["host"] }
+umsh-ulcp-simdev = { path = "../../crates/umsh-ulcp-simdev", features = ["lan"] }
 # `manage` borrows the attached radio and runs a host MAC over it, which
 # means holding the coordinator in the same shared cell every other host
 # application does, and generating the administrator identity's seed.

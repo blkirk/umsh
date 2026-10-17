@@ -83,6 +83,7 @@ pub fn web_sim_config() -> umsh_ulcp_simdev::SessionConfig {
         // The simulator restarts by rebuilding its session, which is
         // near enough a power cycle for the debugger to exercise.
         reboot: true,
+        dev_identity: true,
         // No node behind the session: a backhaul would connect the host
         // to nothing, so the device must not claim `CAP_MAC_BACKHAUL`—
         // that claim is exactly what a bridge checks before trusting a
@@ -90,7 +91,7 @@ pub fn web_sim_config() -> umsh_ulcp_simdev::SessionConfig {
         stats: None,
         mac_node: false,
         meshcore_forwarder: false,
-        lan_bearer: false,
+        lan_bearer: umsh_ulcp_simdev::LanBearerRole::None,
         // A station and a dual-stack, for the same reason as the clock
         // and the receiver: the simulator answers the whole property
         // surface, joins its own canned networks, and hands back an

@@ -97,7 +97,8 @@ pub enum Target {
     /// multicast group: no hardware, and the mesh reached through
     /// whichever radios on the LAN forward to it.
     Lan {
-        group: std::net::SocketAddrV4,
+        /// The group to use instead of the radio's own, if any.
+        group: Option<std::net::SocketAddrV4>,
     },
     /// A device reached over the mesh rather than a wire, through the
     /// Node Management binding. Opening one borrows whatever radio is
@@ -128,7 +129,8 @@ impl Target {
             }
             Self::Ble { selector, name } => name.clone().unwrap_or_else(|| selector.clone()),
             Self::Tcp { host, port } => format_endpoint(host, *port),
-            Self::Lan { group } => format!("lan {group}"),
+            Self::Lan { group: Some(group) } => format!("lan {group}"),
+            Self::Lan { group: None } => "lan".to_string(),
             Self::Mesh { key } => umsh::core::PublicKey(*key).to_string(),
         }
     }

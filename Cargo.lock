@@ -4357,6 +4357,7 @@ dependencies = [
  "umsh-core",
  "umsh-crypto",
  "umsh-hal",
+ "umsh-lan-bearer",
  "umsh-mac",
  "umsh-node",
  "umsh-node-mgmt",
@@ -4364,6 +4365,8 @@ dependencies = [
  "umsh-sync",
  "umsh-text",
  "umsh-ulcp",
+ "umsh-ulcp-device",
+ "umsh-ulcp-simdev",
  "umsh-uri",
  "uniffi",
  "zeroize",
@@ -4546,9 +4549,11 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "rand 0.10.1",
+ "tokio",
  "umsh-core",
  "umsh-crypto",
  "umsh-gnss",
+ "umsh-lan-bearer",
  "umsh-ulcp",
  "umsh-ulcp-device",
 ]

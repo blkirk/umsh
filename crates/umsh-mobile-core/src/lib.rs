@@ -20,6 +20,7 @@ mod mobile_chat;
 mod mobile_mesh;
 mod regions;
 mod ulcp;
+mod virtual_radio;
 
 pub use counter_store::{CounterStoreError, MobileCounterStore};
 pub use mobile_chat::{
@@ -53,13 +54,18 @@ pub use ulcp::{
     ulcp_max_dev_peers, ulcp_prop_get, ulcp_prop_set, ulcp_save,
 };
 
+pub use virtual_radio::{
+    MobileQueuedClass, MobileQueuedNoticeRecord, MobileVirtualRadio, MobileVirtualRadioError,
+    MobileVirtualRadioListener,
+};
+
 uniffi::setup_scaffolding!();
 
 /// Version of the mobile facade contract.
 ///
 /// Increment this when a binding-visible operation, record, or error contract
 /// changes incompatibly. It is independent of the UMSH wire version.
-pub const MOBILE_API_VERSION: u16 = 53;
+pub const MOBILE_API_VERSION: u16 = 54;
 
 /// Stable error categories consumed by platform adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]

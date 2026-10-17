@@ -23,10 +23,14 @@ umsh-node-mgmt = { path = "../umsh-node-mgmt" }
 umsh-regiondb = { path = "../umsh-regiondb" }
 umsh-sync = { path = "../umsh-sync" }
 umsh-text = { path = "../umsh-text" }
+# The LAN virtual radio: the production device session on the LAN bearer.
+umsh-lan-bearer = { path = "../umsh-lan-bearer", features = ["tokio"] }
+umsh-ulcp-device = { path = "../umsh-ulcp-device" }
+umsh-ulcp-simdev = { path = "../umsh-ulcp-simdev", features = ["lan"] }
 embedded-hal-async.workspace = true
 lwuri.workspace = true
 rand = { workspace = true, features = ["std", "thread_rng", "sys_rng"] }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 uniffi = "=0.32.0"
 zeroize.workspace = true
 

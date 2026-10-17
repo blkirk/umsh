@@ -5,6 +5,22 @@ use umsh_ulcp::{
     lan::{DEFAULT_INGRESS_LIMIT, Group},
 };
 
+/// How a device carries the LAN bearer, if at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LanBearerRole {
+    /// No bearer: `CAP_LAN_BEARER` is absent and its properties unknown.
+    #[default]
+    None,
+    /// Beside a node, which forwards between the group and the LoRa radio.
+    /// Every bearer property and counter exists. Meaningful only alongside
+    /// [`SessionConfig::mac_node`](crate::SessionConfig::mac_node).
+    Forwarding,
+    /// The group is the device's PHY, as on a virtual radio. Only the group
+    /// and the state exist: `PROP_PHY_ENABLED` is the switch, and nothing is
+    /// forwarded to limit or count.
+    Phy,
+}
+
 /// The bearer's settings. The group and the ingress limit are held as
 /// what an operator chose, if anything: an unchosen one follows this
 /// firmware's default, and is saved as unchosen so that a later firmware

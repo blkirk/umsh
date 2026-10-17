@@ -113,7 +113,8 @@ pub struct ToolArgs {
     /// The radio runs in this process with an identity of its own, and
     /// reaches the mesh through whichever radios on the LAN have their
     /// bearer enabled. The group needs the `=` form
-    /// (`--lan=239.255.134.121:15056`); bare `--lan` uses the default.
+    /// (`--lan=239.255.134.121:15056`) and lasts for this run unless
+    /// saved; bare `--lan` uses the radio's own.
     #[arg(
         long,
         value_name = "GROUP[:PORT]",
@@ -351,13 +352,7 @@ async fn resolve(args: &ToolArgs, prefs: &Prefs) -> Result<Option<Target>> {
         if args.port.is_some() || args.ble.is_some() || args.tcp.is_some() {
             bail!("--lan, --tcp, --port, and --ble name different radios; give one");
         }
-        let group = match group {
-            Some(spec) => parse_group(spec)?,
-            None => std::net::SocketAddrV4::new(
-                umsh_lan_bearer::DEFAULT_GROUP.into(),
-                umsh_lan_bearer::DEFAULT_PORT,
-            ),
-        };
+        let group = group.as_deref().map(parse_group).transpose()?;
         return Ok(Some(Target::Lan { group }));
     }
     if let Some(endpoint) = &args.tcp {

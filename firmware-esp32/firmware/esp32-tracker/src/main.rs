@@ -457,11 +457,16 @@ fn session_config() -> SessionConfig {
         ble_pin: cfg!(feature = "ble"),
         // The SoC restarts on command; see the `reboot` hook below.
         reboot: true,
+        dev_identity: true,
         // A real MAC runs behind this session.
         mac_node: true,
         meshcore_forwarder: cfg!(feature = "meshcore-forwarder"),
         // The device node above is what the bearer forwards through.
-        lan_bearer: cfg!(feature = "lan-bearer"),
+        lan_bearer: if cfg!(feature = "lan-bearer") {
+            umsh_ulcp_device::LanBearerRole::Forwarding
+        } else {
+            umsh_ulcp_device::LanBearerRole::None
+        },
         // These chips have the radio, but nothing here drives it yet:
         // the capability is a promise about the property surface, and
         // claiming it before there is a station to serve it would be a

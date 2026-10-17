@@ -297,9 +297,21 @@ pub struct SessionConfig {
     /// Whether the platform can restart the hardware on command. When
     /// set, `CAP_REBOOT` is advertised and `CMD_REBOOT` reaches
     /// [`Effect::Reboot`]; otherwise the command answers
-    /// `STATUS_UNIMPLEMENTED`. Every firmware sets this; a session that
-    /// is a process rather than a board must not.
+    /// `STATUS_UNIMPLEMENTED`, and so do `CMD_DFU` and
+    /// `CMD_FACTORY_RESET`, which both end in a restart. Every firmware
+    /// sets this; a session that is a process rather than a board must
+    /// not.
     pub reboot: bool,
+    /// Whether the device holds an identity of its own: a key, the
+    /// device-identity channel and peer tables, and what is built on
+    /// them—its advertised identity, administration over the mesh, and
+    /// announcements. When set, `CAP_DEV_IDENTITY`, `CAP_IDENT`,
+    /// `CAP_ADMIN`, and `CAP_ADVERT` are advertised. When unset, all four
+    /// are absent, their properties are unknown, and `CMD_ANNOUNCE`
+    /// answers `STATUS_UNIMPLEMENTED`. Every firmware sets this; a device
+    /// that only carries its host's traffic, such as a LAN virtual radio,
+    /// need not. Required by [`mac_node`](Self::mac_node).
+    pub dev_identity: bool,
     /// The shared traffic ledger. `None`: the device keeps no counters;
     /// `CAP_STATS` is absent and the `PROP_STAT_*` properties are
     /// unknown. `Some`: the capability is advertised and the counters
@@ -330,11 +342,12 @@ pub struct SessionConfig {
     /// properties exist; otherwise they are unknown. Meaningful only
     /// alongside [`mac_node`](Self::mac_node), whose repeater it shares.
     pub meshcore_forwarder: bool,
-    /// Whether the platform runs a LAN bearer beside its node. When set,
-    /// `CAP_LAN_BEARER` is advertised and the LAN bearer properties and
-    /// counters exist; otherwise they are unknown. Meaningful only
-    /// alongside [`mac_node`](Self::mac_node), whose forwarding it shares.
-    pub lan_bearer: bool,
+    /// Whether and how the platform runs a LAN bearer: beside its node,
+    /// sharing its forwarding, or as the device's PHY. Anything but
+    /// [`LanBearerRole::None`](crate::LanBearerRole::None) advertises
+    /// `CAP_LAN_BEARER`; which properties and counters exist follows the
+    /// role.
+    pub lan_bearer: crate::LanBearerRole,
     /// The I2C buses a host may drive directly, as `PROP_I2C_BUSES`
     /// reports them. Empty: `CAP_I2C` is absent, the two I2C properties
     /// are unknown, and `CMD_I2C_TRANSFER` and `CMD_I2C_SCAN` answer
@@ -3632,6 +3645,19 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         &self.device.lan_bearer
     }
 
+    /// Use `group` for the LAN bearer from now on, as a host's write
+    /// would, without saving it: a platform's own override, such as a
+    /// tool's command line. `None` returns to the default.
+    pub fn set_lan_bearer_group(&mut self, group: Option<umsh_ulcp::lan::Group>) {
+        if self.has_lan_bearer() {
+            let value = group.map(|group| group.encode());
+            let _ = self.device.lan_bearer.set(
+                prop::LAN_BEARER_GROUP,
+                value.as_ref().map_or(&[][..], |value| &value[..]),
+            );
+        }
+    }
+
     /// Report what the platform made of the LAN bearer's configuration,
     /// announcing a change to an attached host.
     pub fn set_lan_bearer_state(
@@ -3648,9 +3674,28 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         }
     }
 
-    /// Whether this device serves the LAN bearer properties.
+    /// Whether this device has a LAN bearer at all.
     fn has_lan_bearer(&self) -> bool {
-        self.config.mac_node && self.config.lan_bearer
+        match self.config.lan_bearer {
+            crate::LanBearerRole::None => false,
+            crate::LanBearerRole::Forwarding => self.config.mac_node,
+            crate::LanBearerRole::Phy => true,
+        }
+    }
+
+    /// Whether this device forwards between its LAN bearer and its radio,
+    /// and so has the bearer's switch, ingress limit, and counters.
+    fn forwards_lan_bearer(&self) -> bool {
+        self.config.mac_node && self.config.lan_bearer == crate::LanBearerRole::Forwarding
+    }
+
+    /// Whether this device serves the LAN bearer property `key`.
+    fn has_lan_property(&self, key: u32) -> bool {
+        match key {
+            prop::LAN_BEARER_GROUP | prop::LAN_BEARER_STATE => self.has_lan_bearer(),
+            prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_INGRESS_LIMIT => self.forwards_lan_bearer(),
+            _ => false,
+        }
     }
 
     /// The live `PROP_DEV_KEY` value. `None` once a factory reset
@@ -4132,8 +4177,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             // persisted journal—then reboot. Unlike CMD_CLEAR this is
             // not confined to the durable provisioning copy and does not
             // reply: the platform wipes storage and resets, so the link
-            // drops. The TID is irrelevant (no response is sent).
-            Some(Cmd::FactoryReset) => Some(Effect::FactoryReset),
+            // drops. The TID is irrelevant (no response is sent). A
+            // device that cannot restart cannot finish one, and says so.
+            Some(Cmd::FactoryReset) => {
+                if !self.config.reboot {
+                    self.complete(tid, Status::UNIMPLEMENTED, emit);
+                    return None;
+                }
+                Some(Effect::FactoryReset)
+            }
             // Restart the hardware, keeping everything persisted. Like
             // CMD_FACTORY_RESET this does not reply—the reboot drops
             // the link, and the TID is irrelevant. A board that cannot
@@ -4146,7 +4198,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 }
                 Some(Effect::Reboot)
             }
+            // Entering the bootloader is a restart into it, so a device
+            // that cannot restart has no DFU either.
             Some(Cmd::Dfu) => {
+                if !self.config.reboot {
+                    self.complete(tid, Status::UNIMPLEMENTED, emit);
+                    return None;
+                }
                 if tid == TID_UNSOLICITED && !self.is_admin() {
                     self.complete(tid, Status::INVALID_ARGUMENT, emit);
                     return None;
@@ -4164,6 +4222,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             // by; whether the announcement can be queued at all is the
             // platform's answer, since the node lives behind it.
             Some(Cmd::Announce) => {
+                if !self.config.dev_identity {
+                    self.complete(tid, Status::UNIMPLEMENTED, emit);
+                    return None;
+                }
                 let request = match Announcement::parse(received.payload) {
                     Ok(request) => request,
                     Err(error) => {
@@ -4854,6 +4916,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         now_ms: u64,
         emit: &mut impl FnMut(&[u8]),
     ) -> Option<Effect> {
+        if self.refuse_without_identity(tid, key, emit) {
+            return None;
+        }
         if self.config.battery.is_some()
             && !self.config.battery_diagnostics.is_empty()
             && (key == prop::BATTERY || self.config.battery_diagnostics.contains(key))
@@ -6455,6 +6520,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         now_ms: u64,
         emit: &mut impl FnMut(&[u8]),
     ) -> Option<Effect> {
+        if self.refuse_without_identity(tid, key, emit) {
+            return None;
+        }
         if self.is_admin() && !admin_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
@@ -6981,7 +7049,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 Ok(false)
             }
             prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT
-                if self.has_lan_bearer() =>
+                if self.has_lan_property(key) =>
             {
                 self.device.lan_bearer.set(key, value)?;
                 self.bump_dev_domain();
@@ -7189,6 +7257,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         item: &[u8],
         emit: &mut impl FnMut(&[u8]),
     ) -> Option<Effect> {
+        if self.refuse_without_identity(tid, key, emit) {
+            return None;
+        }
         if self.is_admin() && !admin_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
@@ -7426,6 +7497,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         selector: &[u8],
         emit: &mut impl FnMut(&[u8]),
     ) -> Option<Effect> {
+        if self.refuse_without_identity(tid, key, emit) {
+            return None;
+        }
         if self.is_admin() && !admin_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
@@ -7749,7 +7823,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         let present = if counter.needs_meshcore() {
             self.has_meshcore()
         } else if counter.needs_lan_bearer() {
-            self.has_lan_bearer()
+            self.forwards_lan_bearer()
         } else {
             !counter.needs_node() || self.config.mac_node
         };
@@ -7789,6 +7863,17 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             prop::IP_DNS | prop::IP_RESOLVERS => ip.v4 || ip.v6,
             _ => false,
         }
+    }
+
+    /// Refuse a property that needs a device identity this device does
+    /// not have, as unknown. One check at the head of each property
+    /// command, so no handler below has to know.
+    fn refuse_without_identity(&mut self, tid: u8, key: u32, emit: &mut impl FnMut(&[u8])) -> bool {
+        if self.config.dev_identity || !is_identity_property(key) {
+            return false;
+        }
+        self.complete(tid, Status::PROP_NOT_FOUND, emit);
+        true
     }
 
     fn known_prop(&self, key: u32) -> bool {
@@ -7869,7 +7954,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 | prop::LAN_BEARER_INGRESS_LIMIT
                 | prop::LAN_BEARER_STATE
         ) {
-            return self.has_lan_bearer();
+            return self.has_lan_property(key);
         }
         if matches!(
             key,
@@ -7881,6 +7966,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 | prop::MAC_BACKHAUL
         ) {
             return self.config.mac_node;
+        }
+        if is_identity_property(key) {
+            return self.config.dev_identity;
         }
         if gnss::is_positioning_property(key)
             || matches!(
@@ -7912,20 +8000,6 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 | prop::PHY_T_FRAME
                 | prop::PHY_LORA_SW
                 | prop::DEV_NAME
-                | prop::DEV_KEY
-                | prop::DEV_PRIVATE_KEY
-                | prop::DEV_CHANNEL_KEYS
-                | prop::DEV_PEERS
-                | prop::DEV_ADMINS
-                | prop::IDENT
-                | prop::IDENT_ROLE
-                | prop::IDENT_MOBILE
-                | prop::IDENT_LOCATION
-                | prop::IDENT_ALTITUDE
-                | prop::DEV_DISCOVERABLE
-                | prop::ADVERT_INTERVAL
-                | prop::BEACON_INTERVAL
-                | prop::STARTUP_BEACON
                 | prop::PHY_DUTY_NOW
                 | prop::PHY_DUTY_LIMIT
                 | prop::MAC_PROMISCUOUS
@@ -7978,6 +8052,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             prop::CAPS => {
                 let mut len = 0;
                 let mac_node = self.config.mac_node;
+                let identity = self.config.dev_identity;
                 for (capability, advertised) in [
                     (cap::WRITABLE_RAW_STREAM, true),
                     (cap::PHY_DUTY_LIMIT, true),
@@ -7988,11 +8063,11 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     (cap::HOST_KEYS, true),
                     (cap::HOST_AUTO_ACK, true),
                     (cap::SAVE, true),
-                    (cap::DEV_IDENTITY, true),
+                    (cap::DEV_IDENTITY, identity),
                     (cap::REPEATER, mac_node),
-                    (cap::IDENT, true),
-                    (cap::ADMIN, true),
-                    (cap::ADVERT, true),
+                    (cap::IDENT, identity),
+                    (cap::ADMIN, identity),
+                    (cap::ADVERT, identity),
                     (cap::MAC_BACKHAUL, mac_node),
                     (cap::CMD_MULTI, true),
                 ] {
@@ -8345,7 +8420,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 len
             }
             prop::LAN_BEARER_ENABLED | prop::LAN_BEARER_GROUP | prop::LAN_BEARER_INGRESS_LIMIT
-                if self.has_lan_bearer() =>
+                if self.has_lan_property(key) =>
             {
                 self.device.lan_bearer.encode(key, out).unwrap_or(0)
             }
@@ -8636,6 +8711,28 @@ const fn is_ip_property(key: u32) -> bool {
     )
 }
 
+/// The properties of the device identity and of what is built on it:
+/// `CAP_DEV_IDENTITY`, `CAP_IDENT`, `CAP_ADMIN`, and `CAP_ADVERT`.
+const fn is_identity_property(key: u32) -> bool {
+    matches!(
+        key,
+        prop::DEV_KEY
+            | prop::DEV_PRIVATE_KEY
+            | prop::DEV_CHANNEL_KEYS
+            | prop::DEV_PEERS
+            | prop::DEV_DISCOVERABLE
+            | prop::DEV_ADMINS
+            | prop::IDENT
+            | prop::IDENT_ROLE
+            | prop::IDENT_MOBILE
+            | prop::IDENT_LOCATION
+            | prop::IDENT_ALTITUDE
+            | prop::ADVERT_INTERVAL
+            | prop::BEACON_INTERVAL
+            | prop::STARTUP_BEACON
+    )
+}
+
 /// The properties whose value the platform holds rather than the session:
 /// the stored networks, what a scan heard, and each family's addresses.
 const fn is_deferred_table(key: u32) -> bool {
@@ -8910,9 +9007,10 @@ mod tests {
             ble_pairing: true,
             ble_pin: true,
             reboot: true,
+            dev_identity: true,
             mac_node: true,
             meshcore_forwarder: true,
-            lan_bearer: true,
+            lan_bearer: crate::LanBearerRole::Forwarding,
             wifi: Some(net::WifiConfig::STATION),
             ip: Some(net::IpConfig::DUAL),
             bridge_client: false,
@@ -9644,7 +9742,7 @@ mod tests {
             SessionConfig {
                 mac_node: false,
                 meshcore_forwarder: false,
-                lan_bearer: false,
+                lan_bearer: crate::LanBearerRole::None,
                 ..test_config()
             },
             Status::RESET_POWER_ON,
@@ -9676,7 +9774,7 @@ mod tests {
         let config = SessionConfig {
             mac_node: false,
             meshcore_forwarder: false,
-            lan_bearer: false,
+            lan_bearer: crate::LanBearerRole::None,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -9819,6 +9917,83 @@ mod tests {
         assert_eq!(status_key, prop::LAST_STATUS);
         assert_eq!(pui::decode(&value).unwrap().0, Status::UNIMPLEMENTED.0);
         assert!(!capabilities(&mut fixed).contains(&cap::REBOOT));
+    }
+
+    /// DFU and a factory reset both end in a restart, so a device that
+    /// cannot restart refuses them as it refuses `CMD_REBOOT`.
+    #[test]
+    fn dfu_and_factory_reset_need_a_device_that_can_restart() {
+        let config = SessionConfig {
+            reboot: false,
+            ..test_config()
+        };
+        let mut fixed: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        fixed.attach(true);
+        let mut buf = [0u8; 8];
+        let requests = [
+            frame::dfu(&mut buf, 3, None).map(|len| buf[..len].to_vec()),
+            frame::factory_reset(&mut buf, 4).map(|len| buf[..len].to_vec()),
+        ];
+        for request in requests {
+            let request = request.unwrap();
+            let (emitted, effect) = dispatch(&mut fixed, &request, 0);
+            assert_eq!(effect, None);
+            let (_, status_key, value) = parse_prop_is(&emitted[0]);
+            assert_eq!(status_key, prop::LAST_STATUS);
+            assert_eq!(pui::decode(&value).unwrap().0, Status::UNIMPLEMENTED.0);
+        }
+
+        let mut session = test_session();
+        let len = frame::factory_reset(&mut buf, 4).unwrap();
+        let (_, effect) = dispatch(&mut session, &buf[..len], 0);
+        assert_eq!(effect, Some(Effect::FactoryReset));
+    }
+
+    /// A device with no identity of its own leaves out the identity and
+    /// everything built on it, and knows none of their properties.
+    #[test]
+    fn a_device_without_an_identity_offers_nothing_that_needs_one() {
+        let config = SessionConfig {
+            dev_identity: false,
+            mac_node: false,
+            meshcore_forwarder: false,
+            lan_bearer: crate::LanBearerRole::None,
+            ..test_config()
+        };
+        let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        session.attach(true);
+        let caps = capabilities(&mut session);
+        for capability in [cap::DEV_IDENTITY, cap::IDENT, cap::ADMIN, cap::ADVERT] {
+            assert!(!caps.contains(&capability), "cap {capability} advertised");
+        }
+        for key in [
+            prop::DEV_KEY,
+            prop::DEV_CHANNEL_KEYS,
+            prop::DEV_PEERS,
+            prop::DEV_DISCOVERABLE,
+            prop::DEV_ADMINS,
+            prop::IDENT,
+            prop::IDENT_ROLE,
+            prop::ADVERT_INTERVAL,
+        ] {
+            let mut buf = [0u8; 16];
+            let len = frame::prop_get(&mut buf, 6, key).unwrap();
+            let (emitted, effect) = dispatch(&mut session, &buf[..len], 0);
+            assert_eq!(effect, None, "prop {key} produced an effect");
+            let (_, status_key, value) = parse_prop_is(&emitted[0]);
+            assert_eq!(status_key, prop::LAST_STATUS);
+            assert_eq!(
+                pui::decode(&value).unwrap().0,
+                Status::PROP_NOT_FOUND.0,
+                "prop {key} is visible without an identity"
+            );
+        }
+        let mut buf = [0u8; 8];
+        let len = frame::announce(&mut buf, 3, &Announcement::default()).unwrap();
+        let (emitted, effect) = dispatch(&mut session, &buf[..len], 0);
+        assert_eq!(effect, None);
+        let (_, _, value) = parse_prop_is(&emitted[0]);
+        assert_eq!(pui::decode(&value).unwrap().0, Status::UNIMPLEMENTED.0);
     }
 
     /// `CMD_ANNOUNCE` with nothing in it is the whole command's default:
@@ -11056,7 +11231,7 @@ mod tests {
     #[test]
     fn a_device_without_a_lan_bearer_has_none_of_its_properties() {
         let config = SessionConfig {
-            lan_bearer: false,
+            lan_bearer: crate::LanBearerRole::None,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -11065,6 +11240,35 @@ mod tests {
         for key in [
             prop::LAN_BEARER_ENABLED,
             prop::LAN_BEARER_STATE,
+            prop::STAT_LAN_EXPORTED,
+        ] {
+            let (emitted, _) = set(&mut session, key, &[1]);
+            expect_status(&emitted[0], 2, Status::PROP_NOT_FOUND);
+        }
+    }
+
+    /// A device whose PHY is the group has the group and the state, and
+    /// none of what belongs to forwarding.
+    #[test]
+    fn a_virtual_radio_has_only_the_group_and_state() {
+        let config = SessionConfig {
+            lan_bearer: crate::LanBearerRole::Phy,
+            mac_node: false,
+            ..test_config()
+        };
+        let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        session.attach(true);
+        assert!(capabilities(&mut session).contains(&cap::LAN_BEARER));
+        assert_eq!(get(&mut session, prop::LAN_BEARER_STATE), [0]);
+        set(
+            &mut session,
+            prop::LAN_BEARER_GROUP,
+            &[239, 1, 2, 3, 0x10, 0x27],
+        );
+        assert_eq!(session.lan_bearer_config().group().port, 10_000);
+        for key in [
+            prop::LAN_BEARER_ENABLED,
+            prop::LAN_BEARER_INGRESS_LIMIT,
             prop::STAT_LAN_EXPORTED,
         ] {
             let (emitted, _) = set(&mut session, key, &[1]);
@@ -11321,7 +11525,7 @@ mod tests {
     fn meshcore_settings_are_absent_without_the_forwarder() {
         let config = SessionConfig {
             meshcore_forwarder: false,
-            lan_bearer: false,
+            lan_bearer: crate::LanBearerRole::None,
             ..test_config()
         };
         let mut session: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
@@ -17862,7 +18066,7 @@ mod tests {
                 bridge_client: enabled,
                 mac_node: node,
                 meshcore_forwarder: false,
-                lan_bearer: false,
+                lan_bearer: crate::LanBearerRole::None,
                 ip: if ip { Some(net::IpConfig::DUAL) } else { None },
                 ..test_config()
             };

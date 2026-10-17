@@ -36,6 +36,7 @@ pub mod net;
 pub mod session;
 
 pub use duty::{DutyExceeded, DutyLedger, DutyTracker};
+pub use lan_bearer::LanBearerRole;
 pub use net::{IpConfig, MAX_RESOLVERS, ResolverError, Resolvers, SelectedNetwork, WifiConfig};
 #[cfg(feature = "wifi")]
 pub mod known_networks;

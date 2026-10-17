@@ -15,6 +15,8 @@
 //! - [`host::HostPlatform`]: a real device with no radio of its own, such
 //!   as a LAN virtual radio. State persists in files, identities come
 //!   from the operating system's generator, and the clock is the system's.
+//! - [`lan`]: that device with the LAN bearer's group as its PHY, driven
+//!   for as long as its owner runs it.
 //!
 //! The [`SessionConfig`] is the caller's: it names the device and
 //! declares its capability surface. A simulated device has no node
@@ -24,6 +26,8 @@
 
 #[cfg(feature = "host")]
 pub mod host;
+#[cfg(feature = "lan")]
+pub mod lan;
 pub mod soft;
 
 use umsh_core::{NodeHint, PacketBuilder};
@@ -41,8 +45,8 @@ use umsh_ulcp_device::{AnnounceRequest, Effect};
 use soft::{DeviceSession, SoftDevice, SoftPlatform};
 
 pub use umsh_ulcp_device::{
-    AlertConfig, BatteryFields, DutyLedger, GnssConfig, IpConfig, RadioRxInfo, RadioSettings,
-    SessionConfig, TimeConfig, WifiConfig,
+    AlertConfig, BatteryFields, DutyLedger, GnssConfig, IpConfig, LanBearerRole, RadioRxInfo,
+    RadioSettings, SessionConfig, TimeConfig, WifiConfig,
 };
 
 /// Bonds a fresh simulated device pretends to be holding.
@@ -874,11 +878,12 @@ mod tests {
             // A simulated power cycle is a rebuilt session, which is
             // exactly what a host watching this device would see.
             reboot: true,
+            dev_identity: true,
             // A simulated device has no radio to count for.
             stats: None,
             mac_node: false,
             meshcore_forwarder: false,
-            lan_bearer: false,
+            lan_bearer: umsh_ulcp_device::LanBearerRole::None,
             wifi: Some(WifiConfig::STATION),
             ip: Some(IpConfig::DUAL),
             bridge_client: false,

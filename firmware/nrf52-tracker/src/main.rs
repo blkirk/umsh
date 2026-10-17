@@ -560,10 +560,11 @@ mod firmware {
             // Every nRF52 board can reset itself through the bootloader
             // register; see the `reboot` hook below.
             reboot: true,
+            dev_identity: true,
             // A real MAC runs behind every session here.
             mac_node: true,
             meshcore_forwarder: cfg!(feature = "meshcore-forwarder"),
-            lan_bearer: false,
+            lan_bearer: umsh_ulcp_device::LanBearerRole::None,
             // No nRF52840 board has a Wi-Fi radio or a stack of its own,
             // so neither capability is advertised and none of those
             // properties exists.
