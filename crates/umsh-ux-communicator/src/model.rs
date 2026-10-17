@@ -52,8 +52,7 @@ pub struct ChatSummary {
     pub age: String<6>,
     pub unread: bool,
     pub muted: bool,
-    /// How far away the peer is, for a peer chat.
-    pub hops: Option<u8>,
+    pub kind: ChatKind,
     /// The unsent message, kept until it is sent or erased.
     pub draft: Draft,
 }
@@ -70,7 +69,7 @@ impl ChatSummary {
             age: String::new(),
             unread: false,
             muted: false,
-            hops: None,
+            kind: ChatKind::Peer { hops: None },
             draft: EditBuffer::with_text(DraftText::new(heap)),
         };
         push_cut(&mut summary.name, name);
@@ -83,13 +82,30 @@ impl ChatSummary {
         match (message.direction, &message.sender) {
             (Direction::Outbound, _) => push_cut(&mut self.preview, "You: "),
             (Direction::Inbound, Some(sender)) => {
-                push_cut(&mut self.preview, sender);
+                push_cut(&mut self.preview, &sender.name);
                 push_cut(&mut self.preview, ": ");
             }
             (Direction::Inbound, None) => {}
         }
         push_cut(&mut self.preview, &message.text);
     }
+}
+
+/// Whom a chat is with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatKind {
+    /// One peer, and how far away it is when that is known.
+    Peer { hops: Option<u8> },
+    /// Everyone holding the channel's key.
+    Channel,
+}
+
+/// Who sent a channel message, as the channel shows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sender {
+    /// The best name known for them, or their hint.
+    pub name: String<24>,
+    pub avatar: AvatarStyle,
 }
 
 /// Which way a message went.
@@ -164,7 +180,7 @@ pub struct Message {
     pub id: MessageId,
     pub direction: Direction,
     /// Who sent an incoming channel message.
-    pub sender: Option<String<24>>,
+    pub sender: Option<Sender>,
     pub text: SharedText,
     pub delivery: Delivery,
     pub reactions: Reactions,
@@ -529,7 +545,7 @@ impl State {
             .sender
             .as_ref()
             .and_then(|sender| {
-                SharedText::joined(message.text.heap(), &[sender, ": ", &message.text])
+                SharedText::joined(message.text.heap(), &[&sender.name, ": ", &message.text])
             })
             .unwrap_or_else(|| message.text.clone());
         match self.arrived.iter_mut().find(|a| a.chat == chat) {

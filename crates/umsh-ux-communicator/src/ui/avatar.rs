@@ -6,10 +6,9 @@ use embedded_graphics::pixelcolor::Rgb565;
 
 use crate::avatar::{AvatarStyle, Outline};
 use crate::font;
-use crate::model::State;
 
 /// `style` at `size` pixels across.
-pub fn view(style: &AvatarStyle, size: u32) -> impl View<Rgb565, State> + use<> {
+pub fn view<C>(style: &AvatarStyle, size: u32) -> impl View<Rgb565, C> + use<C> {
     let (face, text_size) = match style.outline {
         // A peer's hint is set in the monospaced face, two over two.
         Outline::Peer(_) => (&font::MONO_BOLD, size * 3 / 8),

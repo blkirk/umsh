@@ -457,7 +457,7 @@ fn icons() -> String {
 }
 
 /// Avatar diameters, in pixels, that the screens draw.
-const AVATAR_SIZES: &[u32] = &[26, 28, 34];
+const AVATAR_SIZES: &[u32] = &[26, 28, 30, 34];
 
 /// The avatar outlines as Gray4 masks: one static per shape and size, named
 /// like `HEXAGON_34`, each row padded to a whole byte.

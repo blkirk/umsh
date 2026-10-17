@@ -636,3 +636,18 @@ fn a_muted_chat_does_not_wake_the_panel() {
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
     assert!(app.state().arrived.is_empty());
 }
+
+#[test]
+fn a_channel_send_ends_at_sent() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_in_conversation(app.state(), TRAIL_CREW);
+    run(&mut app, &[Input::Enter]);
+    run(&mut app, &typed("Switchbacks, 15 min out"));
+    run(&mut app, &[Input::Enter]);
+    let conversation = app.state().conversation.as_ref().expect("a chat is open");
+    let sent = conversation.messages.last().expect("the message sent");
+    assert_eq!(sent.text.as_str(), "Switchbacks, 15 min out");
+    // Multicast has no acknowledgment to wait for.
+    assert_eq!(sent.delivery, Delivery::Sent);
+}

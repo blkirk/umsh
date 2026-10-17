@@ -17,8 +17,8 @@ use heapless::Vec;
 use super::label;
 use crate::avatar::AvatarStyle;
 use crate::model::{
-    ChatId, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId, Messages, Reacted,
-    Reaction, Reactions, State,
+    ChatId, ChatKind, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId, Messages,
+    Reacted, Reaction, Reactions, State,
 };
 use crate::nav::{Screen, keys};
 use crate::text::DraftText;
@@ -48,11 +48,18 @@ const RING_GAP: u32 = 4;
 const GAP_SAME: u32 = 3;
 const GAP_CHANGE: u32 = 8;
 const SENDER_LINE: u32 = 18;
+/// Where a channel's received bubbles begin, beside their senders' avatars,
+/// and those avatars' size and place.
+const IN_X: u32 = 42;
+const MEMBER_AVATAR: u32 = 30;
+const MEMBER_AVATAR_X: u32 = 5;
 const STATUS_LINE: u32 = 21;
 /// Keeps part of the next message in view when focus moves.
 const FOCUS_MARGIN: u32 = 12;
 /// How far a turn scrolls through a message taller than the history: a line.
 const SCROLL_STEP: u32 = 24;
+/// What an empty composer says: "Message" and the chat's name.
+type Placeholder = heapless::String<48>;
 /// The field's fill while it is edited.
 const ACTIVE_FIELD: Rgb565 = Rgb565::new(0x1A >> 3, 0x23 >> 2, 0x33 >> 3);
 
@@ -85,16 +92,22 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     // The menu offers my reaction as the one already chosen.
     let menu = find(actions).map(Message::my_reaction);
     let quoted = find(reply).map(|message| quote(message, summary.map_or("", |s| &s.name)));
+    let channel = summary.is_some_and(|s| s.kind == ChatKind::Channel);
+    let mut placeholder = Placeholder::new();
+    _ = core::fmt::write(
+        &mut placeholder,
+        format_args!("Message {}", summary.map_or("", |s| &s.name)),
+    );
     VStack::new((
         header(
             summary.map_or("", |s| &s.name),
             summary.map(|s| &s.avatar),
-            summary.and_then(|s| s.hops),
+            summary.map(|s| s.kind),
         ),
-        history(messages, actions),
+        history(messages, actions, channel),
         state.airtime_wait.map(airtime_line),
         quoted,
-        summary.map(|s| composer(chat, &s.draft, reading)),
+        summary.map(|s| composer(chat, &s.draft, reading, &placeholder)),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
@@ -115,19 +128,22 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     .popover(menu.as_ref(), |&mine| actions_menu(mine))
 }
 
-/// Back, the peer or channel, and how far away a peer is; or a screen's
-/// title alone.
+/// Back, the peer or channel, and how far away a peer is or that it is a
+/// channel; or a screen's title alone.
 pub(super) fn header(
     name: &str,
     avatar: Option<&AvatarStyle>,
-    hops: Option<u8>,
+    kind: Option<ChatKind>,
 ) -> impl View<Rgb565, State> + use<> {
     let mut distance: heapless::String<12> = heapless::String::new();
-    match hops {
-        Some(0) => _ = distance.push_str("Direct"),
-        Some(1) => _ = distance.push_str("1 hop"),
-        Some(n) => _ = core::fmt::write(&mut distance, format_args!("{n} hops")),
-        None => {}
+    match kind {
+        Some(ChatKind::Peer { hops: Some(0) }) => _ = distance.push_str("Direct"),
+        Some(ChatKind::Peer { hops: Some(1) }) => _ = distance.push_str("1 hop"),
+        Some(ChatKind::Peer { hops: Some(n) }) => {
+            _ = core::fmt::write(&mut distance, format_args!("{n} hops"));
+        }
+        Some(ChatKind::Channel) => _ = distance.push_str("Channel"),
+        Some(ChatKind::Peer { hops: None }) | None => {}
     }
     HStack::new((
         Image::new(&icon::BACK)
@@ -154,7 +170,11 @@ pub(super) fn header(
 /// The messages, oldest first, ending at the composer. History shorter
 /// than the space sits on the composer. The message whose actions are open
 /// stays marked while focus is in them.
-fn history(messages: &[Message], acting_on: Option<MessageId>) -> impl View<Rgb565, State> + use<> {
+fn history(
+    messages: &[Message],
+    acting_on: Option<MessageId>,
+    channel: bool,
+) -> impl View<Rgb565, State> + use<> {
     let messages = Messages::from_slice(messages).unwrap_or_default();
     let ids: Vec<MessageId, MAX_MESSAGES> = messages.iter().map(|m| m.id).collect();
     // Delivery shows under the newest message sent, the newest delivered,
@@ -171,7 +191,7 @@ fn history(messages: &[Message], acting_on: Option<MessageId>) -> impl View<Rgb5
             let delivery = Some(i) == newest_sent
                 || Some(i) == newest_delivered
                 || messages[i].delivery == Delivery::Unconfirmed;
-            item(&messages, i, delivery, acting_on)
+            item(&messages, i, delivery, acting_on, channel)
         })
         .keyed(move |&i| keys::message(ids[i])),
     )
@@ -182,13 +202,15 @@ fn history(messages: &[Message], acting_on: Option<MessageId>) -> impl View<Rgb5
     .with_scroll_step(SCROLL_STEP)
 }
 
-/// A message, with its sender above it in a channel when the sender changes,
-/// and its delivery below it when asked.
+/// A message, with its delivery below it when asked. In a channel, each run
+/// of messages from one member has the member's name above its first and
+/// their avatar beside its last.
 fn item(
     messages: &Messages,
     i: usize,
     delivery: bool,
     acting_on: Option<MessageId>,
+    channel: bool,
 ) -> impl View<Rgb565, State> + use<> {
     let message = &messages[i];
     let follows_same = i.checked_sub(1).is_some_and(|p| {
@@ -206,6 +228,21 @@ fn item(
         HorizontalAlignment::Leading
     };
     let sender = (!follows_same).then(|| message.sender.clone()).flatten();
+    let ends_run = messages
+        .get(i + 1)
+        .is_none_or(|next| next.direction != message.direction || next.sender != message.sender);
+    // A channel's received bubbles stand clear of their senders' avatars.
+    let beside_avatar = channel && !outbound;
+    let avatar = message
+        .sender
+        .as_ref()
+        .filter(|_| beside_avatar && ends_run)
+        .map(|sender| {
+            Lazy::new(sender.avatar.clone(), member_avatar)
+                .padding(Edges::Leading, MEMBER_AVATAR_X)
+                .padding(Edges::Bottom, RING_GAP)
+        });
+    let lead = if beside_avatar { IN_X } else { SIDE };
     // Chips over the bubble take room above it, which a sender's name
     // beside them shares.
     let reserve = chip_reserve(&message.reactions).saturating_sub(if sender.is_some() {
@@ -214,18 +251,25 @@ fn item(
         0
     });
     VStack::new((
-        sender.map(|name| {
-            label::<24>(&name, &font::BOLD, theme::SMALL, theme::TEXT_SECONDARY)
-                .frame()
-                .with_height(SENDER_LINE)
-                .padding(Edges::Leading, SIDE + 4)
+        sender.map(|sender| {
+            label::<24>(
+                &sender.name,
+                &font::BOLD,
+                theme::SMALL,
+                theme::TEXT_SECONDARY,
+            )
+            .frame()
+            .with_height(SENDER_LINE)
+            .padding(Edges::Leading, lead + 4)
         }),
-        bubble(message, acting_on == Some(message.id)),
+        bubble(message, acting_on == Some(message.id)).padding(Edges::Leading, lead - SIDE),
         delivery.then(|| delivery_line(message.delivery)),
     ))
     .with_spacing(0)
     .with_alignment(alignment)
     .flex_infinite_width(alignment)
+    // Received messages have no delivery line, so the bottom is the bubble's.
+    .overlay(Alignment::BottomLeading, avatar)
     .padding(Edges::Top, gap + reserve)
 }
 
@@ -454,14 +498,23 @@ fn airtime_line(wait: u16) -> impl View<Rgb565, State> + use<> {
 }
 
 /// The composer, or the line it folds to while you read.
-fn composer(chat: ChatId, draft: &Draft, folded: bool) -> impl View<Rgb565, State> + use<> {
+fn composer(
+    chat: ChatId,
+    draft: &Draft,
+    folded: bool,
+    placeholder: &Placeholder,
+) -> impl View<Rgb565, State> + use<> {
     buoyant::match_view!(folded, {
-        true => folded_bar(draft),
-        false => field(chat, draft),
+        true => folded_bar(draft, placeholder.clone()),
+        false => field(chat, draft, placeholder.clone()),
     })
 }
 
-fn field(chat: ChatId, draft: &Draft) -> impl View<Rgb565, State> + use<> {
+fn field(
+    chat: ChatId,
+    draft: &Draft,
+    placeholder: Placeholder,
+) -> impl View<Rgb565, State> + use<> {
     let empty = draft.is_empty();
     TextField::new(draft, &font::REGULAR, move |s: &mut State| {
         s.draft_mut(chat)
@@ -469,7 +522,9 @@ fn field(chat: ChatId, draft: &Draft) -> impl View<Rgb565, State> + use<> {
     .with_font_size(theme::BODY)
     .with_max_lines(3)
     .on_submit(move |s: &mut State| s.send(chat))
-    .with_label(move |status: TextFieldStatus, area| field_look(status, area, empty))
+    .with_label(move |status: TextFieldStatus, area| {
+        field_look(status, area, empty.then_some(&placeholder))
+    })
     .focus_key(keys::COMPOSER)
     .padding(Edges::Horizontal, SIDE)
     .padding(Edges::Vertical, COMPOSER_INSET)
@@ -478,7 +533,7 @@ fn field(chat: ChatId, draft: &Draft) -> impl View<Rgb565, State> + use<> {
 fn field_look(
     status: TextFieldStatus,
     area: TextArea<'static, DraftText, PrerenderedFont>,
-    empty: bool,
+    placeholder: Option<&Placeholder>,
 ) -> impl View<Rgb565, State> + use<> {
     let (fill, line_width) = if status.is_active() {
         (ACTIVE_FIELD, 2)
@@ -498,10 +553,17 @@ fn field_look(
     .hint_background_color(fill)
     .overlay(
         Alignment::Leading,
-        (empty && !status.is_active()).then(|| {
-            label::<8>("Message", &font::REGULAR, theme::BODY, theme::TEXT_TERTIARY)
+        placeholder
+            .filter(|_| !status.is_active())
+            .map(|placeholder| {
+                label::<48>(
+                    placeholder,
+                    &font::REGULAR,
+                    theme::BODY,
+                    theme::TEXT_TERTIARY,
+                )
                 .padding(Edges::Leading, 4)
-        }),
+            }),
     )
     .padding(Edges::Horizontal, 12)
     .padding(Edges::Vertical, 2)
@@ -517,7 +579,7 @@ fn field_look(
 }
 
 /// The composer folded to one dim line: the draft, or where one would go.
-fn folded_bar(draft: &Draft) -> impl View<Rgb565, State> + use<> {
+fn folded_bar(draft: &Draft, placeholder: Placeholder) -> impl View<Rgb565, State> + use<> {
     let text = (!draft.is_empty()).then(|| draft.storage().clone());
     // Focusable, so turning past the newest message reaches the composer.
     Button::new(
@@ -531,8 +593,8 @@ fn folded_bar(draft: &Draft) -> impl View<Rgb565, State> + use<> {
                     super::line(text, &font::REGULAR, theme::SMALL, theme::TEXT_SECONDARY)
                 }),
                 text.is_none().then(|| {
-                    label::<8>(
-                        "Message",
+                    label::<48>(
+                        &placeholder,
                         &font::REGULAR,
                         theme::SMALL,
                         theme::TEXT_TERTIARY,
@@ -565,7 +627,7 @@ fn quote(message: &Message, chat_name: &str) -> impl View<Rgb565, State> + use<>
     let mut title: heapless::String<48> = heapless::String::new();
     let whom = match (message.direction, &message.sender) {
         (Direction::Outbound, _) => "yourself",
-        (Direction::Inbound, Some(sender)) => sender.as_str(),
+        (Direction::Inbound, Some(sender)) => sender.name.as_str(),
         (Direction::Inbound, None) => chat_name,
     };
     _ = core::fmt::write(&mut title, format_args!("Replying to {whom}"));
@@ -713,4 +775,11 @@ fn menu_item(
             .padding(Edges::Bottom, 2)
     })
     .focus_key(key)
+}
+
+/// A channel member's avatar beside their messages. Built from its style
+/// each time it is drawn ([`Lazy`]): kept in the render trees, one for every
+/// run would outweigh the messages themselves.
+fn member_avatar(style: &AvatarStyle) -> impl View<Rgb565, ()> + use<> {
+    super::avatar::view(style, MEMBER_AVATAR)
 }

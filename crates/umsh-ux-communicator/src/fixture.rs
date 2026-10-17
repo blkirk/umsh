@@ -5,8 +5,8 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChatId, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Message, MessageId,
-    Messages, Reacted, Reaction, Reactions, State, StatusStrip, push_newest,
+    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Message,
+    MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -16,11 +16,30 @@ fn s<const N: usize>(text: &str) -> String<N> {
     String::try_from(text).expect("fixture text fits")
 }
 
+/// A channel member as the channel shows them: a name the mockup gives
+/// them, or their hint when nothing better is known.
+fn member(name: &str) -> Sender {
+    let avatar = match name {
+        "Sam" => AvatarStyle::peer([218, 50, 133], "j3DC", PeerShape::Circle),
+        "Kit" => AvatarStyle::peer([187, 150, 80], "iMyA", PeerShape::Circle),
+        _ => AvatarStyle::peer([245, 212, 31], "4Fz*", PeerShape::Hexagon),
+    };
+    Sender {
+        name: s(name),
+        avatar,
+    }
+}
+
+/// Whether `chat` is one of the fixture's channels, Trail Crew or public.
+fn is_channel(chat: ChatId) -> bool {
+    matches!(chat, 2 | 4)
+}
+
 struct Chat {
     avatar: AvatarStyle,
     name: &'static str,
     age: &'static str,
-    hops: Option<u8>,
+    kind: ChatKind,
     unread: bool,
     muted: bool,
     draft: &'static str,
@@ -47,7 +66,11 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
             (From::Me, "Just passed it. ETA 20 min."),
             (From::Peer, "See you at the hut"),
         ],
-        2 => &[(From::Member("Sam"), "Will wait 10 min")],
+        2 => &[
+            (From::Member("Sam"), "At the saddle"),
+            (From::Member("Member 4Fz*"), "Two of us behind you"),
+            (From::Member("Sam"), "Will wait 10 min"),
+        ],
         3 => &[
             (From::Peer, "Is Bald Knob back up?"),
             (From::Me, "Not yet, Saturday."),
@@ -108,7 +131,7 @@ fn message(
             From::Peer | From::Member(_) => Direction::Inbound,
         },
         sender: match from {
-            From::Member(name) => Some(s(name)),
+            From::Member(name) => Some(member(name)),
             From::Me | From::Peer => None,
         },
         text: SharedText::new(heap, text)?,
@@ -177,11 +200,13 @@ impl Store {
                 From::Peer | From::Member(_) => Direction::Inbound,
             },
             sender: match from {
-                From::Member(name) => Some(s(name)),
+                From::Member(name) => Some(member(name)),
                 From::Me | From::Peer => None,
             },
             text: SharedText::new(self.heap, text)?,
             delivery: match from {
+                // A channel's sends have no acknowledgment to wait for.
+                From::Me if is_channel(chat) => Delivery::Sent,
                 From::Me => Delivery::Sending,
                 From::Peer | From::Member(_) => Delivery::Delivered,
             },
@@ -305,7 +330,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::peer([235, 187, 21], "kBkQ", PeerShape::Circle),
             name: "Ridge Medic",
             age: "2m",
-            hops: Some(2),
+            kind: ChatKind::Peer { hops: Some(2) },
             unread: false,
             muted: false,
             draft: "On my way, save me some hot coffee",
@@ -314,7 +339,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(None, "Trail Crew", [203, 24, 112]),
             name: "Trail Crew",
             age: "9m",
-            hops: None,
+            kind: ChatKind::Channel,
             unread: true,
             muted: false,
             draft: "",
@@ -323,7 +348,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::peer([179, 246, 158], "YmRG", PeerShape::Circle),
             name: "Pat Okafor",
             age: "41m",
-            hops: Some(0),
+            kind: ChatKind::Peer { hops: Some(0) },
             unread: false,
             muted: false,
             draft: "",
@@ -332,7 +357,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(Some(BuiltinChannel::Public), "public", [0, 0, 0]),
             name: "public",
             age: "1h",
-            hops: None,
+            kind: ChatKind::Channel,
             unread: false,
             muted: true,
             draft: "",
@@ -341,7 +366,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::peer([94, 10, 224], "H1x*", PeerShape::Circle),
             name: "Jo Reyes",
             age: "3h",
-            hops: Some(3),
+            kind: ChatKind::Peer { hops: Some(3) },
             unread: false,
             muted: false,
             draft: "",
@@ -352,7 +377,7 @@ pub fn state(store: &'static Store) -> State {
         summary.age = s(chat.age);
         summary.unread = chat.unread;
         summary.muted = chat.muted;
-        summary.hops = chat.hops;
+        summary.kind = chat.kind;
         let mut draft = DraftText::new(store.heap);
         assert!(draft.splice(0..0, chat.draft), "fixture draft fits");
         summary.draft = EditBuffer::with_text(draft);
