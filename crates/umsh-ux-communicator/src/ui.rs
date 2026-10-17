@@ -23,6 +23,7 @@ mod conversation;
 mod details;
 mod join;
 mod member;
+mod peer;
 mod peers;
 mod rail;
 mod status;
@@ -75,6 +76,11 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             ),
             Screen::Join { invite, name, .. } => join::view(invite, name),
             Screen::AddPeer { text, .. } => add_peer::view(state, text),
+            Screen::Peer {
+                peer, detail, confirm, ..
+            } => state
+                .peer(*peer)
+                .map(|summary| peer::view(summary, detail, *confirm)),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),

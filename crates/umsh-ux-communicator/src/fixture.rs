@@ -6,8 +6,8 @@ use core::cell::{Cell, RefCell};
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerEntry, PeerId, PeerSummary, Reacted,
-    Reaction, Reactions, Sender, State, StatusStrip, push_newest,
+    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerDetail, PeerEntry, PeerId, PeerSummary,
+    Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -262,6 +262,10 @@ pub struct Store {
     direct: RefCell<Vec<String<44>, KEPT>>,
     /// Channels joined from invitations, by the invitation's name.
     joined: RefCell<Vec<String<32>, KEPT>>,
+    /// Peers with forward secrecy turned on, peers pinged, and peers forgotten.
+    secrecy: RefCell<Vec<PeerId, KEPT>>,
+    pinged: RefCell<Vec<PeerId, KEPT>>,
+    forgotten: RefCell<Vec<PeerId, KEPT>>,
 }
 
 impl Store {
@@ -280,9 +284,41 @@ impl Store {
             saved: RefCell::new(Vec::new()),
             direct: RefCell::new(Vec::new()),
             joined: RefCell::new(Vec::new()),
+            secrecy: RefCell::new(Vec::new()),
+            pinged: RefCell::new(Vec::new()),
+            forgotten: RefCell::new(Vec::new()),
         }
     }
 }
+
+/// The fixture's saved peers' addresses, how they are reached, when they
+/// were last heard, and the chat with them, by peer.
+const PEERS: [(&str, Option<&str>, &str, Option<ChatId>); 4] = [
+    (
+        "YmRGmitsDJy13p2eiuxziZph6qDZFS1pcN1uaofYjM45",
+        Some("Direct \u{B7} \u{2212}97 dBm"),
+        "5 min ago",
+        Some(3),
+    ),
+    (
+        "H1xBRrvv1ExLhX3wqH3LdU7ew8dkovDZsgMuCcPZXa7y",
+        Some("3 hops"),
+        "1 hr ago",
+        Some(5),
+    ),
+    (
+        "hhaevhk7fePTPDkBgW55Sd5Zh9oy3bC5ueFrUxcVUtYg",
+        Some("3 hops"),
+        "3 hr ago",
+        None,
+    ),
+    (
+        "Dc7qZiXV4uuYKB4TvuRhW2XFUgdP5v986FkCyhq9FAyq",
+        Some("2 hops"),
+        "4 hr ago",
+        None,
+    ),
+];
 
 /// How a node URI begins.
 const PEER_INVITATION: &str = "umsh:n:";
@@ -453,6 +489,14 @@ impl History for Store {
     }
 
     fn direct_chat(&self, address: &str, name: &str, avatar: &AvatarStyle) -> Option<ChatSummary> {
+        // A saved peer the fixture already has a chat with.
+        if let Some(chat) = PEERS
+            .iter()
+            .find(|(a, ..)| *a == address)
+            .and_then(|&(.., chat)| chat)
+        {
+            return Some(ChatSummary::new(chat, avatar.clone(), name, self.heap));
+        }
         let mut direct = self.direct.borrow_mut();
         let index = match direct.iter().position(|a| a == address) {
             Some(index) => index,
@@ -467,6 +511,49 @@ impl History for Store {
             name,
             self.heap,
         ))
+    }
+
+    fn peer_detail(&self, peer: PeerId) -> Option<PeerDetail> {
+        if self.forgotten.borrow().contains(&peer) {
+            return None;
+        }
+        let (address, route, heard) = match peer.checked_sub(1).and_then(|i| PEERS.get(i as usize))
+        {
+            Some(&(address, route, heard, _)) => (s(address), route.map(s), heard),
+            // A member saved since the fixture started.
+            None => {
+                let saved = self.saved.borrow();
+                let index = peer.checked_sub(FIRST_SAVED)? as usize;
+                (saved.get(index)?.clone(), None, "2 min ago")
+            }
+        };
+        Some(PeerDetail {
+            address,
+            route,
+            heard: s(heard),
+            forward_secrecy: self.secrecy.borrow().contains(&peer),
+            // A ping is answered at once.
+            ping: self.pinged.borrow().contains(&peer).then(|| s("1.4 s")),
+        })
+    }
+
+    fn set_forward_secrecy(&self, peer: PeerId, on: bool) {
+        let mut secrecy = self.secrecy.borrow_mut();
+        secrecy.retain(|p| *p != peer);
+        if on {
+            _ = secrecy.push(peer);
+        }
+    }
+
+    fn ping(&self, peer: PeerId) {
+        let mut pinged = self.pinged.borrow_mut();
+        if !pinged.contains(&peer) {
+            _ = pinged.push(peer);
+        }
+    }
+
+    fn forget_peer(&self, peer: PeerId) {
+        _ = self.forgotten.borrow_mut().push(peer);
     }
 
     fn inspect_peer(&self, text: &str) -> PeerEntry {

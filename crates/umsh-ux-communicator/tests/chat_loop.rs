@@ -997,3 +997,75 @@ fn add_peer_reads_an_invitation_and_refuses_what_is_not_an_address() {
     run(&mut app, &typed("0O"));
     assert_eq!(app.state().peer_entry(), PeerEntry::Invalid);
 }
+
+fn peer_detail(state: &State) -> &umsh_ux_communicator::model::PeerDetail {
+    match state.screen() {
+        Screen::Peer { detail, .. } => detail,
+        other => panic!("expected a peer, got {other:?}"),
+    }
+}
+
+/// Opens the first saved peer, Pat Okafor, from the Peers list.
+fn open_pat<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(
+        app,
+        &[
+            Input::Backspace,
+            Input::Turn(1),
+            Input::Press,
+            Input::Turn(1),
+            Input::Press,
+        ],
+    );
+    assert_eq!(focus(app.state()), Some(keys::PEER_MESSAGE));
+}
+
+#[test]
+fn a_saved_peer_shows_its_detail_and_messages_in_its_own_chat() {
+    let mut app = app!();
+    open_pat(&mut app);
+    assert!(peer_detail(app.state()).address.starts_with("YmRG"));
+    run(&mut app, &[Input::Press]);
+    assert_in_conversation(app.state(), PAT);
+}
+
+#[test]
+fn forward_secrecy_switches_and_a_ping_is_answered() {
+    let mut app = app!();
+    open_pat(&mut app);
+    run(&mut app, &[Input::Turn(3)]);
+    assert_eq!(focus(app.state()), Some(keys::PEER_SECRECY));
+    run(&mut app, &[Input::Press]);
+    assert!(peer_detail(app.state()).forward_secrecy);
+    run(&mut app, &[Input::Press]);
+    assert!(!peer_detail(app.state()).forward_secrecy);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(peer_detail(app.state()).ping.as_deref(), Some("1.4 s"));
+}
+
+#[test]
+fn forget_asks_first_and_cancel_keeps_the_peer() {
+    let mut app = app!();
+    open_pat(&mut app);
+    let peers = app.state().peers.len();
+    run(&mut app, &[Input::Turn(5)]);
+    assert_eq!(focus(app.state()), Some(keys::PEER_FORGET));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::FORGET_CANCEL));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::PEER_FORGET));
+    assert_eq!(app.state().peers.len(), peers);
+
+    run(&mut app, &[Input::Press, Input::Turn(-1), Input::Press]);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(app.state().peers.len(), peers - 1);
+    // The row that took its place is focused.
+    let next = app.state().peers.first().map(|p| keys::peer(p.id));
+    assert_eq!(focus(app.state()), next);
+}

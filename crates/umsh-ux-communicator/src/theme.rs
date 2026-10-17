@@ -36,6 +36,9 @@ pub const FIELD: Rgb565 = rgb(0x161A20);
 /// A field while it is edited, and while it is edited in an open channel.
 pub const ACTIVE_FIELD: Rgb565 = rgb(0x1A2333);
 pub const ACTIVE_FIELD_OPEN: Rgb565 = rgb(0x152B1F);
+/// A switch that is off, and its knob.
+pub const SWITCH_OFF: Rgb565 = rgb(0x3A414B);
+pub const KNOB_OFF: Rgb565 = rgb(0xC9CED6);
 /// A card that is not focused.
 pub const PANEL: Rgb565 = rgb(0x11151A);
 pub const MENU: Rgb565 = rgb(0x1B2027);

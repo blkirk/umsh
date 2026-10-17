@@ -10,8 +10,8 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerEntry, PeerId, Reaction, Section,
-    State,
+    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerDetail, PeerEntry, PeerId,
+    Reaction, Section, State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -48,6 +48,16 @@ pub mod keys {
     pub const SAVE_PEER: FocusKey = FocusKey(0x0700_0002);
     /// The Peers list's Add peer, which heads it.
     pub const ADD_PEER: FocusKey = FocusKey(0x0A00_0000);
+    /// A saved peer's screen: its actions and readouts, in order, and
+    /// Forget's confirmation.
+    pub const PEER_MESSAGE: FocusKey = FocusKey(0x0C00_0000);
+    pub const PEER_ROUTE: FocusKey = FocusKey(0x0C00_0001);
+    pub const PEER_HEARD: FocusKey = FocusKey(0x0C00_0002);
+    pub const PEER_SECRECY: FocusKey = FocusKey(0x0C00_0003);
+    pub const PEER_PING: FocusKey = FocusKey(0x0C00_0004);
+    pub const PEER_FORGET: FocusKey = FocusKey(0x0C00_0005);
+    pub const FORGET_CONFIRM: FocusKey = FocusKey(0x0C00_0006);
+    pub const FORGET_CANCEL: FocusKey = FocusKey(0x0C00_0007);
     /// Add peer's field, and its Message.
     pub const PEER_FIELD: FocusKey = FocusKey(0x0B00_0000);
     pub const MESSAGE_PEER: FocusKey = FocusKey(0x0B00_0001);
@@ -154,6 +164,14 @@ pub enum Screen {
         requested: bool,
         focus: FocusState,
     },
+    /// A saved peer.
+    Peer {
+        peer: PeerId,
+        detail: PeerDetail,
+        /// Forget is asking to be confirmed.
+        confirm: bool,
+        focus: FocusState,
+    },
     /// A peer's address or invitation, being typed.
     AddPeer { text: PeerText, focus: FocusState },
     /// A channel an invitation offers, before it is joined.
@@ -187,6 +205,7 @@ impl Screen {
             | Self::Member { focus, .. }
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
+            | Self::Peer { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -199,6 +218,7 @@ impl Screen {
             | Self::Member { focus, .. }
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
+            | Self::Peer { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -367,6 +387,111 @@ impl State {
             let chat = self.add_chat(summary);
             self.go_to_chat(chat);
         }
+    }
+
+    /// Shows the saved peer `peer`, Message focused.
+    pub fn open_peer(&mut self, peer: PeerId) {
+        if self.peer(peer).is_none() {
+            return;
+        }
+        let Some(detail) = self.history.peer_detail(peer) else {
+            return;
+        };
+        _ = self.screens.push(Screen::Peer {
+            peer,
+            detail,
+            confirm: false,
+            focus: FocusState::requesting(keys::PEER_MESSAGE),
+        });
+    }
+
+    /// The saved peer shown.
+    fn shown_peer(&self) -> Option<PeerId> {
+        match self.screens.last() {
+            Some(Screen::Peer { peer, .. }) => Some(*peer),
+            _ => None,
+        }
+    }
+
+    /// Reads the saved peer shown from the history again.
+    fn refresh_peer(&mut self) {
+        let history = self.history;
+        if let Some(Screen::Peer { peer, detail, .. }) = self.screens.last_mut()
+            && let Some(fresh) = history.peer_detail(*peer)
+        {
+            *detail = fresh;
+        }
+    }
+
+    /// Opens the direct chat with the saved peer shown.
+    pub fn message_peer(&mut self) {
+        let Some(Screen::Peer { peer, detail, .. }) = self.screens.last() else {
+            return;
+        };
+        let Some(summary) = self.peer(*peer) else {
+            return;
+        };
+        if let Some(chat) =
+            self.history
+                .direct_chat(&detail.address, &summary.name, &summary.avatar)
+        {
+            let chat = self.add_chat(chat);
+            self.go_to_chat(chat);
+        }
+    }
+
+    /// Turns forward secrecy with the saved peer shown on or off.
+    pub fn toggle_forward_secrecy(&mut self) {
+        let Some(Screen::Peer { peer, detail, .. }) = self.screens.last() else {
+            return;
+        };
+        self.history
+            .set_forward_secrecy(*peer, !detail.forward_secrecy);
+        self.refresh_peer();
+    }
+
+    /// Pings the saved peer shown.
+    pub fn ping_peer(&mut self) {
+        if let Some(peer) = self.shown_peer() {
+            self.history.ping(peer);
+            self.refresh_peer();
+        }
+    }
+
+    /// Asks to confirm forgetting the saved peer shown, Cancel focused.
+    pub fn ask_forget(&mut self) {
+        if let Some(Screen::Peer { confirm, focus, .. }) = self.screens.last_mut() {
+            *confirm = true;
+            focus.request(keys::FORGET_CANCEL);
+        }
+    }
+
+    /// Keeps the saved peer shown after all.
+    pub fn cancel_forget(&mut self) {
+        if let Some(Screen::Peer { confirm, focus, .. }) = self.screens.last_mut() {
+            *confirm = false;
+            focus.request(keys::PEER_FORGET);
+        }
+    }
+
+    /// Forgets the saved peer shown and returns to the Peers list, at the
+    /// row that took its place.
+    pub fn forget_peer(&mut self) {
+        let Some(peer) = self.shown_peer() else {
+            return;
+        };
+        self.history.forget_peer(peer);
+        let Some(index) = self.peers.iter().position(|p| p.id == peer) else {
+            return;
+        };
+        self.peers.remove(index);
+        self.back();
+        let next = self
+            .peers
+            .get(index)
+            .or_else(|| self.peers.last())
+            .map_or(keys::ADD_PEER, |p| keys::peer(p.id));
+        self.focus().request(next);
     }
 
     /// Shows Add peer, its field focused, so typing starts the address.

@@ -119,8 +119,9 @@ fn add_row() -> impl View<Rgb565, State> + use<> {
 
 fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
     let peer = peer.clone();
+    let id = peer.id;
     Button::new(
-        |_: &mut State| {},
+        move |s: &mut State| s.open_peer(id),
         move |button: ButtonState| {
             focused_row(
                 VStack::new((

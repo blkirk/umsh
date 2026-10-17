@@ -99,6 +99,19 @@ impl ChatSummary {
     }
 }
 
+/// What a saved peer's screen shows beyond the Peers list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerDetail {
+    pub address: String<44>,
+    /// How they are reached, such as `Direct · −97 dBm`, when known.
+    pub route: Option<String<24>>,
+    /// When they were last heard, such as `5 min ago`.
+    pub heard: String<12>,
+    pub forward_secrecy: bool,
+    /// The round trip of the last ping they answered, such as `1.4 s`.
+    pub ping: Option<String<8>>,
+}
+
 /// What the text typed into Add peer names, as far as it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEntry {
@@ -409,6 +422,18 @@ pub trait History {
 
     /// What `text`, typed as an address or a peer invitation, names so far.
     fn inspect_peer(&self, text: &str) -> PeerEntry;
+
+    /// What is known of the saved peer `peer`.
+    fn peer_detail(&self, peer: PeerId) -> Option<PeerDetail>;
+
+    /// Turns forward secrecy with `peer` on or off.
+    fn set_forward_secrecy(&self, peer: PeerId, on: bool);
+
+    /// Pings `peer`. Its answer shows in their detail.
+    fn ping(&self, peer: PeerId);
+
+    /// Forgets the saved peer `peer`.
+    fn forget_peer(&self, peer: PeerId);
 
     /// Keeps `member`, whose identity is known, among my peers, and returns
     /// them as the Peers list shows them. `None` when there is no room.
