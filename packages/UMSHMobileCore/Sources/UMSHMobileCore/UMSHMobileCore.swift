@@ -4731,6 +4731,464 @@ public func FfiConverterTypeMobileUlcpSession_lower(_ value: MobileUlcpSession) 
 
 
 
+
+
+/**
+ * A running virtual radio. Dropping it, or calling [`Self::stop`], stops
+ * the device and releases its state directory.
+ */
+public protocol MobileVirtualRadioProtocol: AnyObject, Sendable {
+
+    /**
+     * A host attached: the device starts a session, announcing it with
+     * `CMD_SESSION_RESET`.
+     */
+    func attach()
+
+    /**
+     * The host went away: the device carries on detached.
+     */
+    func detach()
+
+    /**
+     * Bytes from the attached host, in HDLC-Lite, in any chunking.
+     */
+    func receive(bytes: Data)
+
+    /**
+     * Stop the device. It cannot be started again; make another.
+     */
+    func stop()
+
+}
+/**
+ * A running virtual radio. Dropping it, or calling [`Self::stop`], stops
+ * the device and releases its state directory.
+ */
+open class MobileVirtualRadio: MobileVirtualRadioProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_umsh_mobile_core_fn_clone_mobilevirtualradio(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_umsh_mobile_core_fn_free_mobilevirtualradio(handle, $0) }
+    }
+
+
+    /**
+     * Start a virtual radio keeping its saved configuration under
+     * `state_dir`.
+     *
+     * With `enable_phy`, the device comes up listening whatever it saved:
+     * starting it is choosing the LAN. Without, its saved state decides,
+     * so a host that turned the PHY off and saved keeps it off across
+     * restarts.
+     */
+public static func start(stateDir: String, enablePhy: Bool, listener: MobileVirtualRadioListener)throws  -> MobileVirtualRadio  {
+    return try  FfiConverterTypeMobileVirtualRadio_lift(try rustCallWithError(FfiConverterTypeMobileVirtualRadioError_lift) {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_constructor_mobilevirtualradio_start(
+        FfiConverterString.lower(stateDir),
+        FfiConverterBool.lower(enablePhy),
+        FfiConverterTypeMobileVirtualRadioListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+
+
+
+    /**
+     * A host attached: the device starts a session, announcing it with
+     * `CMD_SESSION_RESET`.
+     */
+open func attach()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradio_attach(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * The host went away: the device carries on detached.
+     */
+open func detach()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradio_detach(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Bytes from the attached host, in HDLC-Lite, in any chunking.
+     */
+open func receive(bytes: Data)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradio_receive(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Stop the device. It cannot be started again; make another.
+     */
+open func stop()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradio_stop(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileVirtualRadio: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileVirtualRadio
+
+    public static func lift(_ handle: UInt64) throws -> MobileVirtualRadio {
+        return MobileVirtualRadio(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MobileVirtualRadio) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileVirtualRadio {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileVirtualRadio, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadio_lift(_ handle: UInt64) throws -> MobileVirtualRadio {
+    return try FfiConverterTypeMobileVirtualRadio.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadio_lower(_ value: MobileVirtualRadio) -> UInt64 {
+    return FfiConverterTypeMobileVirtualRadio.lower(value)
+}
+
+
+
+
+
+
+/**
+ * What the device has for the platform.
+ *
+ * Called on the device's worker thread; implementations hand the value
+ * to their own executor and return.
+ */
+public protocol MobileVirtualRadioListener: AnyObject, Sendable {
+
+    /**
+     * HDLC-Lite bytes for the attached host.
+     */
+    func onWire(bytes: Data)
+
+    /**
+     * A frame was queued while no host was attached.
+     */
+    func onQueued(notice: MobileQueuedNoticeRecord)
+
+}
+/**
+ * What the device has for the platform.
+ *
+ * Called on the device's worker thread; implementations hand the value
+ * to their own executor and return.
+ */
+open class MobileVirtualRadioListenerImpl: MobileVirtualRadioListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_umsh_mobile_core_fn_clone_mobilevirtualradiolistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_umsh_mobile_core_fn_free_mobilevirtualradiolistener(handle, $0) }
+    }
+
+
+
+
+    /**
+     * HDLC-Lite bytes for the attached host.
+     */
+open func onWire(bytes: Data)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradiolistener_on_wire(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * A frame was queued while no host was attached.
+     */
+open func onQueued(notice: MobileQueuedNoticeRecord)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilevirtualradiolistener_on_queued(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileQueuedNoticeRecord_lower(notice),uniffiCallStatus
+    )
+}
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceMobileVirtualRadioListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceMobileVirtualRadioListener = UniffiVTableCallbackInterfaceMobileVirtualRadioListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeMobileVirtualRadioListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface MobileVirtualRadioListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeMobileVirtualRadioListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface MobileVirtualRadioListener: handle missing in uniffiClone")
+            }
+        },
+        onWire: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeMobileVirtualRadioListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onWire(
+                     bytes: try FfiConverterData.lift(bytes)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onQueued: { (
+            uniffiHandle: UInt64,
+            notice: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeMobileVirtualRadioListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onQueued(
+                     notice: try FfiConverterTypeMobileQueuedNoticeRecord_lift(notice)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceMobileVirtualRadioListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceMobileVirtualRadioListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitMobileVirtualRadioListener() {
+    uniffi_umsh_mobile_core_fn_init_callback_vtable_mobilevirtualradiolistener(UniffiCallbackInterfaceMobileVirtualRadioListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileVirtualRadioListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<MobileVirtualRadioListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileVirtualRadioListener
+
+    public static func lift(_ handle: UInt64) throws -> MobileVirtualRadioListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return MobileVirtualRadioListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: MobileVirtualRadioListener) -> UInt64 {
+         if let rustImpl = value as? MobileVirtualRadioListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileVirtualRadioListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileVirtualRadioListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadioListener_lift(_ handle: UInt64) throws -> MobileVirtualRadioListener {
+    return try FfiConverterTypeMobileVirtualRadioListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadioListener_lower(_ value: MobileVirtualRadioListener) -> UInt64 {
+    return FfiConverterTypeMobileVirtualRadioListener.lower(value)
+}
+
+
+
+
 /**
  * Safe, non-mutating preview of a channel the user is about to join.
  *
@@ -7591,6 +8049,81 @@ public func FfiConverterTypeMobilePeerRegistrationRecord_lift(_ buf: RustBuffer)
 #endif
 public func FfiConverterTypeMobilePeerRegistrationRecord_lower(_ value: MobilePeerRegistrationRecord) -> RustBuffer {
     return FfiConverterTypeMobilePeerRegistrationRecord.lower(value)
+}
+
+
+/**
+ * A frame entered the inbound queue while no host was attached.
+ */
+public struct MobileQueuedNoticeRecord: Equatable, Hashable {
+    public var `class`: MobileQueuedClass
+    /**
+     * The source is muted: counts still stand, but the frame earns no
+     * notification of its own.
+     */
+    public var muted: Bool
+    /**
+     * Frames in the queue after this one.
+     */
+    public var depth: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(`class`: MobileQueuedClass,
+        /**
+         * The source is muted: counts still stand, but the frame earns no
+         * notification of its own.
+         */muted: Bool,
+        /**
+         * Frames in the queue after this one.
+         */depth: UInt32) {
+        self.`class` = `class`
+        self.muted = muted
+        self.depth = depth
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileQueuedNoticeRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileQueuedNoticeRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileQueuedNoticeRecord {
+        return
+            try MobileQueuedNoticeRecord(
+                class: FfiConverterTypeMobileQueuedClass.read(from: &buf),
+                muted: FfiConverterBool.read(from: &buf),
+                depth: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileQueuedNoticeRecord, into buf: inout [UInt8]) {
+        FfiConverterTypeMobileQueuedClass.write(value.`class`, into: &buf)
+        FfiConverterBool.write(value.muted, into: &buf)
+        FfiConverterUInt32.write(value.depth, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileQueuedNoticeRecord_lift(_ buf: RustBuffer) throws -> MobileQueuedNoticeRecord {
+    return try FfiConverterTypeMobileQueuedNoticeRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileQueuedNoticeRecord_lower(_ value: MobileQueuedNoticeRecord) -> RustBuffer {
+    return FfiConverterTypeMobileQueuedNoticeRecord.lower(value)
 }
 
 
@@ -14775,6 +15308,81 @@ public func FfiConverterTypeMobileMeshRouteKind_lower(_ value: MobileMeshRouteKi
 
 
 /**
+ * What a queued frame is, as far as a notification is concerned.
+ */
+
+public enum MobileQueuedClass: Equatable, Hashable {
+
+    /**
+     * Addressed to the host.
+     */
+    case direct
+    /**
+     * Multicast or broadcast.
+     */
+    case group
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileQueuedClass: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileQueuedClass: FfiConverterRustBuffer {
+    typealias SwiftType = MobileQueuedClass
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileQueuedClass {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .direct
+
+        case 2: return .group
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MobileQueuedClass, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .direct:
+            writeInt(&buf, Int32(1))
+
+
+        case .group:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileQueuedClass_lift(_ buf: RustBuffer) throws -> MobileQueuedClass {
+    return try FfiConverterTypeMobileQueuedClass.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileQueuedClass_lower(_ value: MobileQueuedClass) -> RustBuffer {
+    return FfiConverterTypeMobileQueuedClass.lower(value)
+}
+
+
+
+/**
  * Anything that can go wrong opening or consulting a region database.
  */
 public
@@ -14991,6 +15599,99 @@ public func FfiConverterTypeMobileRegionMembership_lower(_ value: MobileRegionMe
     return FfiConverterTypeMobileRegionMembership.lower(value)
 }
 
+
+
+public
+enum MobileVirtualRadioError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+
+
+    /**
+     * The state directory could not be created or locked.
+     */
+    case StateUnavailable
+    /**
+     * Another virtual radio, in this process or another, is using the
+     * state directory.
+     */
+    case StateInUse
+    /**
+     * The device's worker could not be started.
+     */
+    case WorkerUnavailable
+
+
+
+
+
+
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+
+}
+
+#if compiler(>=6)
+extension MobileVirtualRadioError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileVirtualRadioError: FfiConverterRustBuffer {
+    typealias SwiftType = MobileVirtualRadioError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileVirtualRadioError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+
+
+
+        case 1: return .StateUnavailable
+        case 2: return .StateInUse
+        case 3: return .WorkerUnavailable
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MobileVirtualRadioError, into buf: inout [UInt8]) {
+        switch value {
+
+
+
+
+
+        case .StateUnavailable:
+            writeInt(&buf, Int32(1))
+
+
+        case .StateInUse:
+            writeInt(&buf, Int32(2))
+
+
+        case .WorkerUnavailable:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadioError_lift(_ buf: RustBuffer) throws -> MobileVirtualRadioError {
+    return try FfiConverterTypeMobileVirtualRadioError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileVirtualRadioError_lower(_ value: MobileVirtualRadioError) -> RustBuffer {
+    return FfiConverterTypeMobileVirtualRadioError.lower(value)
+}
 
 
 /**
@@ -19961,6 +20662,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_transmit_raw() != 6208) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_attach() != 33195) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_detach() != 64719) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_receive() != 39738) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_stop() != 38522) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradiolistener_on_wire() != 44182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradiolistener_on_queued() != 57698) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_umsh_mobile_core_checksum_constructor_mobileidentity_unlock() != 33117) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19988,8 +20707,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_constructor_mobileulcpsession_new() != 48651) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_umsh_mobile_core_checksum_constructor_mobilevirtualradio_start() != 14085) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
     uniffiCallbackInitMobileMeshWakeListener()
+    uniffiCallbackInitMobileVirtualRadioListener()
     return InitializationResult.ok
 }()
 

@@ -98,6 +98,7 @@ struct RadioSnapshot: Equatable, Sendable {
             supportsTime: true,
             supportsGnss: true,
             supportsAdvert: true,
+            supportsReboot: true,
             timeZoneOffsetMinutes: -420,
             gnss: UlcpGnssSettingsRecord(
                 enabled: true,
@@ -486,6 +487,9 @@ struct RadioProvisioningSummary: Equatable, Sendable {
     var supportsGnss: Bool = false
     /// `CAP_ADVERT`: the radio announces itself on a schedule of its own.
     var supportsAdvert: Bool = false
+    /// `CAP_REBOOT`: the radio can restart, and so can be restarted, put
+    /// into DFU, or factory reset.
+    var supportsReboot: Bool = false
     /// `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when
     /// `supportsTime` and the radio reported it.
     var timeZoneOffsetMinutes: Int16? = nil

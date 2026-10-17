@@ -27,6 +27,17 @@ struct ManageDeviceScreen: View {
         _model = State(initialValue: ManageDeviceModel(peer: peer, management: management))
     }
 
+    /// The attached radio, which may hold no identity to be a peer under.
+    init(companionAddress: String?, name: String, management: DeviceManagementBackend,
+         browsing: RemotePeerBrowsing) {
+        self.browsing = browsing
+        _model = State(initialValue: ManageDeviceModel(
+            address: companionAddress ?? "",
+            fallbackName: name,
+            management: management
+        ))
+    }
+
     var body: some View {
         Form {
             ManageDeviceIdentitySection(model: model)
@@ -108,7 +119,9 @@ private struct DfuEntrySheet: View {
                 Section {
                     Text(model.card?.deviceName ?? model.fallbackName)
                         .font(.headline)
-                    Text(model.address).font(.caption.monospaced())
+                    if !model.address.isEmpty {
+                        Text(model.address).font(.caption.monospaced())
+                    }
                     Picker("DFU Method", selection: $mode) {
                         Text("Default DFU").tag(UlcpDfuMode.default)
                         Text("Serial/USB-CDC DFU").tag(UlcpDfuMode.serial)

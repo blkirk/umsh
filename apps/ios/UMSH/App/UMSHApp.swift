@@ -42,6 +42,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
     /// changes: the session accumulates state that must not be discarded
     /// because something unrelated wrote to defaults.
     private var tcpConnection: (endpoint: TcpEndpoint, connection: TcpRadioConnection)?
+    private var lanConnection: VirtualRadioConnection?
     private var defaultsObserver: (any NSObjectProtocol)?
     #endif
 
@@ -87,6 +88,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
             tcpConnection = (endpoint, connection)
             // A bridged radio is a real radio, so this uses the real store.
             runtime = AppRuntime(radioConnection: connection)
+        case .lan:
+            let connection = VirtualRadioConnection()
+            lanConnection = connection
+            runtime = AppRuntime(radioConnection: connection)
         #endif
         }
         super.init()
@@ -124,13 +129,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
         #if DEBUG
         case staging
         case tcp(TcpEndpoint)
+        case lan
         #endif
     }
 
     /// The same precedence the root view's `WindowGroup` used to apply, read
     /// from the same keys. Staging wins over a bridge, a bridge over the
-    /// real radio, and an unparseable endpoint falls through to the radio
-    /// rather than leaving the app with nothing.
+    /// local network, that over the real radio, and an unparseable endpoint
+    /// falls through rather than leaving the app with nothing.
     private static func desiredMode(_ defaults: UserDefaults) -> Mode {
         #if DEBUG
         if defaults.bool(forKey: "staging.enabled") { return .staging }
@@ -140,6 +146,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
            ) {
             return .tcp(endpoint)
         }
+        if defaults.bool(forKey: "debug.radioLan.enabled") { return .lan }
         #endif
         return .live
     }
@@ -160,6 +167,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
             )
         case let .tcp(endpoint):
             AppRuntime(radioConnection: tcpRadioConnection(for: endpoint))
+        case .lan:
+            AppRuntime(radioConnection: lanRadioConnection())
         }
     }
 
@@ -187,6 +196,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
         }
         let connection = TcpRadioConnection(endpoint: endpoint)
         tcpConnection = (endpoint, connection)
+        return connection
+    }
+
+    private func lanRadioConnection() -> VirtualRadioConnection {
+        if let lanConnection { return lanConnection }
+        let connection = VirtualRadioConnection()
+        lanConnection = connection
         return connection
     }
 

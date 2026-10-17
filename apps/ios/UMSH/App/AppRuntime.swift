@@ -484,7 +484,8 @@ final class AppRuntime {
                 peer.identity.canonicalAddress == companionAddress
                     ? self.companionDeviceManagement
                     : self.remoteDeviceManagement
-            }
+            },
+            manageCompanion: { self.companionDeviceManagement }
         )
     }
 
@@ -706,6 +707,16 @@ final class AppRuntime {
                 }
                 continuation.onTermination = { _ in task.cancel() }
             }
+        }
+        // The cache rows hang off the radio's node, so a radio with no
+        // identity of its own has nowhere to keep them. Over its own link
+        // a fresh read costs next to nothing, so it simply goes uncached.
+        if radioSnapshot.deviceIdentity == nil {
+            management.loadCard = { _ in nil }
+            management.saveCard = { _, _ in }
+            management.forgetCache = { _ in }
+            management.loadValues = { _, _ in [:] }
+            management.saveValues = { _, _ in }
         }
         return management
     }

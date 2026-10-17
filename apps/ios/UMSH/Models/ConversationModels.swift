@@ -1021,6 +1021,9 @@ struct PeerActions {
     /// the companion radio is managed over its own link, everything else
     /// across the mesh. Nil only where no backend could exist at all.
     var manageDevice: ((PeerSummary) -> DeviceManagementBackend)? = nil
+    /// The attached companion radio, managed over its own link whether or
+    /// not it has an identity of its own to be a peer under.
+    var manageCompanion: (() -> DeviceManagementBackend)? = nil
 
     /// No app services wired up—used by previews and by any sheet built
     /// before the mesh session exists.

@@ -155,10 +155,21 @@ final class ManageDeviceModel {
     let fallbackName: String
     private let management: DeviceManagementBackend
 
-    init(peer: PeerSummary, management: DeviceManagementBackend) {
-        address = peer.identity.canonicalAddress
-        fallbackName = peer.displayName
+    /// Manage the device at `address`, called `fallbackName` until it says
+    /// otherwise. A device reached over its own link and holding no
+    /// identity has no address, and passes an empty one.
+    init(address: String, fallbackName: String, management: DeviceManagementBackend) {
+        self.address = address
+        self.fallbackName = fallbackName
         self.management = management
+    }
+
+    convenience init(peer: PeerSummary, management: DeviceManagementBackend) {
+        self.init(
+            address: peer.identity.canonicalAddress,
+            fallbackName: peer.displayName,
+            management: management
+        )
     }
 
     /// What to show as the device's name: what it calls itself, then what

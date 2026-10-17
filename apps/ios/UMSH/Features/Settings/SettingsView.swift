@@ -689,9 +689,17 @@ struct RadioDetailView: View {
     @State private var confirmsReboot = false
     @State private var showsRadioPicker = false
     @State private var radioAccessories = RadioAccessories.shared
+    #if DEBUG
+    @AppStorage("debug.radioLan.enabled") private var lanRadioEnabled = false
+    #endif
 
     var body: some View {
         List {
+            #if DEBUG
+            Section {
+                Toggle("Local network", isOn: $lanRadioEnabled)
+            }
+            #endif
             Section("Connection") {
                 LabeledContent("State", value: snapshot.linkState.accessibilityLabel)
                 if let name = snapshot.name {
@@ -751,14 +759,13 @@ struct RadioDetailView: View {
                 // The same management sheet every device gets, over this
                 // radio's own link: reads refresh on sight, and the radio's
                 // unsolicited announcements keep the screens current.
-                if let deviceIdentity = snapshot.deviceIdentity,
-                   let manageDevice = peerActions.manageDevice,
+                if let manageCompanion = peerActions.manageCompanion,
                    snapshot.provisioning != nil, canEditConfiguration {
-                    let peer = companionPeer(deviceIdentity)
                     NavigationLink {
                         ManageDeviceScreen(
-                            peer: peer,
-                            management: manageDevice(peer),
+                            companionAddress: snapshot.deviceIdentity?.canonicalAddress,
+                            name: snapshot.name ?? "Radio",
+                            management: manageCompanion(),
                             browsing: companionBrowsing
                         )
                     } label: {
@@ -908,20 +915,6 @@ struct RadioDetailView: View {
             && (snapshot.hostState == .matchesCurrentIdentity || snapshot.hostState == .unsupported)
     }
 
-    /// The radio's own device identity as a peer row, which is what the
-    /// unified management sheet keys its cache and screens on. The same
-    /// construction the Radio identity section makes.
-    private func companionPeer(_ identity: MeshPublicIdentity) -> PeerSummary {
-        PeerSummary(
-            id: 0,
-            identity: identity,
-            alias: nil,
-            advertisedName: snapshot.name,
-            systemRole: "companion_radio",
-            storedRole: .unknown
-        )
-    }
-
     /// How the management sheet's peer lists open a node from here: the
     /// same peer page they open anywhere else.
     private var companionBrowsing: RemotePeerBrowsing {
@@ -949,9 +942,6 @@ struct RadioDetailView: View {
         }
         if snapshot.provisioning == nil {
             return "Finish connecting and reading the radio's current settings first"
-        }
-        if snapshot.deviceIdentity == nil {
-            return "This radio has no device identity to manage settings under"
         }
         return "Connect the companion radio to edit its settings"
     }
@@ -1021,9 +1011,13 @@ struct RadioDetailView: View {
             Button("Disconnect", role: .destructive) {
                 Task { await disconnect() }
             }
-            rebootButton
+            if snapshot.provisioning?.supportsReboot == true {
+                rebootButton
+            }
             forgetButton
-            factoryResetButton
+            if snapshot.provisioning?.supportsReboot == true {
+                factoryResetButton
+            }
         case .waitingForRadio:
             VStack(alignment: .leading, spacing: 4) {
                 Text("Waiting for the radio to appear")

@@ -67,15 +67,15 @@ struct ManageDeviceLifecycleSection: View {
     @Binding var confirmsDfu: Bool
 
     var body: some View {
-        Group {
+        // DFU and a factory reset both end in a restart, so a device that
+        // cannot restart is offered none of the three.
+        if model.supportsRestart {
             Section {
                 Button("Enter DFU Mode…", role: .destructive) {
                     confirmsDfu = true
                 }
-                if model.supportsRestart {
-                    Button("Restart This Device…", role: .destructive) {
-                        confirmsRestart = true
-                    }
+                Button("Restart This Device…", role: .destructive) {
+                    confirmsRestart = true
                 }
                 if model.offersFactoryReset {
                     Button("Factory Reset…", role: .destructive) {
@@ -83,11 +83,9 @@ struct ManageDeviceLifecycleSection: View {
                     }
                 }
             } footer: {
-                if model.supportsRestart || model.offersFactoryReset {
                 Text(model.offersFactoryReset
                      ? "A restart keeps everything the device has saved. A factory reset keeps nothing, the device's own identity included."
                      : "A restart keeps everything the device has saved. Erasing a device is only offered while it is connected to this phone.")
-                }
             }
         }
     }

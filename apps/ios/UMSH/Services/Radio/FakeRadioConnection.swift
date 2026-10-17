@@ -281,7 +281,8 @@ actor FakeRadioConnection: RadioConnection {
                 hostPeerCount: provisioning.hostPeerCount,
                 autoAcknowledgementEnabled: provisioning.autoAcknowledgementEnabled,
                 supportsDeviceIdentity: provisioning.supportsDeviceIdentity,
-                devPeerAddresses: provisioning.devPeerAddresses
+                devPeerAddresses: provisioning.devPeerAddresses,
+                supportsReboot: provisioning.supportsReboot
             )
         }
         publish(updated)

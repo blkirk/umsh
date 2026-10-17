@@ -1849,6 +1849,7 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 supportsTime: $0.supportsTime,
                 supportsGnss: $0.supportsGnss,
                 supportsAdvert: $0.supportsAdvert,
+                supportsReboot: $0.supportsReboot,
                 timeZoneOffsetMinutes: $0.tzOffsetMin,
                 gnss: $0.gnss,
                 advert: $0.advert

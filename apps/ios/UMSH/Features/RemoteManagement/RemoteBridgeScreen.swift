@@ -13,7 +13,10 @@ struct RemoteBridgeScreen: View {
     private var problems: [UInt32: String] { model.writeRefusals[.bridge] ?? [:] }
     private var offered: Set<UInt32> { Set(model.properties(of: .bridge)) }
     private var hasServer: Bool { offered.contains(ulcpProperties.bridgeEnabled) }
-    private var hasLocal: Bool { offered.contains(ulcpProperties.lanBearerEnabled) }
+    private var hasLocal: Bool { offered.contains(ulcpProperties.lanBearerGroup) }
+    /// Whether the device forwards between the LAN and LoRa, and so has a
+    /// switch and an ingress limit of its own.
+    private var forwardsLocal: Bool { offered.contains(ulcpProperties.lanBearerEnabled) }
 
     var body: some View {
         Form {
@@ -33,12 +36,15 @@ struct RemoteBridgeScreen: View {
     @ViewBuilder
     private var localSections: some View {
         Section {
-            if edits.localEnabled.isKnown {
-                Toggle(isOn: $edits.localEnabled.edited.replacingNil(with: false)) {
-                    RemoteFieldTitle("Local network", problem: problems[ulcpProperties.lanBearerEnabled])
+            // A device whose radio is the network has nothing to switch.
+            if forwardsLocal {
+                if edits.localEnabled.isKnown {
+                    Toggle(isOn: $edits.localEnabled.edited.replacingNil(with: false)) {
+                        RemoteFieldTitle("Local network", problem: problems[ulcpProperties.lanBearerEnabled])
+                    }
+                } else {
+                    RemoteReadOnlyToggle("Local network", isOn: nil)
                 }
-            } else {
-                RemoteReadOnlyToggle("Local network", isOn: nil)
             }
             RemoteValueRow("Status", value: localStateText)
         } header: {
@@ -50,9 +56,11 @@ struct RemoteBridgeScreen: View {
             RemoteTextField("Group", text: $edits.group.edited.replacingNil(with: ""),
                             isKnown: edits.group.isKnown, problem: problems[ulcpProperties.lanBearerGroup],
                             placeholder: "Default")
-            RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
-                            isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit],
-                            placeholder: "Default")
+            if forwardsLocal {
+                RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
+                                isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit],
+                                placeholder: "Default")
+            }
             if !hasServer { RemoteReadingFooter(reading: reading, isBusy: model.isBusy) }
         } header: {
             Text("Local Network Settings")
