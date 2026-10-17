@@ -15,9 +15,11 @@ use crate::model::{Section, State};
 use crate::nav::{Screen, keys};
 use crate::theme;
 
+mod add_channel;
 mod add_peer;
 mod avatar;
 mod banner;
+mod channels;
 mod chats;
 mod conversation;
 mod details;
@@ -84,10 +86,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             } => state
                 .peer(*peer)
                 .map(|summary| peer::view(summary, detail, *confirm)),
-            Screen::Radio {
-                settings, picker, ..
-            } => device::radio(settings, *picker),
-            Screen::Share { .. } => share::view(state),
+            Screen::Device { page, .. } => device::page(state, page),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),

@@ -5,8 +5,8 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, Invite,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
+    ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction,
+    Invite, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
     PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender, ShareUri, Shareable,
     State, StatusStrip, push_newest,
 };
@@ -261,8 +261,8 @@ pub struct Store {
     /// address.
     saved: RefCell<Vec<String<44>, KEPT>>,
     direct: RefCell<Vec<String<44>, KEPT>>,
-    /// Channels joined from invitations, by the invitation's name.
-    joined: RefCell<Vec<String<32>, KEPT>>,
+    /// Channels joined since, by name, and who can read them.
+    joined: RefCell<Vec<(String<32>, ChannelAccess), KEPT>>,
     /// Peers with forward secrecy turned on, peers pinged, and peers forgotten.
     secrecy: RefCell<Vec<PeerId, KEPT>>,
     pinged: RefCell<Vec<PeerId, KEPT>>,
@@ -337,14 +337,64 @@ const FIRST_DIRECT: ChatId = 0x100;
 /// Where members saved as peers are numbered from, above the fixture's own
 /// peers.
 const FIRST_SAVED: PeerId = 0x100;
-/// Where channels joined from invitations are numbered from.
+/// Where channels joined since are numbered from.
 const FIRST_JOINED: ChatId = 0x200;
+const CHANNEL_INVITATION: &str = "umsh:ck:";
 
 /// This node's address, as the mockup's Share screen shows it.
 const ADDRESS: &str = "Geb9QfXhe5f1vXHcFDnXbvcXShxAFhAxaRp1jr5Bqe3L";
 /// Private channels' keys: Trail Crew's, and any joined from an invitation.
 const TRAIL_CREW_KEY: &str = "5BFn8YGKJ6pZR4qV3tW7mNhDrXsCxEaL9kUv2wAjT8bP";
 const JOINED_KEY: &str = "8xQvW3mZr7KpN2sTfYhB6cLdJ4gE9aUoRiV5tHnXkM1w";
+
+/// As much of `text` as a name holds.
+fn cut(text: &str) -> String<32> {
+    let mut name = String::new();
+    for c in text.chars() {
+        if name.push(c).is_err() {
+            break;
+        }
+    }
+    name
+}
+
+/// A channel's name as its key is derived from: ASCII folded to lowercase.
+fn folded(name: &str) -> String<32> {
+    let mut folded = cut(name);
+    folded.make_ascii_lowercase();
+    folded
+}
+
+/// A URI parameter's value with its percent-encoding undone; what does not
+/// decode to text stays as it was typed.
+fn decoded(value: &str) -> String<32> {
+    let mut bytes: Vec<u8, 32> = Vec::new();
+    let mut rest = value.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        let escaped = match (byte, tail) {
+            (b'%', [high, low, after @ ..]) => core::str::from_utf8(&[*high, *low])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .map(|byte| (byte, after)),
+            _ => None,
+        };
+        let (byte, tail) = escaped.unwrap_or((byte, tail));
+        if bytes.push(byte).is_err() {
+            break;
+        }
+        rest = tail;
+    }
+    core::str::from_utf8(&bytes).map_or_else(|_| cut(value), cut)
+}
+
+/// A channel avatar's color, from its name.
+fn tint(name: &str) -> [u8; 3] {
+    let hash = name.bytes().fold(0x811C_9DC5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    });
+    let [r, g, b, _] = hash.to_be_bytes();
+    [r, g, b]
+}
 
 /// `name` as a URI parameter: what is not a letter, a digit, or `-._~` is
 /// percent-encoded.
@@ -367,6 +417,31 @@ fn private_uri(key: &str, name: &str) -> Option<ShareUri> {
 }
 
 impl Store {
+    /// The chat of the channel joined since as `name`, numbered the first
+    /// time it is joined.
+    fn joined_id(&self, name: &str, access: ChannelAccess) -> Option<ChatId> {
+        let mut joined = self.joined.borrow_mut();
+        let index = match joined.iter().position(|(n, _)| n.as_str() == name) {
+            Some(index) => index,
+            None => {
+                joined.push((cut(name), access)).ok()?;
+                joined.len() - 1
+            }
+        };
+        Some(FIRST_JOINED + index as ChatId)
+    }
+
+    /// A fixture chat joined from the start, as `add_channel` returns it;
+    /// the list already holds it, so only its ID matters.
+    fn existing(&self, chat: ChatId) -> ChatSummary {
+        ChatSummary::new(
+            chat,
+            AvatarStyle::channel(None, "", [0, 0, 0]),
+            "",
+            self.heap,
+        )
+    }
+
     /// The next message to arrive, the ones on the T-LoRa Pager mockup's
     /// wake screen, and the chat it arrived in. It is kept as the newest
     /// message there. `None` once all have arrived.
@@ -607,7 +682,16 @@ impl Node for Store {
             Shareable::Channel(chat) => {
                 let index = chat.checked_sub(FIRST_JOINED)? as usize;
                 let joined = self.joined.borrow();
-                private_uri(JOINED_KEY, joined.get(index)?)
+                let (name, access) = joined.get(index)?;
+                match access {
+                    ChannelAccess::Private => private_uri(JOINED_KEY, name),
+                    _ => {
+                        let mut uri = ShareUri::new();
+                        core::fmt::write(&mut uri, format_args!("umsh:cs:")).ok()?;
+                        push_encoded(&mut uri, &folded(name))?;
+                        Some(uri)
+                    }
+                }
             }
         }
     }
@@ -695,26 +779,75 @@ impl Node for Store {
     }
 
     fn join(&self, invite: &Invite, name: &str) -> Option<ChatSummary> {
-        let mut joined = self.joined.borrow_mut();
-        let index = match joined
-            .iter()
-            .position(|n| n.as_str() == invite.name.as_str())
-        {
-            Some(index) => index,
-            None => {
-                joined.push(s(&invite.name)).ok()?;
-                joined.len() - 1
-            }
-        };
-        let mut summary = ChatSummary::new(
-            FIRST_JOINED + index as ChatId,
-            invite.avatar(),
-            name,
-            self.heap,
-        );
+        let id = self.joined_id(&invite.name, invite.access)?;
+        let mut summary = ChatSummary::new(id, invite.avatar(), name, self.heap);
         summary.kind = ChatKind::Channel {
             access: invite.access,
         };
+        Some(summary)
+    }
+
+    fn inspect_channel(&self, text: &str) -> ChannelEntry {
+        use umsh_core::base58::{ENCODED_LEN, prefix_bounds};
+
+        let text = text.trim();
+        if text.is_empty() {
+            return ChannelEntry::Empty;
+        }
+        let missing = |key: &str| ChannelEntry::Partial {
+            missing: (ENCODED_LEN - key.len()) as u8,
+        };
+        match text.strip_prefix(CHANNEL_INVITATION) {
+            Some(rest) => {
+                let key = rest.split_once('?').map_or(rest, |(key, _)| key);
+                if key.is_empty() {
+                    missing(key)
+                } else if key.len() > ENCODED_LEN || prefix_bounds(key.as_bytes()).is_err() {
+                    ChannelEntry::Invalid
+                } else if key.len() == ENCODED_LEN {
+                    ChannelEntry::Private
+                } else {
+                    missing(key)
+                }
+            }
+            // An invitation still being typed.
+            None if CHANNEL_INVITATION.starts_with(text) && text.contains(':') => missing(""),
+            // A name is any ASCII without the invitation's colon.
+            None if text.is_ascii() && !text.contains(':') => ChannelEntry::Named,
+            None => ChannelEntry::Invalid,
+        }
+    }
+
+    fn add_channel(&self, text: &str) -> Option<ChatSummary> {
+        let text = text.trim();
+        let (name, access): (String<32>, _) = match self.inspect_channel(text) {
+            ChannelEntry::Named => match folded(text).as_str() {
+                // Joined from the start.
+                "public" => return Some(self.existing(4)),
+                "emergency" => return Some(self.existing(6)),
+                _ => (cut(text), ChannelAccess::Named),
+            },
+            ChannelEntry::Private => {
+                let rest = &text[CHANNEL_INVITATION.len()..];
+                let (key, query) = rest.split_once('?').unwrap_or((rest, ""));
+                let name = query
+                    .split(';')
+                    .find_map(|p| p.strip_prefix("n="))
+                    .map(decoded)
+                    .filter(|n| !n.is_empty());
+                let name = name.unwrap_or_else(|| {
+                    let mut name: String<32> = String::new();
+                    _ = core::fmt::write(&mut name, format_args!("Channel {}", &key[..4]));
+                    name
+                });
+                (name, ChannelAccess::Private)
+            }
+            _ => return None,
+        };
+        let id = self.joined_id(&name, access)?;
+        let avatar = AvatarStyle::channel(None, &name, tint(&name));
+        let mut summary = ChatSummary::new(id, avatar, &name, self.heap);
+        summary.kind = ChatKind::Channel { access };
         Some(summary)
     }
 

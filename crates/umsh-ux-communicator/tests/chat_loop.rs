@@ -9,9 +9,10 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChatKind, Delivery, Direction, Preset, Reaction, Section, Shareable, State,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Preset, Reaction, Section,
+    Shareable, State,
 };
-use umsh_ux_communicator::nav::{Screen, keys};
+use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
 
 /// The fixture's chats, in list order.
@@ -1072,8 +1073,9 @@ fn forget_asks_first_and_cancel_keeps_the_peer() {
 
 fn radio(state: &State) -> (&umsh_ux_communicator::model::RadioSettings, bool) {
     match state.screen() {
-        Screen::Radio {
-            settings, picker, ..
+        Screen::Device {
+            page: DevicePage::Radio { settings, picker },
+            ..
         } => (settings, *picker),
         other => panic!("expected Radio, got {other:?}"),
     }
@@ -1138,7 +1140,13 @@ fn turning_on_share_moves_between_this_node_and_its_channels() {
         &mut app,
         &[Input::Backspace, Input::Turn(2), Input::Press, Input::Press],
     );
-    assert!(matches!(app.state().screen(), Screen::Share { .. }));
+    assert!(matches!(
+        app.state().screen(),
+        Screen::Device {
+            page: DevicePage::Share,
+            ..
+        }
+    ));
     assert_eq!(app.state().shared(), Shareable::Identity);
     run(&mut app, &[Input::Turn(1)]);
     assert_eq!(app.state().shared(), Shareable::Channel(2));
@@ -1149,4 +1157,78 @@ fn turning_on_share_moves_between_this_node_and_its_channels() {
     assert_eq!(app.state().shared(), Shareable::Channel(6));
     run(&mut app, &[Input::Backspace]);
     assert_eq!(focus(app.state()), Some(keys::IDENTITY));
+}
+
+/// Opens Device › Channels › Add channel from the Chats list.
+fn open_add_channel<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(
+        app,
+        &[
+            Input::Backspace,
+            Input::Turn(2),
+            Input::Press,
+            Input::Turn(1),
+            Input::Press,
+        ],
+    );
+    assert_eq!(focus(app.state()), Some(keys::ADD_CHANNEL));
+    run(app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CHANNEL_FIELD));
+}
+
+#[test]
+fn a_channel_name_joins_a_named_channel() {
+    let mut app = app!();
+    open_add_channel(&mut app);
+    assert_eq!(app.state().channel_entry(), ChannelEntry::Empty);
+    run(&mut app, &typed("Ridge Runners"));
+    assert_eq!(app.state().channel_entry(), ChannelEntry::Named);
+    run(&mut app, &[Input::Enter]);
+    let chat = app.state().chats[0].id;
+    assert_eq!(app.state().chats[0].name.as_str(), "Ridge Runners");
+    assert_eq!(
+        app.state().chats[0].kind,
+        ChatKind::Channel {
+            access: ChannelAccess::Named
+        }
+    );
+    assert_in_conversation(app.state(), chat);
+}
+
+#[test]
+fn an_invitation_counts_down_and_joins_a_private_channel() {
+    let mut app = app!();
+    open_add_channel(&mut app);
+    run(
+        &mut app,
+        &typed("umsh:ck:5BFn8YGKJ6pZR4qV3tW7mNhDrXsCxEaL9kUv2wAjT"),
+    );
+    assert_eq!(
+        app.state().channel_entry(),
+        ChannelEntry::Partial { missing: 3 }
+    );
+    // Join is not there to press yet.
+    run(&mut app, &[Input::Enter, Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::CHANNEL_FIELD));
+    run(&mut app, &[Input::Press]);
+    run(&mut app, &typed("8bP?n=Base%20Camp"));
+    assert_eq!(app.state().channel_entry(), ChannelEntry::Private);
+    run(&mut app, &[Input::Enter]);
+    assert_eq!(app.state().chats[0].name.as_str(), "Base Camp");
+    assert_in_conversation(app.state(), app.state().chats[0].id);
+}
+
+#[test]
+fn a_joined_channel_opens_from_the_channels_list() {
+    let mut app = app!();
+    open_add_channel(&mut app);
+    run(&mut app, &[Input::Backspace, Input::Turn(1), Input::Press]);
+    // Trail Crew, the first channel in the list.
+    assert_in_conversation(app.state(), 2);
 }

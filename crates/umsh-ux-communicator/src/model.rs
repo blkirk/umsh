@@ -112,6 +112,22 @@ pub struct PeerDetail {
     pub ping: Option<String<8>>,
 }
 
+/// What the text typed into Add channel names, as far as it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelEntry {
+    /// Nothing yet.
+    Empty,
+    /// Neither a channel's name nor an invitation.
+    Invalid,
+    /// A named channel, whose key anyone can derive from its name.
+    Named,
+    /// The start of a private channel's invitation, and how many characters
+    /// its key lacks.
+    Partial { missing: u8 },
+    /// A private channel's whole invitation.
+    Private,
+}
+
 /// What Share shows as a code: this node, or a channel it has joined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shareable {
@@ -492,6 +508,14 @@ pub trait Node {
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.
     fn retry(&self, chat: ChatId, message: MessageId) -> bool;
+
+    /// What `text`, typed as a channel's name or invitation, names so far.
+    fn inspect_channel(&self, text: &str) -> ChannelEntry;
+
+    /// Joins the channel `text` names or invites to, and returns its chat:
+    /// the one already joined, if it is. `None` when `text` names no channel
+    /// or there is no room for it.
+    fn add_channel(&self, text: &str) -> Option<ChatSummary>;
 
     /// This node's address.
     fn address(&self) -> String<44>;

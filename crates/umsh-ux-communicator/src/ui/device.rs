@@ -4,6 +4,7 @@
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
+use buoyant::match_view;
 use buoyant::view::prelude::*;
 use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -12,7 +13,7 @@ use heapless::String;
 use super::conversation::header;
 use super::setting::{End, card, choice, row};
 use crate::model::{ChatKind, Preset, RadioSettings, State};
-use crate::nav::keys;
+use crate::nav::{DevicePage, keys};
 use crate::theme;
 
 const ROW: u32 = 36;
@@ -44,7 +45,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                 State::open_share,
                 &state.status.device_name,
             ),
-            category("Channels", keys::CHANNELS, |_| {}, &joined),
+            category("Channels", keys::CHANNELS, State::open_channels, &joined),
             category(
                 "Radio",
                 keys::RADIO,
@@ -84,8 +85,18 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
     })
 }
 
+/// A screen under Device.
+pub fn page(state: &State, page: &DevicePage) -> impl View<Rgb565, State> + use<> {
+    match_view!(page, {
+        DevicePage::Radio { settings, picker } => radio(settings, *picker),
+        DevicePage::Share => super::share::view(state),
+        DevicePage::Channels => super::channels::view(state),
+        DevicePage::AddChannel { text } => super::add_channel::view(state, text),
+    })
+}
+
 /// The radio's settings, and Preset's choices while they are open.
-pub fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + use<> {
+fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + use<> {
     let mut airtime: String<24> = String::new();
     _ = core::fmt::write(
         &mut airtime,

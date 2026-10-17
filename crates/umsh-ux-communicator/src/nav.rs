@@ -10,14 +10,16 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatKind, ChatSummary, Details, Invite, MAX_CHATS, Member, MessageId, PeerDetail,
-    PeerEntry, PeerId, Preset, RadioSettings, Reaction, Section, Shareable, State,
+    ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Invite, MAX_CHATS, Member, MessageId,
+    PeerDetail, PeerEntry, PeerId, Preset, RadioSettings, Reaction, Section, Shareable, State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
 pub type JoinName = EditBuffer<String<32>>;
 /// An address or a peer invitation, as it is typed into Add peer.
 pub type PeerText = EditBuffer<String<64>>;
+/// A channel's name or invitation, as it is typed into Add channel.
+pub type ChannelText = EditBuffer<String<96>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -63,6 +65,12 @@ pub mod keys {
     pub const PEER_FORGET: FocusKey = FocusKey(0x0C00_0005);
     pub const FORGET_CONFIRM: FocusKey = FocusKey(0x0C00_0006);
     pub const FORGET_CANCEL: FocusKey = FocusKey(0x0C00_0007);
+    /// The Channels screen's Add channel, which heads it; the channels
+    /// under it are named as the Chats list names them.
+    pub const ADD_CHANNEL: FocusKey = FocusKey(0x1000_0000);
+    /// Add channel's field, and its Join.
+    pub const CHANNEL_FIELD: FocusKey = FocusKey(0x1100_0000);
+    pub const JOIN_ENTRY: FocusKey = FocusKey(0x1100_0001);
     /// Add peer's field, and its Message.
     pub const PEER_FIELD: FocusKey = FocusKey(0x0B00_0000);
     pub const MESSAGE_PEER: FocusKey = FocusKey(0x0B00_0001);
@@ -189,6 +197,23 @@ pub mod keys {
     }
 }
 
+/// A screen under Device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DevicePage {
+    /// The radio's settings.
+    Radio {
+        settings: RadioSettings,
+        /// Preset's choices are open.
+        picker: bool,
+    },
+    /// A code that shares this node or a joined channel.
+    Share,
+    /// The joined channels.
+    Channels,
+    /// A channel's name or invitation, being typed.
+    AddChannel { text: ChannelText },
+}
+
 /// A screen on the navigation stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -227,15 +252,8 @@ pub enum Screen {
         confirm: bool,
         focus: FocusState,
     },
-    /// A code that shares this node or a joined channel.
-    Share { focus: FocusState },
-    /// The radio's settings.
-    Radio {
-        settings: RadioSettings,
-        /// Preset's choices are open.
-        picker: bool,
-        focus: FocusState,
-    },
+    /// One of the screens under Device.
+    Device { page: DevicePage, focus: FocusState },
     /// A peer's address or invitation, being typed.
     AddPeer { text: PeerText, focus: FocusState },
     /// A channel an invitation offers, before it is joined.
@@ -270,8 +288,7 @@ impl Screen {
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
-            | Self::Radio { focus, .. }
-            | Self::Share { focus }
+            | Self::Device { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -285,8 +302,7 @@ impl Screen {
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
-            | Self::Radio { focus, .. }
-            | Self::Share { focus }
+            | Self::Device { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -564,7 +580,8 @@ impl State {
 
     /// Shows this node's code.
     pub fn open_share(&mut self) {
-        _ = self.screens.push(Screen::Share {
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::Share,
             focus: FocusState::requesting(keys::share(Shareable::Identity)),
         });
     }
@@ -595,9 +612,11 @@ impl State {
 
     /// Shows the radio's settings, Region focused.
     pub fn open_radio(&mut self) {
-        _ = self.screens.push(Screen::Radio {
-            settings: self.node.radio(),
-            picker: false,
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::Radio {
+                settings: self.node.radio(),
+                picker: false,
+            },
             focus: FocusState::requesting(keys::REGION),
         });
     }
@@ -605,16 +624,19 @@ impl State {
     /// Reads the radio's settings shown from the node again.
     fn refresh_radio(&mut self) {
         let node = self.node;
-        if let Some(Screen::Radio { settings, .. }) = self.screens.last_mut() {
+        if let Some(Screen::Device {
+            page: DevicePage::Radio { settings, .. },
+            ..
+        }) = self.screens.last_mut()
+        {
             *settings = node.radio();
         }
     }
 
     /// Opens Preset's choices, the current one focused.
     pub fn open_presets(&mut self) {
-        if let Some(Screen::Radio {
-            settings,
-            picker,
+        if let Some(Screen::Device {
+            page: DevicePage::Radio { settings, picker },
             focus,
         }) = self.screens.last_mut()
         {
@@ -625,7 +647,11 @@ impl State {
 
     /// Closes Preset's choices, Preset focused.
     pub fn close_presets(&mut self) {
-        if let Some(Screen::Radio { picker, focus, .. }) = self.screens.last_mut() {
+        if let Some(Screen::Device {
+            page: DevicePage::Radio { picker, .. },
+            focus,
+        }) = self.screens.last_mut()
+        {
             *picker = false;
             focus.request(keys::PRESET_ROW);
         }
@@ -638,17 +664,89 @@ impl State {
         self.close_presets();
     }
 
+    /// The radio's settings shown.
+    fn shown_radio(&self) -> Option<&RadioSettings> {
+        match self.screens.last() {
+            Some(Screen::Device {
+                page: DevicePage::Radio { settings, .. },
+                ..
+            }) => Some(settings),
+            _ => None,
+        }
+    }
+
     pub fn toggle_forwarding(&mut self) {
-        if let Some(Screen::Radio { settings, .. }) = self.screens.last() {
+        if let Some(settings) = self.shown_radio() {
             self.node.set_forwarding(!settings.forwarding);
             self.refresh_radio();
         }
     }
 
     pub fn toggle_share_location(&mut self) {
-        if let Some(Screen::Radio { settings, .. }) = self.screens.last() {
+        if let Some(settings) = self.shown_radio() {
             self.node.set_share_location(!settings.share_location);
             self.refresh_radio();
+        }
+    }
+
+    /// Shows the joined channels, Add channel focused.
+    pub fn open_channels(&mut self) {
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::Channels,
+            focus: FocusState::requesting(keys::ADD_CHANNEL),
+        });
+    }
+
+    /// Opens the conversation of the joined channel `chat`.
+    pub fn open_channel(&mut self, chat: ChatId) {
+        self.go_to_chat(chat);
+    }
+
+    /// Shows Add channel, its field focused, so typing starts the name.
+    pub fn open_add_channel(&mut self) {
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::AddChannel {
+                text: ChannelText::new(),
+            },
+            focus: FocusState::requesting(keys::CHANNEL_FIELD),
+        });
+    }
+
+    /// The name or invitation being typed into Add channel.
+    pub fn channel_text_mut(&mut self) -> Option<&mut ChannelText> {
+        match self.screens.last_mut() {
+            Some(Screen::Device {
+                page: DevicePage::AddChannel { text },
+                ..
+            }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// What has been typed into Add channel names so far.
+    #[must_use]
+    pub fn channel_entry(&self) -> ChannelEntry {
+        match self.screens.last() {
+            Some(Screen::Device {
+                page: DevicePage::AddChannel { text },
+                ..
+            }) => self.node.inspect_channel(text.text()),
+            _ => ChannelEntry::Empty,
+        }
+    }
+
+    /// Joins the channel typed into Add channel and opens it.
+    pub fn add_channel(&mut self) {
+        let Some(Screen::Device {
+            page: DevicePage::AddChannel { text },
+            ..
+        }) = self.screens.last()
+        else {
+            return;
+        };
+        if let Some(chat) = self.node.add_channel(text.text()) {
+            let chat = self.add_chat(chat);
+            self.go_to_chat(chat);
         }
     }
 

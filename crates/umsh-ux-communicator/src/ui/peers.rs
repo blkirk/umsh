@@ -13,12 +13,12 @@ use crate::model::{MAX_PEERS, PeerSummary, State};
 use crate::nav::keys;
 use crate::{font, icon, theme};
 
-const ROW: u32 = 44;
+pub(super) const ROW: u32 = 44;
 const NAME_LINE: u32 = 24;
 const ROUTE_LINE: u32 = ROW - NAME_LINE;
-const AVATAR: u32 = 34;
+pub(super) const AVATAR: u32 = 34;
 /// From the list's leading edge to the text.
-const TEXT_X: u32 = 51;
+pub(super) const TEXT_X: u32 = 51;
 const LIST_WIDTH: u32 = theme::WIDTH - RAIL;
 /// The signal bars: each one's width, the space between them, and the
 /// shortest one's height and how much taller each next one is.
@@ -44,7 +44,7 @@ pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + u
     let count = rows.len();
     ScrollView::new(
         VStack::new((
-            add_row(),
+            add_row("Add peer", State::open_add_peer, keys::ADD_PEER, LIST_WIDTH),
             ForEach::<MAX_PEERS>::new_vertical(&INDICES[..count], move |&i| row(&rows[i]))
                 .keyed(move |&i| keys::peer(ids[i])),
         ))
@@ -62,10 +62,11 @@ pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + u
 }
 
 /// A row's focused look, under its content: filled, with the accent at its
-/// leading edge, as the Chats list's rows are.
-fn focused_row<V: View<Rgb565, State>>(
+/// leading edge, as the Chats list's rows are. `width` is the list's.
+pub(super) fn focused_row<V: View<Rgb565, State>>(
     content: V,
     focused: bool,
+    width: u32,
 ) -> impl View<Rgb565, State> + use<V> {
     content
         .hint_background_color(if focused {
@@ -90,15 +91,21 @@ fn focused_row<V: View<Rgb565, State>>(
             (!focused).then(|| {
                 Rectangle
                     .foreground_color(theme::LINE)
-                    .frame_sized(LIST_WIDTH - TEXT_X, 1)
+                    .frame_sized(width - TEXT_X, 1)
             }),
         )
 }
 
-fn add_row() -> impl View<Rgb565, State> + use<> {
-    Button::new(State::open_add_peer, |button: ButtonState| {
+/// The row heading a list that adds to it.
+pub(super) fn add_row(
+    name: &'static str,
+    act: fn(&mut State),
+    key: buoyant::focus::FocusKey,
+    width: u32,
+) -> impl View<Rgb565, State> + use<> {
+    Button::new(act, move |button: ButtonState| {
         focused_row(
-            label::<16>("Add peer", &font::SEMIBOLD, theme::BODY, theme::ACCENT)
+            super::line(name, &font::SEMIBOLD, theme::BODY, theme::ACCENT)
                 .padding(Edges::Leading, TEXT_X)
                 .flex_infinite_width(HorizontalAlignment::Leading)
                 .frame()
@@ -112,9 +119,10 @@ fn add_row() -> impl View<Rgb565, State> + use<> {
                         .with_width(TEXT_X),
                 ),
             button.is_focused(),
+            width,
         )
     })
-    .focus_key(keys::ADD_PEER)
+    .focus_key(key)
 }
 
 fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
@@ -155,6 +163,7 @@ fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
                         .with_width(TEXT_X),
                 ),
                 button.is_focused(),
+                LIST_WIDTH,
             )
         },
     )

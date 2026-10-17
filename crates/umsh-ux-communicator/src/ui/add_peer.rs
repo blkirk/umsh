@@ -7,9 +7,9 @@ use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::font::PrerenderedFont;
 use buoyant::render::AreaColors;
-use buoyant::view::TextArea;
 use buoyant::view::prelude::*;
 use buoyant::view::text_field::TextFieldStatus;
+use buoyant::view::{EditText, TextArea};
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
 
@@ -85,16 +85,19 @@ fn field(text: &PeerText) -> impl View<Rgb565, State> + use<> {
         .with_caret_width(CARET)
         // Enter messages the peer once the address is whole.
         .on_submit(State::message_entry)
-        .with_label(field_look)
+        // Half an address to a line, so its groups line up.
+        .with_label(|status, area| field_look(status, area, COLUMN * ADVANCE + CARET))
         .focus_key(keys::PEER_FIELD)
         .padding(Edges::Horizontal, INSET)
 }
 
-fn field_look(
+/// A field typed in monospace, its text `width` wide at most.
+pub(super) fn field_look<B: EditText>(
     status: TextFieldStatus,
-    area: TextArea<'static, String<64>, PrerenderedFont>,
-) -> impl View<Rgb565, State> + use<> {
-    let (fill, ring, width) = if status.is_active() {
+    area: TextArea<'static, B, PrerenderedFont>,
+    width: u32,
+) -> impl View<Rgb565, State> + use<B> {
+    let (fill, ring, stroke) = if status.is_active() {
         (theme::ACTIVE_FIELD, theme::ACCENT, 2)
     } else if status.is_focused() {
         (theme::FIELD, theme::ACCENT, 1)
@@ -107,9 +110,8 @@ fn field_look(
     })
     .foreground_color(theme::TEXT)
     .hint_background_color(fill)
-    // Half an address to a line, so its groups line up.
     .frame()
-    .with_width(COLUMN * ADVANCE + CARET)
+    .with_width(width)
     .flex_infinite_width(HorizontalAlignment::Leading)
     .padding(Edges::Horizontal, 12)
     .padding(Edges::Vertical, 5)
@@ -118,7 +120,7 @@ fn field_look(
         ZStack::new((
             RoundedRectangle::new(RADIUS).foreground_color(fill),
             RoundedRectangle::new(RADIUS)
-                .stroked(width)
+                .stroked(stroke)
                 .foreground_color(ring),
         )),
     )
