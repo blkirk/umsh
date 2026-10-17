@@ -128,6 +128,8 @@ pub struct Member {
     pub address: Option<String<44>>,
     /// How long ago they were last heard, already formatted, such as `2m`.
     pub heard: String<6>,
+    /// They are among my peers.
+    pub saved: bool,
 }
 
 /// Which way a message went.
@@ -309,6 +311,13 @@ pub trait History {
     /// Asks the channel `chat` for the identity of the member who sent
     /// `message`.
     fn request_identity(&self, chat: ChatId, message: MessageId);
+
+    /// The direct chat with `member`, whose identity is known, made if there
+    /// is none yet. `None` when there is no room for it.
+    fn direct_chat(&self, member: &Member) -> Option<ChatSummary>;
+
+    /// Keeps `member`, whose identity is known, among my peers.
+    fn save_peer(&self, member: &Member);
 
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.

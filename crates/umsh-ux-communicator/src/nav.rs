@@ -28,10 +28,10 @@ pub mod keys {
     pub const VIEW_MEMBER: FocusKey = FocusKey(ACTION | 0x102);
     /// What the details screen shows, which the wheel scrolls through.
     pub const DETAIL_LIST: FocusKey = FocusKey(0x0600_0000);
-    /// The member screen's Request identity, and what it shows when there
-    /// is nothing to do.
+    /// The member screen's Request identity, Message, and Save peer.
     pub const REQUEST_IDENTITY: FocusKey = FocusKey(0x0700_0000);
-    pub const MEMBER_INFO: FocusKey = FocusKey(0x0700_0001);
+    pub const MESSAGE_MEMBER: FocusKey = FocusKey(0x0700_0001);
+    pub const SAVE_PEER: FocusKey = FocusKey(0x0700_0002);
 
     /// A reaction in the actions menu's palette.
     #[must_use]
@@ -112,6 +112,8 @@ pub enum Screen {
     Member {
         message: MessageId,
         member: Member,
+        /// Their identity has been asked for.
+        requested: bool,
         focus: FocusState,
     },
     /// The chats that got messages while the panel was dark, which the first
@@ -304,23 +306,97 @@ impl State {
         let focus = if member.address.is_none() {
             keys::REQUEST_IDENTITY
         } else {
-            keys::MEMBER_INFO
+            keys::MESSAGE_MEMBER
         };
         _ = self.screens.push(Screen::Member {
             message,
             member,
+            requested: false,
             focus: FocusState::requesting(focus),
         });
     }
 
     /// Asks the channel for the identity of the member shown.
     pub fn request_identity(&mut self) {
-        let Some(Screen::Member { message, .. }) = self.screens.last() else {
+        let chat = self.conversation.as_ref().map(|c| c.chat);
+        let Some(Screen::Member {
+            message, requested, ..
+        }) = self.screens.last_mut()
+        else {
             return;
         };
-        if let Some(chat) = self.conversation.as_ref().map(|c| c.chat) {
+        if let Some(chat) = chat {
             self.history.request_identity(chat, *message);
+            *requested = true;
         }
+    }
+
+    /// Shows the identities the history has learned since they were drawn:
+    /// members' names and addresses in the conversation and on the member
+    /// screen. Focus on a Request identity that is no longer offered moves
+    /// to Message.
+    pub fn identities_arrived(&mut self) {
+        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
+            return;
+        };
+        self.load_conversation(chat);
+        let history = self.history;
+        for screen in &mut self.screens {
+            let Screen::Member {
+                message,
+                member,
+                focus,
+                ..
+            } = screen
+            else {
+                continue;
+            };
+            if let Some(known) = history.member(chat, *message) {
+                *member = known;
+            }
+            let asking = focus.current().or(focus.pending()) == Some(keys::REQUEST_IDENTITY);
+            if asking && member.address.is_some() {
+                focus.request(keys::MESSAGE_MEMBER);
+            }
+        }
+    }
+
+    /// Opens the direct chat with the member shown, made if there is none.
+    /// Back from it goes to the list, as the interface holds one
+    /// conversation.
+    pub fn message_member(&mut self) {
+        let Some(Screen::Member { member, .. }) = self.screens.last() else {
+            return;
+        };
+        if member.address.is_none() {
+            return;
+        }
+        let Some(summary) = self.history.direct_chat(member) else {
+            return;
+        };
+        let chat = summary.id;
+        if self.chat(chat).is_none() {
+            if self.chats.is_full() {
+                self.chats.pop();
+            }
+            _ = self.chats.insert(0, summary);
+        }
+        self.go_to_chat(chat);
+    }
+
+    /// Keeps the member shown among my peers. Focus on Save peer, which is
+    /// no longer offered, moves to Message.
+    pub fn save_member(&mut self) {
+        let history = self.history;
+        let Some(Screen::Member { member, focus, .. }) = self.screens.last_mut() else {
+            return;
+        };
+        if member.address.is_none() || member.saved {
+            return;
+        }
+        history.save_peer(member);
+        member.saved = true;
+        focus.request(keys::MESSAGE_MEMBER);
     }
 
     /// Shows the chats that got messages while the panel was dark, the first
@@ -335,13 +411,19 @@ impl State {
         });
     }
 
-    /// Opens `chat` from the screen the panel woke to. The interface holds
-    /// one conversation, so whatever was open under it closes; Back from
-    /// the chat goes to the list, at its row.
+    /// Opens `chat` from the screen the panel woke to, in place of whatever
+    /// was open under it.
     pub fn open_arrival(&mut self, chat: ChatId) {
+        self.arrived.clear();
+        self.go_to_chat(chat);
+    }
+
+    /// Opens `chat` in place of whatever is shown. The interface holds one
+    /// conversation, so whatever was open closes; Back from the chat goes to
+    /// the list, at its row.
+    fn go_to_chat(&mut self, chat: ChatId) {
         self.screens.truncate(1);
         self.conversation = None;
-        self.arrived.clear();
         self.focus().request(keys::chat(chat));
         self.open_chat(chat);
     }

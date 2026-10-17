@@ -48,14 +48,34 @@ fn member_traits(name: &str) -> ([u8; 3], &'static str, PeerShape, Option<&'stat
     }
 }
 
-/// What is known of the channel member `name`.
-fn member_card(name: &str) -> Member {
-    let (_, hint, _, address) = member_traits(name);
+/// The member known by their hint until asked, and who they turn out to be.
+const UNIDENTIFIED: &str = "Member 4Fz*";
+const IDENTIFIED: (&str, &str) = ("Robin Hale", "4FzRC8jVNGDYhYCXKWyHDHzm8MakqsCxtGBGDpQdZDtk");
+
+/// What is known of the channel member `name`, who is `identified` when
+/// their identity has arrived.
+fn member_card(name: &str, identified: bool) -> Member {
+    let (color, hint, shape, address) = member_traits(name);
+    if name == UNIDENTIFIED && identified {
+        let (name, address) = IDENTIFIED;
+        let hint = &address[..4];
+        return Member {
+            sender: Sender {
+                name: s(name),
+                avatar: AvatarStyle::peer(color, hint, shape),
+            },
+            hint: s(hint),
+            address: Some(s(address)),
+            heard: s("2m"),
+            saved: false,
+        };
+    }
     Member {
         sender: member(name),
         hint: s(hint),
         address: address.map(s),
         heard: s("2m"),
+        saved: false,
     }
 }
 
@@ -196,6 +216,14 @@ pub struct Store {
     /// Unconfirmed messages sent again.
     retried: RefCell<Vec<MessageId, KEPT>>,
     next: Cell<MessageId>,
+    /// The unidentified member's identity has been asked for, and has
+    /// arrived.
+    asked: Cell<bool>,
+    identified: Cell<bool>,
+    /// Members saved as peers, and direct chats made with members, by
+    /// address.
+    saved: RefCell<Vec<String<44>, KEPT>>,
+    direct: RefCell<Vec<String<44>, KEPT>>,
 }
 
 impl Store {
@@ -209,9 +237,17 @@ impl Store {
             retried: RefCell::new(Vec::new()),
             // Above the fixture's own messages.
             next: Cell::new(0x1_0000),
+            asked: Cell::new(false),
+            identified: Cell::new(false),
+            saved: RefCell::new(Vec::new()),
+            direct: RefCell::new(Vec::new()),
         }
     }
 }
+
+/// Where direct chats made with members are numbered from, above the
+/// fixture's own chats.
+const FIRST_DIRECT: ChatId = 0x100;
 
 impl Store {
     /// The next message to arrive, the ones on the T-LoRa Pager mockup's
@@ -222,6 +258,32 @@ impl Store {
         let &(chat, from, text) = ARRIVALS.get(index)?;
         self.arrived.set(index + 1);
         Some((chat, self.keep(chat, from, text)?))
+    }
+
+    /// An identity has been asked for and has not yet arrived.
+    #[must_use]
+    pub fn identity_asked(&self) -> bool {
+        self.asked.get() && !self.identified.get()
+    }
+
+    /// The identity asked for arrives. Returns whether one was asked for;
+    /// [`State::identities_arrived`] then shows it.
+    pub fn answer_identity(&self) -> bool {
+        let answered = self.identity_asked();
+        if answered {
+            self.identified.set(true);
+        }
+        answered
+    }
+
+    /// What is known of the channel member `name`.
+    fn card(&self, name: &str) -> Member {
+        let mut member = member_card(name, self.identified.get());
+        member.saved = member
+            .address
+            .as_ref()
+            .is_some_and(|address| self.saved.borrow().contains(address));
+        member
     }
 
     /// Keeps `text`, from `from`, as the newest message of `chat`.
@@ -287,6 +349,14 @@ impl History for Store {
                 message.delivery = Delivery::Sending;
             }
         }
+        if self.identified.get() {
+            let known = self.card(UNIDENTIFIED).sender;
+            for message in into.iter_mut() {
+                if let Some(sender) = message.sender.as_mut().filter(|s| s.name == UNIDENTIFIED) {
+                    *sender = known.clone();
+                }
+            }
+        }
     }
 
     fn send(&self, chat: ChatId, text: &str, _reply_to: Option<MessageId>) -> Option<Message> {
@@ -326,11 +396,39 @@ impl History for Store {
                 _ => return None,
             }
         };
-        Some(member_card(&name))
+        Some(self.card(&name))
     }
 
     fn request_identity(&self, _chat: ChatId, _message: MessageId) {
-        // The fixture has no channel to ask.
+        // Only the unidentified member has an identity to come.
+        self.asked.set(true);
+    }
+
+    fn direct_chat(&self, member: &Member) -> Option<ChatSummary> {
+        let address = member.address.as_ref()?;
+        let mut direct = self.direct.borrow_mut();
+        let index = match direct.iter().position(|a| a == address) {
+            Some(index) => index,
+            None => {
+                direct.push(address.clone()).ok()?;
+                direct.len() - 1
+            }
+        };
+        Some(ChatSummary::new(
+            FIRST_DIRECT + index as ChatId,
+            member.sender.avatar.clone(),
+            &member.sender.name,
+            self.heap,
+        ))
+    }
+
+    fn save_peer(&self, member: &Member) {
+        let mut saved = self.saved.borrow_mut();
+        if let Some(address) = member.address.as_ref()
+            && !saved.contains(address)
+        {
+            _ = saved.push(address.clone());
+        }
     }
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {

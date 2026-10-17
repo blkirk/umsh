@@ -59,8 +59,11 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
             Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
-            Screen::Member { member, .. } => member::view(
+            Screen::Member {
+                member, requested, ..
+            } => member::view(
                 member,
+                *requested,
                 state
                     .conversation
                     .as_ref()

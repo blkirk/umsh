@@ -25,6 +25,8 @@ const REPORT: Duration = Duration::from_secs(1);
 /// is lit, and otherwise long after the last arrival, once it has gone dark.
 const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
 const ARRIVAL_AFTER_ARRIVAL: Duration = Duration::from_secs(40);
+/// How long the fixture's identity takes to arrive once asked for.
+const IDENTITY_DELAY: Duration = Duration::from_secs(2);
 
 #[embassy_executor::task]
 pub(crate) async fn task(
@@ -75,6 +77,8 @@ pub(crate) async fn task(
     // When the fixture's next message arrives, while it has any left.
     let mut arrivals_left = true;
     let mut arrival: Option<Instant> = None;
+    // When the identity asked for arrives.
+    let mut identity: Option<Instant> = None;
 
     loop {
         SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
@@ -84,6 +88,7 @@ pub(crate) async fn task(
             attention.next_deadline(),
             app.state().next_deadline(),
             arrival.map(|at| at.as_millis()),
+            identity.map(|at| at.as_millis()),
         ]
         .into_iter()
         .flatten()
@@ -104,6 +109,9 @@ pub(crate) async fn task(
                     }
                     costs.layout = costs.layout.max(Instant::now() - began);
                     arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
+                    if store.identity_asked() {
+                        identity = Some(Instant::now() + IDENTITY_DELAY);
+                    }
                     attention.wake(now())
                 }
                 Either3::Second(()) => attention.wake(now()),
@@ -111,6 +119,12 @@ pub(crate) async fn task(
             };
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
+        }
+        if identity.is_some_and(|at| at <= Instant::now()) {
+            identity = None;
+            if store.answer_identity() {
+                app.state_mut().identities_arrived();
+            }
         }
         if arrival.is_some_and(|at| at <= Instant::now()) {
             arrival = None;

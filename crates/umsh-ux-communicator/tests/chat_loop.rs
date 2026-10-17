@@ -696,7 +696,7 @@ fn a_known_member_shows_their_address() {
     };
     assert_eq!(member.sender.name.as_str(), "Sam");
     assert!(member.address.is_some());
-    assert_eq!(focus(app.state()), Some(keys::MEMBER_INFO));
+    assert_eq!(focus(app.state()), Some(keys::MESSAGE_MEMBER));
 }
 
 #[test]
@@ -736,4 +736,64 @@ fn changing_my_reaction_moves_it_between_shared_chips() {
         reactions(app.state(), BEHIND_YOU),
         [(Reaction::ThumbsUp, 1, false), (Reaction::Exclaim, 2, true)]
     );
+}
+
+fn shown_member(state: &State) -> (&umsh_ux_communicator::model::Member, bool) {
+    match state.screen() {
+        Screen::Member {
+            member, requested, ..
+        } => (member, *requested),
+        other => panic!("expected a member, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_identity_that_arrives_names_the_member_everywhere() {
+    let store = store();
+    let mut app = app!(store);
+    view_member(&mut app, 2);
+    assert!(!store.answer_identity(), "nothing asked yet");
+    run(&mut app, &[Input::Press]);
+    assert!(shown_member(app.state()).1, "requested");
+    assert!(store.answer_identity());
+    app.state_mut().identities_arrived();
+    app.finalize_view();
+
+    let (member, _) = shown_member(app.state());
+    assert_eq!(member.sender.name.as_str(), "Robin Hale");
+    assert_eq!(member.hint.as_str(), "4FzR");
+    assert!(member.address.is_some());
+    assert_eq!(focus(app.state()), Some(keys::MESSAGE_MEMBER));
+    let conversation = app.state().conversation.as_ref().expect("a chat is open");
+    let sender = conversation.messages.iter().find(|m| m.id == BEHIND_YOU);
+    assert_eq!(
+        sender
+            .and_then(|m| m.sender.as_ref())
+            .map(|s| s.name.as_str()),
+        Some("Robin Hale")
+    );
+}
+
+#[test]
+fn save_peer_goes_once_saved_and_message_opens_a_direct_chat() {
+    let mut app = app!();
+    view_member(&mut app, 1);
+    run(&mut app, &[Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::SAVE_PEER));
+    run(&mut app, &[Input::Press]);
+    assert!(shown_member(app.state()).0.saved);
+    assert_eq!(focus(app.state()), Some(keys::MESSAGE_MEMBER));
+
+    run(&mut app, &[Input::Press]);
+    let chat = match app.state().screen() {
+        Screen::Conversation { chat, .. } => *chat,
+        other => panic!("expected a conversation, got {other:?}"),
+    };
+    assert_eq!(app.state().chat(chat).map(|c| c.name.as_str()), Some("Sam"));
+    assert_eq!(app.state().chats.first().map(|c| c.id), Some(chat));
+    assert_in_conversation(app.state(), chat);
+    // Back goes to the list, at the new chat's row.
+    run(&mut app, &[Input::Backspace]);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(focus(app.state()), Some(keys::chat(chat)));
 }

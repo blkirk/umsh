@@ -7,7 +7,8 @@
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
 //! a click presses it. Return, Backspace, and the letters are themselves.
-//! Tab brings the fixture's next message in, as if it arrived.
+//! Tab brings the fixture's next message in, as if it arrived. An
+//! identity asked for arrives two seconds later.
 //!
 //! Headless, for scripted runs and comparisons with the mockup:
 //!
@@ -16,8 +17,9 @@
 //! Each script line is one step: `turn N` (negative is up), `press`,
 //! `enter`, `backspace`, `type TEXT`, `airtime SECONDS` (spent airtime
 //! that returns in that long; 0 for none), `arrive` (the fixture's next
-//! message arrives), `wait SECONDS` (the board's clock moves on), `dark`
-//! and `lit` (the panel goes dark and lights again), or
+//! message arrives), `identify` (the identity asked for arrives), `wait
+//! SECONDS` (the board's clock moves on), `dark` and `lit` (the panel goes
+//! dark and lights again), or
 //! `shot NAME`, which writes `NAME.png` into the output directory. `#`
 //! starts a comment.
 //!
@@ -63,6 +65,24 @@ where
 {
     if let Some((chat, message)) = store.arrive() {
         app.state_mut().receive(chat, message, now);
+        app.finalize_view();
+    }
+}
+
+/// How long an identity takes to arrive once asked for, in the window.
+#[cfg(feature = "window")]
+const IDENTITY_DELAY_MS: u64 = 2000;
+
+/// Takes in the identity asked for, as a board would, if one was.
+fn identify<V, F>(app: &mut App<V, State, F>, store: &fixture::Store)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    if store.answer_identity() {
+        app.state_mut().identities_arrived();
         app.finalize_view();
     }
 }
@@ -181,6 +201,10 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 arrive(&mut app, store, clock);
                 None
             }
+            "identify" => {
+                identify(&mut app, store);
+                None
+            }
             "wait" => {
                 let seconds: u64 = rest
                     .parse()
@@ -240,6 +264,8 @@ fn window() -> ExitCode {
     let store = store();
     let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
+    // When the identity asked for arrives.
+    let mut identity_at: Option<u64> = None;
     loop {
         app.set_time(start.elapsed());
         let now = start.elapsed().as_millis() as u64;
@@ -283,7 +309,15 @@ fn window() -> ExitCode {
             };
             if let Some(input) = input {
                 input::apply(&mut app, input);
+                // An identity asked for arrives a moment later.
+                if store.identity_asked() {
+                    identity_at = Some(now + IDENTITY_DELAY_MS);
+                }
             }
+        }
+        if identity_at.is_some_and(|at| at <= now) {
+            identity_at = None;
+            identify(&mut app, store);
         }
         if app.should_redraw() || target.clear_animation_status() {
             target.clear(theme::BACKGROUND);

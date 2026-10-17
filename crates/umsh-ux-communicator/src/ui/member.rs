@@ -1,6 +1,7 @@
 //! The member who sent a channel message. A channel message carries only a
 //! hint of its sender, so until their identity is known the screen offers to
-//! ask the channel for it. Backspace goes back.
+//! ask the channel for it; once it is, it offers to message them and to save
+//! them as a peer. Backspace goes back.
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
@@ -13,18 +14,30 @@ use super::details::row;
 use super::label;
 use crate::model::{Member, State};
 use crate::nav::keys;
-use crate::{font, theme};
+use crate::{font, icon, theme};
 
 /// The head's height, and its avatar's size and place.
 const HEAD: u32 = 62;
+/// The address line under the head.
+const ADDRESS: u32 = 22;
 const AVATAR: u32 = 44;
 const AVATAR_X: u32 = 10;
 const ROW: u32 = 36;
+const INSET: u32 = 12;
 
-/// `member`, heard in the channel named `channel`.
-pub fn view(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
+/// What an action row shows at its end.
+#[derive(Clone, Copy)]
+enum End {
+    Nothing,
+    /// It goes to another screen.
+    Chevron,
+    Value(&'static str),
+}
+
+/// `member`, heard in the channel named `channel`. `requested` says their
+/// identity has been asked for.
+pub fn view(member: &Member, requested: bool, channel: &str) -> impl View<Rgb565, State> + use<> {
     let known = member.address.is_some();
-    let shown = member.clone();
     VStack::new((
         header("Member", None, None),
         head(member, channel),
@@ -33,14 +46,32 @@ pub fn view(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> 
                 "Request identity",
                 keys::REQUEST_IDENTITY,
                 State::request_identity,
+                if requested {
+                    End::Value("Requested")
+                } else {
+                    End::Nothing
+                },
             )
         }),
-        // With nothing to do, what is known takes focus, so Back has
-        // somewhere to be pressed from.
         known.then(|| {
-            Button::new(|_: &mut State| {}, move |_| info(&shown)).focus_key(keys::MEMBER_INFO)
+            action(
+                "Message",
+                keys::MESSAGE_MEMBER,
+                State::message_member,
+                End::Chevron,
+            )
         }),
-        (!known).then(|| info(member)),
+        (known && !member.saved).then(|| {
+            action(
+                "Save peer",
+                keys::SAVE_PEER,
+                State::save_member,
+                End::Nothing,
+            )
+        }),
+        // Once known, the address under the head shows the hint.
+        (!known).then(|| row("Hint", &member.hint, false)),
+        (!known).then(|| row("Address", "Not yet known", true)),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
@@ -53,28 +84,15 @@ pub fn view(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> 
     })
 }
 
-/// Their hint, and their address once it is known.
-fn info(member: &Member) -> impl View<Rgb565, State> + use<> {
-    VStack::new((
-        row("Hint", &member.hint, false),
-        row(
-            "Address",
-            member.address.as_deref().unwrap_or("Not yet known"),
-            member.address.is_none(),
-        ),
-    ))
-    .with_spacing(0)
-    .content_shape(Rectangle)
-}
-
-/// Their avatar and name, and where and when they were last heard.
+/// Their avatar and name, where and when they were last heard, and their
+/// address once it is known.
 fn head(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
     let mut heard: String<48> = String::new();
     _ = core::fmt::write(
         &mut heard,
         format_args!("Heard in {channel} \u{B7} {}", member.heard),
     );
-    HStack::new((
+    let named = HStack::new((
         super::avatar::view(&member.sender.avatar, AVATAR),
         VStack::new((
             label::<24>(&member.sender.name, &font::BOLD, theme::BODY, theme::TEXT),
@@ -87,7 +105,18 @@ fn head(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
     .padding(Edges::Leading, AVATAR_X)
     .flex_infinite_width(HorizontalAlignment::Leading)
     .frame()
-    .with_height(HEAD)
+    .with_height(HEAD);
+    VStack::new((
+        named,
+        member.address.as_ref().map(|address| {
+            label::<44>(address, &font::REGULAR, theme::SMALL, theme::TEXT_SECONDARY)
+                .padding(Edges::Leading, AVATAR_X)
+                .flex_infinite_width(HorizontalAlignment::Leading)
+                .frame()
+                .with_height(ADDRESS)
+        }),
+    ))
+    .with_spacing(0)
 }
 
 /// A row that does something when pressed.
@@ -95,33 +124,62 @@ fn action(
     text: &'static str,
     key: buoyant::focus::FocusKey,
     act: fn(&mut State),
+    end: End,
 ) -> impl View<Rgb565, State> + use<> {
     Button::new(act, move |button: ButtonState| {
         let focused = button.is_focused();
         let face = if focused { &font::BOLD } else { &font::REGULAR };
-        label::<24>(text, face, theme::BODY, theme::TEXT)
-            .hint_background_color(if focused {
-                theme::FOCUS
-            } else {
-                theme::BACKGROUND
-            })
-            .padding(Edges::Leading, 8)
-            .flex_infinite_width(HorizontalAlignment::Leading)
-            .frame()
-            .with_height(ROW - 2)
-            .background(
-                Alignment::Center,
-                focused.then(|| {
-                    ZStack::new((
-                        RoundedRectangle::new(8).foreground_color(theme::FOCUS),
-                        RoundedRectangle::new(8)
-                            .stroked(2)
-                            .foreground_color(theme::ACCENT),
-                    ))
-                }),
-            )
-            .padding(Edges::Horizontal, 4)
-            .padding(Edges::Vertical, 1)
+        HStack::new((
+            label::<24>(text, face, theme::BODY, theme::TEXT),
+            Spacer::default(),
+            match end {
+                End::Value(value) => Some(label::<16>(
+                    value,
+                    &font::REGULAR,
+                    theme::SECONDARY,
+                    theme::TEXT_SECONDARY,
+                )),
+                End::Nothing | End::Chevron => None,
+            },
+            matches!(end, End::Chevron).then(|| {
+                Image::new(&icon::CHEVRON)
+                    .as_template()
+                    .foreground_color(theme::TEXT_TERTIARY)
+            }),
+        ))
+        .with_spacing(8)
+        .hint_background_color(if focused {
+            theme::FOCUS
+        } else {
+            theme::BACKGROUND
+        })
+        .padding(Edges::Leading, INSET - 4)
+        .padding(Edges::Trailing, 10)
+        .frame()
+        .with_height(ROW - 2)
+        .background(
+            Alignment::Center,
+            focused.then(|| {
+                ZStack::new((
+                    RoundedRectangle::new(8).foreground_color(theme::FOCUS),
+                    RoundedRectangle::new(8)
+                        .stroked(2)
+                        .foreground_color(theme::ACCENT),
+                ))
+            }),
+        )
+        .padding(Edges::Horizontal, 4)
+        .padding(Edges::Vertical, 1)
+        .overlay(
+            Alignment::Bottom,
+            (!focused).then(|| {
+                Rectangle
+                    .foreground_color(theme::LINE)
+                    .frame()
+                    .with_height(1)
+                    .padding(Edges::Leading, INSET)
+            }),
+        )
     })
     .focus_key(key)
 }
