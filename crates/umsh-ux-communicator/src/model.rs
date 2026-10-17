@@ -391,9 +391,10 @@ pub fn push_newest(messages: &mut Messages, message: Message) {
     _ = messages.push(message);
 }
 
-/// Where every chat's messages are kept. The interface holds only the open
+/// The node behind the interface: where every chat's messages are kept, and
+/// what it knows of peers and channels. The interface holds only the open
 /// chat's newest messages, and reads them from here when it opens.
-pub trait History {
+pub trait Node {
     /// Fills `messages`, which is empty, with the newest messages of `chat`.
     fn load(&self, chat: ChatId, messages: &mut Messages);
 
@@ -490,7 +491,7 @@ pub struct State {
     pub conversation: Option<Conversation>,
     /// The screens, the one shown last. The Chats screen is always first.
     pub screens: Vec<Screen, 4>,
-    pub history: &'static dyn History,
+    pub node: &'static dyn Node,
     /// Seconds until sending is allowed again, while the airtime it may use
     /// is spent.
     pub airtime_wait: Option<u16>,
@@ -521,9 +522,9 @@ impl core::fmt::Debug for State {
 }
 
 impl State {
-    /// No chats, on the Chats screen, with chats' messages kept in `history`.
+    /// No chats, on the Chats screen, with chats' messages kept in `node`.
     #[must_use]
-    pub fn new(history: &'static dyn History) -> Self {
+    pub fn new(node: &'static dyn Node) -> Self {
         let mut screens = Vec::new();
         _ = screens.push(Screen::chats());
         Self {
@@ -533,7 +534,7 @@ impl State {
             peers: Vec::new(),
             conversation: None,
             screens,
-            history,
+            node,
             airtime_wait: None,
             banner: None,
             dark: false,
@@ -572,7 +573,7 @@ impl State {
         self.chat_mut(chat).map(|c| &mut c.draft)
     }
 
-    /// Reads the newest messages of `chat` from the history, as the open
+    /// Reads the newest messages of `chat` from the node, as the open
     /// chat's.
     pub(crate) fn load_conversation(&mut self, chat: ChatId) {
         // Filled where it lies: a conversation is too large to build aside.
@@ -582,12 +583,12 @@ impl State {
         });
         conversation.chat = chat;
         conversation.messages.clear();
-        self.history.load(chat, &mut conversation.messages);
+        self.node.load(chat, &mut conversation.messages);
     }
 
     /// Sends the draft of `chat`: it becomes the newest message, and the
     /// chat moves to the top of the list. A draft stays a draft while airtime
-    /// is spent, or when the history has no room for it.
+    /// is spent, or when the node has no room for it.
     pub fn send(&mut self, chat: ChatId) {
         if self.airtime_wait.is_some() {
             return;
@@ -606,7 +607,7 @@ impl State {
             _ => None,
         };
         let Some(message) = self
-            .history
+            .node
             .send(chat, self.chats[index].draft.text(), reply_to)
         else {
             return;
@@ -647,7 +648,7 @@ impl State {
         };
         let mine = (target.my_reaction() != Some(reaction)).then_some(reaction);
         target.set_my_reaction(mine);
-        self.history.react(conversation.chat, message, mine);
+        self.node.react(conversation.chat, message, mine);
     }
 
     /// Sends `message` in the open chat again, if it is unconfirmed and
@@ -666,13 +667,13 @@ impl State {
         else {
             return;
         };
-        if self.history.retry(conversation.chat, message) {
+        if self.node.retry(conversation.chat, message) {
             target.delivery = Delivery::Sending;
         }
     }
 
-    /// Takes in `message`, which arrived in `chat` and is already in the
-    /// history, at `now` on the board's clock. The chat moves to the top of
+    /// Takes in `message`, which arrived in `chat` and is already kept by
+    /// the node, at `now` on the board's clock. The chat moves to the top of
     /// the list. Returns whether the message calls for attention: it does
     /// not while its chat is being read, or when the chat is muted. One that
     /// does while the panel is dark is listed for the screen it wakes to.

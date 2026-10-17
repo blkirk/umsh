@@ -383,7 +383,7 @@ impl State {
         } else {
             given
         };
-        if let Some(summary) = self.history.join(invite, given) {
+        if let Some(summary) = self.node.join(invite, given) {
             let chat = self.add_chat(summary);
             self.go_to_chat(chat);
         }
@@ -394,7 +394,7 @@ impl State {
         if self.peer(peer).is_none() {
             return;
         }
-        let Some(detail) = self.history.peer_detail(peer) else {
+        let Some(detail) = self.node.peer_detail(peer) else {
             return;
         };
         _ = self.screens.push(Screen::Peer {
@@ -413,11 +413,11 @@ impl State {
         }
     }
 
-    /// Reads the saved peer shown from the history again.
+    /// Reads the saved peer shown from the node again.
     fn refresh_peer(&mut self) {
-        let history = self.history;
+        let node = self.node;
         if let Some(Screen::Peer { peer, detail, .. }) = self.screens.last_mut()
-            && let Some(fresh) = history.peer_detail(*peer)
+            && let Some(fresh) = node.peer_detail(*peer)
         {
             *detail = fresh;
         }
@@ -431,9 +431,9 @@ impl State {
         let Some(summary) = self.peer(*peer) else {
             return;
         };
-        if let Some(chat) =
-            self.history
-                .direct_chat(&detail.address, &summary.name, &summary.avatar)
+        if let Some(chat) = self
+            .node
+            .direct_chat(&detail.address, &summary.name, &summary.avatar)
         {
             let chat = self.add_chat(chat);
             self.go_to_chat(chat);
@@ -445,7 +445,7 @@ impl State {
         let Some(Screen::Peer { peer, detail, .. }) = self.screens.last() else {
             return;
         };
-        self.history
+        self.node
             .set_forward_secrecy(*peer, !detail.forward_secrecy);
         self.refresh_peer();
     }
@@ -453,7 +453,7 @@ impl State {
     /// Pings the saved peer shown.
     pub fn ping_peer(&mut self) {
         if let Some(peer) = self.shown_peer() {
-            self.history.ping(peer);
+            self.node.ping(peer);
             self.refresh_peer();
         }
     }
@@ -480,7 +480,7 @@ impl State {
         let Some(peer) = self.shown_peer() else {
             return;
         };
-        self.history.forget_peer(peer);
+        self.node.forget_peer(peer);
         let Some(index) = self.peers.iter().position(|p| p.id == peer) else {
             return;
         };
@@ -514,7 +514,7 @@ impl State {
     #[must_use]
     pub fn peer_entry(&self) -> PeerEntry {
         match self.screens.last() {
-            Some(Screen::AddPeer { text, .. }) => self.history.inspect_peer(text.text()),
+            Some(Screen::AddPeer { text, .. }) => self.node.inspect_peer(text.text()),
             _ => PeerEntry::Empty,
         }
     }
@@ -532,7 +532,7 @@ impl State {
             return;
         };
         let name = name.as_ref().map_or(hint.as_str(), String::as_str);
-        if let Some(summary) = self.history.direct_chat(&address, name, &avatar) {
+        if let Some(summary) = self.node.direct_chat(&address, name, &avatar) {
             let chat = self.add_chat(summary);
             self.go_to_chat(chat);
         }
@@ -598,7 +598,7 @@ impl State {
         let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
             return;
         };
-        let details = self.history.details(chat, message).unwrap_or_default();
+        let details = self.node.details(chat, message).unwrap_or_default();
         _ = self.screens.push(Screen::Details {
             message,
             details,
@@ -614,7 +614,7 @@ impl State {
         let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
             return;
         };
-        let Some(member) = self.history.member(chat, message) else {
+        let Some(member) = self.node.member(chat, message) else {
             return;
         };
         let focus = if member.address.is_none() {
@@ -640,12 +640,12 @@ impl State {
             return;
         };
         if let Some(chat) = chat {
-            self.history.request_identity(chat, *message);
+            self.node.request_identity(chat, *message);
             *requested = true;
         }
     }
 
-    /// Shows the identities the history has learned since they were drawn:
+    /// Shows the identities the node has learned since they were drawn:
     /// members' names and addresses in the conversation and on the member
     /// screen. Focus on a Request identity that is no longer offered moves
     /// to Message.
@@ -654,7 +654,7 @@ impl State {
             return;
         };
         self.load_conversation(chat);
-        let history = self.history;
+        let node = self.node;
         for screen in &mut self.screens {
             let Screen::Member {
                 message,
@@ -665,7 +665,7 @@ impl State {
             else {
                 continue;
             };
-            if let Some(known) = history.member(chat, *message) {
+            if let Some(known) = node.member(chat, *message) {
                 *member = known;
             }
             let asking = focus.current().or(focus.pending()) == Some(keys::REQUEST_IDENTITY);
@@ -686,7 +686,7 @@ impl State {
             return;
         };
         let Some(summary) =
-            self.history
+            self.node
                 .direct_chat(address, &member.sender.name, &member.sender.avatar)
         else {
             return;
@@ -698,14 +698,14 @@ impl State {
     /// Keeps the member shown among my peers. Focus on Save peer, which is
     /// no longer offered, moves to Message.
     pub fn save_member(&mut self) {
-        let history = self.history;
+        let node = self.node;
         let Some(Screen::Member { member, focus, .. }) = self.screens.last_mut() else {
             return;
         };
         if member.address.is_none() || member.saved {
             return;
         }
-        let saved = history.save_peer(member);
+        let saved = node.save_peer(member);
         member.saved = true;
         focus.request(keys::MESSAGE_MEMBER);
         if let Some(peer) = saved

@@ -5,9 +5,9 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerDetail, PeerEntry, PeerId, PeerSummary,
-    Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
+    ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, Invite,
+    MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
+    PeerSummary, Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -413,7 +413,7 @@ impl core::fmt::Debug for Store {
     }
 }
 
-impl History for Store {
+impl Node for Store {
     fn load(&self, chat: ChatId, into: &mut Messages) {
         for (index, &entry) in messages(chat).iter().enumerate() {
             if let Some(message) = message(self.heap, chat, index, entry) {
