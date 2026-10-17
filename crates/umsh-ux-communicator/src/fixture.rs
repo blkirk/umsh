@@ -7,7 +7,8 @@ use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, Invite,
     MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
-    PeerSummary, Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
+    PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
+    push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -266,6 +267,10 @@ pub struct Store {
     secrecy: RefCell<Vec<PeerId, KEPT>>,
     pinged: RefCell<Vec<PeerId, KEPT>>,
     forgotten: RefCell<Vec<PeerId, KEPT>>,
+    /// The radio's settings.
+    preset: Cell<Preset>,
+    forwarding: Cell<bool>,
+    share_location: Cell<bool>,
 }
 
 impl Store {
@@ -287,6 +292,9 @@ impl Store {
             secrecy: RefCell::new(Vec::new()),
             pinged: RefCell::new(Vec::new()),
             forgotten: RefCell::new(Vec::new()),
+            preset: Cell::new(Preset::LongRange),
+            forwarding: Cell::new(true),
+            share_location: Cell::new(false),
         }
     }
 }
@@ -554,6 +562,28 @@ impl Node for Store {
 
     fn forget_peer(&self, peer: PeerId) {
         _ = self.forgotten.borrow_mut().push(peer);
+    }
+
+    fn radio(&self) -> RadioSettings {
+        RadioSettings {
+            region: String::try_from("United States").expect("fixture text fits"),
+            preset: self.preset.get(),
+            forwarding: self.forwarding.get(),
+            share_location: self.share_location.get(),
+            airtime: 3,
+        }
+    }
+
+    fn set_preset(&self, preset: Preset) {
+        self.preset.set(preset);
+    }
+
+    fn set_forwarding(&self, on: bool) {
+        self.forwarding.set(on);
+    }
+
+    fn set_share_location(&self, on: bool) {
+        self.share_location.set(on);
     }
 
     fn inspect_peer(&self, text: &str) -> PeerEntry {

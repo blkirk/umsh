@@ -414,6 +414,7 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
     ),
     ("BACK", 14, 1.0, &[stroke("M3 -6 L-3 0 L3 6", 2.0)]),
     ("CHEVRON", 14, 1.0, &[stroke("M-3 -6 L3 0 L-3 6", 2.0)]),
+    ("CHECK", 16, 1.0, &[stroke("M-5 0 L-1.5 4 L5 -4", 2.2)]),
     (
         "ADD",
         32,

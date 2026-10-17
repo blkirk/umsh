@@ -10,8 +10,8 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerDetail, PeerEntry, PeerId,
-    Reaction, Section, State,
+    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerDetail, PeerEntry, PeerId, Preset,
+    RadioSettings, Reaction, Section, State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -22,7 +22,7 @@ pub type PeerText = EditBuffer<String<64>>;
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
 pub mod keys {
-    use super::{ChatId, FocusKey, MessageId, PeerId, Reaction, Section};
+    use super::{ChatId, FocusKey, MessageId, PeerId, Preset, Reaction, Section};
 
     const KIND: u32 = 0xFF00_0000;
     const RAIL: u32 = 0x0100_0000;
@@ -30,6 +30,8 @@ pub mod keys {
     const MESSAGE: u32 = 0x0300_0000;
     const ACTION: u32 = 0x0500_0000;
     const PEER: u32 = 0x0900_0000;
+    const DEVICE: u32 = 0x0D00_0000;
+    const PRESET: u32 = 0x0E00_0010;
 
     /// A conversation's composer. Only one conversation is shown at a time.
     pub const COMPOSER: FocusKey = FocusKey(0x0400_0000);
@@ -64,6 +66,20 @@ pub mod keys {
     /// The join screen's Name and Join channel.
     pub const JOIN_NAME: FocusKey = FocusKey(0x0800_0000);
     pub const JOIN_CHANNEL: FocusKey = FocusKey(0x0800_0001);
+    /// The Device list's categories, in order.
+    pub const IDENTITY: FocusKey = FocusKey(DEVICE);
+    pub const CHANNELS: FocusKey = FocusKey(DEVICE | 1);
+    pub const RADIO: FocusKey = FocusKey(DEVICE | 2);
+    pub const ALERTS: FocusKey = FocusKey(DEVICE | 3);
+    pub const DISPLAY: FocusKey = FocusKey(DEVICE | 4);
+    pub const PHONE_LINK: FocusKey = FocusKey(DEVICE | 5);
+    pub const MAINTENANCE: FocusKey = FocusKey(DEVICE | 6);
+    /// The Radio screen's settings and readout, in order.
+    pub const REGION: FocusKey = FocusKey(0x0E00_0000);
+    pub const PRESET_ROW: FocusKey = FocusKey(0x0E00_0001);
+    pub const FORWARDING: FocusKey = FocusKey(0x0E00_0002);
+    pub const SHARE_LOCATION: FocusKey = FocusKey(0x0E00_0003);
+    pub const AIRTIME: FocusKey = FocusKey(0x0E00_0004);
 
     /// A reaction in the actions menu's palette.
     #[must_use]
@@ -74,6 +90,18 @@ pub mod keys {
     #[must_use]
     pub const fn rail(section: Section) -> FocusKey {
         FocusKey(RAIL | section as u32)
+    }
+
+    /// A preset among Preset's choices.
+    #[must_use]
+    pub const fn preset(preset: Preset) -> FocusKey {
+        FocusKey(PRESET | preset as u32)
+    }
+
+    /// Whether `key` names one of the Device list's categories.
+    #[must_use]
+    pub const fn is_category(key: FocusKey) -> bool {
+        key.0 & KIND == DEVICE
     }
 
     /// A chat's row in the Chats list.
@@ -172,6 +200,13 @@ pub enum Screen {
         confirm: bool,
         focus: FocusState,
     },
+    /// The radio's settings.
+    Radio {
+        settings: RadioSettings,
+        /// Preset's choices are open.
+        picker: bool,
+        focus: FocusState,
+    },
     /// A peer's address or invitation, being typed.
     AddPeer { text: PeerText, focus: FocusState },
     /// A channel an invitation offers, before it is joined.
@@ -206,6 +241,7 @@ impl Screen {
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
+            | Self::Radio { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -219,6 +255,7 @@ impl Screen {
             | Self::Join { focus, .. }
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
+            | Self::Radio { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -267,7 +304,7 @@ impl State {
             .or_else(|| match self.section {
                 Section::Chats => self.chats.first().map(|c| keys::chat(c.id)),
                 Section::Peers => Some(keys::ADD_PEER),
-                Section::Device => None,
+                Section::Device => Some(keys::IDENTITY),
             })
     }
 
@@ -279,7 +316,7 @@ impl State {
                 row == keys::ADD_PEER
                     || keys::peer_of(row).is_some_and(|peer| self.peer(peer).is_some())
             }
-            Section::Device => false,
+            Section::Device => keys::is_category(row),
         }
     }
 
@@ -492,6 +529,65 @@ impl State {
             .or_else(|| self.peers.last())
             .map_or(keys::ADD_PEER, |p| keys::peer(p.id));
         self.focus().request(next);
+    }
+
+    /// Shows the radio's settings, Region focused.
+    pub fn open_radio(&mut self) {
+        _ = self.screens.push(Screen::Radio {
+            settings: self.node.radio(),
+            picker: false,
+            focus: FocusState::requesting(keys::REGION),
+        });
+    }
+
+    /// Reads the radio's settings shown from the node again.
+    fn refresh_radio(&mut self) {
+        let node = self.node;
+        if let Some(Screen::Radio { settings, .. }) = self.screens.last_mut() {
+            *settings = node.radio();
+        }
+    }
+
+    /// Opens Preset's choices, the current one focused.
+    pub fn open_presets(&mut self) {
+        if let Some(Screen::Radio {
+            settings,
+            picker,
+            focus,
+        }) = self.screens.last_mut()
+        {
+            *picker = true;
+            focus.request(keys::preset(settings.preset));
+        }
+    }
+
+    /// Closes Preset's choices, Preset focused.
+    pub fn close_presets(&mut self) {
+        if let Some(Screen::Radio { picker, focus, .. }) = self.screens.last_mut() {
+            *picker = false;
+            focus.request(keys::PRESET_ROW);
+        }
+    }
+
+    /// Sets the radio to `preset` and closes Preset's choices.
+    pub fn choose_preset(&mut self, preset: Preset) {
+        self.node.set_preset(preset);
+        self.refresh_radio();
+        self.close_presets();
+    }
+
+    pub fn toggle_forwarding(&mut self) {
+        if let Some(Screen::Radio { settings, .. }) = self.screens.last() {
+            self.node.set_forwarding(!settings.forwarding);
+            self.refresh_radio();
+        }
+    }
+
+    pub fn toggle_share_location(&mut self) {
+        if let Some(Screen::Radio { settings, .. }) = self.screens.last() {
+            self.node.set_share_location(!settings.share_location);
+            self.refresh_radio();
+        }
     }
 
     /// Shows Add peer, its field focused, so typing starts the address.

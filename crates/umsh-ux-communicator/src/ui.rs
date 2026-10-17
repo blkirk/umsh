@@ -21,11 +21,13 @@ mod banner;
 mod chats;
 mod conversation;
 mod details;
+mod device;
 mod join;
 mod member;
 mod peer;
 mod peers;
 mod rail;
+mod setting;
 mod status;
 mod wake;
 
@@ -81,6 +83,9 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             } => state
                 .peer(*peer)
                 .map(|summary| peer::view(summary, detail, *confirm)),
+            Screen::Radio {
+                settings, picker, ..
+            } => device::radio(settings, *picker),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),
@@ -106,8 +111,7 @@ fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
         match_view!(shown, {
             Section::Chats => chats::view(&state.chats),
             Section::Peers => peers::view(&state.peers),
-            // Not built yet.
-            Section::Device => EmptyView,
+            Section::Device => device::view(state),
         })
         .padding(Edges::Leading, RAIL),
     ))

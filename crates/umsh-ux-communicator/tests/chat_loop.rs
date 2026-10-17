@@ -9,7 +9,7 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChatKind, Delivery, Direction, Reaction, Section, State,
+    ChannelAccess, ChatKind, Delivery, Direction, Preset, Reaction, Section, State,
 };
 use umsh_ux_communicator::nav::{Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
@@ -1068,4 +1068,65 @@ fn forget_asks_first_and_cancel_keeps_the_peer() {
     // The row that took its place is focused.
     let next = app.state().peers.first().map(|p| keys::peer(p.id));
     assert_eq!(focus(app.state()), next);
+}
+
+fn radio(state: &State) -> (&umsh_ux_communicator::model::RadioSettings, bool) {
+    match state.screen() {
+        Screen::Radio {
+            settings, picker, ..
+        } => (settings, *picker),
+        other => panic!("expected Radio, got {other:?}"),
+    }
+}
+
+/// Opens Device › Radio from the Chats list.
+fn open_radio<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(app, &[Input::Backspace, Input::Turn(2), Input::Press]);
+    assert_eq!(app.state().section, Section::Device);
+    assert_eq!(focus(app.state()), Some(keys::IDENTITY));
+    run(app, &[Input::Turn(2), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::REGION));
+}
+
+#[test]
+fn a_preset_is_chosen_from_its_choices_and_backspace_cancels() {
+    let mut app = app!();
+    open_radio(&mut app);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert!(radio(app.state()).1);
+    assert_eq!(focus(app.state()), Some(keys::preset(Preset::LongRange)));
+    run(&mut app, &[Input::Turn(1), Input::Backspace]);
+    assert!(!radio(app.state()).1);
+    assert_eq!(radio(app.state()).0.preset, Preset::LongRange);
+    assert_eq!(focus(app.state()), Some(keys::PRESET_ROW));
+
+    run(&mut app, &[Input::Press, Input::Turn(1), Input::Press]);
+    assert_eq!(radio(app.state()).0.preset, Preset::MediumRange);
+    assert!(!radio(app.state()).1);
+    assert_eq!(focus(app.state()), Some(keys::PRESET_ROW));
+
+    // Back returns to Radio's category, and again to the rail.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::RADIO));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::rail(Section::Device)));
+}
+
+#[test]
+fn a_switch_flips_on_press() {
+    let mut app = app!();
+    open_radio(&mut app);
+    run(&mut app, &[Input::Turn(3)]);
+    assert_eq!(focus(app.state()), Some(keys::SHARE_LOCATION));
+    assert!(!radio(app.state()).0.share_location);
+    run(&mut app, &[Input::Press]);
+    assert!(radio(app.state()).0.share_location);
+    run(&mut app, &[Input::Turn(-1), Input::Press]);
+    assert!(!radio(app.state()).0.forwarding);
 }

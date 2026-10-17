@@ -112,6 +112,40 @@ pub struct PeerDetail {
     pub ping: Option<String<8>>,
 }
 
+/// How the radio trades reach for speed, farthest reaching first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    LongRange,
+    MediumRange,
+    ShortRange,
+}
+
+impl Preset {
+    pub const ALL: [Self; 3] = [Self::LongRange, Self::MediumRange, Self::ShortRange];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::LongRange => "Long range",
+            Self::MediumRange => "Medium range",
+            Self::ShortRange => "Short range",
+        }
+    }
+}
+
+/// The radio's settings, and how much of its airtime it has spent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RadioSettings {
+    /// Where the radio is, which sets what it may use.
+    pub region: String<24>,
+    pub preset: Preset,
+    /// Repeats what it hears for others.
+    pub forwarding: bool,
+    pub share_location: bool,
+    /// How much of this hour's airtime is spent, in percent.
+    pub airtime: u8,
+}
+
 /// What the text typed into Add peer names, as far as it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerEntry {
@@ -448,6 +482,15 @@ pub trait Node {
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.
     fn retry(&self, chat: ChatId, message: MessageId) -> bool;
+
+    /// The radio's settings as they stand.
+    fn radio(&self) -> RadioSettings;
+
+    fn set_preset(&self, preset: Preset);
+
+    fn set_forwarding(&self, on: bool);
+
+    fn set_share_location(&self, on: bool);
 }
 
 /// How long a banner stays, in milliseconds.
