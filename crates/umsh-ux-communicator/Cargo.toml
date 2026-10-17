@@ -24,7 +24,7 @@ fixture = []
 # text, focus by key bound into app state, a text field whose text is kept
 # in storage the app chooses, and building an app in place. Branch `umsh` of
 # darconeous/buoyant.
-buoyant = { git = "https://github.com/darconeous/buoyant", rev = "77704f908f6e3f08b9cd607db5572ff015473229", default-features = false, features = ["embedded-graphics"] }
+buoyant = { git = "https://github.com/darconeous/buoyant", rev = "1a7daa0c7b2b1faa27c2ec8b76a831c116f9c0f0", default-features = false, features = ["embedded-graphics"] }
 embedded-graphics = { version = "0.8", default-features = false }
 heapless = { version = "0.9", default-features = false }
 libm = "0.2"

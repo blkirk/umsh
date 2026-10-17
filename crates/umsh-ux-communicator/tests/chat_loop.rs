@@ -8,7 +8,7 @@ use buoyant::view::ViewLayout;
 use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
-use umsh_ux_communicator::model::{Delivery, Direction, Section, State};
+use umsh_ux_communicator::model::{Delivery, Direction, Reaction, Section, State};
 use umsh_ux_communicator::nav::{Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
 
@@ -238,4 +238,142 @@ fn backspace_in_the_history_is_back() {
     run(&mut app, &[Input::Press, Input::Turn(-2), Input::Backspace]);
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
     assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+}
+
+/// Ridge Medic's messages: the question, my answer, and "See you at the hut".
+const QUESTION: u32 = 0x100;
+const ANSWER: u32 = 0x101;
+const SEE_YOU: u32 = 0x102;
+
+fn actions(state: &State) -> Option<u32> {
+    match state.screen() {
+        Screen::Conversation { actions, .. } => *actions,
+        _ => None,
+    }
+}
+
+fn reply(state: &State) -> Option<u32> {
+    match state.screen() {
+        Screen::Conversation { reply, .. } => *reply,
+        _ => None,
+    }
+}
+
+fn reactions(state: &State, message: u32) -> Vec<(Reaction, u8, bool)> {
+    let conversation = state.conversation.as_ref().expect("a chat is open");
+    let message = conversation
+        .messages
+        .iter()
+        .find(|m| m.id == message)
+        .expect("the message");
+    message
+        .reactions
+        .iter()
+        .map(|r| (r.reaction, r.count, r.mine))
+        .collect()
+}
+
+#[test]
+fn pressing_a_message_opens_its_actions_and_backspace_closes_them() {
+    let mut app = app!();
+    run(&mut app, &[Input::Press, Input::Turn(-1), Input::Press]);
+    assert_eq!(actions(app.state()), Some(SEE_YOU));
+    assert_eq!(focus(app.state()), Some(keys::REPLY));
+    // The palette is above Reply.
+    run(&mut app, &[Input::Turn(-1)]);
+    assert_eq!(focus(app.state()), Some(keys::reaction(Reaction::Question)));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(actions(app.state()), None);
+    assert_eq!(focus(app.state()), Some(keys::message(SEE_YOU)));
+}
+
+#[test]
+fn a_reaction_is_mine_until_chosen_again_and_kept_across_opening_the_chat() {
+    let mut app = app!();
+    let open_on_answer = [Input::Press, Input::Turn(-2), Input::Press, Input::Turn(-6)];
+    run(&mut app, &open_on_answer);
+    // Ridge Medic's heart is there already; mine joins it.
+    assert_eq!(focus(app.state()), Some(keys::reaction(Reaction::Heart)));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(actions(app.state()), None);
+    assert_eq!(reactions(app.state(), ANSWER), [(Reaction::Heart, 2, true)]);
+
+    run(&mut app, &[Input::Backspace, Input::Press]);
+    assert_eq!(reactions(app.state(), ANSWER), [(Reaction::Heart, 2, true)]);
+
+    // Choosing it again withdraws it.
+    run(&mut app, &open_on_answer[1..]);
+    run(&mut app, &[Input::Press]);
+    assert_eq!(
+        reactions(app.state(), ANSWER),
+        [(Reaction::Heart, 1, false)]
+    );
+}
+
+#[test]
+fn typing_with_the_actions_open_goes_to_the_composer() {
+    let mut app = app!();
+    run(&mut app, &[Input::Press, Input::Turn(-1), Input::Press]);
+    run(&mut app, &typed("!"));
+    assert_eq!(actions(app.state()), None);
+    assert_in_conversation(app.state(), RIDGE);
+    assert_eq!(draft(app.state(), RIDGE), format!("{RIDGE_DRAFT}!"));
+}
+
+#[test]
+fn a_reply_is_dropped_by_backspace_before_backspace_leaves() {
+    let mut app = app!();
+    run(
+        &mut app,
+        &[Input::Press, Input::Turn(-3), Input::Press, Input::Press],
+    );
+    assert_eq!(reply(app.state()), Some(QUESTION));
+    assert_in_conversation(app.state(), RIDGE);
+    // The field is not being edited: the first Backspace drops the reply
+    // and keeps the text, the next leaves.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(reply(app.state()), None);
+    assert_in_conversation(app.state(), RIDGE);
+    assert_eq!(draft(app.state(), RIDGE), RIDGE_DRAFT);
+    run(&mut app, &[Input::Backspace]);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+}
+
+#[test]
+fn sending_a_reply_ends_it() {
+    let mut app = app!();
+    run(
+        &mut app,
+        &[Input::Press, Input::Turn(-3), Input::Press, Input::Press],
+    );
+    run(&mut app, &[Input::Enter, Input::Enter]);
+    assert_eq!(reply(app.state()), None);
+    assert_eq!(draft(app.state(), RIDGE), "");
+}
+
+#[test]
+fn details_open_from_the_actions_and_back_returns_to_the_message() {
+    let mut app = app!();
+    run(
+        &mut app,
+        &[
+            Input::Press,
+            Input::Turn(-3),
+            Input::Press,
+            Input::Turn(1),
+            Input::Press,
+        ],
+    );
+    let Screen::Details {
+        message, details, ..
+    } = app.state().screen()
+    else {
+        panic!("expected details, got {:?}", app.state().screen());
+    };
+    assert_eq!(*message, QUESTION);
+    assert_eq!(details.rssi, Some(-97));
+    assert_eq!(focus(app.state()), Some(keys::DETAIL_LIST));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::message(QUESTION)));
+    assert_eq!(actions(app.state()), None);
 }

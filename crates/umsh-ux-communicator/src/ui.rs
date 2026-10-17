@@ -18,6 +18,7 @@ use crate::theme;
 mod avatar;
 mod chats;
 mod conversation;
+mod details;
 mod rail;
 mod status;
 
@@ -54,6 +55,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
         match_view!(state.screen(), {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
+            Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
         })
         .padding(Edges::Top, STRIP),
     ))

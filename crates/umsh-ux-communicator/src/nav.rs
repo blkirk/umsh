@@ -6,20 +6,32 @@
 
 use buoyant::focus::{FocusKey, FocusState};
 
-use crate::model::{ChatId, MessageId, Section, State};
+use crate::model::{ChatId, Details, MessageId, Reaction, Section, State};
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
 pub mod keys {
-    use super::{ChatId, FocusKey, MessageId, Section};
+    use super::{ChatId, FocusKey, MessageId, Reaction, Section};
 
     const KIND: u32 = 0xFF00_0000;
     const RAIL: u32 = 0x0100_0000;
     const CHAT: u32 = 0x0200_0000;
     const MESSAGE: u32 = 0x0300_0000;
+    const ACTION: u32 = 0x0500_0000;
 
     /// A conversation's composer. Only one conversation is shown at a time.
     pub const COMPOSER: FocusKey = FocusKey(0x0400_0000);
+    /// The actions menu's Reply and Details.
+    pub const REPLY: FocusKey = FocusKey(ACTION | 0x100);
+    pub const DETAILS: FocusKey = FocusKey(ACTION | 0x101);
+    /// What the details screen shows, which the wheel scrolls through.
+    pub const DETAIL_LIST: FocusKey = FocusKey(0x0600_0000);
+
+    /// A reaction in the actions menu's palette.
+    #[must_use]
+    pub const fn reaction(reaction: Reaction) -> FocusKey {
+        FocusKey(ACTION | reaction as u32)
+    }
 
     #[must_use]
     pub const fn rail(section: Section) -> FocusKey {
@@ -79,6 +91,16 @@ pub enum Screen {
     Conversation {
         chat: ChatId,
         focus: FocusState,
+        /// The message whose actions menu is open.
+        actions: Option<MessageId>,
+        /// The message the draft replies to.
+        reply: Option<MessageId>,
+    },
+    /// How a message reached this device.
+    Details {
+        message: MessageId,
+        details: Details,
+        focus: FocusState,
     },
 }
 
@@ -95,13 +117,17 @@ impl Screen {
     #[must_use]
     pub fn focus(&self) -> &FocusState {
         match self {
-            Self::Chats { focus, .. } | Self::Conversation { focus, .. } => focus,
+            Self::Chats { focus, .. }
+            | Self::Conversation { focus, .. }
+            | Self::Details { focus, .. } => focus,
         }
     }
 
     pub fn focus_mut(&mut self) -> &mut FocusState {
         match self {
-            Self::Chats { focus, .. } | Self::Conversation { focus, .. } => focus,
+            Self::Chats { focus, .. }
+            | Self::Conversation { focus, .. }
+            | Self::Details { focus, .. } => focus,
         }
     }
 }
@@ -176,6 +202,72 @@ impl State {
         _ = self.screens.push(Screen::Conversation {
             chat,
             focus: FocusState::requesting(keys::COMPOSER),
+            actions: None,
+            reply: None,
+        });
+    }
+
+    /// Opens the actions menu of `message` in the conversation shown, with
+    /// Reply focused.
+    pub fn open_actions(&mut self, message: MessageId) {
+        if let Some(Screen::Conversation { actions, focus, .. }) = self.screens.last_mut() {
+            *actions = Some(message);
+            focus.request(keys::REPLY);
+        }
+    }
+
+    /// Closes the actions menu, focusing the message it was opened on, and
+    /// returns that message.
+    pub fn close_actions(&mut self) -> Option<MessageId> {
+        let Some(Screen::Conversation { actions, focus, .. }) = self.screens.last_mut() else {
+            return None;
+        };
+        let message = actions.take()?;
+        focus.request(keys::message(message));
+        Some(message)
+    }
+
+    /// Reacts to the message whose actions menu is open, and closes it.
+    pub fn react_from_actions(&mut self, reaction: Reaction) {
+        if let Some(message) = self.close_actions() {
+            self.react(message, reaction);
+        }
+    }
+
+    /// Starts a reply to the message whose actions menu is open, in the
+    /// composer.
+    pub fn reply_from_actions(&mut self) {
+        let Some(message) = self.close_actions() else {
+            return;
+        };
+        if let Some(Screen::Conversation { reply, focus, .. }) = self.screens.last_mut() {
+            *reply = Some(message);
+            focus.request(keys::COMPOSER);
+        }
+    }
+
+    /// Drops the reply being written, keeping its text. Returns `false` when
+    /// the draft is not a reply.
+    pub fn drop_reply(&mut self) -> bool {
+        match self.screens.last_mut() {
+            Some(Screen::Conversation { reply, .. }) => reply.take().is_some(),
+            _ => false,
+        }
+    }
+
+    /// Shows how the message whose actions menu is open reached this device.
+    pub fn details_from_actions(&mut self) {
+        let Some(message) = self.close_actions() else {
+            return;
+        };
+        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
+            return;
+        };
+        let details = self.history.details(chat, message).unwrap_or_default();
+        _ = self.screens.push(Screen::Details {
+            message,
+            details,
+            focus: FocusState::requesting(keys::DETAIL_LIST),
         });
     }
 
@@ -188,8 +280,12 @@ impl State {
         if let Some(Screen::Conversation { .. }) = self.screens.pop() {
             self.conversation = None;
         }
+        // Focus returns where it was, unless the screen was left asking for
+        // somewhere else.
         let focus = self.focus();
-        if let Some(key) = focus.current() {
+        if focus.pending().is_none()
+            && let Some(key) = focus.current()
+        {
             focus.request(key);
         }
         true

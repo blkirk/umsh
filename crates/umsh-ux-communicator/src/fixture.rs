@@ -5,8 +5,8 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChatId, ChatSummary, Delivery, Direction, History, MESSAGE_LEN, Message, MessageId, Messages,
-    State, StatusStrip, push_newest,
+    ChatId, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Message, MessageId,
+    Messages, Reacted, Reaction, Reactions, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -64,6 +64,11 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
     }
 }
 
+/// The peer's reaction to a message of the fixture's.
+fn their_reaction(chat: ChatId, index: usize) -> Option<Reaction> {
+    (chat == 1 && index == 1).then_some(Reaction::Heart)
+}
+
 /// The fixture's message, with its text kept on `heap`, when there is room.
 fn message(
     heap: TextHeap,
@@ -84,6 +89,14 @@ fn message(
         },
         text: SharedText::new(heap, text)?,
         delivery: Delivery::Delivered,
+        reactions: their_reaction(chat, index)
+            .map(|reaction| Reacted {
+                reaction,
+                count: 1,
+                mine: false,
+            })
+            .into_iter()
+            .collect::<Reactions>(),
     })
 }
 
@@ -95,6 +108,8 @@ const SENT: usize = 8;
 pub struct Store {
     heap: TextHeap,
     sent: RefCell<Vec<(ChatId, Message), SENT>>,
+    /// My reactions, by message.
+    mine: RefCell<Vec<(MessageId, Reaction), SENT>>,
     next: Cell<MessageId>,
 }
 
@@ -104,6 +119,7 @@ impl Store {
         Self {
             heap,
             sent: RefCell::new(Vec::new()),
+            mine: RefCell::new(Vec::new()),
             // Above the fixture's own messages.
             next: Cell::new(0x1_0000),
         }
@@ -114,6 +130,7 @@ impl core::fmt::Debug for Store {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Store")
             .field("sent", &self.sent)
+            .field("mine", &self.mine)
             .field("next", &self.next)
             .finish_non_exhaustive()
     }
@@ -129,15 +146,21 @@ impl History for Store {
         for (_, sent) in self.sent.borrow().iter().filter(|(c, _)| *c == chat) {
             push_newest(into, sent.clone());
         }
+        for &(id, reaction) in self.mine.borrow().iter() {
+            if let Some(message) = into.iter_mut().find(|m| m.id == id) {
+                message.set_my_reaction(Some(reaction));
+            }
+        }
     }
 
-    fn send(&self, chat: ChatId, text: &str) -> Option<Message> {
+    fn send(&self, chat: ChatId, text: &str, _reply_to: Option<MessageId>) -> Option<Message> {
         let message = Message {
             id: self.next.get(),
             direction: Direction::Outbound,
             sender: None,
             text: SharedText::new(self.heap, text)?,
             delivery: Delivery::Sending,
+            reactions: Reactions::new(),
         };
         self.next.set(message.id + 1);
         let mut sent = self.sent.borrow_mut();
@@ -146,6 +169,42 @@ impl History for Store {
         }
         _ = sent.push((chat, message.clone()));
         Some(message)
+    }
+
+    fn react(&self, _chat: ChatId, message: MessageId, reaction: Option<Reaction>) {
+        let mut mine = self.mine.borrow_mut();
+        mine.retain(|(id, _)| *id != message);
+        if let Some(reaction) = reaction {
+            if mine.is_full() {
+                mine.remove(0);
+            }
+            _ = mine.push((message, reaction));
+        }
+    }
+
+    fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
+        // Sent since the fixture started.
+        if message >= 0x1_0000 {
+            return Some(Details {
+                time: s("14:32"),
+                ..Details::default()
+            });
+        }
+        let (from, _) = *messages(chat).get((message & 0xFF) as usize)?;
+        Some(match from {
+            From::Me => Details {
+                time: s("14:27"),
+                ..Details::default()
+            },
+            From::Peer | From::Member(_) => Details {
+                time: s("14:29"),
+                hops: Some(2),
+                route: s("Gh* \u{203A} 4Tn"),
+                rssi: Some(-97),
+                snr: Some(65),
+                authenticated: true,
+            },
+        })
     }
 }
 

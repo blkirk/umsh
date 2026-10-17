@@ -6,10 +6,10 @@
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
-use buoyant::view::TextArea;
 use buoyant::view::prelude::*;
 use buoyant::view::scroll_view::ScrollBarVisibility;
 use buoyant::view::text_field::TextFieldStatus;
+use buoyant::view::{Lazy, TextArea};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
 use heapless::Vec;
@@ -17,9 +17,10 @@ use heapless::Vec;
 use super::label;
 use crate::avatar::AvatarStyle;
 use crate::model::{
-    ChatId, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId, Messages, State,
+    ChatId, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId, Messages, Reacted,
+    Reaction, Reactions, State,
 };
-use crate::nav::keys;
+use crate::nav::{Screen, keys};
 use crate::text::DraftText;
 use crate::{font, icon, theme};
 use buoyant::font::PrerenderedFont;
@@ -69,25 +70,39 @@ static INDICES: [usize; MAX_MESSAGES] = {
 pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     let summary = state.chat(chat);
     let messages = state.conversation(chat).map_or(&[][..], |c| &c.messages);
-    let reading = state
-        .screen()
-        .focus()
-        .current()
-        .is_some_and(keys::is_message);
+    let (actions, reply) = match state.screen() {
+        Screen::Conversation { actions, reply, .. } => (*actions, *reply),
+        _ => (None, None),
+    };
+    // A message's actions are part of reading it.
+    let reading = actions.is_some()
+        || state
+            .screen()
+            .focus()
+            .current()
+            .is_some_and(keys::is_message);
+    let find = |id: Option<MessageId>| id.and_then(|id| messages.iter().find(|m| m.id == id));
+    // The menu offers my reaction as the one already chosen.
+    let menu = find(actions).map(Message::my_reaction);
+    let quoted = find(reply).map(|message| quote(message, summary.map_or("", |s| &s.name)));
     VStack::new((
         header(
             summary.map_or("", |s| &s.name),
             summary.map(|s| &s.avatar),
             summary.and_then(|s| s.hops),
         ),
-        history(messages),
+        history(messages, actions),
+        quoted,
         summary.map(|s| composer(chat, &s.draft, reading)),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {
+        // A reply is dropped first, keeping its text; then Back.
         Key::Backspace => {
-            s.back();
+            if !s.drop_reply() {
+                s.back();
+            }
             KeyResponse::Handled
         }
         Key::Character(_) | Key::Enter => {
@@ -96,10 +111,12 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
         }
         _ => KeyResponse::Ignored,
     })
+    .popover(menu.as_ref(), |&mine| actions_menu(mine))
 }
 
-/// Back, the peer or channel, and how far away a peer is.
-fn header(
+/// Back, the peer or channel, and how far away a peer is; or a screen's
+/// title alone.
+pub(super) fn header(
     name: &str,
     avatar: Option<&AvatarStyle>,
     hops: Option<u8>,
@@ -134,8 +151,9 @@ fn header(
 }
 
 /// The messages, oldest first, ending at the composer. History shorter
-/// than the space sits on the composer.
-fn history(messages: &[Message]) -> impl View<Rgb565, State> + use<> {
+/// than the space sits on the composer. The message whose actions are open
+/// stays marked while focus is in them.
+fn history(messages: &[Message], acting_on: Option<MessageId>) -> impl View<Rgb565, State> + use<> {
     let messages = Messages::from_slice(messages).unwrap_or_default();
     let ids: Vec<MessageId, MAX_MESSAGES> = messages.iter().map(|m| m.id).collect();
     // Delivery shows under the newest message sent.
@@ -145,7 +163,7 @@ fn history(messages: &[Message]) -> impl View<Rgb565, State> + use<> {
     let count = messages.len();
     ScrollView::new(
         ForEach::<MAX_MESSAGES>::new_vertical(&INDICES[..count], move |&i| {
-            item(&messages, i, newest_sent == Some(i))
+            item(&messages, i, newest_sent == Some(i), acting_on)
         })
         .keyed(move |&i| keys::message(ids[i])),
     )
@@ -158,7 +176,12 @@ fn history(messages: &[Message]) -> impl View<Rgb565, State> + use<> {
 
 /// A message, with its sender above it in a channel when the sender changes,
 /// and its delivery below it when asked.
-fn item(messages: &Messages, i: usize, delivery: bool) -> impl View<Rgb565, State> + use<> {
+fn item(
+    messages: &Messages,
+    i: usize,
+    delivery: bool,
+    acting_on: Option<MessageId>,
+) -> impl View<Rgb565, State> + use<> {
     let message = &messages[i];
     let follows_same = i.checked_sub(1).is_some_and(|p| {
         messages[p].direction == message.direction && messages[p].sender == message.sender
@@ -175,6 +198,13 @@ fn item(messages: &Messages, i: usize, delivery: bool) -> impl View<Rgb565, Stat
         HorizontalAlignment::Leading
     };
     let sender = (!follows_same).then(|| message.sender.clone()).flatten();
+    // Chips over the bubble take room above it, which a sender's name
+    // beside them shares.
+    let reserve = chip_reserve(&message.reactions).saturating_sub(if sender.is_some() {
+        SENDER_LINE
+    } else {
+        0
+    });
     VStack::new((
         sender.map(|name| {
             label::<24>(&name, &font::BOLD, theme::SMALL, theme::TEXT_SECONDARY)
@@ -182,17 +212,19 @@ fn item(messages: &Messages, i: usize, delivery: bool) -> impl View<Rgb565, Stat
                 .with_height(SENDER_LINE)
                 .padding(Edges::Leading, SIDE + 4)
         }),
-        bubble(message),
+        bubble(message, acting_on == Some(message.id)),
         delivery.then(|| delivery_line(message.delivery)),
     ))
     .with_spacing(0)
     .with_alignment(alignment)
     .flex_infinite_width(alignment)
-    .padding(Edges::Top, gap)
+    .padding(Edges::Top, gap + reserve)
 }
 
-fn bubble(message: &Message) -> impl View<Rgb565, State> + use<> {
+fn bubble(message: &Message, acting_on: bool) -> impl View<Rgb565, State> + use<> {
+    let id = message.id;
     let text = message.text.clone();
+    let reactions = message.reactions.clone();
     let outbound = message.direction == Direction::Outbound;
     let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
     if outbound {
@@ -209,8 +241,14 @@ fn bubble(message: &Message) -> impl View<Rgb565, State> + use<> {
     } else {
         (theme::INBOUND, theme::TEXT, HorizontalAlignment::Leading)
     };
+    let corner = if outbound {
+        Alignment::TopLeading
+    } else {
+        Alignment::TopTrailing
+    };
+    // Pressing a message opens its actions.
     Button::new(
-        |_: &mut State| {},
+        move |s: &mut State| s.open_actions(id),
         move |button: ButtonState| {
             Text::new(text.clone(), &font::REGULAR)
                 .with_font_size(theme::BODY)
@@ -222,11 +260,17 @@ fn bubble(message: &Message) -> impl View<Rgb565, State> + use<> {
                 .padding(Edges::All, RING_GAP)
                 .overlay(
                     Alignment::Center,
-                    button.is_focused().then(|| {
+                    (button.is_focused() || acting_on).then(|| {
                         RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
                             .stroked(2)
                             .foreground_color(theme::ACCENT)
                     }),
+                )
+                // Over the ring, so a chip cuts it as it cuts the bubble.
+                .overlay(
+                    corner,
+                    (!reactions.is_empty())
+                        .then(|| Lazy::new((reactions.clone(), outbound), chips)),
                 )
                 // Text wraps to fit; a short bubble keeps to its side.
                 .flex_frame()
@@ -235,6 +279,131 @@ fn bubble(message: &Message) -> impl View<Rgb565, State> + use<> {
         },
     )
     .padding(Edges::Horizontal, SIDE - RING_GAP)
+}
+
+/// A reaction chip's diameter, the background ring that sets it off, and how
+/// far apart chips overlap.
+const CHIP: u32 = 28;
+const CHIP_HALO: u32 = 2;
+const CHIP_STEP: i32 = 21;
+/// How far a chip's center sits above the bubble's top edge.
+const CHIP_RISE: u32 = 6;
+/// The count on a chip shared by several people.
+const BADGE: u32 = 18;
+
+/// Room above a bubble for its chips, and for a count when there is one.
+fn chip_reserve(reactions: &[Reacted]) -> u32 {
+    if reactions.is_empty() {
+        return 0;
+    }
+    let counted = reactions.iter().any(|r| r.count > 1);
+    CHIP_RISE + CHIP / 2 + CHIP_HALO + if counted { 6 } else { 0 }
+}
+
+/// A bubble's reactions as round chips over its outer top corner, like a
+/// hand of cards: mine frontmost at the corner, with one dot trail falling
+/// outside the bubble. Placed from the corner outward and inward: offsets
+/// here are from the corner of the ring around the bubble.
+///
+/// Built from its data each time it is drawn ([`Lazy`]): kept in the render
+/// trees, every bubble's chips would outweigh the rest of the screen.
+fn chips((reactions, outbound): &(Reactions, bool)) -> impl View<Rgb565, ()> + use<> {
+    let outbound = *outbound;
+    // Toward the outside of the bubble: left on a sent message.
+    let out: i32 = if outbound { -1 } else { 1 };
+    let ring = RING_GAP as i32;
+    // How far an element's outer edge reaches beyond the corner, as an
+    // offset from the side the cluster is aligned to.
+    let edge = move |beyond: i32| out * (beyond - ring);
+    let top = move |above_bubble: i32| ring + above_bubble;
+    let halo = (CHIP + 2 * CHIP_HALO) as i32;
+    // Mine at the corner, then others inward, drawn back to front.
+    let mut order: Vec<Reacted, { Reaction::ALL.len() }> = Vec::new();
+    for r in reactions.iter().filter(|r| r.mine) {
+        _ = order.push(*r);
+    }
+    for r in reactions.iter().filter(|r| !r.mine) {
+        _ = order.push(*r);
+    }
+    let count = order.len();
+    let front = order.first().map_or(theme::CHIP_THEIRS, |r| {
+        if r.mine {
+            theme::OUTBOUND
+        } else {
+            theme::CHIP_THEIRS
+        }
+    });
+    // The `k`th chip drawn: the innermost first, mine at the corner last.
+    let chip = move |k: usize| {
+        let place = count.checked_sub(1 + k)?;
+        order.get(place).map(|r| {
+            let inward = CHIP_STEP * place as i32;
+            let (fill, pad) = if r.mine {
+                (theme::OUTBOUND, icon::Pad::Mine)
+            } else {
+                (theme::CHIP_THEIRS, icon::Pad::Theirs)
+            };
+            let number = (r.count > 1).then(|| {
+                let mut n: heapless::String<4> = heapless::String::new();
+                _ = core::fmt::write(&mut n, format_args!("{}", r.count));
+                ZStack::new((
+                    Circle.foreground_color(theme::BACKGROUND),
+                    Text::new(n, &font::BOLD)
+                        .with_font_size(theme::SMALL)
+                        .with_line_limit(1)
+                        .foreground_color(theme::TEXT),
+                ))
+                .frame_sized(BADGE, BADGE)
+                .offset(
+                    edge(BADGE as i32 / 2 + 11 - inward),
+                    top(-(CHIP_RISE as i32) - 11 - BADGE as i32 / 2),
+                )
+            });
+            ZStack::new((
+                ZStack::new((
+                    Circle.foreground_color(theme::BACKGROUND),
+                    Circle.foreground_color(fill).frame_sized(CHIP, CHIP),
+                    Image::new(icon::reaction(r.reaction, pad)),
+                ))
+                .frame_sized(halo as u32, halo as u32)
+                .offset(edge(halo / 2 - inward), top(-(CHIP_RISE as i32) - halo / 2)),
+                number,
+            ))
+            .with_alignment(if outbound {
+                Alignment::TopLeading
+            } else {
+                Alignment::TopTrailing
+            })
+        })
+    };
+    // The dot trail, from the corner chip outward and down.
+    let dot = move |distance: i32, radius: u32, color: Rgb565| {
+        let size = 2 * radius;
+        Circle
+            .foreground_color(color)
+            .frame_sized(size, size)
+            .offset(
+                edge(distance + radius as i32),
+                top(distance - CHIP_RISE as i32 - radius as i32),
+            )
+    };
+    ZStack::new((
+        dot(15, 6, theme::BACKGROUND),
+        dot(15, 4, front),
+        dot(21, 4, theme::BACKGROUND),
+        dot(21, 2, front),
+        chip(0),
+        chip(1),
+        chip(2),
+        chip(3),
+        chip(4),
+        chip(5),
+    ))
+    .with_alignment(if outbound {
+        Alignment::TopLeading
+    } else {
+        Alignment::TopTrailing
+    })
 }
 
 fn delivery_line(delivery: Delivery) -> impl View<Rgb565, State> + use<> {
@@ -352,4 +521,162 @@ fn folded_bar(draft: &Draft) -> impl View<Rgb565, State> + use<> {
         },
     )
     .focus_key(keys::COMPOSER)
+}
+
+/// The quote above the composer while the draft is a reply.
+const QUOTE: u32 = 42;
+
+/// Who and what the draft replies to.
+fn quote(message: &Message, chat_name: &str) -> impl View<Rgb565, State> + use<> {
+    let mut title: heapless::String<48> = heapless::String::new();
+    let whom = match (message.direction, &message.sender) {
+        (Direction::Outbound, _) => "yourself",
+        (Direction::Inbound, Some(sender)) => sender.as_str(),
+        (Direction::Inbound, None) => chat_name,
+    };
+    _ = core::fmt::write(&mut title, format_args!("Replying to {whom}"));
+    let text = message.text.clone();
+    HStack::new((
+        RoundedRectangle::new(2)
+            .foreground_color(theme::ACCENT)
+            .frame_sized(3, QUOTE - 6),
+        VStack::new((
+            label::<48>(&title, &font::BOLD, theme::SMALL, theme::ACCENT),
+            super::line(
+                text,
+                &font::REGULAR,
+                theme::SECONDARY,
+                theme::TEXT_SECONDARY,
+            ),
+        ))
+        .with_spacing(0)
+        .with_alignment(HorizontalAlignment::Leading),
+    ))
+    .with_spacing(9)
+    .padding(Edges::Leading, 12)
+    .padding(Edges::Trailing, SIDE)
+    .flex_infinite_width(HorizontalAlignment::Leading)
+    .frame()
+    .with_height(QUOTE)
+}
+
+/// The actions menu's width, and its palette's row.
+const MENU_WIDTH: u32 = 236;
+const PALETTE: u32 = 44;
+const PAD: u32 = 34;
+/// A menu item, and its focused look inside it.
+const ITEM: u32 = 32;
+const ITEM_INSET: u32 = 5;
+
+/// What pressing a message gives: reactions first, then Reply and Details,
+/// at the top of the screen beside the history. Backspace closes it, and
+/// typing closes it and goes to the composer.
+fn actions_menu(mine: Option<Reaction>) -> impl View<Rgb565, State> + use<> {
+    let pad = |reaction: Reaction| {
+        Button::new(
+            move |s: &mut State| s.react_from_actions(reaction),
+            move |button: ButtonState| {
+                let ring = if button.is_focused() {
+                    Some(theme::ACCENT)
+                } else if mine == Some(reaction) {
+                    Some(theme::TEXT_TERTIARY)
+                } else {
+                    None
+                };
+                ZStack::new((
+                    Circle.foreground_color(theme::REACTION_PAD),
+                    Image::new(icon::reaction(reaction, icon::Pad::Palette)),
+                    ring.map(|color| Circle.stroked(2).foreground_color(color)),
+                ))
+                .frame_sized(PAD, PAD)
+            },
+        )
+        .focus_key(keys::reaction(reaction))
+    };
+    let [heart, up, down, laugh, exclaim, question] = Reaction::ALL;
+    VStack::new((
+        HStack::new((
+            pad(heart),
+            pad(up),
+            pad(down),
+            pad(laugh),
+            pad(exclaim),
+            pad(question),
+        ))
+        .with_spacing(3)
+        .padding(Edges::Leading, 8)
+        .flex_infinite_width(HorizontalAlignment::Leading)
+        .frame()
+        .with_height(PALETTE),
+        Rectangle
+            .foreground_color(theme::MENU_LINE)
+            .frame()
+            .with_height(1),
+        menu_item("Reply", keys::REPLY, State::reply_from_actions).padding(Edges::Top, 2),
+        menu_item("Details", keys::DETAILS, State::details_from_actions),
+    ))
+    .with_spacing(0)
+    .padding(Edges::Bottom, 6)
+    .frame()
+    .with_width(MENU_WIDTH)
+    .background(
+        Alignment::Center,
+        ZStack::new((
+            RoundedRectangle::new(12)
+                .foreground_color(Rgb565::BLACK)
+                .offset(1, 3),
+            RoundedRectangle::new(12).foreground_color(theme::MENU),
+            RoundedRectangle::new(12)
+                .stroked(1)
+                .foreground_color(theme::MENU_LINE),
+        )),
+    )
+    .padding(Edges::Top, HEADER + 6)
+    .padding(Edges::Trailing, SIDE)
+    .flex_infinite_width(HorizontalAlignment::Trailing)
+    .flex_infinite_height(VerticalAlignment::Top)
+    .on_key(|key, s: &mut State| match key {
+        Key::Backspace => {
+            s.close_actions();
+            KeyResponse::Handled
+        }
+        Key::Character(_) | Key::Enter => {
+            s.close_actions();
+            s.focus().request(keys::COMPOSER);
+            KeyResponse::Redirect
+        }
+        _ => KeyResponse::Ignored,
+    })
+}
+
+/// One of the menu's actions.
+fn menu_item(
+    text: &'static str,
+    key: buoyant::focus::FocusKey,
+    action: fn(&mut State),
+) -> impl View<Rgb565, State> + use<> {
+    Button::new(action, move |button: ButtonState| {
+        let focused = button.is_focused();
+        let face = if focused { &font::BOLD } else { &font::REGULAR };
+        label::<16>(text, face, theme::BODY, theme::TEXT)
+            .hint_background_color(if focused { theme::FOCUS } else { theme::MENU })
+            .padding(Edges::Leading, 11)
+            .flex_infinite_width(HorizontalAlignment::Leading)
+            .frame()
+            .with_height(ITEM - 2)
+            .background(
+                Alignment::Center,
+                focused.then(|| {
+                    ZStack::new((
+                        RoundedRectangle::new(7).foreground_color(theme::FOCUS),
+                        RoundedRectangle::new(7)
+                            .stroked(2)
+                            .foreground_color(theme::ACCENT),
+                    ))
+                }),
+            )
+            .padding(Edges::Horizontal, ITEM_INSET)
+            .padding(Edges::Bottom, 2)
+    })
+    .focus_key(key)
 }

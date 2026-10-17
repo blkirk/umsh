@@ -30,6 +30,10 @@ pub const RED: Rgb565 = rgb(0xFF6B5E);
 pub const FIELD: Rgb565 = rgb(0x161A20);
 pub const MENU: Rgb565 = rgb(0x1B2027);
 pub const MENU_LINE: Rgb565 = rgb(0x2E3540);
+/// Behind each reaction in the actions menu's palette.
+pub const REACTION_PAD: Rgb565 = rgb(0x2A313B);
+/// A reaction chip of someone else's; mine is in [`OUTBOUND`].
+pub const CHIP_THEIRS: Rgb565 = rgb(0x323A45);
 
 /// Body text: about 2.3 mm on the Pager's panel.
 pub const BODY: u32 = 20;

@@ -108,6 +108,55 @@ pub enum Delivery {
     Failed,
 }
 
+/// A reaction to a message: one of UMSH's emote tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reaction {
+    Heart,
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Exclaim,
+    Question,
+}
+
+impl Reaction {
+    /// The palette, in the order the actions menu shows it.
+    pub const ALL: [Self; 6] = [
+        Self::Heart,
+        Self::ThumbsUp,
+        Self::ThumbsDown,
+        Self::Laugh,
+        Self::Exclaim,
+        Self::Question,
+    ];
+
+    /// The emote's body on the air.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Heart => "<3",
+            Self::ThumbsUp => "+1",
+            Self::ThumbsDown => "-1",
+            Self::Laugh => "ha",
+            Self::Exclaim => "!",
+            Self::Question => "?",
+        }
+    }
+}
+
+/// Everyone who reacted to a message one way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reacted {
+    pub reaction: Reaction,
+    pub count: u8,
+    /// One of them is me.
+    pub mine: bool,
+}
+
+/// A message's reactions, in the order they first arrived. Each sender has
+/// at most one.
+pub type Reactions = Vec<Reacted, { Reaction::ALL.len() }>;
+
 /// One message in a conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -117,6 +166,59 @@ pub struct Message {
     pub sender: Option<String<24>>,
     pub text: SharedText,
     pub delivery: Delivery,
+    pub reactions: Reactions,
+}
+
+impl Message {
+    /// My reaction, if I have reacted.
+    #[must_use]
+    pub fn my_reaction(&self) -> Option<Reaction> {
+        self.reactions.iter().find(|r| r.mine).map(|r| r.reaction)
+    }
+
+    /// Makes `reaction` mine, in place of any I had.
+    pub fn set_my_reaction(&mut self, reaction: Option<Reaction>) {
+        if let Some(index) = self.reactions.iter().position(|r| r.mine) {
+            let old = &mut self.reactions[index];
+            old.mine = false;
+            old.count -= 1;
+            if old.count == 0 {
+                self.reactions.remove(index);
+            }
+        }
+        let Some(reaction) = reaction else {
+            return;
+        };
+        match self.reactions.iter_mut().find(|r| r.reaction == reaction) {
+            Some(same) => {
+                same.count = same.count.saturating_add(1);
+                same.mine = true;
+            }
+            None => {
+                _ = self.reactions.push(Reacted {
+                    reaction,
+                    count: 1,
+                    mine: true,
+                });
+            }
+        }
+    }
+}
+
+/// How a message reached this device, for its details.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Details {
+    /// When it was received or sent, already formatted, such as `14:29`.
+    pub time: String<8>,
+    pub hops: Option<u8>,
+    /// The routers it came through, already formatted.
+    pub route: String<24>,
+    /// The signal's strength, in dBm.
+    pub rssi: Option<i16>,
+    /// Signal-to-noise, in tenths of a dB.
+    pub snr: Option<i16>,
+    /// Its sender's signature checked out.
+    pub authenticated: bool,
 }
 
 /// The newest messages of the open chat, oldest first.
@@ -150,9 +252,17 @@ pub trait History {
     /// Fills `messages`, which is empty, with the newest messages of `chat`.
     fn load(&self, chat: ChatId, messages: &mut Messages);
 
-    /// Keeps `text`, sent now, as the newest message of `chat`, and returns
-    /// the message as kept, or `None` when there is no room for it.
-    fn send(&self, chat: ChatId, text: &str) -> Option<Message>;
+    /// Keeps `text`, sent now in reply to `reply_to` if it is a reply, as the
+    /// newest message of `chat`, and returns the message as kept, or `None`
+    /// when there is no room for it.
+    fn send(&self, chat: ChatId, text: &str, reply_to: Option<MessageId>) -> Option<Message>;
+
+    /// Keeps `reaction` as my reaction to `message` in `chat`; `None`
+    /// withdraws it.
+    fn react(&self, chat: ChatId, message: MessageId, reaction: Option<Reaction>);
+
+    /// How `message` in `chat` reached this device, when that is known.
+    fn details(&self, chat: ChatId, message: MessageId) -> Option<Details>;
 }
 
 /// The top-level lists the rail switches between.
@@ -255,9 +365,21 @@ impl State {
         else {
             return;
         };
-        let Some(message) = self.history.send(chat, self.chats[index].draft.text()) else {
+        let reply_to = match self.screens.last() {
+            Some(Screen::Conversation {
+                chat: shown, reply, ..
+            }) if *shown == chat => *reply,
+            _ => None,
+        };
+        let Some(message) = self
+            .history
+            .send(chat, self.chats[index].draft.text(), reply_to)
+        else {
             return;
         };
+        if let Some(Screen::Conversation { reply, .. }) = self.screens.last_mut() {
+            *reply = None;
+        }
         let mut summary = self.chats.remove(index);
         summary.draft.clear();
         summary.preview(&message);
@@ -267,6 +389,31 @@ impl State {
         if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
             conversation.push(message);
         }
+    }
+}
+
+impl State {
+    /// Whether `message` in the open chat was received rather than sent.
+    #[must_use]
+    pub fn inbound(&self, message: MessageId) -> bool {
+        self.conversation
+            .as_ref()
+            .and_then(|c| c.messages.iter().find(|m| m.id == message))
+            .is_some_and(|m| m.direction == Direction::Inbound)
+    }
+
+    /// Reacts to `message` in the open chat with `reaction`, in place of any
+    /// reaction I had; choosing the one I had withdraws it.
+    pub fn react(&mut self, message: MessageId, reaction: Reaction) {
+        let Some(conversation) = self.conversation.as_mut() else {
+            return;
+        };
+        let Some(target) = conversation.messages.iter_mut().find(|m| m.id == message) else {
+            return;
+        };
+        let mine = (target.my_reaction() != Some(reaction)).then_some(reaction);
+        target.set_my_reaction(mine);
+        self.history.react(conversation.chat, message, mine);
     }
 }
 
