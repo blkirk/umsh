@@ -55,7 +55,7 @@ pub fn session_config(dev_version: &'static str) -> SessionConfig {
     SessionConfig {
         dev_version,
         dev_model: None,
-        default_device_name: "LAN virtual radio",
+        default_device_name: "Virtual radio",
         mtu: MAX_FRAME as u16,
         tx_preamble_symbols: 32,
         sync_word: profiles::DEFAULT.sync_word,

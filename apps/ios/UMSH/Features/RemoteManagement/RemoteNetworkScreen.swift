@@ -3,7 +3,8 @@ import SwiftUI
 import UMSHMobileCore
 
 /// The device's IP stack: what each family holds, how it was told to get
-/// it, and which resolvers it is using.
+/// it, and which resolvers it is using. On a device whose medium is the
+/// local network's multicast group, the group it joins.
 ///
 /// One card per family the device offered, and one shared DNS card
 /// beneath. A family a device does not implement is never asked for, so
@@ -17,9 +18,13 @@ struct RemoteNetworkScreen: View {
 
     private var hasV4: Bool { reading?.propertyIDs.contains(ulcpProperties.ipv4State) == true }
     private var hasV6: Bool { reading?.propertyIDs.contains(ulcpProperties.ipv6State) == true }
+    private var hasLocal: Bool {
+        model.properties(of: .network).contains(ulcpProperties.lanBearerGroup)
+    }
 
     var body: some View {
         Form {
+            if hasLocal { localSection }
             if hasV4 {
                 v4StatusSection
                 v4ConfigurationSection
@@ -28,8 +33,10 @@ struct RemoteNetworkScreen: View {
                 v6StatusSection
                 v6ConfigurationSection
             }
-            dnsSection
-            resolverSection
+            if hasV4 || hasV6 {
+                dnsSection
+                resolverSection
+            }
             RemoteProblemSection(model: model)
         }
         .remoteCategoryChrome(
@@ -42,6 +49,30 @@ struct RemoteNetworkScreen: View {
         )
         .onChange(of: reading?.asOf) { edits = Edits(reading, preserving: edits) }
         .onAppear { if edits.isEmpty { edits = Edits(reading) } }
+    }
+
+    // MARK: - Local network
+
+    @ViewBuilder
+    private var localSection: some View {
+        Section {
+            RemoteValueRow("Status", value: lanStateText(reading?.properties.lanBearerState))
+            RemoteTextField(
+                "Group",
+                text: $edits.group.edited.replacingNil(with: ""),
+                isKnown: edits.group.isKnown,
+                problem: problems[ulcpProperties.lanBearerGroup],
+                placeholder: "Default"
+            )
+        } header: {
+            Text("Local Network")
+        } footer: {
+            if edits.group.isDirty, lanGroupEdit(edits.group.value) == nil {
+                Text(lanGroupInvalid).foregroundStyle(.red)
+            } else if !hasV4 {
+                RemoteReadingFooter(reading: reading, isBusy: model.isBusy)
+            }
+        }
     }
 
     // MARK: - IPv4
@@ -275,6 +306,7 @@ struct RemoteNetworkScreen: View {
         var v4Config = RemoteField<UlcpIpConfigRecord>(0, nil)
         var v6Config = RemoteField<UlcpIpConfigRecord>(0, nil)
         var dns = RemoteField<[Data]>(0, nil)
+        var group = RemoteField<String>(0, nil)
         var v4Address = ""
         var v4Prefix = ""
         var v4Gateway = ""
@@ -295,6 +327,7 @@ struct RemoteNetworkScreen: View {
             v4Method = RemoteField(id.ipv4Config, held.ipv4Config?.method)
             v6Method = RemoteField(id.ipv6Config, held.ipv6Config?.method)
             dns = RemoteField(id.ipDns, held.ipDns)
+            group = RemoteField(id.lanBearerGroup, held.lanBearerGroup)
             if let config = held.ipv4Config {
                 v4Address = config.address.isEmpty ? "" : ipText(config.address)
                 v4Prefix = config.address.isEmpty ? "" : "\(config.prefix)"
@@ -317,6 +350,7 @@ struct RemoteNetworkScreen: View {
             guard !old.isEmpty else { return }
             v4Method = v4Method.preserving(old.v4Method)
             v6Method = v6Method.preserving(old.v6Method)
+            group = group.preserving(old.group)
             if old.v4Edited(against: fresh) {
                 (v4Address, v4Prefix, v4Gateway) = (old.v4Address, old.v4Prefix, old.v4Gateway)
             }
@@ -431,6 +465,10 @@ struct RemoteNetworkScreen: View {
             if let desired = desiredDns, desired != dns.reported {
                 dirty.insert(dns.property)
             }
+            // A group that does not parse yet is not an edit.
+            if group.isDirty, lanGroupEdit(group.value) != nil {
+                dirty.insert(group.property)
+            }
             return dirty
         }
 
@@ -439,6 +477,10 @@ struct RemoteNetworkScreen: View {
             desired.ipv4Config = desiredV4 ?? held.ipv4Config
             desired.ipv6Config = desiredV6 ?? held.ipv6Config
             desired.ipDns = desiredDns ?? held.ipDns
+            // A cleared field hands the group back to the device's default.
+            if group.isDirty, let edit = lanGroupEdit(group.value) {
+                desired.lanBearerGroup = edit
+            }
             return desired
         }
     }

@@ -14,9 +14,6 @@ struct RemoteBridgeScreen: View {
     private var offered: Set<UInt32> { Set(model.properties(of: .bridge)) }
     private var hasServer: Bool { offered.contains(ulcpProperties.bridgeEnabled) }
     private var hasLocal: Bool { offered.contains(ulcpProperties.lanBearerGroup) }
-    /// Whether the device forwards between the LAN and LoRa, and so has a
-    /// switch and an ingress limit of its own.
-    private var forwardsLocal: Bool { offered.contains(ulcpProperties.lanBearerEnabled) }
 
     var body: some View {
         Form {
@@ -36,43 +33,29 @@ struct RemoteBridgeScreen: View {
     @ViewBuilder
     private var localSections: some View {
         Section {
-            // A device whose radio is the network has nothing to switch.
-            if forwardsLocal {
-                if edits.localEnabled.isKnown {
-                    Toggle(isOn: $edits.localEnabled.edited.replacingNil(with: false)) {
-                        RemoteFieldTitle("Local network", problem: problems[ulcpProperties.lanBearerEnabled])
-                    }
-                } else {
-                    RemoteReadOnlyToggle("Local network", isOn: nil)
+            if edits.localEnabled.isKnown {
+                Toggle(isOn: $edits.localEnabled.edited.replacingNil(with: false)) {
+                    RemoteFieldTitle("Local network", problem: problems[ulcpProperties.lanBearerEnabled])
                 }
+            } else {
+                RemoteReadOnlyToggle("Local network", isOn: nil)
             }
-            RemoteValueRow("Status", value: localStateText)
+            RemoteValueRow("Status", value: lanStateText(reading?.properties.lanBearerState))
         } header: {
             Text("Local Network")
         } footer: {
-            Text("Links this radio with radios and apps on the same network.")
+            Text("Bridges this radio's LoRa channel with UMSH devices on this network.")
         }
         Section {
             RemoteTextField("Group", text: $edits.group.edited.replacingNil(with: ""),
                             isKnown: edits.group.isKnown, problem: problems[ulcpProperties.lanBearerGroup],
                             placeholder: "Default")
-            if forwardsLocal {
-                RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
-                                isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit],
-                                placeholder: "Default")
-            }
+            RemoteTextField("Frames per minute", text: $edits.limit.edited.replacingNil(with: ""),
+                            isKnown: edits.limit.isKnown, problem: problems[ulcpProperties.lanBearerIngressLimit],
+                            placeholder: "Default")
             if !hasServer { RemoteReadingFooter(reading: reading, isBusy: model.isBusy) }
         } header: {
             Text("Local Network Settings")
-        }
-    }
-
-    private var localStateText: String {
-        switch reading?.properties.lanBearerState {
-        case 0: "Off"
-        case 1: "Connected"
-        case 2: "No network"
-        default: "Not read"
         }
     }
 
@@ -168,9 +151,11 @@ struct RemoteBridgeScreen: View {
         desired.lanBearerEnabled = edits.localEnabled.value
         // A cleared field hands the setting back to the device's default.
         if edits.group.isDirty {
-            let text = (edits.group.value ?? "").trimmingCharacters(in: .whitespaces)
-            do { desired.lanBearerGroup = text.isEmpty ? nil : try ulcpLanGroup(input: text) }
-            catch { validation = "Enter a multicast group or a peer address, with an optional port."; return }
+            guard let group = lanGroupEdit(edits.group.value) else {
+                validation = lanGroupInvalid
+                return
+            }
+            desired.lanBearerGroup = group
         }
         if edits.limit.isDirty {
             let text = (edits.limit.value ?? "").trimmingCharacters(in: .whitespaces)
@@ -235,3 +220,27 @@ struct RemoteBridgeScreen: View {
         }
     }
 }
+
+// MARK: - The multicast group
+
+/// What `PROP_LAN_BEARER_STATE` is called.
+func lanStateText(_ code: UInt8?) -> String {
+    switch code {
+    case 0: "Off"
+    case 1: "Connected"
+    case 2: "No network"
+    default: "Not read"
+    }
+}
+
+/// A group as typed, ready to write: `.some(nil)` for a cleared field,
+/// which hands the setting back to the device's default, and nil for one
+/// that does not parse.
+func lanGroupEdit(_ text: String?) -> String?? {
+    let text = (text ?? "").trimmingCharacters(in: .whitespaces)
+    if text.isEmpty { return .some(nil) }
+    guard let group = try? ulcpLanGroup(input: text) else { return nil }
+    return .some(group)
+}
+
+let lanGroupInvalid = "Enter a multicast group or a peer address, with an optional port."

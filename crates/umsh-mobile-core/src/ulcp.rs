@@ -4974,6 +4974,13 @@ pub fn ulcp_category_properties(
                 has(cap::IPV6),
                 &[prop::IPV6_STATE, prop::IPV6_CONFIG, prop::IPV6_ADDRESSES],
             );
+            // A device whose medium is the group, with no LoRa radio to
+            // bridge it to. It turns the group on and off with its PHY,
+            // so there is no switch here.
+            when(
+                has(cap::LAN_BEARER) && !has(cap::REPEATER),
+                &[prop::LAN_BEARER_GROUP, prop::LAN_BEARER_STATE],
+            );
             when(
                 has(cap::IPV4) || has(cap::IPV6),
                 &[prop::IP_DNS, prop::IP_RESOLVERS],
@@ -4994,16 +5001,17 @@ pub fn ulcp_category_properties(
                     prop::MAC_REPEATER_ENABLED,
                 ],
             );
-            when(
-                has(cap::LAN_BEARER),
-                &[prop::LAN_BEARER_GROUP, prop::LAN_BEARER_STATE],
-            );
-            // The switch and the ingress limit belong to a device that
-            // forwards between the LAN and its LoRa radio. One whose PHY
-            // is the group turns it on and off with the PHY.
+            // A device that can forward between the group and its LoRa
+            // radio is a bridge. One whose medium is the group has the
+            // group under Network instead.
             when(
                 has(cap::LAN_BEARER) && has(cap::REPEATER),
-                &[prop::LAN_BEARER_ENABLED, prop::LAN_BEARER_INGRESS_LIMIT],
+                &[
+                    prop::LAN_BEARER_ENABLED,
+                    prop::LAN_BEARER_GROUP,
+                    prop::LAN_BEARER_INGRESS_LIMIT,
+                    prop::LAN_BEARER_STATE,
+                ],
             );
         }
         UlcpManageCategory::Repeater => {
@@ -12428,6 +12436,19 @@ mod tests {
         .unwrap();
         assert!(properties.contains(&prop::LAN_BEARER_ENABLED));
         assert!(!properties.contains(&prop::BRIDGE_ENABLED));
+
+        // A device whose medium is the group bridges nothing: its group
+        // is a network setting.
+        let virtual_radio = encoded_capabilities(&[cap::LAN_BEARER]);
+        assert!(
+            ulcp_category_properties(UlcpManageCategory::Bridge, virtual_radio.clone())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            ulcp_category_properties(UlcpManageCategory::Network, virtual_radio).unwrap(),
+            vec![prop::LAN_BEARER_GROUP, prop::LAN_BEARER_STATE]
+        );
     }
 
     #[test]
