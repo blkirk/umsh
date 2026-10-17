@@ -686,9 +686,11 @@ A `VirtualRadio` UniFFI object owning the phase 1 soft device core and the
 - **Extension target:** hosts `VirtualRadio`, listens on the socket, posts
   notifications. The project file is hand-written, so the new target and files
   need manual `project.pbxproj` edits.
-- **Entitlements and plumbing:** App Group and keychain access group on both
-  targets, with existing keychain items migrated into the shared group;
-  multicast and `app-push-provider` entitlements; Info.plist keys.
+- **Entitlements and plumbing:** App Group on both targets, holding the
+  radio's state and its socket; no keychain access group, since the radio
+  has no identity of its own; multicast and `app-push-provider`
+  entitlements; Wi-Fi information on the app, to list the network;
+  Info.plist keys.
 
 #### 2.5 Phase 2 validation
 

@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
             // A bridged radio is a real radio, so this uses the real store.
             runtime = AppRuntime(radioConnection: connection)
         case .lan:
-            let connection = VirtualRadioConnection()
+            let connection = Self.makeLanConnection()
             lanConnection = connection
             runtime = AppRuntime(radioConnection: connection)
         #endif
@@ -201,9 +201,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
 
     private func lanRadioConnection() -> VirtualRadioConnection {
         if let lanConnection { return lanConnection }
-        let connection = VirtualRadioConnection()
+        let connection = Self.makeLanConnection()
         lanConnection = connection
         return connection
+    }
+
+    /// The LAN virtual radio. On a phone the network extension hosts it,
+    /// running on the networks the app lists, and the app reaches it at
+    /// its socket. The Simulator runs no network extensions, so there it
+    /// runs in this process.
+    private static func makeLanConnection() -> VirtualRadioConnection {
+        #if targetEnvironment(simulator)
+        return VirtualRadioConnection()
+        #else
+        Task { await LanRadioRegistration.includeCurrentNetwork() }
+        return VirtualRadioConnection(hosting: .socket(path: VirtualRadioPaths.socketPath))
+        #endif
     }
 
     /// Rebuild the pipeline when a debug toggle picks a different radio.
@@ -227,6 +240,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
                 // the streams. The old radio is left connected, exactly as
                 // the previous root-swapping arrangement left it.
                 self.runtime.stop()
+                #if !targetEnvironment(simulator)
+                if self.currentMode == .lan {
+                    Task { await LanRadioRegistration.disable() }
+                }
+                #endif
                 self.currentMode = mode
                 self.runtime = self.buildRuntime(for: mode)
                 self.runtime.start()

@@ -1,8 +1,9 @@
 import Foundation
+import Network
 import OSLog
 import UMSHMobileCore
 
-/// The LAN virtual radio, hosted in this process.
+/// The LAN virtual radio.
 ///
 /// A companion radio with no hardware: the production device session,
 /// running in the mobile core, whose PHY is the LAN's multicast group.
@@ -12,29 +13,50 @@ import UMSHMobileCore
 /// forward them. Its group is a setting of its own, managed like any
 /// radio's.
 ///
-/// In-process hosting is what the Simulator and an unlisted network get:
-/// the device runs only while the app does. It keeps running across a
-/// detach, acknowledging and queueing, until the connection is released.
+/// The device runs in one of two places. Hosted in this process, as in
+/// the Simulator, it runs only while the app does. Hosted by the network
+/// extension, it runs while the phone is on a listed network, whatever
+/// the app is doing, and the app reaches it over the extension's local
+/// socket: connecting attaches and closing detaches. Either way it keeps
+/// running across a detach, acknowledging and queueing.
 final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrameLink,
     @unchecked Sendable {
-    /// How long to wait before trying again when the device cannot start.
+    /// Where the device runs.
+    enum Hosting {
+        /// In this process, keeping its state in `stateDirectory`.
+        case inProcess(stateDirectory: URL)
+        /// In the network extension, reached at its local socket.
+        case socket(path: String)
+    }
+
+    /// How long to wait before trying again when the device cannot be
+    /// reached.
     private static let retryDelaySeconds: TimeInterval = 2
 
     /// The one virtual radio's identifier, fixed so the app remembers it
-    /// like any other radio.
+    /// like any other radio. The same wherever it is hosted: it is one
+    /// device.
     private static let identifier = UUID(uuidString: "5B0E7C1A-8D3F-4E62-9A4B-6C1D2E3F4A5B")!
 
-    private let stateDirectory: URL
+    private static let displayName = "Local network"
+
+    private let hosting: Hosting
     private var identifier: UUID { Self.identifier }
     private let decoder = MobileHdlcDecoder()
+    /// The device, when hosted here.
     private var radio: MobileVirtualRadio?
+    /// The connection to the extension's socket, while there is one.
+    private var socket: NWConnection?
     private var attached = false
+    /// Counts attaches to an in-process device, so bytes owed to an
+    /// earlier session are recognized and dropped.
+    private var generation = 0
     /// False once the user disconnects, so a deliberate teardown does
     /// not immediately start again.
     private var wantsConnection = false
 
-    init(stateDirectory: URL = VirtualRadioConnection.defaultStateDirectory) {
-        self.stateDirectory = stateDirectory
+    init(hosting: Hosting = .inProcess(stateDirectory: VirtualRadioPaths.stateDirectory)) {
+        self.hosting = hosting
         super.init(sessionQueue: DispatchQueue(
             label: "com.voria.umsh.radio.virtual",
             qos: .userInitiated
@@ -42,17 +64,6 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
         adopt(link: self)
         snapshot.localIdentifier = Self.identifier
     }
-
-    /// Where the virtual radio keeps its identity and saved
-    /// configuration. Excluded from backups: the identity belongs to this
-    /// device, as a radio's does to its own flash.
-    static var defaultStateDirectory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("lan-radio", isDirectory: true)
-    }
-
-    private static let displayName = "Local network"
 
     // ------------------------------------------------------------------
     // Connection lifecycle
@@ -142,14 +153,27 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
     var linkCanReconnect: Bool { wantsConnection }
 
     func linkSend(frame: Data, rawTransactionID: UInt8?) {
-        guard attached, let radio else { return }
+        guard attached else { return }
+        let wire: Data
         do {
-            radio.receive(bytes: try UMSHMobileCore.ulcpHdlcEncode(frame: frame))
+            wire = try UMSHMobileCore.ulcpHdlcEncode(frame: frame)
         } catch {
             terminateConnectionForFatalProtocolError(
                 "The ULCP session produced an unsendable frame",
                 name: linkName
             )
+            return
+        }
+        if let radio {
+            radio.receive(bytes: wire)
+        } else if let socket {
+            socket.send(content: wire, completion: .contentProcessed { [weak self] error in
+                guard let self, error != nil else { return }
+                // A refused write means the socket is gone.
+                self.sessionQueue.async {
+                    self.detach(problem: "The local network radio stopped")
+                }
+            })
         }
     }
 
@@ -160,7 +184,6 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
     func linkInvalidate(retrying: Bool) {
         if !retrying { wantsConnection = false }
         detach(problem: nil, preservingPublishedFailure: true)
-        if retrying { scheduleRetry() }
     }
 
     func linkDidAttach() {}
@@ -182,7 +205,22 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
 
     private func startAttaching() {
         wantsConnection = true
-        guard !attached else { return }
+        guard !attached, socket == nil else { return }
+        // Publishes over the standing snapshot, so a failure stays on
+        // screen through the retry.
+        snapshot.linkState = .connecting
+        snapshot.name = Self.displayName
+        snapshot.localIdentifier = identifier
+        publish(snapshot)
+        switch hosting {
+        case .inProcess(let stateDirectory):
+            attachInProcess(stateDirectory: stateDirectory)
+        case .socket(let path):
+            connectSocket(path: path)
+        }
+    }
+
+    private func attachInProcess(stateDirectory: URL) {
         if radio == nil {
             do {
                 try FileManager.default.createDirectory(
@@ -195,45 +233,102 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
                 radio = try MobileVirtualRadio.start(
                     stateDir: stateDirectory.path,
                     enablePhy: true,
-                    listener: VirtualRadioListener(connection: self)
+                    listener: VirtualRadioListener()
                 )
             } catch {
-                snapshot.linkState = .connecting
-                snapshot.name = Self.displayName
-                snapshot.localIdentifier = identifier
                 snapshot.problemDescription = Self.describe(error)
                 publish(snapshot)
                 scheduleRetry()
                 return
             }
         }
-        snapshot.linkState = .connecting
-        snapshot.name = Self.displayName
-        snapshot.localIdentifier = identifier
-        publish(snapshot)
         decoder.reset()
+        generation &+= 1
         attached = true
-        radio?.attach()
+        radio?.attach(sink: VirtualRadioSink(connection: self, generation: generation))
         linkDidBecomeReady()
     }
 
-    /// Detach from the device, which carries on queueing for as long as
-    /// this connection keeps it.
+    private func connectSocket(path: String) {
+        let connection = NWConnection(to: .unix(path: path), using: .tcp)
+        socket = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, self.socket === connection else { return }
+            switch state {
+            case .ready:
+                self.decoder.reset()
+                self.attached = true
+                self.receiveNext(on: connection)
+                // Connecting is attaching, so the ULCP handshake starts
+                // here.
+                self.linkDidBecomeReady()
+            case .failed, .waiting:
+                // No extension listening: try again shortly.
+                self.detach(problem: "The local network radio is not running")
+            default:
+                break
+            }
+        }
+        connection.start(queue: sessionQueue)
+    }
+
+    /// A stream hands over arbitrary chunks, so one read can complete
+    /// none, one, or several frames.
+    private func receiveNext(on connection: NWConnection) {
+        connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: 65_536
+        ) { [weak self] content, _, isComplete, error in
+            guard let self, self.socket === connection else { return }
+            if let content, !content.isEmpty {
+                for frame in self.decoder.push(bytes: content) {
+                    self.linkDidReceive(frame: frame)
+                }
+            }
+            // The extension closing the socket is a detach: it stopped,
+            // or another connection replaced this one.
+            if error != nil || isComplete {
+                self.detach(problem: "The local network radio closed the connection")
+                return
+            }
+            self.receiveNext(on: connection)
+        }
+    }
+
+    /// Detach from the device, which carries on queueing wherever it is
+    /// hosted, then try again if the user still wants this radio.
     private func detach(problem: String?, preservingPublishedFailure: Bool = false) {
-        guard attached else { return }
+        let wasUp = attached || socket != nil
+        if attached, radio != nil {
+            radio?.detach()
+        }
         attached = false
-        radio?.detach()
+        generation &+= 1
+        socket?.stateUpdateHandler = nil
+        socket?.cancel()
+        socket = nil
         decoder.reset()
+        guard wasUp else { return }
         if preservingPublishedFailure {
             sessionDidLoseLink()
+        } else if wantsConnection {
+            // The retry is part of the same standing attempt, so this
+            // publishes one steady state rather than flapping.
+            sessionDidLoseLink()
+            snapshot.linkState = .connecting
+            snapshot.name = Self.displayName
+            snapshot.localIdentifier = identifier
+            if let problem { snapshot.problemDescription = problem }
+            publish(snapshot)
         } else {
             linkDidClose(problem: problem)
         }
+        if wantsConnection { scheduleRetry() }
     }
 
     private func scheduleRetry() {
         sessionQueue.asyncAfter(deadline: .now() + Self.retryDelaySeconds) { [weak self] in
-            guard let self, self.wantsConnection, !self.attached else { return }
+            guard let self, self.wantsConnection, !self.attached, self.socket == nil else { return }
             self.startAttaching()
         }
     }
@@ -247,10 +342,10 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
         }
     }
 
-    /// Bytes from the device, on its worker thread.
-    fileprivate func deviceDidSend(_ bytes: Data) {
+    /// Bytes from an in-process device, on its worker thread.
+    fileprivate func deviceDidSend(_ bytes: Data, generation: Int) {
         sessionQueue.async { [self] in
-            guard attached else { return }
+            guard attached, generation == self.generation else { return }
             for frame in decoder.push(bytes: bytes) {
                 linkDidReceive(frame: frame)
             }
@@ -258,21 +353,25 @@ final class VirtualRadioConnection: UlcpRadioSession, RadioConnection, UlcpFrame
     }
 }
 
-/// Carries the device's output onto the connection's queue. Holds the
+/// Carries one attach's replies onto the connection's queue. Holds the
 /// connection weakly so a released one cannot be kept alive by its
 /// device.
-private final class VirtualRadioListener: MobileVirtualRadioListener, @unchecked Sendable {
+private final class VirtualRadioSink: MobileWireSink, @unchecked Sendable {
     private weak var connection: VirtualRadioConnection?
+    private let generation: Int
 
-    init(connection: VirtualRadioConnection) {
+    init(connection: VirtualRadioConnection, generation: Int) {
         self.connection = connection
+        self.generation = generation
     }
 
     func onWire(bytes: Data) {
-        connection?.deviceDidSend(bytes)
+        connection?.deviceDidSend(bytes, generation: generation)
     }
+}
 
-    /// In-process, the device queues only while the app is running and
-    /// detached, and the app notices its own messages when it drains.
+/// In-process, the device queues only while the app is running and
+/// detached, and the app notices its own messages when it drains.
+private final class VirtualRadioListener: MobileVirtualRadioListener, @unchecked Sendable {
     func onQueued(notice: MobileQueuedNoticeRecord) {}
 }

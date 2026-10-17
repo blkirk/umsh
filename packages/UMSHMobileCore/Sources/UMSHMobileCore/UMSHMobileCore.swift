@@ -4740,10 +4740,10 @@ public func FfiConverterTypeMobileUlcpSession_lower(_ value: MobileUlcpSession) 
 public protocol MobileVirtualRadioProtocol: AnyObject, Sendable {
 
     /**
-     * A host attached: the device starts a session, announcing it with
-     * `CMD_SESSION_RESET`.
+     * A host in this process attached, taking replies at `sink`: the
+     * device starts a session, announcing it with `CMD_SESSION_RESET`.
      */
-    func attach()
+    func attach(sink: MobileWireSink)
 
     /**
      * The host went away: the device carries on detached.
@@ -4817,8 +4817,27 @@ open class MobileVirtualRadio: MobileVirtualRadioProtocol, @unchecked Sendable {
 
 
     /**
+     * Start a virtual radio as [`Self::start`] does, for hosts that
+     * connect to the local socket at `socket_path`: connecting attaches,
+     * closing detaches, and a new connection replaces the current one.
+     * The socket is placed where only processes entitled to the radio
+     * can reach it, and is removed when the radio stops.
+     */
+public static func serve(stateDir: String, socketPath: String, enablePhy: Bool, listener: MobileVirtualRadioListener)throws  -> MobileVirtualRadio  {
+    return try  FfiConverterTypeMobileVirtualRadio_lift(try rustCallWithError(FfiConverterTypeMobileVirtualRadioError_lift) {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_constructor_mobilevirtualradio_serve(
+        FfiConverterString.lower(stateDir),
+        FfiConverterString.lower(socketPath),
+        FfiConverterBool.lower(enablePhy),
+        FfiConverterTypeMobileVirtualRadioListener_lower(listener),uniffiCallStatus
+    )
+})
+}
+
+    /**
      * Start a virtual radio keeping its saved configuration under
-     * `state_dir`.
+     * `state_dir`, for a host in this process.
      *
      * With `enable_phy`, the device comes up listening whatever it saved:
      * starting it is choosing the LAN. Without, its saved state decides,
@@ -4839,13 +4858,14 @@ public static func start(stateDir: String, enablePhy: Bool, listener: MobileVirt
 
 
     /**
-     * A host attached: the device starts a session, announcing it with
-     * `CMD_SESSION_RESET`.
+     * A host in this process attached, taking replies at `sink`: the
+     * device starts a session, announcing it with `CMD_SESSION_RESET`.
      */
-open func attach()  {try! rustCall() {
+open func attach(sink: MobileWireSink)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_umsh_mobile_core_fn_method_mobilevirtualradio_attach(
-            self.uniffiCloneHandle(),uniffiCallStatus
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileWireSink_lower(sink),uniffiCallStatus
     )
 }
 }
@@ -4935,17 +4955,12 @@ public func FfiConverterTypeMobileVirtualRadio_lower(_ value: MobileVirtualRadio
 
 
 /**
- * What the device has for the platform.
+ * What the device has for the platform, beyond a host's own replies.
  *
  * Called on the device's worker thread; implementations hand the value
  * to their own executor and return.
  */
 public protocol MobileVirtualRadioListener: AnyObject, Sendable {
-
-    /**
-     * HDLC-Lite bytes for the attached host.
-     */
-    func onWire(bytes: Data)
 
     /**
      * A frame was queued while no host was attached.
@@ -4954,7 +4969,7 @@ public protocol MobileVirtualRadioListener: AnyObject, Sendable {
 
 }
 /**
- * What the device has for the platform.
+ * What the device has for the platform, beyond a host's own replies.
  *
  * Called on the device's worker thread; implementations hand the value
  * to their own executor and return.
@@ -5013,18 +5028,6 @@ open class MobileVirtualRadioListenerImpl: MobileVirtualRadioListener, @unchecke
 
 
     /**
-     * HDLC-Lite bytes for the attached host.
-     */
-open func onWire(bytes: Data)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_umsh_mobile_core_fn_method_mobilevirtualradiolistener_on_wire(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(bytes),uniffiCallStatus
-    )
-}
-}
-
-    /**
      * A frame was queued while no host was attached.
      */
 open func onQueued(notice: MobileQueuedNoticeRecord)  {try! rustCall() {
@@ -5063,30 +5066,6 @@ fileprivate struct UniffiCallbackInterfaceMobileVirtualRadioListener {
             } catch {
                 fatalError("Uniffi callback interface MobileVirtualRadioListener: handle missing in uniffiClone")
             }
-        },
-        onWire: { (
-            uniffiHandle: UInt64,
-            bytes: RustBuffer,
-            uniffiOutReturn: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> () in
-                guard let uniffiObj = try? FfiConverterTypeMobileVirtualRadioListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.onWire(
-                     bytes: try FfiConverterData.lift(bytes)
-                )
-            }
-
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
         },
         onQueued: { (
             uniffiHandle: UInt64,
@@ -5184,6 +5163,224 @@ public func FfiConverterTypeMobileVirtualRadioListener_lift(_ handle: UInt64) th
 #endif
 public func FfiConverterTypeMobileVirtualRadioListener_lower(_ value: MobileVirtualRadioListener) -> UInt64 {
     return FfiConverterTypeMobileVirtualRadioListener.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Where one attached host's replies go.
+ *
+ * Called on the device's worker thread. Each attach brings its own sink,
+ * and a sink hears nothing once its host detaches or is replaced, so it
+ * never carries the bytes of another session.
+ */
+public protocol MobileWireSink: AnyObject, Sendable {
+
+    /**
+     * HDLC-Lite bytes for the host.
+     */
+    func onWire(bytes: Data)
+
+}
+/**
+ * Where one attached host's replies go.
+ *
+ * Called on the device's worker thread. Each attach brings its own sink,
+ * and a sink hears nothing once its host detaches or is replaced, so it
+ * never carries the bytes of another session.
+ */
+open class MobileWireSinkImpl: MobileWireSink, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_umsh_mobile_core_fn_clone_mobilewiresink(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_umsh_mobile_core_fn_free_mobilewiresink(handle, $0) }
+    }
+
+
+
+
+    /**
+     * HDLC-Lite bytes for the host.
+     */
+open func onWire(bytes: Data)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobilewiresink_on_wire(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+}
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceMobileWireSink {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceMobileWireSink = UniffiVTableCallbackInterfaceMobileWireSink(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeMobileWireSink.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface MobileWireSink: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeMobileWireSink.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface MobileWireSink: handle missing in uniffiClone")
+            }
+        },
+        onWire: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeMobileWireSink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onWire(
+                     bytes: try FfiConverterData.lift(bytes)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceMobileWireSink> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceMobileWireSink>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitMobileWireSink() {
+    uniffi_umsh_mobile_core_fn_init_callback_vtable_mobilewiresink(UniffiCallbackInterfaceMobileWireSink.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileWireSink: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<MobileWireSink>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileWireSink
+
+    public static func lift(_ handle: UInt64) throws -> MobileWireSink {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return MobileWireSinkImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: MobileWireSink) -> UInt64 {
+         if let rustImpl = value as? MobileWireSinkImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileWireSink {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileWireSink, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileWireSink_lift(_ handle: UInt64) throws -> MobileWireSink {
+    return try FfiConverterTypeMobileWireSink.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileWireSink_lower(_ value: MobileWireSink) -> UInt64 {
+    return FfiConverterTypeMobileWireSink.lower(value)
 }
 
 
@@ -15619,6 +15816,10 @@ enum MobileVirtualRadioError: Swift.Error, Equatable, Hashable, Foundation.Local
      * The device's worker could not be started.
      */
     case WorkerUnavailable
+    /**
+     * The local socket could not be made.
+     */
+    case SocketUnavailable
 
 
 
@@ -15651,6 +15852,7 @@ public struct FfiConverterTypeMobileVirtualRadioError: FfiConverterRustBuffer {
         case 1: return .StateUnavailable
         case 2: return .StateInUse
         case 3: return .WorkerUnavailable
+        case 4: return .SocketUnavailable
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -15673,6 +15875,10 @@ public struct FfiConverterTypeMobileVirtualRadioError: FfiConverterRustBuffer {
 
         case .WorkerUnavailable:
             writeInt(&buf, Int32(3))
+
+
+        case .SocketUnavailable:
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -20662,7 +20868,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_transmit_raw() != 6208) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_attach() != 33195) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_attach() != 60687) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_detach() != 64719) {
@@ -20674,10 +20880,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradio_stop() != 38522) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradiolistener_on_wire() != 44182) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradiolistener_on_queued() != 17670) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobilevirtualradiolistener_on_queued() != 57698) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobilewiresink_on_wire() != 31287) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_constructor_mobileidentity_unlock() != 33117) {
@@ -20707,12 +20913,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_constructor_mobileulcpsession_new() != 48651) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_constructor_mobilevirtualradio_start() != 14085) {
+    if (uniffi_umsh_mobile_core_checksum_constructor_mobilevirtualradio_serve() != 4768) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_constructor_mobilevirtualradio_start() != 51525) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitMobileMeshWakeListener()
     uniffiCallbackInitMobileVirtualRadioListener()
+    uniffiCallbackInitMobileWireSink()
     return InitializationResult.ok
 }()
 
