@@ -287,18 +287,20 @@ pub fn display(
     dc: peripherals::GPIO37<'static>,
     lights: board::display::BootBacklights,
 ) -> board::display::Display {
+    // Well past the ST7796's rated write clock, and through the GPIO matrix
+    // rather than the IO MUX pins, but the panel is write-only and holds up
+    // at 80 MHz; the next step down is 40.
     let spi = board::SpiHandle::new(
         bus,
         cs,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(40))
+            .with_frequency(Rate::from_mhz(80))
             .with_mode(Mode::_0),
     );
     board::display::Display::new(
         spi,
         Output::new(dc, Level::High, OutputConfig::default()),
         lights,
-        external::display_frame(),
         external::display_frame(),
         &mut STRIPE
             .init_with(|| Stripe([0; umsh_pager_peripherals::display::STRIPE_BYTES]))

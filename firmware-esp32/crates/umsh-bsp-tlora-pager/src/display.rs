@@ -6,7 +6,7 @@ use esp_hal::gpio::Output;
 use esp_hal::gpio::{Level, OutputConfig};
 use esp_hal::peripherals::{GPIO42, GPIO46};
 use umsh_pager_peripherals::display::{
-    FRAME_BYTES, Framebuffer, HEIGHT, STRIPE_BYTES, STRIPE_ROWS, St7796,
+    FRAME_BYTES, Framebuffer, HEIGHT, STRIPE_BYTES, STRIPE_ROWS, SentStripes, St7796,
 };
 pub type Error = umsh_pager_peripherals::display::Error<
     embassy_embedded_hal::shared_bus::SpiDeviceError<
@@ -44,8 +44,7 @@ impl BootBacklights {
 pub struct Display {
     panel: St7796<SpiHandle, Output<'static>>,
     fb: Framebuffer,
-    sent: Framebuffer,
-    sent_valid: bool,
+    sent: SentStripes,
     stripe: &'static mut [u8; STRIPE_BYTES],
     backlight: Output<'static>,
     keyboard_light: Output<'static>,
@@ -57,19 +56,22 @@ impl Display {
     pub fn invert(&mut self) {
         self.fb.invert();
     }
+    /// The working frame in full color. Drawing on the display itself is
+    /// black and white.
+    pub fn color(&mut self) -> &mut Framebuffer {
+        &mut self.fb
+    }
     pub fn new(
         spi: SpiHandle,
         dc: Output<'static>,
         lights: BootBacklights,
         fb: &'static mut [u8; FRAME_BYTES],
-        sent: &'static mut [u8; FRAME_BYTES],
         stripe: &'static mut [u8; STRIPE_BYTES],
     ) -> Self {
         Self {
             panel: St7796::new(spi, dc),
             fb: Framebuffer::new(fb),
-            sent: Framebuffer::new(sent),
-            sent_valid: false,
+            sent: SentStripes::new(),
             stripe,
             backlight: lights.display,
             keyboard_light: lights.keyboard,
@@ -79,26 +81,30 @@ impl Display {
         }
     }
     pub async fn init(&mut self) -> Result<(), Error> {
-        self.sent_valid = false;
+        self.sent.forget();
         self.backlight(self.brightness).await;
         self.panel.init(&mut Delay).await
     }
     pub async fn flush(&mut self) -> Result<(), Error> {
-        for y in (0..HEIGHT).step_by(STRIPE_ROWS) {
-            if self.sent_valid && self.fb.stripe_matches(y, &self.sent) {
-                continue;
-            }
+        // Where the panel's write pointer is, after a stripe just sent: a
+        // changed stripe there follows on without setting a window.
+        let mut next_row = None;
+        for (index, y) in (0..HEIGHT).step_by(STRIPE_ROWS).enumerate() {
             let len = self.fb.stripe(y, self.stripe);
-            if let Err(error) = self.panel.stripe(y, &self.stripe[..len]).await {
+            let Some(hash) = self.sent.changed(index, &self.stripe[..len]) else {
+                continue;
+            };
+            let continues = next_row == Some(y);
+            if let Err(error) = self.panel.stripe(y, &self.stripe[..len], continues).await {
                 // A failed transfer may have written part of the stripe. Even
                 // a later frame matching old history must repair those pixels.
-                self.sent_valid = false;
+                self.sent.forget();
                 return Err(error);
             }
-            self.sent.copy_stripe_from(y, &self.fb);
+            self.sent.sent(index, hash);
+            next_row = Some(y + STRIPE_ROWS);
             embassy_futures::yield_now().await;
         }
-        self.sent_valid = true;
         Ok(())
     }
     async fn backlight(&mut self, value: u8) {
@@ -164,9 +170,9 @@ impl DrawTarget for Display {
         &mut self,
         pixels: I,
     ) -> Result<(), Self::Error> {
-        self.fb.draw_iter(pixels)
+        self.fb.binary().draw_iter(pixels)
     }
     fn clear(&mut self, color: BinaryColor) -> Result<(), Self::Error> {
-        self.fb.clear(color)
+        self.fb.binary().clear(color)
     }
 }

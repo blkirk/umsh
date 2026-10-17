@@ -998,13 +998,14 @@ fn framebuffer_clipping_packing_and_last_stripe() {
     use crate::display::*;
     use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
     let mut fb = Framebuffer::new(Box::leak(Box::new([0; FRAME_BYTES])));
-    fb.draw_iter([
-        Pixel(Point::new(-1, 0), BinaryColor::On),
-        Pixel(Point::new(0, 0), BinaryColor::On),
-        Pixel(Point::new(479, 221), BinaryColor::On),
-        Pixel(Point::new(480, 221), BinaryColor::On),
-    ])
-    .unwrap();
+    fb.binary()
+        .draw_iter([
+            Pixel(Point::new(-1, 0), BinaryColor::On),
+            Pixel(Point::new(0, 0), BinaryColor::On),
+            Pixel(Point::new(479, 221), BinaryColor::On),
+            Pixel(Point::new(480, 221), BinaryColor::On),
+        ])
+        .unwrap();
     let mut bytes = [0; STRIPE_BYTES];
     assert_eq!(fb.stripe(0, &mut bytes), STRIPE_BYTES);
     assert_eq!(&bytes[..4], &[255, 255, 0, 0]);
@@ -1022,39 +1023,96 @@ fn framebuffer_clipping_packing_and_last_stripe() {
 }
 
 #[test]
+fn pixel_fills_hold_their_byte_order_at_any_alignment() {
+    for offset in 0..4 {
+        for pixels in 0..9 {
+            let mut bytes = [0u8; 32];
+            let span = offset..offset + 2 * pixels;
+            crate::display::fill_pixels(&mut bytes[span.clone()], [0xab, 0xcd]);
+            for (i, &byte) in bytes.iter().enumerate() {
+                let expected = if span.contains(&i) {
+                    [0xab, 0xcd][(i - offset) % 2]
+                } else {
+                    0
+                };
+                assert_eq!(byte, expected, "offset {offset}, {pixels} pixels, byte {i}");
+            }
+        }
+    }
+}
+
+#[test]
+fn framebuffer_stores_big_endian_rgb565_and_clips_fills() {
+    use crate::display::*;
+    use embedded_graphics::{pixelcolor::Rgb565, prelude::*, primitives::Rectangle};
+    let mut fb = Framebuffer::new(Box::leak(Box::new([0; FRAME_BYTES])));
+    let color = Rgb565::new(0x1f, 0, 0x01);
+    fb.draw_iter([Pixel(Point::new(1, 0), color)]).unwrap();
+    fb.fill_solid(
+        &Rectangle::new(Point::new(478, 219), Size::new(10, 10)),
+        color,
+    )
+    .unwrap();
+    let mut bytes = [0; STRIPE_BYTES];
+    fb.stripe(0, &mut bytes);
+    assert_eq!(&bytes[..4], &[0, 0, 0xf8, 0x01]);
+    let len = fb.stripe(220, &mut bytes);
+    let row = WIDTH * 2;
+    assert_eq!(&bytes[row - 6..row], &[0, 0, 0xf8, 0x01, 0xf8, 0x01]);
+    assert_eq!(&bytes[len - 6..len], &[0, 0, 0xf8, 0x01, 0xf8, 0x01]);
+}
+
+#[test]
 fn repainting_an_unchanged_frame_needs_no_transfers() {
     use crate::display::*;
     use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
+    // Stripes that differ from what was sent, with their hashes.
+    fn changed(frame: &Framebuffer, sent: &SentStripes) -> Vec<(usize, u64)> {
+        let mut out = [0; STRIPE_BYTES];
+        (0..HEIGHT)
+            .step_by(STRIPE_ROWS)
+            .enumerate()
+            .filter_map(|(index, y)| {
+                let len = frame.stripe(y, &mut out);
+                sent.changed(index, &out[..len]).map(|hash| (index, hash))
+            })
+            .collect()
+    }
     let mut frame = Framebuffer::new(Box::leak(Box::new([0; FRAME_BYTES])));
-    let mut sent = Framebuffer::new(Box::leak(Box::new([0; FRAME_BYTES])));
+    let mut sent = SentStripes::new();
+    // Nothing is known to be on the panel yet.
+    assert_eq!(changed(&frame, &sent).len(), STRIPES);
+    for (index, hash) in changed(&frame, &sent) {
+        sent.sent(index, hash);
+    }
+    assert!(changed(&frame, &sent).is_empty());
+
     let pixel = Pixel(Point::new(20, 26), BinaryColor::On);
-    frame.draw_iter([pixel]).unwrap();
-    assert!(!frame.stripe_matches(24, &sent));
-    assert!(frame.stripe_matches(28, &sent));
-    // Only successful transfers update history; an uncommitted stripe retries.
-    assert!(!frame.stripe_matches(24, &sent));
-    sent.copy_stripe_from(24, &frame);
-    frame.clear(BinaryColor::Off).unwrap();
-    frame.draw_iter([pixel]).unwrap();
-    assert!(
-        (0..HEIGHT)
-            .step_by(STRIPE_ROWS)
-            .all(|y| frame.stripe_matches(y, &sent))
-    );
-    frame.clear(BinaryColor::Off).unwrap();
-    assert!(!frame.stripe_matches(24, &sent));
-    assert_eq!(
-        (0..HEIGHT)
-            .step_by(STRIPE_ROWS)
-            .filter(|&y| !frame.stripe_matches(y, &sent))
-            .count(),
-        1
-    );
-    // The short final stripe follows the same history rules.
+    frame.binary().draw_iter([pixel]).unwrap();
+    let pending = changed(&frame, &sent);
+    assert_eq!(pending.iter().map(|&(i, _)| i).collect::<Vec<_>>(), [6]);
+    // Only successful transfers update history; an unsent stripe retries.
+    assert_eq!(changed(&frame, &sent), pending);
+    sent.sent(pending[0].0, pending[0].1);
+    // Clearing and redrawing the same pixels sends nothing.
+    frame.binary().clear(BinaryColor::Off).unwrap();
+    frame.binary().draw_iter([pixel]).unwrap();
+    assert!(changed(&frame, &sent).is_empty());
+    frame.binary().clear(BinaryColor::Off).unwrap();
+    assert_eq!(changed(&frame, &sent).len(), 1);
+
+    // The short final stripe follows the same rules.
     frame
+        .binary()
         .draw_iter([Pixel(Point::new(479, 221), BinaryColor::On)])
         .unwrap();
-    assert!(!frame.stripe_matches(220, &sent));
-    sent.copy_stripe_from(220, &frame);
-    assert!(frame.stripe_matches(220, &sent));
+    let pending = changed(&frame, &sent);
+    assert_eq!(pending.last().unwrap().0, STRIPES - 1);
+    for (index, hash) in pending {
+        sent.sent(index, hash);
+    }
+    assert!(changed(&frame, &sent).is_empty());
+    // A failed transfer forgets everything.
+    sent.forget();
+    assert_eq!(changed(&frame, &sent).len(), STRIPES);
 }
