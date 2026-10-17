@@ -415,6 +415,10 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
     ("BACK", 14, 1.0, &[stroke("M3 -6 L-3 0 L3 6", 2.0)]),
     ("CHEVRON", 14, 1.0, &[stroke("M-3 -6 L3 0 L-3 6", 2.0)]),
     ("CHECK", 16, 1.0, &[stroke("M-5 0 L-1.5 4 L5 -4", 2.2)]),
+    // A battery with only its last cell left: the banner's at 22, and the
+    // screen's when it is empty at five times that.
+    ("BATTERY_LOW", 22, 1.0, BATTERY),
+    ("BATTERY_EMPTY", 104, 5.0, BATTERY),
     (
         "ADD",
         32,
@@ -434,6 +438,15 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             fill("M-1.2 4.6 A1.2 1.2 0 1 0 1.2 4.6 A1.2 1.2 0 1 0 -1.2 4.6 Z"),
         ],
     ),
+];
+
+const BATTERY: &[Layer] = &[
+    stroke(
+        "M-7 -5 H5 A2 2 0 0 1 7 -3 V3 A2 2 0 0 1 5 5 H-7 A2 2 0 0 1 -9 3 V-3 A2 2 0 0 1 -7 -5 Z",
+        1.5,
+    ),
+    fill("M7.5 -2 H9.5 V2 H7.5 Z"),
+    fill("M-7 -3 H-4.5 V3 H-7 Z"),
 ];
 
 /// The icons as Gray4 masks.

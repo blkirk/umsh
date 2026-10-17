@@ -22,7 +22,7 @@ pub fn view(s: &StatusStrip) -> impl View<Rgb565, State> + use<> {
             s.silent.then(|| indicator(&icon::BELL_SLASH)),
             s.phone_linked.then(|| indicator(&icon::BLUETOOTH)),
             s.gnss.then(|| indicator(&icon::GNSS)),
-            battery(s.battery_segments),
+            battery(s.battery_segments, s.battery_low),
         ))
         .with_spacing(3)
         .padding(Edges::Horizontal, 8),
@@ -44,8 +44,14 @@ fn indicator(
         .foreground_color(theme::TEXT_SECONDARY)
 }
 
-/// A battery outline with up to three charge segments, and its terminal.
-fn battery(segments: u8) -> impl View<Rgb565, State> + use<> {
+/// A battery outline with up to three charge segments, and its terminal,
+/// amber while the charge is `low`.
+fn battery(segments: u8, low: bool) -> impl View<Rgb565, State> + use<> {
+    let outline = if low {
+        theme::AMBER
+    } else {
+        theme::TEXT_SECONDARY
+    };
     let segment = move |i: u8| {
         Rectangle
             .foreground_color(if segments > i {
@@ -59,13 +65,13 @@ fn battery(segments: u8) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
         RoundedRectangle::new(3)
             .stroked(1)
-            .foreground_color(theme::TEXT_SECONDARY)
+            .foreground_color(outline)
             .frame_sized(25, 12),
         segment(0),
         segment(1),
         segment(2),
         Rectangle
-            .foreground_color(theme::TEXT_SECONDARY)
+            .foreground_color(outline)
             .frame_sized(2, 5)
             .offset(26, 0),
     ))

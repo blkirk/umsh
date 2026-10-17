@@ -40,6 +40,8 @@ pub struct StatusStrip {
     pub gnss: bool,
     /// Optional sounds are silenced.
     pub silent: bool,
+    /// The charge is low enough to say so.
+    pub battery_low: bool,
 }
 
 /// A chat as the list knows it, whether or not it is open.
@@ -536,13 +538,22 @@ pub trait Node {
 /// How long a banner stays, in milliseconds.
 pub const BANNER_MS: u64 = 4000;
 
-/// A message that arrived in another chat, shown over the screen for a
-/// moment. It shows the chat as the list does.
+/// Something shown over the screen for a moment, taking no input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Banner {
-    pub chat: ChatId,
+    pub notice: Notice,
     /// When it goes, on the board's clock, in milliseconds.
     pub until: u64,
+}
+
+/// What a banner says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// A message arrived in another chat; the banner shows the chat as the
+    /// list does.
+    Message(ChatId),
+    /// The charge has fallen low, to `percent`.
+    BatteryLow { percent: u8 },
 }
 
 /// A chat that got a message while the panel was dark.
@@ -585,6 +596,9 @@ pub struct State {
     /// The chats that got messages while the panel was dark, in the order
     /// they first did, for the screen the first of them woke it to.
     pub arrived: Vec<Arrived, MAX_CHATS>,
+    /// The battery is empty and power is about to go: the screen shows only
+    /// that, its icon lit or not as the board blinks it.
+    pub battery_empty: Option<bool>,
 }
 
 impl core::fmt::Debug for State {
@@ -600,6 +614,7 @@ impl core::fmt::Debug for State {
             .field("banner", &self.banner)
             .field("dark", &self.dark)
             .field("arrived", &self.arrived)
+            .field("battery_empty", &self.battery_empty)
             .finish_non_exhaustive()
     }
 }
@@ -622,6 +637,7 @@ impl State {
             banner: None,
             dark: false,
             arrived: Vec::new(),
+            battery_empty: None,
         }
     }
 
@@ -787,7 +803,7 @@ impl State {
         } else if !matches!(self.screen(), Screen::Chats { .. }) {
             // The list shows it arrive; anywhere else, a banner does.
             self.banner = Some(Banner {
-                chat,
+                notice: Notice::Message(chat),
                 until: now + BANNER_MS,
             });
         }
@@ -814,6 +830,23 @@ impl State {
             }
         }
         self.show_arrivals();
+    }
+
+    /// The charge has fallen low, to `percent`: the strip's battery says so
+    /// from now on, and a banner says it once while the panel is lit.
+    pub fn battery_low(&mut self, percent: u8, now: u64) {
+        self.status.battery_low = true;
+        if !self.dark {
+            self.banner = Some(Banner {
+                notice: Notice::BatteryLow { percent },
+                until: now + BANNER_MS,
+            });
+        }
+    }
+
+    /// The battery is empty: the screen shows only its icon, `lit` or not.
+    pub fn battery_empty(&mut self, lit: bool) {
+        self.battery_empty = Some(lit);
     }
 
     /// When the screen next changes by itself, on the board's clock.

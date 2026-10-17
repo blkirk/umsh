@@ -9,7 +9,7 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Preset, Reaction, Section,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Notice, Preset, Reaction, Section,
     Shareable, State,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
@@ -479,7 +479,7 @@ fn a_message_from_elsewhere_shows_a_banner_that_takes_no_key() {
     run(&mut app, &[Input::Press, Input::Enter, Input::Turn(-7)]);
     assert!(arrive(&mut app, store, 1000));
     let banner = app.state().banner.expect("a banner");
-    assert_eq!(banner.chat, TRAIL_CREW);
+    assert_eq!(banner.notice, Notice::Message(TRAIL_CREW));
     assert_eq!(app.state().chats[0].id, TRAIL_CREW);
     assert!(app.state().chats[0].unread);
     // Typing goes on where it was.
@@ -1231,4 +1231,31 @@ fn a_joined_channel_opens_from_the_channels_list() {
     run(&mut app, &[Input::Backspace, Input::Turn(1), Input::Press]);
     // Trail Crew, the first channel in the list.
     assert_in_conversation(app.state(), 2);
+}
+
+#[test]
+fn low_battery_says_so_once_without_taking_a_key() {
+    let mut app = app!();
+    // Typing in Ridge Medic.
+    run(&mut app, &[Input::Press, Input::Enter]);
+    app.state_mut().battery_low(9, 1000);
+    app.finalize_view();
+    assert!(app.state().status.battery_low);
+    let banner = app.state().banner.expect("a banner");
+    assert_eq!(banner.notice, Notice::BatteryLow { percent: 9 });
+    run(&mut app, &typed("!"));
+    assert!(draft(app.state(), RIDGE).ends_with('!'));
+    app.state_mut().expire(banner.until);
+    assert_eq!(app.state().banner, None);
+    // The strip keeps saying it.
+    assert!(app.state().status.battery_low);
+}
+
+#[test]
+fn low_battery_while_dark_marks_only_the_strip() {
+    let mut app = app!();
+    app.state_mut().dark = true;
+    app.state_mut().battery_low(9, 1000);
+    assert!(app.state().status.battery_low);
+    assert_eq!(app.state().banner, None);
 }

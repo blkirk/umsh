@@ -91,14 +91,26 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
         })
         .padding(Edges::Top, STRIP),
         // Over everything, and taking no input.
-        state
-            .banner
-            .and_then(|banner| state.chat(banner.chat))
-            .map(banner::view),
+        state.banner.map(|banner| banner::view(state, banner.notice)),
+        // The last thing shown before power goes, over even the strip.
+        state.battery_empty.map(empty_battery),
     ))
     .with_alignment(Alignment::TopLeading)
     .flex_infinite_width(HorizontalAlignment::Leading)
     .flex_infinite_height(VerticalAlignment::Top)
+    .background_color(theme::BACKGROUND, Rectangle)
+}
+
+/// The empty battery, alone on the screen, `lit` or not as it blinks. No
+/// words to translate, and no controls.
+fn empty_battery(lit: bool) -> impl View<Rgb565, State> + use<> {
+    lit.then(|| {
+        Image::new(&crate::icon::BATTERY_EMPTY)
+            .as_template()
+            .foreground_color(theme::RED)
+    })
+    .flex_infinite_width(HorizontalAlignment::Center)
+    .flex_infinite_height(VerticalAlignment::Center)
     .background_color(theme::BACKGROUND, Rectangle)
 }
 

@@ -19,8 +19,8 @@
 //! that returns in that long; 0 for none), `arrive` (the fixture's next
 //! message arrives), `identify` (the identity asked for arrives), `wait
 //! SECONDS` (the board's clock moves on), `dark` and `lit` (the panel goes
-//! dark and lights again), or
-//! `shot NAME`, which writes `NAME.png` into the output directory. `#`
+//! dark and lights again), `battery-low PERCENT`, `battery-empty` (with
+//! `off` for the blink's dark half), or `shot NAME`, which writes `NAME.png` into the output directory. `#`
 //! starts a comment.
 //!
 //! Timing, and something for a profiler to watch:
@@ -211,6 +211,22 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                     .map_err(|_| format!("line {}: wait needs seconds", number + 1))?;
                 clock += seconds * 1000;
                 expire(&mut app, clock);
+                None
+            }
+            "battery-low" => {
+                let percent: u8 = rest
+                    .parse()
+                    .map_err(|_| format!("line {}: battery-low needs a percent", number + 1))?;
+                // Thirds of a full charge, as a board reports them.
+                app.state_mut().status.battery_segments = percent / 34;
+                app.state_mut().battery_low(percent, clock);
+                app.finalize_view();
+                None
+            }
+            "battery-empty" => {
+                // `battery-empty off` draws the blink's dark half.
+                app.state_mut().battery_empty(rest != "off");
+                app.finalize_view();
                 None
             }
             "airtime" => {

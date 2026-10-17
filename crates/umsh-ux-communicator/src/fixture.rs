@@ -913,6 +913,7 @@ pub fn state(store: &'static Store) -> State {
         phone_linked: true,
         gnss: true,
         silent: false,
+        battery_low: false,
     };
     let chats = [
         Chat {
