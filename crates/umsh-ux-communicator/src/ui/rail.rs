@@ -1,26 +1,24 @@
 //! The rail: Chats, Peers, and Device, beside the top-level lists.
 
+use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
 use embedded_graphics::image::ImageRaw;
 use embedded_graphics::pixelcolor::{Gray4, Rgb565};
 
 use super::{RAIL, STRIP, label};
 use crate::model::{Section, State};
+use crate::nav::keys;
 use crate::{font, icon, theme};
 
 pub fn view(active: Section, unread_chats: usize) -> impl View<Rgb565, State> + use<> {
     VStack::new((
-        item(
-            "Chats",
-            &icon::CHATS,
-            active == Section::Chats,
-            unread_chats,
-        ),
-        item("Peers", &icon::PEERS, active == Section::Peers, 0),
-        item("Device", &icon::DEVICE, active == Section::Device, 0),
+        item(Section::Chats, "Chats", &icon::CHATS, active, unread_chats),
+        item(Section::Peers, "Peers", &icon::PEERS, active, 0),
+        item(Section::Device, "Device", &icon::DEVICE, active, 0),
     ))
     .with_spacing(0)
     .with_alignment(HorizontalAlignment::Leading)
+    .bound_focus(BoundaryBehavior::Stop)
     .frame()
     .with_width(RAIL)
     .with_height(theme::HEIGHT - STRIP)
@@ -35,10 +33,28 @@ pub fn view(active: Section, unread_chats: usize) -> impl View<Rgb565, State> + 
     .background_color(theme::CHROME, Rectangle)
 }
 
+/// One section's item. Pressing it enters the section's list.
 fn item(
+    section: Section,
+    name: &'static str,
+    glyph: &'static ImageRaw<'static, Gray4>,
+    shown: Section,
+    badge: usize,
+) -> impl View<Rgb565, State> + use<> {
+    Button::new(
+        move |s: &mut State| s.enter_section(section),
+        move |button: ButtonState| {
+            item_look(name, glyph, section == shown, button.is_focused(), badge)
+        },
+    )
+    .focus_key(keys::rail(section))
+}
+
+fn item_look(
     name: &str,
     glyph: &'static ImageRaw<'static, Gray4>,
     active: bool,
+    focused: bool,
     badge: usize,
 ) -> impl View<Rgb565, State> + use<> {
     let color = if active {
@@ -62,11 +78,26 @@ fn item(
     ))
     .with_spacing(2)
     .frame()
+    .with_width(RAIL - 9)
+    .with_height(cell - 8)
+    // Focused, the item is boxed in place of its bar.
+    .background(
+        Alignment::Center,
+        focused.then(|| {
+            ZStack::new((
+                RoundedRectangle::new(7).foreground_color(theme::FOCUS),
+                RoundedRectangle::new(7)
+                    .stroked(2)
+                    .foreground_color(theme::ACCENT),
+            ))
+        }),
+    )
+    .frame()
     .with_width(RAIL - 1)
     .with_height(cell)
     .overlay(
         Alignment::Leading,
-        active.then(|| {
+        (active && !focused).then(|| {
             RoundedRectangle::new(2)
                 .foreground_color(theme::ACCENT)
                 .frame_sized(4, cell - 20)

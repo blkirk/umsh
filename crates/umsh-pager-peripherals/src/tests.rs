@@ -137,6 +137,61 @@ fn keyboard_backspace_uses_one_based_fifo_and_suppresses_repeat() {
     assert_eq!(kb.decode(0x1e), KeyEvent::BackRelease);
     assert_eq!(kb.decode(0x9e), KeyEvent::BackPress);
 }
+/// The FIFO codes for pressing and releasing the key at matrix `position`.
+fn tap(kb: &mut Keyboard<Bus>, position: u8) -> KeyEvent {
+    let event = kb.decode(0x80 | (position + 1));
+    kb.decode(position + 1);
+    event
+}
+
+#[test]
+fn keyboard_types_letters_enter_and_space() {
+    let mut kb = Keyboard::new(Bus(VecDeque::new()));
+    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('q'));
+    assert_eq!(tap(&mut kb, 18), KeyEvent::Character('l'));
+    assert_eq!(tap(&mut kb, 27), KeyEvent::Character('m'));
+    assert_eq!(tap(&mut kb, 19), KeyEvent::Enter);
+    assert_eq!(tap(&mut kb, 30), KeyEvent::Character(' '));
+    assert_eq!(tap(&mut kb, 29), KeyEvent::BackPress);
+}
+
+#[test]
+fn keyboard_modifiers_apply_while_held() {
+    let mut kb = Keyboard::new(Bus(VecDeque::new()));
+    assert_eq!(kb.decode(0x80 | 29), KeyEvent::Press); // CAP down
+    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('Q'));
+    assert_eq!(tap(&mut kb, 1), KeyEvent::Character('W'));
+    assert_eq!(kb.decode(29), KeyEvent::Release);
+    // Used while held, so it does not carry over to the next key.
+    assert_eq!(tap(&mut kb, 2), KeyEvent::Character('e'));
+
+    kb.decode(0x80 | 21); // Sym down
+    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('1'));
+    assert_eq!(tap(&mut kb, 27), KeyEvent::Character('.'));
+    assert_eq!(tap(&mut kb, 17), KeyEvent::Character('"'));
+    // Keys with nothing on the symbol layer type as usual.
+    assert_eq!(tap(&mut kb, 19), KeyEvent::Enter);
+    kb.decode(21);
+    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('q'));
+}
+
+#[test]
+fn keyboard_modifiers_tapped_alone_apply_to_the_next_key() {
+    let mut kb = Keyboard::new(Bus(VecDeque::new()));
+    tap(&mut kb, 28); // CAP
+    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('A'));
+    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('a'));
+
+    tap(&mut kb, 20); // Sym
+    assert_eq!(tap(&mut kb, 25), KeyEvent::Character('!'));
+    assert_eq!(tap(&mut kb, 25), KeyEvent::Character('b'));
+
+    // A second tap cancels the first.
+    tap(&mut kb, 28);
+    tap(&mut kb, 28);
+    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('a'));
+}
+
 #[test]
 fn keyboard_fifo_overflow_discards_incomplete_gesture() {
     let mut ops = vec![Op::Read(0x34, vec![2], vec![8])];

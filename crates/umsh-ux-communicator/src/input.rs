@@ -3,10 +3,17 @@
 //!
 //! What an input means depends on where focus is: Backspace erases while a
 //! text field is active and is Back everywhere else, and turning the wheel
-//! moves the cursor in an active field and focus elsewhere. That decision
-//! lives here so every communicator makes it the same way.
+//! moves the cursor in an active field and focus elsewhere. The screens
+//! decide that through focus; this only delivers inputs, each one to an
+//! interface whose focus has settled from the last.
 
-use buoyant::app::Harness;
+use buoyant::app::{App, Harness as _};
+use buoyant::event::Key;
+use buoyant::focus::DefaultFocus;
+use buoyant::render::AnimatedJoin;
+use buoyant::view::ViewLayout;
+
+use crate::model::State;
 
 /// One user input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +29,13 @@ pub enum Input {
 }
 
 /// Applies `input` to the running interface.
-pub fn apply(app: &mut impl Harness, input: Input) {
+pub fn apply<V, F>(app: &mut App<V, State, F>, input: Input)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
     match input {
         Input::Turn(detents) => {
             for _ in 0..detents.unsigned_abs() {
@@ -31,14 +44,27 @@ pub fn apply(app: &mut impl Harness, input: Input) {
                 } else {
                     app.previous();
                 }
+                app.finalize_view();
             }
         }
-        Input::Press | Input::Enter => {
+        Input::Press => {
             app.select();
         }
-        Input::Backspace => {
-            app.blur();
-        }
-        Input::Character(_) => {}
+        Input::Enter => press(app, Key::Enter),
+        Input::Backspace => press(app, Key::Backspace),
+        Input::Character(c) => press(app, Key::Character(c)),
     }
+    app.finalize_view();
+}
+
+/// A key pressed and released.
+fn press<V, F>(app: &mut App<V, State, F>, key: Key)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    app.key_down(key);
+    app.key_up(key);
 }

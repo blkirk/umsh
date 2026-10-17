@@ -3,7 +3,8 @@
 //! each frame costs: layout, painting, the panel transfer, and
 //! the least stack left free.
 use super::*;
-use board::display::Display;
+use board::display::{Brightness, Display, brightness_from_permille};
+use static_cell::ConstStaticCell;
 use umsh_ux_communicator::buoyant::app::App;
 use umsh_ux_communicator::buoyant::render_target::{
     EmbeddedGraphicsRenderTarget, RenderTarget as _,
@@ -12,6 +13,7 @@ use umsh_ux_communicator::buoyant::view::View;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::State;
 use umsh_ux_communicator::{fixture, theme, ui};
+use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
 use umsh_ux_display_tracker::menu::UiInput;
 
 /// How often an animation advances.
@@ -35,12 +37,18 @@ pub(crate) async fn task(
     // The interface's state and both of its render trees are plain data
     // that only this task touches, and they are the largest thing it
     // holds: kept in the task, they would come out of the main stack.
-    let app = external::communicator(|| {
-        App::new(
-            fixture::state(),
+    static STORE: ConstStaticCell<fixture::Store> =
+        ConstStaticCell::new(fixture::Store::new(external::text_heap()));
+    let store = STORE.take();
+    let app = external::communicator(|slot| {
+        let app = App::new_in(
+            slot,
+            fixture::state(store),
             embedded_graphics::prelude::Size::new(theme::WIDTH, theme::HEIGHT).into(),
             ui::root_view,
-        )
+        );
+        ui::bind(app);
+        app
     });
     debug_log(format_args!(
         "communicator: app={} bytes",
@@ -50,24 +58,82 @@ pub(crate) async fn task(
     let mut animating = draw(&mut display, app, start, &mut costs).await;
     let _ = display.set_display_on(true).await;
     pager::input::shown(epoch);
+    // The panel dims, then goes dark, after a while without input, as the
+    // tracker's does. An input against a fading or dark panel only wakes
+    // it: the input layer reads `SCREEN_FADED` and consumes the gesture.
+    let mut attention = Attention::new(
+        DisplayKind::Emissive,
+        AttentionConfig::EMISSIVE,
+        Instant::now().as_millis(),
+    );
 
     loop {
-        let wait = if animating { FRAME } else { REPORT };
-        if let Either::First(input) = select(UI_INPUT_CH.receive(), Timer::after(wait)).await {
-            input::apply(
-                app,
-                match input {
-                    UiInput::Forward => Input::Turn(1),
-                    UiInput::Backward => Input::Turn(-1),
-                    UiInput::Select => Input::Press,
-                    UiInput::Back => Input::Backspace,
-                },
-            );
+        SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
+        let lit = attention.accepts_redraw();
+        let tick = Instant::now() + if animating && lit { FRAME } else { REPORT };
+        let wake_at = attention
+            .next_deadline()
+            .map_or(tick, |deadline| tick.min(Instant::from_millis(deadline)));
+        let now = || Instant::now().as_millis();
+        let transition =
+            match select3(UI_INPUT_CH.receive(), UI_WAKE.wait(), Timer::at(wake_at)).await {
+                Either3::First(first) => {
+                    // An input leaves the interface laid out and settled, so its
+                    // layout is counted here rather than in the frame. Everything
+                    // queued is taken before drawing, so typing outpacing the
+                    // frames only skips frames.
+                    let began = Instant::now();
+                    let mut next = Some(first);
+                    while let Some(ui) = next {
+                        input::apply(app, translate(ui));
+                        next = UI_INPUT_CH.try_receive().ok();
+                    }
+                    costs.layout = costs.layout.max(Instant::now() - began);
+                    attention.wake(now())
+                }
+                Either3::Second(()) => attention.wake(now()),
+                Either3::Third(()) => attention.poll(now()),
+            };
+        match transition {
+            Some(Transition::Woke) => {
+                // A fresh frame goes in before the panel lights, so a stale
+                // one is never seen.
+                let epoch = pager::input::interactive().await;
+                animating = draw(&mut display, app, start, &mut costs).await;
+                let _ = display.set_brightness(Brightness::NORMAL).await;
+                if display.set_display_on(true).await.is_ok() {
+                    pager::input::shown(epoch);
+                }
+                continue;
+            }
+            Some(Transition::Dimming) => {
+                let _ = display
+                    .set_brightness(brightness_from_permille(attention.brightness_permille()))
+                    .await;
+            }
+            Some(Transition::Lapsed) => {
+                let before = pager::input::activity();
+                if display.set_display_on(false).await.is_ok() {
+                    pager::input::dark(before);
+                }
+            }
+            None => {}
         }
-        if animating || app.should_redraw() {
+        if attention.accepts_redraw() && (animating || app.should_redraw()) {
             animating = draw(&mut display, app, start, &mut costs).await;
         }
         costs.report(animating);
+    }
+}
+
+fn translate(input: UiInput) -> Input {
+    match input {
+        UiInput::Forward => Input::Turn(1),
+        UiInput::Backward => Input::Turn(-1),
+        UiInput::Select => Input::Press,
+        UiInput::Back => Input::Backspace,
+        UiInput::Enter => Input::Enter,
+        UiInput::Character(c) => Input::Character(c),
     }
 }
 

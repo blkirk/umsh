@@ -40,12 +40,18 @@
 /// through the Back entry every level carries; a board with one can also
 /// still use that entry, so the two never need to be told apart
 /// downstream.
+///
+/// A board with a keyboard also sends what it types, as
+/// [`Enter`](UiInput::Enter) and [`Character`](UiInput::Character). Screens
+/// without text entry ignore them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiInput {
     Forward,
     Select,
     Backward,
     Back,
+    Enter,
+    Character(char),
 }
 
 /// One list in the tree.
@@ -676,6 +682,8 @@ impl UiModel {
     ) -> Option<UiEffect> {
         self.notice = None;
         match (self.page, input) {
+            // Nothing here takes text.
+            (_, UiInput::Enter | UiInput::Character(_)) => None,
             (Page::WifiNetworks { .. }, UiInput::Back)
             | (Page::WifiNetworks { selected: None }, UiInput::Select) => {
                 self.page = Page::Menu(MenuItem::WifiNetworks);

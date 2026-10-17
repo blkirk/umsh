@@ -20,12 +20,18 @@ repository.workspace = true
 fixture = []
 
 [dependencies]
-# The fork carries a prerendered anti-aliased font backend and
-# line-limited text. Branch `umsh` of darconeous/buoyant.
-buoyant = { git = "https://github.com/darconeous/buoyant", rev = "ef934005da6629f5df1ab5b3696ed8b3fd124dec", default-features = false, features = ["embedded-graphics"] }
+# The fork carries a prerendered anti-aliased font backend, line-limited
+# text, focus by key bound into app state, a text field whose text is kept
+# in storage the app chooses, and building an app in place. Branch `umsh` of
+# darconeous/buoyant.
+buoyant = { git = "https://github.com/darconeous/buoyant", rev = "77704f908f6e3f08b9cd607db5572ff015473229", default-features = false, features = ["embedded-graphics"] }
 embedded-graphics = { version = "0.8", default-features = false }
 heapless = { version = "0.9", default-features = false }
 libm = "0.2"
+
+[dev-dependencies]
+# The tests drive the fixture's chats.
+umsh-ux-communicator = { path = ".", features = ["fixture"] }
 
 [build-dependencies]
 swash = "0.2.7"

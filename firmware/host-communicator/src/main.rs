@@ -38,6 +38,11 @@ use umsh_ux_communicator::{fixture, theme, ui};
 
 const SIZE: Size = Size::new(theme::WIDTH, theme::HEIGHT);
 
+/// Where the fixture's chats keep their messages, for the life of the run.
+fn store() -> &'static fixture::Store {
+    Box::leak(Box::new(fixture::Store::new(&std::alloc::System)))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -74,7 +79,8 @@ fn bench(count: u32) {
     use std::time::{Duration, Instant};
 
     let mut display: SimulatorDisplay<Rgb565> = SimulatorDisplay::new(SIZE);
-    let mut app = App::new(fixture::state(), SIZE.into(), ui::root_view);
+    let mut app = App::new(fixture::state(store()), SIZE.into(), ui::root_view);
+    ui::bind(&mut app);
     let (mut layout, mut paint) = (Duration::ZERO, Duration::ZERO);
     for turn in 0..count {
         // Four steps down, four back, so the focus keeps moving.
@@ -101,7 +107,8 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
         std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut display: SimulatorDisplay<Rgb565> = SimulatorDisplay::new(SIZE);
-    let mut app = App::new(fixture::state(), SIZE.into(), ui::root_view);
+    let mut app = App::new(fixture::state(store()), SIZE.into(), ui::root_view);
+    ui::bind(&mut app);
     for (number, line) in steps.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -149,7 +156,7 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
 
 #[cfg(feature = "window")]
 fn window() -> ExitCode {
-    use embedded_graphics_simulator::sdl2::{Keycode, MouseButton};
+    use embedded_graphics_simulator::sdl2::{Keycode, Mod, MouseButton};
     use embedded_graphics_simulator::{SimulatorEvent, Window};
 
     let mut window = Window::new(
@@ -163,19 +170,33 @@ fn window() -> ExitCode {
     let mut target = EmbeddedGraphicsRenderTarget::new_hinted(&mut display, theme::BACKGROUND);
     window.update(target.display());
     let start = std::time::Instant::now();
-    let mut app = App::new(fixture::state(), SIZE.into(), ui::root_view);
+    let mut app = App::new(fixture::state(store()), SIZE.into(), ui::root_view);
+    ui::bind(&mut app);
     loop {
         app.set_time(start.elapsed());
         for event in window.events() {
             let input = match event {
                 SimulatorEvent::Quit => return ExitCode::SUCCESS,
-                SimulatorEvent::KeyDown { keycode, .. } => match keycode {
+                SimulatorEvent::KeyDown {
+                    keycode, keymod, ..
+                } => match keycode {
                     Keycode::Up => Some(Input::Turn(-1)),
                     Keycode::Down => Some(Input::Turn(1)),
                     Keycode::Right => Some(Input::Press),
                     Keycode::Return => Some(Input::Enter),
                     Keycode::Backspace => Some(Input::Backspace),
-                    _ => None,
+                    Keycode::Space => Some(Input::Character(' ')),
+                    other => {
+                        // Letters and digits, by their key names.
+                        let shifted = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                        let name = other.name();
+                        let mut chars = name.chars();
+                        match (chars.next(), chars.next()) {
+                            (Some(c), None) if shifted => Some(Input::Character(c)),
+                            (Some(c), None) => Some(Input::Character(c.to_ascii_lowercase())),
+                            _ => None,
+                        }
+                    }
                 },
                 SimulatorEvent::MouseWheel { scroll_delta, .. } => {
                     Some(Input::Turn(if scroll_delta.y > 0 { -1 } else { 1 }))

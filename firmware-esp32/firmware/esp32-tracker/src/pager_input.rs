@@ -445,6 +445,10 @@ async fn run_keyboard(irq: &mut Input<'static>, bus: &'static board::I2cBus) {
                 for _ in 0..16 {
                     match keyboard.next().await.map_err(|_| ())? {
                         Some(KeyEvent::BackPress) => finish_gesture(UiInput::Back, start_gesture()),
+                        Some(KeyEvent::Enter) => finish_gesture(UiInput::Enter, start_gesture()),
+                        Some(KeyEvent::Character(c)) => {
+                            finish_gesture(UiInput::Character(c), start_gesture())
+                        }
                         Some(KeyEvent::Press) if super::alert::active() => super::alert::cancel(),
                         Some(KeyEvent::Overflow) => debug_log(format_args!(
                             "pager: keyboard FIFO overflow; keyboard gestures discarded"

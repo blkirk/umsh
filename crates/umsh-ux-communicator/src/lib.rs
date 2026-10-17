@@ -8,8 +8,10 @@
 //! `docs/ux/src/hardware/mockups/` is the reference design.
 //!
 //! - [`model`]: what the screens show, filled in by the device.
+//! - [`nav`]: moving between screens, and where focus goes.
 //! - [`ui`]: the screens themselves, as Buoyant views.
 //! - [`input`]: the inputs a board reports, and what they mean.
+//! - [`text`]: message text, shared by the screens rather than copied.
 //! - [`avatar`]: peer and channel avatars, following the iOS rules.
 //! - [`font`], [`icon`], [`theme`]: typefaces, icons, colors, and sizes.
 //! - [`fixture`]: stand-in content (the `fixture` feature).
@@ -26,5 +28,7 @@ pub mod font;
 pub mod icon;
 pub mod input;
 pub mod model;
+pub mod nav;
+pub mod text;
 pub mod theme;
 pub mod ui;

@@ -205,6 +205,13 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             stroke("M-5 -5 L5 5", 1.2),
         ],
     ),
+    (
+        "PENCIL",
+        18,
+        1.2,
+        &[stroke("M-5 5 L-4 1 L3 -6 L6 -3 L-1 4 Z M1 -4 L4 -1", 1.4)],
+    ),
+    ("BACK", 14, 1.0, &[stroke("M3 -6 L-3 0 L3 6", 2.0)]),
 ];
 
 /// The icons as Gray4 masks.

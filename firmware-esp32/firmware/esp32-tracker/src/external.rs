@@ -35,6 +35,12 @@ pub fn init(peripheral: esp_hal::peripherals::PSRAM<'static>) {
     }
 }
 
+/// The heap the communicator keeps message text on: plain bytes only.
+#[cfg(feature = "communicator")]
+pub const fn text_heap() -> &'static EspHeap {
+    &EXTERNAL
+}
+
 // Private: callers cannot accidentally put synchronization/DMA objects here.
 unsafe fn storage<T>() -> *mut T {
     let ptr = unsafe { EXTERNAL.alloc_caps(MemoryCapability::External.into(), Layout::new::<T>()) }
@@ -111,17 +117,16 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
 /// Plain data, touched only by the communicator task. Generic only because
 /// the view type cannot be named.
 ///
-/// Built here rather than passed in, and never inlined, so that the
-/// temporary is in this frame, which is gone once it returns. Built in the
-/// task, it would widen the task's frame on every poll.
+/// `build` initializes the app in the place given, since it is too large to
+/// build aside and copy. Never inlined, so that what building needs is in
+/// this frame, which is gone once it returns; built in the task, it would
+/// widen the task's frame on every poll.
 #[cfg(feature = "communicator")]
 #[inline(never)]
-pub fn communicator<T>(build: impl FnOnce() -> T) -> &'static mut T {
-    unsafe {
-        let ptr = storage::<T>();
-        ptr.write(build());
-        &mut *ptr
-    }
+pub fn communicator<T>(
+    build: impl FnOnce(&'static mut core::mem::MaybeUninit<T>) -> &'static mut T,
+) -> &'static mut T {
+    unsafe { build(&mut *storage::<core::mem::MaybeUninit<T>>()) }
 }
 
 #[cfg(feature = "meshcore-forwarder")]
