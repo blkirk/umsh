@@ -16,6 +16,7 @@ use crate::nav::{Screen, keys};
 use crate::theme;
 
 mod avatar;
+mod banner;
 mod chats;
 mod conversation;
 mod details;
@@ -58,6 +59,11 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
         })
         .padding(Edges::Top, STRIP),
+        // Over everything, and taking no input.
+        state
+            .banner
+            .and_then(|banner| state.chat(banner.chat))
+            .map(banner::view),
     ))
     .with_alignment(Alignment::TopLeading)
     .flex_infinite_width(HorizontalAlignment::Leading)

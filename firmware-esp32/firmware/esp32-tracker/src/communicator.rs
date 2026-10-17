@@ -20,6 +20,9 @@ use umsh_ux_display_tracker::menu::UiInput;
 const FRAME: Duration = Duration::from_millis(16);
 /// How often the costs are reported.
 const REPORT: Duration = Duration::from_secs(1);
+/// How long after the last input the fixture's next message arrives, so
+/// that arrivals can be tried before a radio feeds the interface.
+const ARRIVAL_IDLE: Duration = Duration::from_secs(8);
 
 #[embassy_executor::task]
 pub(crate) async fn task(
@@ -39,7 +42,7 @@ pub(crate) async fn task(
     // holds: kept in the task, they would come out of the main stack.
     static STORE: ConstStaticCell<fixture::Store> =
         ConstStaticCell::new(fixture::Store::new(external::text_heap()));
-    let store = STORE.take();
+    let store: &'static fixture::Store = STORE.take();
     let app = external::communicator(|slot| {
         let app = App::new_in(
             slot,
@@ -67,13 +70,23 @@ pub(crate) async fn task(
         Instant::now().as_millis(),
     );
 
+    // When the fixture's next message arrives: one after each pause in
+    // input, while it has any left.
+    let mut arrivals_left = true;
+    let mut arrival: Option<Instant> = None;
+
     loop {
         SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
         let lit = attention.accepts_redraw();
         let tick = Instant::now() + if animating && lit { FRAME } else { REPORT };
-        let wake_at = attention
-            .next_deadline()
-            .map_or(tick, |deadline| tick.min(Instant::from_millis(deadline)));
+        let wake_at = [
+            attention.next_deadline(),
+            app.state().next_deadline(),
+            arrival.filter(|_| lit).map(|at| at.as_millis()),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(tick, |at, deadline| at.min(Instant::from_millis(deadline)));
         let now = || Instant::now().as_millis();
         let transition =
             match select3(UI_INPUT_CH.receive(), UI_WAKE.wait(), Timer::at(wake_at)).await {
@@ -89,11 +102,26 @@ pub(crate) async fn task(
                         next = UI_INPUT_CH.try_receive().ok();
                     }
                     costs.layout = costs.layout.max(Instant::now() - began);
+                    arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_IDLE);
                     attention.wake(now())
                 }
                 Either3::Second(()) => attention.wake(now()),
                 Either3::Third(()) => attention.poll(now()),
             };
+        if app.state().next_deadline().is_some_and(|at| at <= now()) {
+            app.state_mut().expire(now());
+        }
+        if attention.accepts_redraw() && arrival.is_some_and(|at| at <= Instant::now()) {
+            arrival = None;
+            match store.arrive() {
+                Some((chat, message)) => {
+                    if app.state_mut().receive(chat, message, now()) {
+                        pager::alert::tick();
+                    }
+                }
+                None => arrivals_left = false,
+            }
+        }
         match transition {
             Some(Transition::Woke) => {
                 // A fresh frame goes in before the panel lights, so a stale

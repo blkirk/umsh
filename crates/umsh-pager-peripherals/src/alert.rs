@@ -92,6 +92,14 @@ impl<I: I2c> Haptic<I> {
     pub async fn play(&mut self, on: bool) -> Result<(), I::Error> {
         self.0.write(HAPTIC, &[0x0c, u8::from(on)]).await
     }
+    /// Plays a short buzz in place of the alert's long one: library effect
+    /// 47, Buzz 1, alone in the sequence. The clicks are too short for the
+    /// motor to spin up and are barely felt. `init` restores the long buzz.
+    pub async fn buzz(&mut self) -> Result<(), I::Error> {
+        self.0.write(HAPTIC, &[0x04, 47]).await?;
+        self.0.write(HAPTIC, &[0x05, 0]).await?;
+        self.play(true).await
+    }
     pub async fn sleep(&mut self) -> Result<(), I::Error> {
         self.play(false).await?;
         self.0.write(HAPTIC, &[0x01, 0x40]).await

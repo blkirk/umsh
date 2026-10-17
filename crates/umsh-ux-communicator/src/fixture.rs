@@ -73,6 +73,17 @@ fn their_reaction(chat: ChatId, index: usize) -> Option<Reaction> {
     (chat == 1 && index == 1).then_some(Reaction::Heart)
 }
 
+/// Messages that arrive after the fixture starts, in order.
+const ARRIVALS: [(ChatId, From, &str); 3] = [
+    (
+        2,
+        From::Member("Sam"),
+        "Will wait 10 min at the saddle, then we head down",
+    ),
+    (3, From::Peer, "Got the antenna. Bringing two."),
+    (5, From::Peer, "Are you on the ridge yet?"),
+];
+
 /// How far a message of the fixture's got.
 fn delivery(chat: ChatId, index: usize) -> Delivery {
     if chat == 3 && index == 2 {
@@ -113,18 +124,21 @@ fn message(
     })
 }
 
-/// How many sent messages the fixture keeps, across all chats.
-const SENT: usize = 8;
+/// How many messages sent or received since it started the fixture keeps,
+/// across all chats.
+const KEPT: usize = 8;
 
-/// The fixture's messages, and the ones sent since it started, with their
+/// The fixture's messages, and the ones sent or received since it started, with their
 /// text kept on a heap of the device's choosing.
 pub struct Store {
     heap: TextHeap,
-    sent: RefCell<Vec<(ChatId, Message), SENT>>,
+    kept: RefCell<Vec<(ChatId, Message), KEPT>>,
+    /// How many of the fixture's arrivals have arrived.
+    arrived: Cell<usize>,
     /// My reactions, by message.
-    mine: RefCell<Vec<(MessageId, Reaction), SENT>>,
+    mine: RefCell<Vec<(MessageId, Reaction), KEPT>>,
     /// Unconfirmed messages sent again.
-    retried: RefCell<Vec<MessageId, SENT>>,
+    retried: RefCell<Vec<MessageId, KEPT>>,
     next: Cell<MessageId>,
 }
 
@@ -133,7 +147,8 @@ impl Store {
     pub const fn new(heap: TextHeap) -> Self {
         Self {
             heap,
-            sent: RefCell::new(Vec::new()),
+            kept: RefCell::new(Vec::new()),
+            arrived: Cell::new(0),
             mine: RefCell::new(Vec::new()),
             retried: RefCell::new(Vec::new()),
             // Above the fixture's own messages.
@@ -142,10 +157,51 @@ impl Store {
     }
 }
 
+impl Store {
+    /// The next message to arrive, the ones on the T-LoRa Pager mockup's
+    /// wake screen, and the chat it arrived in. It is kept as the newest
+    /// message there. `None` once all have arrived.
+    pub fn arrive(&self) -> Option<(ChatId, Message)> {
+        let index = self.arrived.get();
+        let &(chat, from, text) = ARRIVALS.get(index)?;
+        self.arrived.set(index + 1);
+        Some((chat, self.keep(chat, from, text)?))
+    }
+
+    /// Keeps `text`, from `from`, as the newest message of `chat`.
+    fn keep(&self, chat: ChatId, from: From, text: &str) -> Option<Message> {
+        let message = Message {
+            id: self.next.get(),
+            direction: match from {
+                From::Me => Direction::Outbound,
+                From::Peer | From::Member(_) => Direction::Inbound,
+            },
+            sender: match from {
+                From::Member(name) => Some(s(name)),
+                From::Me | From::Peer => None,
+            },
+            text: SharedText::new(self.heap, text)?,
+            delivery: match from {
+                From::Me => Delivery::Sending,
+                From::Peer | From::Member(_) => Delivery::Delivered,
+            },
+            reactions: Reactions::new(),
+        };
+        self.next.set(message.id + 1);
+        let mut kept = self.kept.borrow_mut();
+        if kept.is_full() {
+            kept.remove(0);
+        }
+        _ = kept.push((chat, message.clone()));
+        Some(message)
+    }
+}
+
 impl core::fmt::Debug for Store {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Store")
-            .field("sent", &self.sent)
+            .field("kept", &self.kept)
+            .field("arrived", &self.arrived)
             .field("mine", &self.mine)
             .field("retried", &self.retried)
             .field("next", &self.next)
@@ -160,8 +216,8 @@ impl History for Store {
                 push_newest(into, message);
             }
         }
-        for (_, sent) in self.sent.borrow().iter().filter(|(c, _)| *c == chat) {
-            push_newest(into, sent.clone());
+        for (_, kept) in self.kept.borrow().iter().filter(|(c, _)| *c == chat) {
+            push_newest(into, kept.clone());
         }
         for &(id, reaction) in self.mine.borrow().iter() {
             if let Some(message) = into.iter_mut().find(|m| m.id == id) {
@@ -176,21 +232,7 @@ impl History for Store {
     }
 
     fn send(&self, chat: ChatId, text: &str, _reply_to: Option<MessageId>) -> Option<Message> {
-        let message = Message {
-            id: self.next.get(),
-            direction: Direction::Outbound,
-            sender: None,
-            text: SharedText::new(self.heap, text)?,
-            delivery: Delivery::Sending,
-            reactions: Reactions::new(),
-        };
-        self.next.set(message.id + 1);
-        let mut sent = self.sent.borrow_mut();
-        if sent.is_full() {
-            sent.remove(0);
-        }
-        _ = sent.push((chat, message.clone()));
-        Some(message)
+        self.keep(chat, From::Me, text)
     }
 
     fn react(&self, _chat: ChatId, message: MessageId, reaction: Option<Reaction>) {
@@ -216,27 +258,32 @@ impl History for Store {
     }
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
-        // Sent since the fixture started.
-        if message >= 0x1_0000 {
-            return Some(Details {
-                time: s("14:32"),
+        // Sent or received since the fixture started, or the fixture's own.
+        let (outbound, time) = if message >= 0x1_0000 {
+            let kept = self.kept.borrow();
+            let (_, kept) = kept.iter().find(|(_, m)| m.id == message)?;
+            (kept.direction == Direction::Outbound, "14:32")
+        } else {
+            let (from, _) = *messages(chat).get((message & 0xFF) as usize)?;
+            match from {
+                From::Me => (true, "14:27"),
+                From::Peer | From::Member(_) => (false, "14:29"),
+            }
+        };
+        Some(if outbound {
+            Details {
+                time: s(time),
                 ..Details::default()
-            });
-        }
-        let (from, _) = *messages(chat).get((message & 0xFF) as usize)?;
-        Some(match from {
-            From::Me => Details {
-                time: s("14:27"),
-                ..Details::default()
-            },
-            From::Peer | From::Member(_) => Details {
-                time: s("14:29"),
+            }
+        } else {
+            Details {
+                time: s(time),
                 hops: Some(2),
                 route: s("Gh* \u{203A} 4Tn"),
                 rssi: Some(-97),
                 snr: Some(65),
                 authenticated: true,
-            },
+            }
         })
     }
 }

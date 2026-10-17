@@ -18,6 +18,9 @@ static CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static DISPLAY_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static CANCEL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static STOPPED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static TICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// How long the motor stays powered for a tick: the buzz and its run-down.
+const TICK_MS: u64 = 300;
 
 pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -41,6 +44,11 @@ pub fn set(active: bool) {
 }
 pub fn cancel() {
     CANCEL.signal(());
+}
+/// One short haptic buzz, for something that calls for attention without an
+/// alert. An alert under way already has the motor; the tick is dropped.
+pub fn tick() {
+    TICK.signal(());
 }
 #[embassy_executor::task]
 pub async fn cancel_task() {
@@ -79,6 +87,43 @@ async fn enable(expander: &'static board::SharedExpander, mask: u16, on: bool) -
         .await,
         Ok(Ok(()))
     )
+}
+
+/// Powers the haptic driver for one short buzz and off again. Called only while
+/// no alert is under way, so the alert's enable gate does not apply.
+async fn tick_buzz(
+    expander: &'static board::SharedExpander,
+    haptic: &mut Haptic<board::I2cHandle>,
+) {
+    let _guard = WakeLock::new();
+    let power = |on: bool| {
+        with_timeout(Duration::from_millis(100), async move {
+            expander.lock().await.set(HAPTIC_ENABLE, on).await
+        })
+    };
+    if matches!(power(true).await, Ok(Ok(()))) && haptic_init(haptic).await {
+        let buzzed = {
+            #[cfg(feature = "ulcp-i2c")]
+            let _held = board::i2c::HAPTIC_PROCEDURE.hold(0x5a);
+            matches!(
+                with_timeout(Duration::from_millis(50), haptic.buzz()).await,
+                Ok(Ok(()))
+            )
+        };
+        if buzzed {
+            Timer::after(Duration::from_millis(TICK_MS)).await;
+        } else {
+            debug_log(format_args!("pager: haptic tick failed"));
+        }
+    }
+    {
+        #[cfg(feature = "ulcp-i2c")]
+        let _held = board::i2c::HAPTIC_PROCEDURE.hold(0x5a);
+        let _ = with_timeout(Duration::from_millis(50), haptic.sleep()).await;
+    }
+    if !matches!(power(false).await, Ok(Ok(()))) {
+        debug_log(format_args!("pager: haptic tick power-off failed"));
+    }
 }
 
 async fn codec_init(codec: &mut Codec<board::I2cHandle>) -> bool {
@@ -177,8 +222,11 @@ pub async fn task(
                 STOPPED.signal(());
                 return;
             }
-            CHANGED.wait().await;
+            if let Either::Second(()) = select(CHANGED.wait(), TICK.wait()).await {
+                tick_buzz(expander, &mut haptic).await;
+            }
         }
+        TICK.reset();
         let guard = WakeLock::new();
         let mut haptic_ok =
             enable(expander, HAPTIC_ENABLE, true).await && haptic_init(&mut haptic).await;

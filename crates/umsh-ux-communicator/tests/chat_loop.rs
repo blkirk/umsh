@@ -17,12 +17,18 @@ const RIDGE: u32 = 1;
 const PAT: u32 = 3;
 const RIDGE_DRAFT: &str = "On my way, save me some hot coffee";
 
+/// Where the fixture's chats keep their messages, for the life of a test.
+fn store() -> &'static fixture::Store {
+    Box::leak(Box::new(fixture::Store::new(&std::alloc::System)))
+}
+
 macro_rules! app {
-    () => {{
+    () => {
+        app!(store())
+    };
+    ($store:expr) => {{
         let mut app = App::new(
-            fixture::state(Box::leak(Box::new(fixture::Store::new(
-                &std::alloc::System,
-            )))),
+            fixture::state($store),
             Size::new(theme::WIDTH, theme::HEIGHT).into(),
             ui::root_view,
         );
@@ -442,4 +448,90 @@ fn spent_airtime_keeps_the_draft_and_holds_a_retry() {
     // The first Enter takes up the draft again; the second sends it.
     run(&mut app, &[Input::Turn(1), Input::Enter, Input::Enter]);
     assert_eq!(draft(app.state(), PAT), "");
+}
+
+/// Trail Crew, the chat the fixture's first arrival comes in.
+const TRAIL_CREW: u32 = 2;
+
+/// Takes in the fixture's next message to arrive, at `now`, as a board
+/// would. Returns whether it calls for attention.
+fn arrive<V, F>(app: &mut App<V, State, F>, store: &fixture::Store, now: u64) -> bool
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    let (chat, message) = store.arrive().expect("an arrival left");
+    let noticed = app.state_mut().receive(chat, message, now);
+    app.finalize_view();
+    noticed
+}
+
+#[test]
+fn a_message_from_elsewhere_shows_a_banner_that_takes_no_key() {
+    let store = store();
+    let mut app = app!(store);
+    // Typing in Ridge Medic, between "hot" and " coffee".
+    run(&mut app, &[Input::Press, Input::Enter, Input::Turn(-7)]);
+    assert!(arrive(&mut app, store, 1000));
+    let banner = app.state().banner.expect("a banner");
+    assert_eq!(banner.chat, TRAIL_CREW);
+    assert_eq!(app.state().chats[0].id, TRAIL_CREW);
+    assert!(app.state().chats[0].unread);
+    // Typing goes on where it was.
+    run(&mut app, &typed("ed"));
+    assert_eq!(
+        draft(app.state(), RIDGE),
+        "On my way, save me some hoted coffee"
+    );
+    // And it goes by itself.
+    app.state_mut().expire(banner.until - 1);
+    assert!(app.state().banner.is_some());
+    app.state_mut().expire(banner.until);
+    assert_eq!(app.state().banner, None);
+    // Enter still sends the draft it interrupted.
+    run(&mut app, &[Input::Enter]);
+    assert_eq!(draft(app.state(), RIDGE), "");
+}
+
+#[test]
+fn a_message_in_the_open_chat_joins_it_without_a_banner() {
+    let store = store();
+    let mut app = app!(store);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_in_conversation(app.state(), TRAIL_CREW);
+    let before = app.state().conversation.as_ref().unwrap().messages.len();
+    assert!(!arrive(&mut app, store, 0));
+    assert_eq!(app.state().banner, None);
+    assert!(!app.state().chats[0].unread);
+    let conversation = app.state().conversation.as_ref().unwrap();
+    assert_eq!(conversation.messages.len(), before + 1);
+    assert_eq!(
+        conversation.messages.last().unwrap().direction,
+        Direction::Inbound
+    );
+}
+
+#[test]
+fn the_list_shows_a_message_arrive_without_a_banner() {
+    let store = store();
+    let mut app = app!(store);
+    assert!(arrive(&mut app, store, 0));
+    assert_eq!(app.state().banner, None);
+    assert_eq!(app.state().chats[0].id, TRAIL_CREW);
+    // Focus stays on the chat it was on.
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+}
+
+#[test]
+fn a_muted_chat_does_not_call_for_attention() {
+    let store = store();
+    let mut app = app!(store);
+    run(&mut app, &[Input::Press]);
+    // The public channel is muted.
+    let (_, message) = store.arrive().expect("an arrival");
+    assert!(!app.state_mut().receive(4, message, 0));
+    assert_eq!(app.state().banner, None);
+    assert_eq!(app.state().chats[0].id, 4);
 }

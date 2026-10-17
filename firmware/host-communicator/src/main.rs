@@ -7,6 +7,7 @@
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
 //! a click presses it. Return, Backspace, and the letters are themselves.
+//! Tab brings the fixture's next message in, as if it arrived.
 //!
 //! Headless, for scripted runs and comparisons with the mockup:
 //!
@@ -14,8 +15,10 @@
 //!
 //! Each script line is one step: `turn N` (negative is up), `press`,
 //! `enter`, `backspace`, `type TEXT`, `airtime SECONDS` (spent airtime
-//! that returns in that long; 0 for none), or `shot NAME`, which writes
-//! `NAME.png` into the output directory. `#` starts a comment.
+//! that returns in that long; 0 for none), `arrive` (the fixture's next
+//! message arrives), `wait SECONDS` (the board's clock moves on), or
+//! `shot NAME`, which writes `NAME.png` into the output directory. `#`
+//! starts a comment.
 //!
 //! Timing, and something for a profiler to watch:
 //!
@@ -30,11 +33,15 @@ use std::process::ExitCode;
 use umsh_ux_communicator::buoyant;
 
 use buoyant::app::App;
+use buoyant::focus::DefaultFocus;
+use buoyant::render::AnimatedJoin;
 use buoyant::render_target::{EmbeddedGraphicsRenderTarget, RenderTarget as _};
+use buoyant::view::ViewLayout;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics_simulator::{OutputSettings, SimulatorDisplay};
 use umsh_ux_communicator::input::{self, Input};
+use umsh_ux_communicator::model::State;
 use umsh_ux_communicator::{fixture, theme, ui};
 
 const SIZE: Size = Size::new(theme::WIDTH, theme::HEIGHT);
@@ -42,6 +49,35 @@ const SIZE: Size = Size::new(theme::WIDTH, theme::HEIGHT);
 /// Where the fixture's chats keep their messages, for the life of the run.
 fn store() -> &'static fixture::Store {
     Box::leak(Box::new(fixture::Store::new(&std::alloc::System)))
+}
+
+/// Takes in the fixture's next message to arrive, at `now` in milliseconds,
+/// as a board would.
+fn arrive<V, F>(app: &mut App<V, State, F>, store: &fixture::Store, now: u64)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    if let Some((chat, message)) = store.arrive() {
+        app.state_mut().receive(chat, message, now);
+        app.finalize_view();
+    }
+}
+
+/// Lets go of whatever on screen has had its time by `now`.
+fn expire<V, F>(app: &mut App<V, State, F>, now: u64)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    if app.state().next_deadline().is_some_and(|at| at <= now) {
+        app.state_mut().expire(now);
+        app.finalize_view();
+    }
 }
 
 fn main() -> ExitCode {
@@ -108,8 +144,11 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
         std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut display: SimulatorDisplay<Rgb565> = SimulatorDisplay::new(SIZE);
-    let mut app = App::new(fixture::state(store()), SIZE.into(), ui::root_view);
+    let store = store();
+    let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
+    // The board's clock, which only `wait` moves.
+    let mut clock = 0;
     for (number, line) in steps.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -130,6 +169,18 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 for c in rest.chars() {
                     input::apply(&mut app, Input::Character(c));
                 }
+                None
+            }
+            "arrive" => {
+                arrive(&mut app, store, clock);
+                None
+            }
+            "wait" => {
+                let seconds: u64 = rest
+                    .parse()
+                    .map_err(|_| format!("line {}: wait needs seconds", number + 1))?;
+                clock += seconds * 1000;
+                expire(&mut app, clock);
                 None
             }
             "airtime" => {
@@ -180,10 +231,13 @@ fn window() -> ExitCode {
     let mut target = EmbeddedGraphicsRenderTarget::new_hinted(&mut display, theme::BACKGROUND);
     window.update(target.display());
     let start = std::time::Instant::now();
-    let mut app = App::new(fixture::state(store()), SIZE.into(), ui::root_view);
+    let store = store();
+    let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
     loop {
         app.set_time(start.elapsed());
+        let now = start.elapsed().as_millis() as u64;
+        expire(&mut app, now);
         for event in window.events() {
             let input = match event {
                 SimulatorEvent::Quit => return ExitCode::SUCCESS,
@@ -196,6 +250,10 @@ fn window() -> ExitCode {
                     Keycode::Return => Some(Input::Enter),
                     Keycode::Backspace => Some(Input::Backspace),
                     Keycode::Space => Some(Input::Character(' ')),
+                    Keycode::Tab => {
+                        arrive(&mut app, store, now);
+                        None
+                    }
                     other => {
                         // Letters and digits, by their key names.
                         let shifted = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);

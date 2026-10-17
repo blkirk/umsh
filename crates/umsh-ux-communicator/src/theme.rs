@@ -34,6 +34,9 @@ pub const MENU_LINE: Rgb565 = rgb(0x2E3540);
 pub const REACTION_PAD: Rgb565 = rgb(0x2A313B);
 /// A reaction chip of someone else's; mine is in [`OUTBOUND`].
 pub const CHIP_THEIRS: Rgb565 = rgb(0x323A45);
+/// A banner for a message that arrived elsewhere, and its edge.
+pub const BANNER: Rgb565 = rgb(0x1E2631);
+pub const BANNER_LINE: Rgb565 = rgb(0x34414F);
 
 /// Body text: about 2.3 mm on the Pager's panel.
 pub const BODY: u32 = 20;

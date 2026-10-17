@@ -270,6 +270,18 @@ pub trait History {
     fn retry(&self, chat: ChatId, message: MessageId) -> bool;
 }
 
+/// How long a banner stays, in milliseconds.
+pub const BANNER_MS: u64 = 4000;
+
+/// A message that arrived in another chat, shown over the screen for a
+/// moment. It shows the chat as the list does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Banner {
+    pub chat: ChatId,
+    /// When it goes, on the board's clock, in milliseconds.
+    pub until: u64,
+}
+
 /// The top-level lists the rail switches between.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
@@ -293,6 +305,8 @@ pub struct State {
     /// Seconds until sending is allowed again, while the airtime it may use
     /// is spent.
     pub airtime_wait: Option<u16>,
+    /// A message that arrived in a chat not on screen, shown for a moment.
+    pub banner: Option<Banner>,
 }
 
 impl core::fmt::Debug for State {
@@ -304,6 +318,7 @@ impl core::fmt::Debug for State {
             .field("conversation", &self.conversation)
             .field("screens", &self.screens)
             .field("airtime_wait", &self.airtime_wait)
+            .field("banner", &self.banner)
             .finish_non_exhaustive()
     }
 }
@@ -322,6 +337,7 @@ impl State {
             screens,
             history,
             airtime_wait: None,
+            banner: None,
         }
     }
 
@@ -447,6 +463,54 @@ impl State {
         };
         if self.history.retry(conversation.chat, message) {
             target.delivery = Delivery::Sending;
+        }
+    }
+
+    /// Takes in `message`, which arrived in `chat` and is already in the
+    /// history, at `now` on the board's clock. The chat moves to the top of
+    /// the list. Returns whether the message calls for attention: it does
+    /// not while its chat is open on screen, or when the chat is muted.
+    pub fn receive(&mut self, chat: ChatId, message: Message, now: u64) -> bool {
+        let Some(index) = self.chats.iter().position(|c| c.id == chat) else {
+            return false;
+        };
+        let reading = matches!(
+            self.screen(),
+            Screen::Conversation { chat: shown, .. } if *shown == chat
+        );
+        let mut summary = self.chats.remove(index);
+        summary.preview(&message);
+        summary.age.clear();
+        push_cut(&mut summary.age, "now");
+        summary.unread |= !reading;
+        let muted = summary.muted;
+        _ = self.chats.insert(0, summary);
+        if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
+            conversation.push(message);
+        }
+        if reading || muted {
+            return false;
+        }
+        // The list shows it arrive; anywhere else, a banner does.
+        if !matches!(self.screen(), Screen::Chats { .. }) {
+            self.banner = Some(Banner {
+                chat,
+                until: now + BANNER_MS,
+            });
+        }
+        true
+    }
+
+    /// When the screen next changes by itself, on the board's clock.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.banner.map(|b| b.until)
+    }
+
+    /// Lets go of whatever has had its time by `now`.
+    pub fn expire(&mut self, now: u64) {
+        if self.banner.is_some_and(|b| b.until <= now) {
+            self.banner = None;
         }
     }
 }
