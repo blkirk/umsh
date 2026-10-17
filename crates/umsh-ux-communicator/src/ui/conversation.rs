@@ -62,6 +62,8 @@ const SCROLL_STEP: u32 = 24;
 type Placeholder = heapless::String<48>;
 /// The field's fill while it is edited.
 const ACTIVE_FIELD: Rgb565 = Rgb565::new(0x1A >> 3, 0x23 >> 2, 0x33 >> 3);
+/// The field's fill while it is edited in an open channel.
+const ACTIVE_FIELD_OPEN: Rgb565 = Rgb565::new(0x15 >> 3, 0x2B >> 2, 0x1F >> 3);
 
 /// Indices `ForEach` can hold without borrowing the state.
 static INDICES: [usize; MAX_MESSAGES] = {
@@ -89,10 +91,13 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             .current()
             .is_some_and(keys::is_message);
     let find = |id: Option<MessageId>| id.and_then(|id| messages.iter().find(|m| m.id == id));
-    // The menu offers my reaction as the one already chosen.
-    let menu = find(actions).map(Message::my_reaction);
+    // The menu offers my reaction as the one already chosen, and a
+    // member's message offers its sender.
+    let menu = find(actions).map(|m| (m.my_reaction(), m.sender.is_some()));
     let quoted = find(reply).map(|message| quote(message, summary.map_or("", |s| &s.name)));
-    let channel = summary.is_some_and(|s| s.kind == ChatKind::Channel);
+    let kind = summary.map(|s| s.kind);
+    let channel = matches!(kind, Some(ChatKind::Channel { .. }));
+    let open = kind.is_some_and(ChatKind::is_open);
     let mut placeholder = Placeholder::new();
     _ = core::fmt::write(
         &mut placeholder,
@@ -104,10 +109,10 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             summary.map(|s| &s.avatar),
             summary.map(|s| s.kind),
         ),
-        history(messages, actions, channel),
+        history(messages, actions, channel, open),
         state.airtime_wait.map(airtime_line),
         quoted,
-        summary.map(|s| composer(chat, &s.draft, reading, &placeholder)),
+        summary.map(|s| composer(chat, &s.draft, reading, open, &placeholder)),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
@@ -125,7 +130,7 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
         }
         _ => KeyResponse::Ignored,
     })
-    .popover(menu.as_ref(), |&mine| actions_menu(mine))
+    .popover(menu.as_ref(), |&(mine, member)| actions_menu(mine, member))
 }
 
 /// Back, the peer or channel, and how far away a peer is or that it is a
@@ -142,7 +147,7 @@ pub(super) fn header(
         Some(ChatKind::Peer { hops: Some(n) }) => {
             _ = core::fmt::write(&mut distance, format_args!("{n} hops"));
         }
-        Some(ChatKind::Channel) => _ = distance.push_str("Channel"),
+        Some(ChatKind::Channel { .. }) => _ = distance.push_str("Channel"),
         Some(ChatKind::Peer { hops: None }) | None => {}
     }
     HStack::new((
@@ -174,6 +179,7 @@ fn history(
     messages: &[Message],
     acting_on: Option<MessageId>,
     channel: bool,
+    open: bool,
 ) -> impl View<Rgb565, State> + use<> {
     let messages = Messages::from_slice(messages).unwrap_or_default();
     let ids: Vec<MessageId, MAX_MESSAGES> = messages.iter().map(|m| m.id).collect();
@@ -191,7 +197,7 @@ fn history(
             let delivery = Some(i) == newest_sent
                 || Some(i) == newest_delivered
                 || messages[i].delivery == Delivery::Unconfirmed;
-            item(&messages, i, delivery, acting_on, channel)
+            item(&messages, i, delivery, acting_on, channel, open)
         })
         .keyed(move |&i| keys::message(ids[i])),
     )
@@ -211,6 +217,7 @@ fn item(
     delivery: bool,
     acting_on: Option<MessageId>,
     channel: bool,
+    open: bool,
 ) -> impl View<Rgb565, State> + use<> {
     let message = &messages[i];
     let follows_same = i.checked_sub(1).is_some_and(|p| {
@@ -262,7 +269,7 @@ fn item(
             .with_height(SENDER_LINE)
             .padding(Edges::Leading, lead + 4)
         }),
-        bubble(message, acting_on == Some(message.id)).padding(Edges::Leading, lead - SIDE),
+        bubble(message, acting_on == Some(message.id), open).padding(Edges::Leading, lead - SIDE),
         delivery.then(|| delivery_line(message.delivery)),
     ))
     .with_spacing(0)
@@ -273,7 +280,9 @@ fn item(
     .padding(Edges::Top, gap + reserve)
 }
 
-fn bubble(message: &Message, acting_on: bool) -> impl View<Rgb565, State> + use<> {
+/// A message in its bubble. Mine are in the color that says who can read
+/// them: green in an `open` channel.
+fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, State> + use<> {
     let id = message.id;
     let text = message.text.clone();
     let reactions = message.reactions.clone();
@@ -286,7 +295,11 @@ fn bubble(message: &Message, acting_on: bool) -> impl View<Rgb565, State> + use<
     }
     let (fill, color, side) = if outbound {
         (
-            theme::OUTBOUND,
+            if open {
+                theme::OUTBOUND_OPEN
+            } else {
+                theme::OUTBOUND
+            },
             Rgb565::WHITE,
             HorizontalAlignment::Trailing,
         )
@@ -330,7 +343,7 @@ fn bubble(message: &Message, acting_on: bool) -> impl View<Rgb565, State> + use<
                 .overlay(
                     corner,
                     (!reactions.is_empty())
-                        .then(|| Lazy::new((reactions.clone(), outbound), chips)),
+                        .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
                 )
                 // Text wraps to fit; a short bubble keeps to its side.
                 .flex_frame()
@@ -367,8 +380,14 @@ fn chip_reserve(reactions: &[Reacted]) -> u32 {
 ///
 /// Built from its data each time it is drawn ([`Lazy`]): kept in the render
 /// trees, every bubble's chips would outweigh the rest of the screen.
-fn chips((reactions, outbound): &(Reactions, bool)) -> impl View<Rgb565, ()> + use<> {
+fn chips((reactions, outbound, open): &(Reactions, bool, bool)) -> impl View<Rgb565, ()> + use<> {
     let outbound = *outbound;
+    // Mine takes the color of my bubbles.
+    let (mine_fill, mine_pad) = if *open {
+        (theme::OUTBOUND_OPEN, icon::Pad::MineOpen)
+    } else {
+        (theme::OUTBOUND, icon::Pad::Mine)
+    };
     // Toward the outside of the bubble: left on a sent message.
     let out: i32 = if outbound { -1 } else { 1 };
     let ring = RING_GAP as i32;
@@ -388,7 +407,7 @@ fn chips((reactions, outbound): &(Reactions, bool)) -> impl View<Rgb565, ()> + u
     let count = order.len();
     let front = order.first().map_or(theme::CHIP_THEIRS, |r| {
         if r.mine {
-            theme::OUTBOUND
+            mine_fill
         } else {
             theme::CHIP_THEIRS
         }
@@ -399,7 +418,7 @@ fn chips((reactions, outbound): &(Reactions, bool)) -> impl View<Rgb565, ()> + u
         order.get(place).map(|r| {
             let inward = CHIP_STEP * place as i32;
             let (fill, pad) = if r.mine {
-                (theme::OUTBOUND, icon::Pad::Mine)
+                (mine_fill, mine_pad)
             } else {
                 (theme::CHIP_THEIRS, icon::Pad::Theirs)
             };
@@ -502,17 +521,19 @@ fn composer(
     chat: ChatId,
     draft: &Draft,
     folded: bool,
+    open: bool,
     placeholder: &Placeholder,
 ) -> impl View<Rgb565, State> + use<> {
     buoyant::match_view!(folded, {
         true => folded_bar(draft, placeholder.clone()),
-        false => field(chat, draft, placeholder.clone()),
+        false => field(chat, draft, open, placeholder.clone()),
     })
 }
 
 fn field(
     chat: ChatId,
     draft: &Draft,
+    open: bool,
     placeholder: Placeholder,
 ) -> impl View<Rgb565, State> + use<> {
     let empty = draft.is_empty();
@@ -523,7 +544,7 @@ fn field(
     .with_max_lines(3)
     .on_submit(move |s: &mut State| s.send(chat))
     .with_label(move |status: TextFieldStatus, area| {
-        field_look(status, area, empty.then_some(&placeholder))
+        field_look(status, area, open, empty.then_some(&placeholder))
     })
     .focus_key(keys::COMPOSER)
     .padding(Edges::Horizontal, SIDE)
@@ -533,20 +554,30 @@ fn field(
 fn field_look(
     status: TextFieldStatus,
     area: TextArea<'static, DraftText, PrerenderedFont>,
+    open: bool,
     placeholder: Option<&Placeholder>,
 ) -> impl View<Rgb565, State> + use<> {
+    // Editing, the field takes the color of what it will send: green where
+    // anyone can read it.
+    let (active_fill, active_ring) = if open {
+        (ACTIVE_FIELD_OPEN, theme::ACCENT_OPEN)
+    } else {
+        (ACTIVE_FIELD, theme::ACCENT)
+    };
     let (fill, line_width) = if status.is_active() {
-        (ACTIVE_FIELD, 2)
+        (active_fill, 2)
     } else {
         (theme::FIELD, 1)
     };
-    let ring = if status.is_focused() {
+    let ring = if status.is_active() {
+        active_ring
+    } else if status.is_focused() {
         theme::ACCENT
     } else {
         theme::MENU_LINE
     };
     area.colors(AreaColors {
-        caret: Some(theme::ACCENT),
+        caret: Some(active_ring),
         scroll_bar: Some((theme::MENU_LINE, theme::TEXT_SECONDARY)),
     })
     .foreground_color(theme::TEXT)
@@ -667,7 +698,7 @@ const ITEM_INSET: u32 = 5;
 /// What pressing a message gives: reactions first, then Reply and Details,
 /// at the top of the screen beside the history. Backspace closes it, and
 /// typing closes it and goes to the composer.
-fn actions_menu(mine: Option<Reaction>) -> impl View<Rgb565, State> + use<> {
+fn actions_menu(mine: Option<Reaction>, member: bool) -> impl View<Rgb565, State> + use<> {
     let pad = |reaction: Reaction| {
         Button::new(
             move |s: &mut State| s.react_from_actions(reaction),
@@ -709,6 +740,13 @@ fn actions_menu(mine: Option<Reaction>) -> impl View<Rgb565, State> + use<> {
             .frame()
             .with_height(1),
         menu_item("Reply", keys::REPLY, State::reply_from_actions).padding(Edges::Top, 2),
+        member.then(|| {
+            menu_item(
+                "View member",
+                keys::VIEW_MEMBER,
+                State::view_member_from_actions,
+            )
+        }),
         menu_item("Details", keys::DETAILS, State::details_from_actions),
     ))
     .with_spacing(0)

@@ -651,3 +651,89 @@ fn a_channel_send_ends_at_sent() {
     // Multicast has no acknowledgment to wait for.
     assert_eq!(sent.delivery, Delivery::Sent);
 }
+
+/// Opens the actions of the Trail Crew message `back` from its newest, and
+/// presses View member.
+fn view_member<V, F>(app: &mut App<V, State, F>, back: i8)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(app, &[Input::Turn(1), Input::Press]);
+    assert_in_conversation(app.state(), TRAIL_CREW);
+    run(app, &[Input::Turn(-back), Input::Press, Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::VIEW_MEMBER));
+    run(app, &[Input::Press]);
+}
+
+#[test]
+fn a_member_not_yet_known_offers_to_request_their_identity() {
+    let mut app = app!();
+    view_member(&mut app, 2);
+    let Screen::Member {
+        message, member, ..
+    } = app.state().screen()
+    else {
+        panic!("expected a member, got {:?}", app.state().screen());
+    };
+    let message = *message;
+    assert_eq!(member.hint.as_str(), "4Fz*");
+    assert_eq!(member.address, None);
+    assert_eq!(focus(app.state()), Some(keys::REQUEST_IDENTITY));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::message(message)));
+    assert_eq!(actions(app.state()), None);
+}
+
+#[test]
+fn a_known_member_shows_their_address() {
+    let mut app = app!();
+    view_member(&mut app, 1);
+    let Screen::Member { member, .. } = app.state().screen() else {
+        panic!("expected a member, got {:?}", app.state().screen());
+    };
+    assert_eq!(member.sender.name.as_str(), "Sam");
+    assert!(member.address.is_some());
+    assert_eq!(focus(app.state()), Some(keys::MEMBER_INFO));
+}
+
+#[test]
+fn a_peer_message_has_no_member_to_view() {
+    let mut app = app!();
+    run(&mut app, &[Input::Press, Input::Turn(-3), Input::Press]);
+    run(&mut app, &[Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::DETAILS));
+}
+
+/// Member 4Fz*'s message, which others have reacted to with 👍 and ‼.
+const BEHIND_YOU: u32 = (TRAIL_CREW << 8) | 1;
+
+#[test]
+fn changing_my_reaction_moves_it_between_shared_chips() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(1), Input::Press, Input::Turn(-2)]);
+    assert_eq!(focus(app.state()), Some(keys::message(BEHIND_YOU)));
+    let on = |reaction: Reaction| {
+        let step = Reaction::ALL
+            .iter()
+            .position(|&r| r == reaction)
+            .expect("in the palette");
+        [
+            Input::Press,
+            Input::Turn(-(Reaction::ALL.len() as i8 - step as i8)),
+            Input::Press,
+        ]
+    };
+    run(&mut app, &on(Reaction::ThumbsUp));
+    assert_eq!(
+        reactions(app.state(), BEHIND_YOU),
+        [(Reaction::ThumbsUp, 2, true), (Reaction::Exclaim, 1, false)]
+    );
+    run(&mut app, &on(Reaction::Exclaim));
+    assert_eq!(
+        reactions(app.state(), BEHIND_YOU),
+        [(Reaction::ThumbsUp, 1, false), (Reaction::Exclaim, 2, true)]
+    );
+}

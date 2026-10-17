@@ -235,14 +235,16 @@ fn reaction_glyphs() -> [Vec<Paint>; 6] {
 }
 
 /// What a reaction glyph is drawn on, and at what size and scale: the
-/// palette in the actions menu, and the chips over a bubble, mine and
-/// someone else's. The colors are `theme::REACTION_PAD`, `theme::OUTBOUND`
-/// and `theme::CHIP_THEIRS`; each image is composited onto its own, since
-/// the panel is drawn without reading it back.
+/// palette in the actions menu, and the chips over a bubble: mine, someone
+/// else's, and mine in an open channel. The colors are `theme::REACTION_PAD`,
+/// `theme::OUTBOUND`, `theme::CHIP_THEIRS` and `theme::OUTBOUND_OPEN`, in
+/// `icon::Pad` order; each image is composited onto its own, since the panel
+/// is drawn without reading it back.
 const REACTION_PADS: &[(u32, u32, f32)] = &[
     (0x2A313B, 23, 1.0),
     (0x2A62C9, 19, 0.78),
     (0x323A45, 19, 0.78),
+    (0x1E7B45, 19, 0.78),
 ];
 
 /// The reaction glyphs as RGB565 images, `REACTIONS[reaction][pad]`.
@@ -457,7 +459,7 @@ fn icons() -> String {
 }
 
 /// Avatar diameters, in pixels, that the screens draw.
-const AVATAR_SIZES: &[u32] = &[26, 28, 30, 34];
+const AVATAR_SIZES: &[u32] = &[26, 28, 30, 34, 44];
 
 /// The avatar outlines as Gray4 masks: one static per shape and size, named
 /// like `HEXAGON_34`, each row padded to a whole byte.

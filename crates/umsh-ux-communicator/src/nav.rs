@@ -6,7 +6,7 @@
 
 use buoyant::focus::{FocusKey, FocusState};
 
-use crate::model::{ChatId, Details, MessageId, Reaction, Section, State};
+use crate::model::{ChatId, Details, Member, MessageId, Reaction, Section, State};
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -24,8 +24,14 @@ pub mod keys {
     /// The actions menu's Reply and Details.
     pub const REPLY: FocusKey = FocusKey(ACTION | 0x100);
     pub const DETAILS: FocusKey = FocusKey(ACTION | 0x101);
+    /// The actions menu's View member, on a member's message.
+    pub const VIEW_MEMBER: FocusKey = FocusKey(ACTION | 0x102);
     /// What the details screen shows, which the wheel scrolls through.
     pub const DETAIL_LIST: FocusKey = FocusKey(0x0600_0000);
+    /// The member screen's Request identity, and what it shows when there
+    /// is nothing to do.
+    pub const REQUEST_IDENTITY: FocusKey = FocusKey(0x0700_0000);
+    pub const MEMBER_INFO: FocusKey = FocusKey(0x0700_0001);
 
     /// A reaction in the actions menu's palette.
     #[must_use]
@@ -102,6 +108,12 @@ pub enum Screen {
         details: Details,
         focus: FocusState,
     },
+    /// The member who sent a channel message.
+    Member {
+        message: MessageId,
+        member: Member,
+        focus: FocusState,
+    },
     /// The chats that got messages while the panel was dark, which the first
     /// of them woke it to.
     Wake { focus: FocusState },
@@ -123,6 +135,7 @@ impl Screen {
             Self::Chats { focus, .. }
             | Self::Conversation { focus, .. }
             | Self::Details { focus, .. }
+            | Self::Member { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -132,6 +145,7 @@ impl Screen {
             Self::Chats { focus, .. }
             | Self::Conversation { focus, .. }
             | Self::Details { focus, .. }
+            | Self::Member { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -274,6 +288,39 @@ impl State {
             details,
             focus: FocusState::requesting(keys::DETAIL_LIST),
         });
+    }
+
+    /// Shows the member who sent the message whose actions menu is open.
+    pub fn view_member_from_actions(&mut self) {
+        let Some(message) = self.close_actions() else {
+            return;
+        };
+        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
+            return;
+        };
+        let Some(member) = self.history.member(chat, message) else {
+            return;
+        };
+        let focus = if member.address.is_none() {
+            keys::REQUEST_IDENTITY
+        } else {
+            keys::MEMBER_INFO
+        };
+        _ = self.screens.push(Screen::Member {
+            message,
+            member,
+            focus: FocusState::requesting(focus),
+        });
+    }
+
+    /// Asks the channel for the identity of the member shown.
+    pub fn request_identity(&mut self) {
+        let Some(Screen::Member { message, .. }) = self.screens.last() else {
+            return;
+        };
+        if let Some(chat) = self.conversation.as_ref().map(|c| c.chat) {
+            self.history.request_identity(chat, *message);
+        }
     }
 
     /// Shows the chats that got messages while the panel was dark, the first

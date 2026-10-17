@@ -96,8 +96,18 @@ impl ChatSummary {
 pub enum ChatKind {
     /// One peer, and how far away it is when that is known.
     Peer { hops: Option<u8> },
-    /// Everyone holding the channel's key.
-    Channel,
+    /// Everyone holding the channel's key. An `open` channel's key is
+    /// derived from its name, or it is EMERGENCY, which is sent in the clear:
+    /// anyone can read it.
+    Channel { open: bool },
+}
+
+impl ChatKind {
+    /// Whether anyone within earshot can read what is written in the chat.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Channel { open: true })
+    }
 }
 
 /// Who sent a channel message, as the channel shows them.
@@ -106,6 +116,18 @@ pub struct Sender {
     /// The best name known for them, or their hint.
     pub name: String<24>,
     pub avatar: AvatarStyle,
+}
+
+/// A channel member as the member screen shows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    pub sender: Sender,
+    /// The leading digits of their address, which their messages carry.
+    pub hint: String<8>,
+    /// Their whole address, once their identity is known.
+    pub address: Option<String<44>>,
+    /// How long ago they were last heard, already formatted, such as `2m`.
+    pub heard: String<6>,
 }
 
 /// Which way a message went.
@@ -280,6 +302,13 @@ pub trait History {
 
     /// How `message` in `chat` reached this device, when that is known.
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details>;
+
+    /// The member who sent `message` in the channel `chat`.
+    fn member(&self, chat: ChatId, message: MessageId) -> Option<Member>;
+
+    /// Asks the channel `chat` for the identity of the member who sent
+    /// `message`.
+    fn request_identity(&self, chat: ChatId, message: MessageId);
 
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.

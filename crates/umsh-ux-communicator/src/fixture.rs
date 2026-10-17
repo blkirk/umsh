@@ -5,8 +5,9 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Message,
-    MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip, push_newest,
+    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Member,
+    Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
+    push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -19,14 +20,42 @@ fn s<const N: usize>(text: &str) -> String<N> {
 /// A channel member as the channel shows them: a name the mockup gives
 /// them, or their hint when nothing better is known.
 fn member(name: &str) -> Sender {
-    let avatar = match name {
-        "Sam" => AvatarStyle::peer([218, 50, 133], "j3DC", PeerShape::Circle),
-        "Kit" => AvatarStyle::peer([187, 150, 80], "iMyA", PeerShape::Circle),
-        _ => AvatarStyle::peer([245, 212, 31], "4Fz*", PeerShape::Hexagon),
-    };
+    let (color, hint, shape, _) = member_traits(name);
     Sender {
         name: s(name),
-        avatar,
+        avatar: AvatarStyle::peer(color, hint, shape),
+    }
+}
+
+/// The channel member `name`'s color, hint, shape, and address. Those with
+/// names have made their identity known; the one shown by their hint has
+/// not.
+fn member_traits(name: &str) -> ([u8; 3], &'static str, PeerShape, Option<&'static str>) {
+    match name {
+        "Sam" => (
+            [218, 50, 133],
+            "j3DC",
+            PeerShape::Circle,
+            Some("j3DCtP9oDcDsv6D8njFcSGvuiLjrAbbY2fru5HBh9gBk"),
+        ),
+        "Kit" => (
+            [187, 150, 80],
+            "iMyA",
+            PeerShape::Circle,
+            Some("iMyAmdi5uCtG278cpgWezD7WJ2nkTBYa8B92BXfWwRYR"),
+        ),
+        _ => ([245, 212, 31], "4Fz*", PeerShape::Hexagon, None),
+    }
+}
+
+/// What is known of the channel member `name`.
+fn member_card(name: &str) -> Member {
+    let (_, hint, _, address) = member_traits(name);
+    Member {
+        sender: member(name),
+        hint: s(hint),
+        address: address.map(s),
+        heard: s("2m"),
     }
 }
 
@@ -91,9 +120,13 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
     }
 }
 
-/// The peer's reaction to a message of the fixture's.
-fn their_reaction(chat: ChatId, index: usize) -> Option<Reaction> {
-    (chat == 1 && index == 1).then_some(Reaction::Heart)
+/// Others' reactions to a message of the fixture's, one each.
+fn their_reactions(chat: ChatId, index: usize) -> &'static [Reaction] {
+    match (chat, index) {
+        (1, 1) => &[Reaction::Heart],
+        (2, 1) => &[Reaction::ThumbsUp, Reaction::Exclaim],
+        _ => &[],
+    }
 }
 
 /// Messages that arrive after the fixture starts, in order.
@@ -136,13 +169,13 @@ fn message(
         },
         text: SharedText::new(heap, text)?,
         delivery: delivery(chat, index),
-        reactions: their_reaction(chat, index)
-            .map(|reaction| Reacted {
+        reactions: their_reactions(chat, index)
+            .iter()
+            .map(|&reaction| Reacted {
                 reaction,
                 count: 1,
                 mine: false,
             })
-            .into_iter()
             .collect::<Reactions>(),
     })
 }
@@ -282,6 +315,24 @@ impl History for Store {
         true
     }
 
+    fn member(&self, chat: ChatId, message: MessageId) -> Option<Member> {
+        let name = if message >= 0x1_0000 {
+            let kept = self.kept.borrow();
+            let (_, kept) = kept.iter().find(|(_, m)| m.id == message)?;
+            kept.sender.as_ref()?.name.clone()
+        } else {
+            match messages(chat).get((message & 0xFF) as usize)? {
+                (From::Member(name), _) => s(name),
+                _ => return None,
+            }
+        };
+        Some(member_card(&name))
+    }
+
+    fn request_identity(&self, _chat: ChatId, _message: MessageId) {
+        // The fixture has no channel to ask.
+    }
+
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
         // Sent or received since the fixture started, or the fixture's own.
         let (outbound, time) = if message >= 0x1_0000 {
@@ -339,7 +390,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(None, "Trail Crew", [203, 24, 112]),
             name: "Trail Crew",
             age: "9m",
-            kind: ChatKind::Channel,
+            kind: ChatKind::Channel { open: false },
             unread: true,
             muted: false,
             draft: "",
@@ -357,7 +408,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(Some(BuiltinChannel::Public), "public", [0, 0, 0]),
             name: "public",
             age: "1h",
-            kind: ChatKind::Channel,
+            kind: ChatKind::Channel { open: true },
             unread: false,
             muted: true,
             draft: "",

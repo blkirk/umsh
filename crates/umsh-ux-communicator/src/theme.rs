@@ -21,8 +21,13 @@ pub const TEXT: Rgb565 = rgb(0xEEF1F5);
 pub const TEXT_SECONDARY: Rgb565 = rgb(0x9AA3AE);
 pub const TEXT_TERTIARY: Rgb565 = rgb(0x7F8995);
 pub const ACCENT: Rgb565 = rgb(0x4DA3FF);
+/// The accent where anyone can read what is written: an open channel.
+pub const ACCENT_OPEN: Rgb565 = GREEN;
 pub const FOCUS: Rgb565 = rgb(0x18304D);
+/// My messages where only those holding the key can read them.
 pub const OUTBOUND: Rgb565 = rgb(0x2A62C9);
+/// My messages in an open channel, which anyone can read.
+pub const OUTBOUND_OPEN: Rgb565 = rgb(0x1E7B45);
 pub const INBOUND: Rgb565 = rgb(0x23272E);
 pub const GREEN: Rgb565 = rgb(0x3DD68C);
 pub const AMBER: Rgb565 = rgb(0xF5B544);
@@ -34,7 +39,8 @@ pub const MENU: Rgb565 = rgb(0x1B2027);
 pub const MENU_LINE: Rgb565 = rgb(0x2E3540);
 /// Behind each reaction in the actions menu's palette.
 pub const REACTION_PAD: Rgb565 = rgb(0x2A313B);
-/// A reaction chip of someone else's; mine is in [`OUTBOUND`].
+/// A reaction chip of someone else's; mine is in [`OUTBOUND`], or
+/// [`OUTBOUND_OPEN`] in an open channel.
 pub const CHIP_THEIRS: Rgb565 = rgb(0x323A45);
 /// A banner for a message that arrived elsewhere, and its edge.
 pub const BANNER: Rgb565 = rgb(0x1E2631);

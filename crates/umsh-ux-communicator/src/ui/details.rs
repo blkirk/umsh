@@ -54,25 +54,27 @@ fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
         (!details.time.is_empty()).then(|| {
             row(
                 if inbound { "Received" } else { "Sent" },
-                text(format_args!("{}", details.time)),
+                &text(format_args!("{}", details.time)),
+                false,
             )
         }),
         details
             .hops
-            .map(|hops| row("Hops", text(format_args!("{hops}")))),
-        (!details.route.is_empty()).then(|| row("Route", text(format_args!("{}", details.route)))),
+            .map(|hops| row("Hops", &text(format_args!("{hops}")), false)),
+        (!details.route.is_empty())
+            .then(|| row("Route", &text(format_args!("{}", details.route)), false)),
         details.rssi.map(|rssi| {
             let value = text(format_args!(
                 "{}{} dBm",
                 minus(rssi < 0),
                 rssi.unsigned_abs()
             ));
-            row("Signal", value)
+            row("Signal", &value, false)
         }),
         details.snr.map(|tenths| {
             let (sign, tenths) = (minus(tenths < 0), tenths.unsigned_abs());
             let value = text(format_args!("{sign}{}.{} dB", tenths / 10, tenths % 10));
-            row("Signal-to-noise", value)
+            row("Signal-to-noise", &value, false)
         }),
         inbound.then(|| {
             let source = if details.authenticated {
@@ -80,7 +82,7 @@ fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
             } else {
                 "Not authenticated"
             };
-            row("Source", text(format_args!("{source}")))
+            row("Source", source, false)
         }),
     ))
     .with_spacing(0)
@@ -88,13 +90,23 @@ fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
     .content_shape(Rectangle)
 }
 
-/// A labeled value, with a rule under it.
-fn row(name: &'static str, value: String<24>) -> impl View<Rgb565, State> + use<> {
+/// A labeled value, with a rule under it. A `muted` label is for a value
+/// not known yet.
+pub(super) fn row(
+    name: &'static str,
+    value: &str,
+    muted: bool,
+) -> impl View<Rgb565, State> + use<> {
+    let color = if muted {
+        theme::TEXT_TERTIARY
+    } else {
+        theme::TEXT
+    };
     HStack::new((
-        label::<16>(name, &font::REGULAR, theme::BODY, theme::TEXT),
+        label::<16>(name, &font::REGULAR, theme::BODY, color),
         Spacer::default(),
-        label::<24>(
-            &value,
+        label::<48>(
+            value,
             &font::REGULAR,
             theme::SECONDARY,
             theme::TEXT_SECONDARY,

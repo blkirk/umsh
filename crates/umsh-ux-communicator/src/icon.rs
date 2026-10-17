@@ -20,6 +20,9 @@ pub enum Pad {
     Mine,
     /// A chip for someone else's, in [`theme::CHIP_THEIRS`](crate::theme::CHIP_THEIRS).
     Theirs,
+    /// A chip for my reaction in an open channel, in
+    /// [`theme::OUTBOUND_OPEN`](crate::theme::OUTBOUND_OPEN).
+    MineOpen,
 }
 
 /// The glyph for `reaction` on `pad`.

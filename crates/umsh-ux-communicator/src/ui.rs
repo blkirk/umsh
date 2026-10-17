@@ -20,6 +20,7 @@ mod banner;
 mod chats;
 mod conversation;
 mod details;
+mod member;
 mod rail;
 mod status;
 mod wake;
@@ -58,6 +59,14 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
             Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
+            Screen::Member { member, .. } => member::view(
+                member,
+                state
+                    .conversation
+                    .as_ref()
+                    .and_then(|c| state.chat(c.chat))
+                    .map_or("", |s| &s.name),
+            ),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),
