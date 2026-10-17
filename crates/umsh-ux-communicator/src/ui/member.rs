@@ -12,6 +12,7 @@ use heapless::String;
 use super::conversation::header;
 use super::details::row;
 use super::label;
+use crate::avatar::AvatarStyle;
 use crate::model::{Member, State};
 use crate::nav::keys;
 use crate::{font, icon, theme};
@@ -92,22 +93,8 @@ fn head(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
         &mut heard,
         format_args!("Heard in {channel} \u{B7} {}", member.heard),
     );
-    let named = HStack::new((
-        super::avatar::view(&member.sender.avatar, AVATAR),
-        VStack::new((
-            label::<24>(&member.sender.name, &font::BOLD, theme::BODY, theme::TEXT),
-            label::<48>(&heard, &font::MEDIUM, theme::SMALL, theme::TEXT_TERTIARY),
-        ))
-        .with_spacing(0)
-        .with_alignment(HorizontalAlignment::Leading),
-    ))
-    .with_spacing(10)
-    .padding(Edges::Leading, AVATAR_X)
-    .flex_infinite_width(HorizontalAlignment::Leading)
-    .frame()
-    .with_height(HEAD);
     VStack::new((
-        named,
+        detail_head(&member.sender.avatar, &member.sender.name, &heard),
         member.address.as_ref().map(|address| {
             label::<44>(address, &font::REGULAR, theme::SMALL, theme::TEXT_SECONDARY)
                 .padding(Edges::Leading, AVATAR_X)
@@ -117,6 +104,29 @@ fn head(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
         }),
     ))
     .with_spacing(0)
+}
+
+/// The head of a screen about one peer or channel: its avatar, its name, and
+/// a line about it.
+pub(super) fn detail_head(
+    avatar: &AvatarStyle,
+    name: &str,
+    about: &str,
+) -> impl View<Rgb565, State> + use<> {
+    HStack::new((
+        super::avatar::view(avatar, AVATAR),
+        VStack::new((
+            label::<32>(name, &font::BOLD, theme::BODY, theme::TEXT),
+            label::<48>(about, &font::MEDIUM, theme::SMALL, theme::TEXT_TERTIARY),
+        ))
+        .with_spacing(0)
+        .with_alignment(HorizontalAlignment::Leading),
+    ))
+    .with_spacing(10)
+    .padding(Edges::Leading, AVATAR_X)
+    .flex_infinite_width(HorizontalAlignment::Leading)
+    .frame()
+    .with_height(HEAD)
 }
 
 /// A row that does something when pressed.

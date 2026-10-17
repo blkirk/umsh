@@ -8,7 +8,7 @@ use buoyant::view::ViewLayout;
 use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
-use umsh_ux_communicator::model::{Delivery, Direction, Reaction, Section, State};
+use umsh_ux_communicator::model::{ChatKind, Delivery, Direction, Reaction, Section, State};
 use umsh_ux_communicator::nav::{Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
 
@@ -796,4 +796,84 @@ fn save_peer_goes_once_saved_and_message_opens_a_direct_chat() {
     run(&mut app, &[Input::Backspace]);
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
     assert_eq!(focus(app.state()), Some(keys::chat(chat)));
+}
+
+/// Jo's invitation to Base Camp.
+const INVITE: u32 = (JO << 8) | 2;
+
+/// Opens Jo's chat, `row` down the list, and turns up to the invitation, through the tall
+/// message, which the wheel scrolls through first.
+fn to_invite<V, F>(app: &mut App<V, State, F>, row: i8)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(app, &[Input::Turn(row), Input::Press]);
+    assert_in_conversation(app.state(), JO);
+    for _ in 0..20 {
+        if focus(app.state()) == Some(keys::message(INVITE)) {
+            return;
+        }
+        run(app, &[Input::Turn(-1)]);
+    }
+    panic!("never reached the invitation: {:?}", focus(app.state()));
+}
+
+fn joined_chat(state: &State) -> u32 {
+    match state.screen() {
+        Screen::Conversation { chat, .. } => *chat,
+        other => panic!("expected a conversation, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_invitation_offers_joining_first_and_join_opens_the_channel() {
+    let mut app = app!();
+    to_invite(&mut app, 4);
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::JOIN));
+    run(&mut app, &[Input::Press]);
+    assert!(matches!(app.state().screen(), Screen::Join { .. }));
+    assert_eq!(focus(app.state()), Some(keys::JOIN_CHANNEL));
+    // Nothing is joined until Join channel.
+    let before = app.state().chats.len();
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(app.state().chats.len(), before);
+    assert_eq!(focus(app.state()), Some(keys::message(INVITE)));
+
+    run(&mut app, &[Input::Press, Input::Press, Input::Press]);
+    let chat = joined_chat(app.state());
+    assert_in_conversation(app.state(), chat);
+    let summary = app.state().chat(chat).expect("joined");
+    assert_eq!(summary.name.as_str(), "Base Camp");
+    assert_eq!(summary.kind, ChatKind::Channel { open: false });
+    assert_eq!(app.state().chats.first().map(|c| c.id), Some(chat));
+
+    // Joining again opens the same channel.
+    run(&mut app, &[Input::Backspace]);
+    // The channel heads the list now, above Jo.
+    run(&mut app, &[Input::Turn(-20)]);
+    to_invite(&mut app, 5);
+    run(&mut app, &[Input::Press, Input::Press, Input::Press]);
+    assert_eq!(joined_chat(app.state()), chat);
+    assert_eq!(app.state().chats.len(), before + 1);
+}
+
+#[test]
+fn a_channel_joined_can_be_called_something_else_here() {
+    let mut app = app!();
+    to_invite(&mut app, 4);
+    run(&mut app, &[Input::Press, Input::Press, Input::Turn(-1)]);
+    assert_eq!(focus(app.state()), Some(keys::JOIN_NAME));
+    run(&mut app, &[Input::Press]);
+    run(&mut app, &[Input::Backspace; 4]);
+    run(&mut app, &typed("Hut"));
+    run(&mut app, &[Input::Enter, Input::Turn(1), Input::Press]);
+    let chat = joined_chat(app.state());
+    assert_eq!(
+        app.state().chat(chat).map(|c| c.name.as_str()),
+        Some("Base Hut")
+    );
 }

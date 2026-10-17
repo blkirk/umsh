@@ -414,6 +414,16 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
     ),
     ("BACK", 14, 1.0, &[stroke("M3 -6 L-3 0 L3 6", 2.0)]),
     ("CHEVRON", 14, 1.0, &[stroke("M-3 -6 L3 0 L-3 6", 2.0)]),
+    (
+        "WARNING",
+        18,
+        0.9,
+        &[
+            stroke("M0 -8 L9 7 H-9 Z", 1.8),
+            stroke("M0 -2.5 V2", 2.0),
+            fill("M-1.2 4.6 A1.2 1.2 0 1 0 1.2 4.6 A1.2 1.2 0 1 0 -1.2 4.6 Z"),
+        ],
+    ),
 ];
 
 /// The icons as Gray4 masks.

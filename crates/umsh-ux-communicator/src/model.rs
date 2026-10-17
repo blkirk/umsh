@@ -4,7 +4,7 @@
 use buoyant::view::EditBuffer;
 use heapless::{String, Vec};
 
-use crate::avatar::AvatarStyle;
+use crate::avatar::{AvatarStyle, BuiltinChannel};
 use crate::nav::Screen;
 use crate::text::{DraftText, SharedText, TextHeap};
 
@@ -87,7 +87,13 @@ impl ChatSummary {
             }
             (Direction::Inbound, None) => {}
         }
-        push_cut(&mut self.preview, &message.text);
+        match &message.invite {
+            Some(invite) if message.text.is_empty() => {
+                push_cut(&mut self.preview, "Channel invite: ");
+                push_cut(&mut self.preview, &invite.name);
+            }
+            _ => push_cut(&mut self.preview, &message.text),
+        }
     }
 }
 
@@ -208,6 +214,27 @@ pub struct Message {
     pub text: SharedText,
     pub delivery: Delivery,
     pub reactions: Reactions,
+    /// The channel it invites to, when it carries an invitation. Its text is
+    /// what it says besides.
+    pub invite: Option<Invite>,
+}
+
+/// An invitation to a channel. Every message carries room for one, so it
+/// keeps its name on the text heap and its avatar as what draws it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invite {
+    pub name: SharedText,
+    pub builtin: Option<BuiltinChannel>,
+    pub tint: [u8; 3],
+    /// The channel's key is derived from its name: anyone can read it.
+    pub open: bool,
+}
+
+impl Invite {
+    #[must_use]
+    pub fn avatar(&self) -> AvatarStyle {
+        AvatarStyle::channel(self.builtin, &self.name, self.tint)
+    }
 }
 
 impl Message {
@@ -318,6 +345,11 @@ pub trait History {
 
     /// Keeps `member`, whose identity is known, among my peers.
     fn save_peer(&self, member: &Member);
+
+    /// Joins the channel `invite` invites to, called `name` here, and returns
+    /// its chat: the one already joined, if it is. `None` when there is no
+    /// room for it.
+    fn join(&self, invite: &Invite, name: &str) -> Option<ChatSummary>;
 
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.

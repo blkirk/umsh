@@ -5,8 +5,8 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, MESSAGE_LEN, Member,
-    Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
+    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite, MESSAGE_LEN,
+    Member, Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
     push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
@@ -127,6 +127,10 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
         ],
         4 => &[(From::Member("Kit"), "Anyone near Mill Creek?")],
         5 => &[
+            (From::Me, "Which channel is base camp on?"),
+            (From::Peer, "This one:"),
+            // An invitation, and nothing besides.
+            (From::Peer, ""),
             (
                 From::Peer,
                 "Hut is open and the stove works. Water from the spring is fine if you \
@@ -138,6 +142,19 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
         ],
         _ => &[],
     }
+}
+
+/// The channel a message of the fixture's invites to.
+fn invite(heap: TextHeap, chat: ChatId, index: usize) -> Option<Invite> {
+    if chat != 5 || index != 2 {
+        return None;
+    }
+    Some(Invite {
+        name: SharedText::new(heap, "Base Camp")?,
+        builtin: None,
+        tint: [46, 125, 196],
+        open: false,
+    })
 }
 
 /// Others' reactions to a message of the fixture's, one each.
@@ -197,6 +214,7 @@ fn message(
                 mine: false,
             })
             .collect::<Reactions>(),
+        invite: invite(heap, chat, index),
     })
 }
 
@@ -224,6 +242,8 @@ pub struct Store {
     /// address.
     saved: RefCell<Vec<String<44>, KEPT>>,
     direct: RefCell<Vec<String<44>, KEPT>>,
+    /// Channels joined from invitations, by the invitation's name.
+    joined: RefCell<Vec<String<32>, KEPT>>,
 }
 
 impl Store {
@@ -241,6 +261,7 @@ impl Store {
             identified: Cell::new(false),
             saved: RefCell::new(Vec::new()),
             direct: RefCell::new(Vec::new()),
+            joined: RefCell::new(Vec::new()),
         }
     }
 }
@@ -248,6 +269,8 @@ impl Store {
 /// Where direct chats made with members are numbered from, above the
 /// fixture's own chats.
 const FIRST_DIRECT: ChatId = 0x100;
+/// Where channels joined from invitations are numbered from.
+const FIRST_JOINED: ChatId = 0x200;
 
 impl Store {
     /// The next message to arrive, the ones on the T-LoRa Pager mockup's
@@ -306,6 +329,7 @@ impl Store {
                 From::Peer | From::Member(_) => Delivery::Delivered,
             },
             reactions: Reactions::new(),
+            invite: None,
         };
         self.next.set(message.id + 1);
         let mut kept = self.kept.borrow_mut();
@@ -420,6 +444,28 @@ impl History for Store {
             &member.sender.name,
             self.heap,
         ))
+    }
+
+    fn join(&self, invite: &Invite, name: &str) -> Option<ChatSummary> {
+        let mut joined = self.joined.borrow_mut();
+        let index = match joined
+            .iter()
+            .position(|n| n.as_str() == invite.name.as_str())
+        {
+            Some(index) => index,
+            None => {
+                joined.push(s(&invite.name)).ok()?;
+                joined.len() - 1
+            }
+        };
+        let mut summary = ChatSummary::new(
+            FIRST_JOINED + index as ChatId,
+            invite.avatar(),
+            name,
+            self.heap,
+        );
+        summary.kind = ChatKind::Channel { open: invite.open };
+        Some(summary)
     }
 
     fn save_peer(&self, member: &Member) {

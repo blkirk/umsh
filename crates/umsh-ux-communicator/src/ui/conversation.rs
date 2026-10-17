@@ -17,8 +17,8 @@ use heapless::Vec;
 use super::label;
 use crate::avatar::AvatarStyle;
 use crate::model::{
-    ChatId, ChatKind, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId, Messages,
-    Reacted, Reaction, Reactions, State,
+    ChatId, ChatKind, Delivery, Direction, Draft, Invite, MAX_MESSAGES, Message, MessageId,
+    Messages, Reacted, Reaction, Reactions, State,
 };
 use crate::nav::{Screen, keys};
 use crate::text::DraftText;
@@ -60,6 +60,8 @@ const FOCUS_MARGIN: u32 = 12;
 const SCROLL_STEP: u32 = 24;
 /// What an empty composer says: "Message" and the chat's name.
 type Placeholder = heapless::String<48>;
+/// An action in the actions menu, which can name a channel.
+type MenuText = heapless::String<40>;
 /// The field's fill while it is edited.
 const ACTIVE_FIELD: Rgb565 = Rgb565::new(0x1A >> 3, 0x23 >> 2, 0x33 >> 3);
 /// The field's fill while it is edited in an open channel.
@@ -93,7 +95,14 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     let find = |id: Option<MessageId>| id.and_then(|id| messages.iter().find(|m| m.id == id));
     // The menu offers my reaction as the one already chosen, and a
     // member's message offers its sender.
-    let menu = find(actions).map(|m| (m.my_reaction(), m.sender.is_some()));
+    let menu = find(actions).map(|m| {
+        let join = m.invite.as_ref().map(|invite| {
+            let mut text = MenuText::new();
+            _ = core::fmt::write(&mut text, format_args!("Join {}", invite.name.as_str()));
+            text
+        });
+        (m.my_reaction(), m.sender.is_some(), join)
+    });
     let quoted = find(reply).map(|message| quote(message, summary.map_or("", |s| &s.name)));
     let kind = summary.map(|s| s.kind);
     let channel = matches!(kind, Some(ChatKind::Channel { .. }));
@@ -130,7 +139,9 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
         }
         _ => KeyResponse::Ignored,
     })
-    .popover(menu.as_ref(), |&(mine, member)| actions_menu(mine, member))
+    .popover(menu.as_ref(), |(mine, member, join)| {
+        actions_menu(*mine, *member, join.clone())
+    })
 }
 
 /// Back, the peer or channel, and how far away a peer is or that it is a
@@ -286,6 +297,7 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
     let id = message.id;
     let text = message.text.clone();
     let reactions = message.reactions.clone();
+    let invite = message.invite.clone();
     let outbound = message.direction == Direction::Outbound;
     let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
     if outbound {
@@ -323,35 +335,87 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
             }
         },
         move |button: ButtonState| {
-            Text::new(text.clone(), &font::REGULAR)
-                .with_font_size(theme::BODY)
-                .foreground_color(color)
-                .hint_background_color(fill)
-                .padding(Edges::Horizontal, BUBBLE_PAD_X)
-                .padding(Edges::Vertical, BUBBLE_PAD_Y)
-                .background_color(fill, RoundedRectangle::with_radii(corners))
-                .padding(Edges::All, RING_GAP)
-                .overlay(
-                    Alignment::Center,
-                    (button.is_focused() || acting_on).then(|| {
-                        RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
-                            .stroked(2)
-                            .foreground_color(theme::ACCENT)
-                    }),
-                )
-                // Over the ring, so a chip cuts it as it cuts the bubble.
-                .overlay(
-                    corner,
-                    (!reactions.is_empty())
-                        .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
-                )
-                // Text wraps to fit; a short bubble keeps to its side.
-                .flex_frame()
-                .with_max_width(BUBBLE_MAX + 2 * RING_GAP)
-                .with_horizontal_alignment(side)
+            VStack::new((
+                // An invitation alone is only its card.
+                (!text.is_empty() || invite.is_none()).then(|| {
+                    Text::new(text.clone(), &font::REGULAR)
+                        .with_font_size(theme::BODY)
+                        .foreground_color(color)
+                        .hint_background_color(fill)
+                        .padding(Edges::Horizontal, BUBBLE_PAD_X)
+                        .padding(Edges::Vertical, BUBBLE_PAD_Y)
+                        .background_color(fill, RoundedRectangle::with_radii(corners))
+                }),
+                invite
+                    .as_ref()
+                    .map(|invite| Lazy::new((invite.clone(), fill, color, corners), invite_card)),
+            ))
+            .with_spacing(GAP_SAME)
+            .with_alignment(side)
+            .padding(Edges::All, RING_GAP)
+            .overlay(
+                Alignment::Center,
+                (button.is_focused() || acting_on).then(|| {
+                    RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
+                        .stroked(2)
+                        .foreground_color(theme::ACCENT)
+                }),
+            )
+            // Over the ring, so a chip cuts it as it cuts the bubble.
+            .overlay(
+                corner,
+                (!reactions.is_empty())
+                    .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
+            )
+            // Text wraps to fit; a short bubble keeps to its side.
+            .flex_frame()
+            .with_max_width(BUBBLE_MAX + 2 * RING_GAP)
+            .with_horizontal_alignment(side)
         },
     )
     .padding(Edges::Horizontal, SIDE - RING_GAP)
+}
+
+/// An invitation's card, and its avatar.
+const CARD_WIDTH: u32 = 300;
+const CARD_HEIGHT: u32 = 64;
+const CARD_AVATAR: u32 = 44;
+
+/// The channel an invitation is to, in a card that a press can take: a link
+/// inside text could not be focused.
+///
+/// Built from its data each time it is drawn ([`Lazy`]), as the chips are.
+fn invite_card(
+    (invite, fill, color, corners): &(Invite, Rgb565, Rgb565, CornerRadii<u16>),
+) -> impl View<Rgb565, ()> + use<> {
+    let (fill, color, corners) = (*fill, *color, *corners);
+    HStack::new((
+        super::avatar::view(&invite.avatar(), CARD_AVATAR),
+        VStack::new((
+            Text::new(invite.name.clone(), &font::BOLD)
+                .with_font_size(theme::BODY)
+                .with_line_limit(1)
+                .foreground_color(color),
+            Text::new("Channel invite", &font::REGULAR)
+                .with_font_size(theme::SECONDARY)
+                .with_line_limit(1)
+                .foreground_color(theme::TEXT_SECONDARY),
+        ))
+        .with_spacing(0)
+        .with_alignment(HorizontalAlignment::Leading),
+        Spacer::default(),
+        Image::new(&icon::CHEVRON)
+            .as_template()
+            .foreground_color(theme::TEXT_TERTIARY),
+    ))
+    .with_spacing(10)
+    .hint_background_color(fill)
+    .padding(Edges::Leading, 10)
+    .padding(Edges::Trailing, 12)
+    .frame()
+    .with_width(CARD_WIDTH)
+    .with_height(CARD_HEIGHT)
+    .background_color(fill, RoundedRectangle::with_radii(corners))
 }
 
 /// A reaction chip's diameter, the background ring that sets it off, and how
@@ -698,7 +762,12 @@ const ITEM_INSET: u32 = 5;
 /// What pressing a message gives: reactions first, then Reply and Details,
 /// at the top of the screen beside the history. Backspace closes it, and
 /// typing closes it and goes to the composer.
-fn actions_menu(mine: Option<Reaction>, member: bool) -> impl View<Rgb565, State> + use<> {
+fn actions_menu(
+    mine: Option<Reaction>,
+    member: bool,
+    join: Option<MenuText>,
+) -> impl View<Rgb565, State> + use<> {
+    let has_join = join.is_some();
     let pad = |reaction: Reaction| {
         Button::new(
             move |s: &mut State| s.react_from_actions(reaction),
@@ -739,15 +808,23 @@ fn actions_menu(mine: Option<Reaction>, member: bool) -> impl View<Rgb565, State
             .foreground_color(theme::MENU_LINE)
             .frame()
             .with_height(1),
-        menu_item("Reply", keys::REPLY, State::reply_from_actions).padding(Edges::Top, 2),
+        // An invitation is for joining, first.
+        join.map(|text| menu_item(text, keys::JOIN, State::join_from_actions))
+            .padding(Edges::Top, 2),
+        menu_item(menu_text("Reply"), keys::REPLY, State::reply_from_actions)
+            .padding(Edges::Top, if has_join { 0 } else { 2 }),
         member.then(|| {
             menu_item(
-                "View member",
+                menu_text("View member"),
                 keys::VIEW_MEMBER,
                 State::view_member_from_actions,
             )
         }),
-        menu_item("Details", keys::DETAILS, State::details_from_actions),
+        menu_item(
+            menu_text("Details"),
+            keys::DETAILS,
+            State::details_from_actions,
+        ),
     ))
     .with_spacing(0)
     .padding(Edges::Bottom, 6)
@@ -783,16 +860,21 @@ fn actions_menu(mine: Option<Reaction>, member: bool) -> impl View<Rgb565, State
     })
 }
 
+/// A fixed action's label.
+fn menu_text(text: &str) -> MenuText {
+    MenuText::try_from(text).unwrap_or_default()
+}
+
 /// One of the menu's actions.
 fn menu_item(
-    text: &'static str,
+    text: MenuText,
     key: buoyant::focus::FocusKey,
     action: fn(&mut State),
 ) -> impl View<Rgb565, State> + use<> {
     Button::new(action, move |button: ButtonState| {
         let focused = button.is_focused();
         let face = if focused { &font::BOLD } else { &font::REGULAR };
-        label::<16>(text, face, theme::BODY, theme::TEXT)
+        label::<40>(&text, face, theme::BODY, theme::TEXT)
             .hint_background_color(if focused { theme::FOCUS } else { theme::MENU })
             .padding(Edges::Leading, 11)
             .flex_infinite_width(HorizontalAlignment::Leading)

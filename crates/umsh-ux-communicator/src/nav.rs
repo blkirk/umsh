@@ -6,7 +6,15 @@
 
 use buoyant::focus::{FocusKey, FocusState};
 
-use crate::model::{ChatId, Details, Member, MessageId, Reaction, Section, State};
+use buoyant::view::EditBuffer;
+use heapless::String;
+
+use crate::model::{
+    ChatId, ChatSummary, Details, Invite, Member, MessageId, Reaction, Section, State,
+};
+
+/// What a joined channel is to be called here, as it is edited.
+pub type JoinName = EditBuffer<String<32>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -26,12 +34,17 @@ pub mod keys {
     pub const DETAILS: FocusKey = FocusKey(ACTION | 0x101);
     /// The actions menu's View member, on a member's message.
     pub const VIEW_MEMBER: FocusKey = FocusKey(ACTION | 0x102);
+    /// The actions menu's Join, on a message carrying an invitation.
+    pub const JOIN: FocusKey = FocusKey(ACTION | 0x103);
     /// What the details screen shows, which the wheel scrolls through.
     pub const DETAIL_LIST: FocusKey = FocusKey(0x0600_0000);
     /// The member screen's Request identity, Message, and Save peer.
     pub const REQUEST_IDENTITY: FocusKey = FocusKey(0x0700_0000);
     pub const MESSAGE_MEMBER: FocusKey = FocusKey(0x0700_0001);
     pub const SAVE_PEER: FocusKey = FocusKey(0x0700_0002);
+    /// The join screen's Name and Join channel.
+    pub const JOIN_NAME: FocusKey = FocusKey(0x0800_0000);
+    pub const JOIN_CHANNEL: FocusKey = FocusKey(0x0800_0001);
 
     /// A reaction in the actions menu's palette.
     #[must_use]
@@ -116,6 +129,13 @@ pub enum Screen {
         requested: bool,
         focus: FocusState,
     },
+    /// A channel an invitation offers, before it is joined.
+    Join {
+        invite: Invite,
+        /// What the channel is to be called here.
+        name: JoinName,
+        focus: FocusState,
+    },
     /// The chats that got messages while the panel was dark, which the first
     /// of them woke it to.
     Wake { focus: FocusState },
@@ -138,6 +158,7 @@ impl Screen {
             | Self::Conversation { focus, .. }
             | Self::Details { focus, .. }
             | Self::Member { focus, .. }
+            | Self::Join { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -148,6 +169,7 @@ impl Screen {
             | Self::Conversation { focus, .. }
             | Self::Details { focus, .. }
             | Self::Member { focus, .. }
+            | Self::Join { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -231,10 +253,83 @@ impl State {
     /// Opens the actions menu of `message` in the conversation shown, with
     /// Reply focused.
     pub fn open_actions(&mut self, message: MessageId) {
+        // An invitation offers joining first.
+        let first = if self.invite(message).is_some() {
+            keys::JOIN
+        } else {
+            keys::REPLY
+        };
         if let Some(Screen::Conversation { actions, focus, .. }) = self.screens.last_mut() {
             *actions = Some(message);
-            focus.request(keys::REPLY);
+            focus.request(first);
         }
+    }
+
+    /// The invitation `message` in the open chat carries.
+    fn invite(&self, message: MessageId) -> Option<&Invite> {
+        self.conversation
+            .as_ref()?
+            .messages
+            .iter()
+            .find(|m| m.id == message)?
+            .invite
+            .as_ref()
+    }
+
+    /// Shows the channel the message whose actions menu is open invites to,
+    /// before it is joined.
+    pub fn join_from_actions(&mut self) {
+        let Some(message) = self.close_actions() else {
+            return;
+        };
+        let Some(invite) = self.invite(message).cloned() else {
+            return;
+        };
+        let name = JoinName::with_text(String::try_from(invite.name.as_str()).unwrap_or_default());
+        _ = self.screens.push(Screen::Join {
+            invite,
+            name,
+            focus: FocusState::requesting(keys::JOIN_CHANNEL),
+        });
+    }
+
+    /// The name being given to the channel on the join screen.
+    pub fn join_name_mut(&mut self) -> Option<&mut JoinName> {
+        match self.screens.last_mut() {
+            Some(Screen::Join { name, .. }) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Joins the channel on the join screen, by the name given it, or its
+    /// own when none is, and opens it.
+    pub fn join(&mut self) {
+        let Some(Screen::Join { invite, name, .. }) = self.screens.last() else {
+            return;
+        };
+        let given = name.text().trim();
+        let given = if given.is_empty() {
+            invite.name.as_str()
+        } else {
+            given
+        };
+        if let Some(summary) = self.history.join(invite, given) {
+            let chat = self.add_chat(summary);
+            self.go_to_chat(chat);
+        }
+    }
+
+    /// Lists `summary` first, unless its chat is listed already, and returns
+    /// its chat. The oldest gives way when the list is full.
+    fn add_chat(&mut self, summary: ChatSummary) -> ChatId {
+        let chat = summary.id;
+        if self.chat(chat).is_none() {
+            if self.chats.is_full() {
+                self.chats.pop();
+            }
+            _ = self.chats.insert(0, summary);
+        }
+        chat
     }
 
     /// Closes the actions menu, focusing the message it was opened on, and
@@ -374,13 +469,7 @@ impl State {
         let Some(summary) = self.history.direct_chat(member) else {
             return;
         };
-        let chat = summary.id;
-        if self.chat(chat).is_none() {
-            if self.chats.is_full() {
-                self.chats.pop();
-            }
-            _ = self.chats.insert(0, summary);
-        }
+        let chat = self.add_chat(summary);
         self.go_to_chat(chat);
     }
 
