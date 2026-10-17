@@ -203,12 +203,18 @@ mod status_led;
 mod temperature;
 // The same split for the panel: the menu and its renderer, or a board
 // with nothing to draw on.
+#[cfg(feature = "communicator")]
+mod communicator;
+#[cfg(all(feature = "communicator", not(feature = "board-tlora-pager")))]
+compile_error!("The communicator interface runs only on the T-LoRa Pager");
+#[cfg(all(feature = "debug-log", any(feature = "wifi", feature = "communicator")))]
+mod memory_probe;
 #[cfg_attr(not(feature = "display"), path = "ui_headless.rs")]
+// The communicator replaces the menus but keeps the boot splash.
+#[cfg_attr(feature = "communicator", allow(dead_code))]
 mod ui;
 #[cfg(feature = "wifi")]
 mod wifi;
-#[cfg(all(feature = "wifi", feature = "debug-log"))]
-mod wifi_memory;
 #[cfg(all(feature = "wifi", not(feature = "chip-esp32s3")))]
 compile_error!("WiFi requires an ESP32-S3 target");
 #[cfg(all(feature = "wifi", feature = "ble", not(feature = "coex")))]
@@ -2570,8 +2576,8 @@ async fn main(spawner: Spawner) {
     // otherwise sleep the chip under a USB-Serial-JTAG console mid-boot,
     // which drops the link and everything printed after it.
     let boot_guard = esp_hal::rtc_cntl::WakeLock::new();
-    #[cfg(all(feature = "wifi", feature = "debug-log"))]
-    wifi_memory::init();
+    #[cfg(all(feature = "debug-log", any(feature = "wifi", feature = "communicator")))]
+    memory_probe::init();
     // umsh-node and umsh-sync use `alloc`. The classic ESP32 has roughly
     // half the S3's data RAM and the BT controller takes a fixed bite out
     // of it before the application sees any, so its heap is smaller.
@@ -3444,7 +3450,10 @@ async fn main(spawner: Spawner) {
             .unwrap(),
         );
         if let Some((panel, splash)) = pager_boot_display {
+            #[cfg(not(feature = "communicator"))]
             spawner.spawn(ui::display_task(panel, splash).unwrap());
+            #[cfg(feature = "communicator")]
+            spawner.spawn(communicator::task(panel, splash).unwrap());
         }
     }
 

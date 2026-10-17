@@ -107,6 +107,23 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
     }
 }
 
+/// The communicator's Buoyant app: its state, view, and render trees.
+/// Plain data, touched only by the communicator task. Generic only because
+/// the view type cannot be named.
+///
+/// Built here rather than passed in, and never inlined, so that the
+/// temporary is in this frame, which is gone once it returns. Built in the
+/// task, it would widen the task's frame on every poll.
+#[cfg(feature = "communicator")]
+#[inline(never)]
+pub fn communicator<T>(build: impl FnOnce() -> T) -> &'static mut T {
+    unsafe {
+        let ptr = storage::<T>();
+        ptr.write(build());
+        &mut *ptr
+    }
+}
+
 #[cfg(feature = "meshcore-forwarder")]
 pub fn meshcore_storage(
     public_key: [u8; 32],

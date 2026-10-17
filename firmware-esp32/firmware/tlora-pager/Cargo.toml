@@ -183,6 +183,10 @@ rtc-pcf8563 = ["external-rtc"]
 external-rtc = []
 display-st7796 = ["display"]
 
+# The communicator interface (`umsh-ux-communicator`) in place of the
+# tracker's menus, for a board with a color screen and a keyboard. While
+# it is being brought up it shows fixture data and logs what it costs.
+communicator = ["display", "dep:umsh-ux-communicator"]
 # Multiplex driver diagnostics as ASCII lines onto the wired output
 # stream (HDLC hosts resynchronize past them).
 debug-log = []
@@ -226,6 +230,7 @@ critical-section = "1"
 umsh-radio-loraphy = { path = "../../../crates/umsh-radio-loraphy", default-features = false }
 umsh-ux-tracker = { path = "../../../crates/umsh-ux-tracker" }
 umsh-ux-display-tracker = { path = "../../../crates/umsh-ux-display-tracker", features = ["screen"] }
+umsh-ux-communicator = { path = "../../../crates/umsh-ux-communicator", optional = true, features = ["fixture"] }
 # The device node: a full on-board MAC/node stack for the device
 # identity (device_node.rs), sharing the radio through the mux.
 umsh-core = { path = "../../../crates/umsh-core", default-features = false }

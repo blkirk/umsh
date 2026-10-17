@@ -498,7 +498,7 @@ pub async fn task(
         let mut backoff = 1;
         loop {
             #[cfg(feature = "debug-log")]
-            super::wifi_memory::sample();
+            super::memory_probe::sample();
             // The controller is up anyway, so a harvest costs nothing.
             if super::entropy::harvest_due() {
                 offer_harvest(harvest(&controller));
