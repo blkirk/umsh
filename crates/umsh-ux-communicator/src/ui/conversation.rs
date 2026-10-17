@@ -17,8 +17,8 @@ use heapless::Vec;
 use super::label;
 use crate::avatar::AvatarStyle;
 use crate::model::{
-    ChatId, ChatKind, Delivery, Direction, Draft, Invite, MAX_MESSAGES, Message, MessageId,
-    Messages, Reacted, Reaction, Reactions, State,
+    ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, Invite, MAX_MESSAGES, Message,
+    MessageId, Messages, Reacted, Reaction, Reactions, State,
 };
 use crate::nav::{Screen, keys};
 use crate::text::DraftText;
@@ -151,13 +151,23 @@ pub(super) fn header(
     avatar: Option<&AvatarStyle>,
     kind: Option<ChatKind>,
 ) -> impl View<Rgb565, State> + use<> {
-    let mut distance: heapless::String<12> = heapless::String::new();
+    let mut distance: heapless::String<16> = heapless::String::new();
+    // A channel sent in the clear says so, in red.
+    let clear = matches!(
+        kind,
+        Some(ChatKind::Channel {
+            access: ChannelAccess::Clear
+        })
+    );
     match kind {
         Some(ChatKind::Peer { hops: Some(0) }) => _ = distance.push_str("Direct"),
         Some(ChatKind::Peer { hops: Some(1) }) => _ = distance.push_str("1 hop"),
         Some(ChatKind::Peer { hops: Some(n) }) => {
             _ = core::fmt::write(&mut distance, format_args!("{n} hops"));
         }
+        Some(ChatKind::Channel {
+            access: ChannelAccess::Clear,
+        }) => _ = distance.push_str("Not encrypted"),
         Some(ChatKind::Channel { .. }) => _ = distance.push_str("Channel"),
         Some(ChatKind::Peer { hops: None }) | None => {}
     }
@@ -166,8 +176,14 @@ pub(super) fn header(
             .as_template()
             .foreground_color(theme::TEXT_TERTIARY),
         avatar.map(|style| super::avatar::view(style, AVATAR)),
-        label::<32>(name, &font::BOLD, theme::BODY, theme::TEXT).fixed_size(true, false),
-        label::<12>(&distance, &font::MEDIUM, theme::SMALL, theme::TEXT_TERTIARY),
+        label::<32>(
+            name,
+            &font::BOLD,
+            theme::BODY,
+            if clear { theme::RED } else { theme::TEXT },
+        )
+        .fixed_size(true, false),
+        label::<16>(&distance, &font::MEDIUM, theme::SMALL, theme::TEXT_TERTIARY),
         Spacer::default(),
     ))
     .with_spacing(6)

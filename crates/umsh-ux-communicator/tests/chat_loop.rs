@@ -8,7 +8,9 @@ use buoyant::view::ViewLayout;
 use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
-use umsh_ux_communicator::model::{ChatKind, Delivery, Direction, Reaction, Section, State};
+use umsh_ux_communicator::model::{
+    ChannelAccess, ChatKind, Delivery, Direction, Reaction, Section, State,
+};
 use umsh_ux_communicator::nav::{Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
 
@@ -848,7 +850,12 @@ fn an_invitation_offers_joining_first_and_join_opens_the_channel() {
     assert_in_conversation(app.state(), chat);
     let summary = app.state().chat(chat).expect("joined");
     assert_eq!(summary.name.as_str(), "Base Camp");
-    assert_eq!(summary.kind, ChatKind::Channel { open: false });
+    assert_eq!(
+        summary.kind,
+        ChatKind::Channel {
+            access: ChannelAccess::Private
+        }
+    );
     assert_eq!(app.state().chats.first().map(|c| c.id), Some(chat));
 
     // Joining again opens the same channel.
@@ -875,5 +882,34 @@ fn a_channel_joined_can_be_called_something_else_here() {
     assert_eq!(
         app.state().chat(chat).map(|c| c.name.as_str()),
         Some("Base Hut")
+    );
+}
+
+const EMERGENCY: u32 = 6;
+
+#[test]
+fn emergency_is_open_and_its_sends_end_at_sent() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(5), Input::Press]);
+    assert_in_conversation(app.state(), EMERGENCY);
+    let kind = app
+        .state()
+        .chat(EMERGENCY)
+        .expect("joined from the start")
+        .kind;
+    assert_eq!(
+        kind,
+        ChatKind::Channel {
+            access: ChannelAccess::Clear
+        }
+    );
+    assert!(kind.is_open());
+    run(&mut app, &[Input::Enter]);
+    run(&mut app, &typed("Heading down"));
+    run(&mut app, &[Input::Enter]);
+    let conversation = app.state().conversation.as_ref().expect("a chat is open");
+    assert_eq!(
+        conversation.messages.last().map(|m| m.delivery),
+        Some(Delivery::Sent)
     );
 }

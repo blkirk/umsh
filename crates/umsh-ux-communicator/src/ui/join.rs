@@ -25,7 +25,7 @@ const INSET: u32 = 12;
 const RADIUS: u16 = 8;
 
 pub fn view(invite: &Invite, name: &JoinName) -> impl View<Rgb565, State> + use<> {
-    let (kind, warning) = if invite.open {
+    let (kind, warning) = if invite.access.is_open() {
         ("Public channel", "Anyone who knows the name can read it.")
     } else {
         (

@@ -102,17 +102,37 @@ impl ChatSummary {
 pub enum ChatKind {
     /// One peer, and how far away it is when that is known.
     Peer { hops: Option<u8> },
-    /// Everyone holding the channel's key. An `open` channel's key is
-    /// derived from its name, or it is EMERGENCY, which is sent in the clear:
-    /// anyone can read it.
-    Channel { open: bool },
+    /// Everyone holding the channel's key.
+    Channel { access: ChannelAccess },
+}
+
+/// Who can read a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelAccess {
+    /// Those its key was given to.
+    Private,
+    /// Anyone who knows its name, which its key is derived from.
+    Named,
+    /// Anyone within earshot: EMERGENCY is sent unencrypted.
+    Clear,
+}
+
+impl ChannelAccess {
+    /// Whether anyone, not only those given its key, can read it.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        !matches!(self, Self::Private)
+    }
 }
 
 impl ChatKind {
     /// Whether anyone within earshot can read what is written in the chat.
     #[must_use]
     pub const fn is_open(self) -> bool {
-        matches!(self, Self::Channel { open: true })
+        match self {
+            Self::Channel { access } => access.is_open(),
+            Self::Peer { .. } => false,
+        }
     }
 }
 
@@ -226,8 +246,9 @@ pub struct Invite {
     pub name: SharedText,
     pub builtin: Option<BuiltinChannel>,
     pub tint: [u8; 3],
-    /// The channel's key is derived from its name: anyone can read it.
-    pub open: bool,
+    /// Who can read it: those given the invitation, or anyone who knows
+    /// the name.
+    pub access: ChannelAccess,
 }
 
 impl Invite {

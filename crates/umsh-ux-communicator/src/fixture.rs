@@ -5,9 +5,9 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite, MESSAGE_LEN,
-    Member, Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
-    push_newest,
+    ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite,
+    MESSAGE_LEN, Member, Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State,
+    StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -38,11 +38,23 @@ fn member_traits(name: &str) -> ([u8; 3], &'static str, PeerShape, Option<&'stat
             PeerShape::Circle,
             Some("j3DCtP9oDcDsv6D8njFcSGvuiLjrAbbY2fru5HBh9gBk"),
         ),
-        "Kit" => (
+        "Kit" | "Kit Moreno" => (
             [187, 150, 80],
             "iMyA",
             PeerShape::Circle,
             Some("iMyAmdi5uCtG278cpgWezD7WJ2nkTBYa8B92BXfWwRYR"),
+        ),
+        "Lee Park" => (
+            [120, 140, 92],
+            "R9f2",
+            PeerShape::Circle,
+            Some("R9f2wQe8LxV3nTGk5ZbYcJhAs7mPdU1oKrN4tFiHvXyE"),
+        ),
+        "Ranger Station" => (
+            [104, 44, 156],
+            "aExj",
+            PeerShape::Circle,
+            Some("aExjT6pRw2KsL9mQvBzN3cYhG8dUoF5iAeZ1tXkPnWr7"),
         ),
         _ => ([245, 212, 31], "4Fz*", PeerShape::Hexagon, None),
     }
@@ -79,9 +91,10 @@ fn member_card(name: &str, identified: bool) -> Member {
     }
 }
 
-/// Whether `chat` is one of the fixture's channels, Trail Crew or public.
+/// Whether `chat` is one of the fixture's channels: Trail Crew, public, or
+/// EMERGENCY.
 fn is_channel(chat: ChatId) -> bool {
-    matches!(chat, 2 | 4)
+    matches!(chat, 2 | 4 | 6)
 }
 
 struct Chat {
@@ -126,6 +139,11 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
             (From::Me, "Bring the spare antenna?"),
         ],
         4 => &[(From::Member("Kit"), "Anyone near Mill Creek?")],
+        6 => &[
+            (From::Member("Kit Moreno"), "Heard a slide near mile 3?"),
+            (From::Member("Lee Park"), "Rockslide on FS 42 at mile 3"),
+            (From::Member("Ranger Station"), "Copy. Crew on the way."),
+        ],
         5 => &[
             (From::Me, "Which channel is base camp on?"),
             (From::Peer, "This one:"),
@@ -153,7 +171,7 @@ fn invite(heap: TextHeap, chat: ChatId, index: usize) -> Option<Invite> {
         name: SharedText::new(heap, "Base Camp")?,
         builtin: None,
         tint: [46, 125, 196],
-        open: false,
+        access: ChannelAccess::Private,
     })
 }
 
@@ -464,7 +482,9 @@ impl History for Store {
             name,
             self.heap,
         );
-        summary.kind = ChatKind::Channel { open: invite.open };
+        summary.kind = ChatKind::Channel {
+            access: invite.access,
+        };
         Some(summary)
     }
 
@@ -534,7 +554,9 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(None, "Trail Crew", [203, 24, 112]),
             name: "Trail Crew",
             age: "9m",
-            kind: ChatKind::Channel { open: false },
+            kind: ChatKind::Channel {
+                access: ChannelAccess::Private,
+            },
             unread: true,
             muted: false,
             draft: "",
@@ -552,7 +574,9 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::channel(Some(BuiltinChannel::Public), "public", [0, 0, 0]),
             name: "public",
             age: "1h",
-            kind: ChatKind::Channel { open: true },
+            kind: ChatKind::Channel {
+                access: ChannelAccess::Named,
+            },
             unread: false,
             muted: true,
             draft: "",
@@ -562,6 +586,17 @@ pub fn state(store: &'static Store) -> State {
             name: "Jo Reyes",
             age: "3h",
             kind: ChatKind::Peer { hops: Some(3) },
+            unread: false,
+            muted: false,
+            draft: "",
+        },
+        Chat {
+            avatar: AvatarStyle::channel(Some(BuiltinChannel::Emergency), "EMERGENCY", [0, 0, 0]),
+            name: "EMERGENCY",
+            age: "5h",
+            kind: ChatKind::Channel {
+                access: ChannelAccess::Clear,
+            },
             unread: false,
             muted: false,
             draft: "",
