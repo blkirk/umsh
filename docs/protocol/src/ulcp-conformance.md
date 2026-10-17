@@ -44,10 +44,12 @@ nothing to apply them to and rejects them under the ordinary property
 rules. `CMD_QUEUE_DRAIN`, `CMD_SAVE`, and `CMD_RESTORE` belong to their
 subsystems' capabilities and **MUST** fail with `STATUS_UNIMPLEMENTED`
 when the capability is not advertised, as **MUST**
-[`CMD_REBOOT`](ulcp-core.md#cmd-reboot) without `CAP_REBOOT` and
+[`CMD_REBOOT`](ulcp-core.md#cmd-reboot),
+[`CMD_DFU`](ulcp-core.md#cmd-dfu), and
+[`CMD_FACTORY_RESET`](ulcp-saved-state.md#cmd-factory-reset) without
+`CAP_REBOOT` and
 [`CMD_ANNOUNCE`](ulcp-device.md#cmd-announce) without `CAP_ADVERT`;
-`CMD_CLEAR` and `CMD_FACTORY_RESET`
-are available regardless of capabilities (see
+`CMD_CLEAR` is available regardless of capabilities (see
 [Saved State](ulcp-saved-state.md)).
 
 DFU implementations **MUST** validate the optional mode, require a nonzero

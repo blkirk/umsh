@@ -336,7 +336,9 @@ Because clearing the bonds invalidates the encrypted link the command
 arrived on, a host that issues `CMD_FACTORY_RESET` over a bonded transport
 should also discard its own pairing to the radio.
 
-This command is available regardless of capabilities.
+This command is only available on devices advertising `CAP_REBOOT`, since
+it ends in one. A device without it answers `STATUS_UNIMPLEMENTED`—the
+only response this command ever produces.
 
 ## Properties
 

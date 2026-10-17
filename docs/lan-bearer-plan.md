@@ -432,8 +432,10 @@ missing optional key as false and ignore unknown keys.
 ### P6. ULCP surface (`ulcp-lan-bearer.md`)
 
 `CAP_LAN_BEARER`, tentatively 63, the next free code after
-`CAP_MESHCORE_FORWARDER` (62); recheck before allocating. It requires
-`CAP_REPEATER` (the forwarding engine) and the Wi-Fi capability.
+`CAP_MESHCORE_FORWARDER` (62); recheck before allocating. It requires no
+other capability. Group and state belong to every device with the bearer;
+the switch, the ingress limit, and the counters belong to a device that
+forwards between the LAN and LoRa, one advertising `CAP_REPEATER`.
 Device-domain properties, saved by `CMD_SAVE` and writable by authorized mesh
 administrators. Numbers are tentative, chosen clear of the MeshCore block
 (4976–4978):
@@ -461,10 +463,11 @@ associated, the bearer reports state 2.
 Counters under `CAP_STATS`: received, dropped by the ingress limit, malformed,
 sent to the group, and dropped from the transmit queue.
 
-**Virtual radio.** No new identifiers. It declares the existing host-side
-capabilities (raw stream, host filters, auto-ack, inbound queue, saved state)
-and none of the repeater, Wi-Fi, or hardware ones. What it reports for PHY
-settings is decision D10.
+**Virtual radio.** No new identifiers. It declares `CAP_LAN_BEARER`, whose
+group property chooses the group its PHY uses, and the existing host-side
+capabilities (raw stream, host filters, auto-ack, inbound queue, saved state),
+and none of the identity, repeater, Wi-Fi, or hardware ones. What it reports
+for PHY settings is decision D10.
 
 ### P7. Cross-references in existing text
 
@@ -482,11 +485,15 @@ settings is decision D10.
 - **`dissectors/README.md`:** the UDP heuristic now describes a protocol, not
   a test fixture.
 
-### P8. Phase 2: local ULCP transport (`ulcp-transport.md`)
+### P8. Phase 2: local ULCP transport (`ulcp-core.md`)
 
 HDLC-Lite over a Unix domain socket, whose possession requirement is met by
-filesystem access to the socket. It is general, not iOS-specific, and lands
-with the iOS work because that is its first user.
+filesystem access to the socket. A connection opening is an attach and its
+closing a detach, and a new connection replaces the current one, so a host
+that died without closing never holds the device against its successor. It
+is general, not iOS-specific, and lands with the iOS work because that is
+its first user. It sits beside the other transport bindings in
+[Local Sockets](protocol/src/ulcp-core.md#local-sockets).
 
 ### P9. Point-to-point and the shared port
 

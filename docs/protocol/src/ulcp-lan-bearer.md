@@ -1,19 +1,29 @@
 # LAN Bearer
 
-A device with a [LAN bearer](lan-bearer.md) joins its node to a multicast
-group on the local network. With
-[`PROP_MAC_REPEATER_ENABLED`](ulcp-device.md#prop-mac-repeater-enabled) set,
-its node forwards between that group and its radio, as the
-[forwarding table](lan-bearer.md#the-forwarding-decision) describes; without
-it, the node sends only its own traffic and its host's to the group.
+A device with a [LAN bearer](lan-bearer.md) sends what it transmits to a
+multicast group on the local network and receives what is sent there. It is
+one of two kinds:
+
+- A **forwarding device** has a LoRa radio and a node beside the bearer, and
+  advertises `CAP_REPEATER`. With
+  [`PROP_MAC_REPEATER_ENABLED`](ulcp-device.md#prop-mac-repeater-enabled) set,
+  its node forwards between the group and its radio, as the
+  [forwarding table](lan-bearer.md#the-forwarding-decision) describes;
+  without it, the node sends only its own traffic and its host's to the
+  group.
+- A [**virtual radio**](lan-bearer.md#participants) has no LoRa radio: the
+  group is its PHY, and `PROP_PHY_ENABLED` turns it on and off.
+
 Configuration belongs to the device domain and is independent of the
 attached host. Enabling the bearer does not enable Wi-Fi, change IP
 configuration, or change `PROP_MAC_REPEATER_ENABLED`.
 
 ## Capabilities
 
-`CAP_LAN_BEARER` (63) requires `CAP_DEV_IDENTITY` and `CAP_IPV4`. It requires all
-four properties below, and, with `CAP_STATS`, the five counters.
+`CAP_LAN_BEARER` (63) requires no other capability. It requires
+`PROP_LAN_BEARER_GROUP` and `PROP_LAN_BEARER_STATE`. A forwarding device also
+requires `PROP_LAN_BEARER_ENABLED` and `PROP_LAN_BEARER_INGRESS_LIMIT`, and,
+with `CAP_STATS`, the five counters; a virtual radio has none of these.
 
 ## PROP_LAN_BEARER_ENABLED {#prop-lan-bearer-enabled}
 
@@ -45,15 +55,15 @@ attached host.
 
 Value | Meaning
 ------|--------
-0 | Disabled
+0 | Disabled: the bearer, or a virtual radio's PHY, is off
 1 | Active: joined to the group and carrying frames
 2 | No network: enabled, with no IPv4 network to join the group on
 
-While the state is not Active, the node offers nothing to the bearer.
+While the state is not Active, nothing is sent to the group.
 
 ## Counters
 
-Under `CAP_STATS`, with the semantics of the other
+On a forwarding device under `CAP_STATS`, with the semantics of the other
 [statistics](ulcp-radio.md#statistics): cumulative `UINT32_LE` values, reset
 by writing four zero octets.
 
@@ -67,8 +77,8 @@ Property | Name | Counts
 
 ## Persistence and lifecycle
 
-The three configuration properties are saved by `CMD_SAVE` in the device
-snapshot. A group or ingress limit at its default is saved as the default,
+The configuration properties a device has are saved by `CMD_SAVE` in the
+device snapshot. A group or ingress limit at its default is saved as the default,
 not as its value, so that the device follows the default of whatever firmware
 it later runs. `CMD_CLEAR` erases saved configuration without changing live
 configuration; `CMD_RST` follows the normal saved-state restore rules.
@@ -83,8 +93,9 @@ when the network returns.
 ## Virtual Radios
 
 A [virtual radio](lan-bearer.md#participants) uses no identifiers of its own.
-It declares the host-side capabilities a companion radio does—the raw
-stream, host filters and keys, auto-acknowledgment, the inbound queue, and
-saved state—and none of the repeater, Wi-Fi, or hardware ones, since it has
-no node. Its radio properties describe a LoRa channel it does not itself
+It declares `CAP_LAN_BEARER` and the host-side capabilities a companion radio
+does—the raw stream, host filters and keys, auto-acknowledgment, the inbound
+queue, and saved state—and none of the repeater, Wi-Fi, or hardware ones,
+since it has no node. It needs no device identity: what it sends to the group
+is its host's. Its radio properties describe a LoRa channel it does not itself
 transmit on; their values set the frame time the host's MAC times against.

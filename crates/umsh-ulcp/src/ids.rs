@@ -856,10 +856,11 @@ pub mod cap {
     /// `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`). Requires
     /// [`REPEATER`].
     pub const MESHCORE_FORWARDER: u32 = 62;
-    /// `CAP_LAN_BEARER`: the device's node participates in an IP
-    /// multicast group on its local network (`PROP_LAN_BEARER_ENABLED`,
-    /// `PROP_LAN_BEARER_GROUP`, `PROP_LAN_BEARER_INGRESS_LIMIT`,
-    /// `PROP_LAN_BEARER_STATE`). Requires [`DEV_IDENTITY`] and [`IPV4`].
+    /// `CAP_LAN_BEARER`: the device participates in an IP multicast group
+    /// on its local network (`PROP_LAN_BEARER_GROUP`,
+    /// `PROP_LAN_BEARER_STATE`). A device that also advertises
+    /// [`REPEATER`] forwards between the group and its LoRa radio, and has
+    /// `PROP_LAN_BEARER_ENABLED` and `PROP_LAN_BEARER_INGRESS_LIMIT` too.
     pub const LAN_BEARER: u32 = 63;
 }
 

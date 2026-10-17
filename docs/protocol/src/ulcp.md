@@ -375,6 +375,8 @@ command and property namespace. The same frames run over:
 - UART / USB-CDC serial, using HDLC-Lite framing
 - BLE, using the GATT frame transport of
   [ULCP over BLE](ulcp-ble.md)
+- a [local socket](ulcp-core.md#local-sockets) between processes on one
+  host, using HDLC-Lite framing
 - any other reliable, ordered, flow-controlled local transport
 
 The key structural ideas:
@@ -396,7 +398,8 @@ framing or the version.
 Whatever the transport, ULCP is a privileged interface: an
 attached host commands transmission with arbitrary content, timing, and
 power, and provisioning moves real key material onto the device. On serial
-transports this is protected by physical possession; the BLE binding
+transports this is protected by physical possession, and on a local
+socket by access to the socket; the BLE binding
 specifies an equivalent barrier
 (see [Security](ulcp-ble.md#ble-security)), and key provisioning
 must never be carried over a transport that provides less.

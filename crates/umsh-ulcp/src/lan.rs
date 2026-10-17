@@ -16,7 +16,7 @@ pub const GROUP_LEN: usize = 6;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum State {
-    /// The bearer is switched off.
+    /// The bearer, or a virtual radio's PHY, is switched off.
     #[default]
     Disabled = 0,
     /// The bearer is joined to its group and carrying frames.

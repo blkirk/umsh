@@ -19,6 +19,8 @@ flow control. The framing mechanism depends on the underlying transport:
   [ULCP over BLE](ulcp-ble.md).
 * A reliable, in-order byte stream standing in for a serial link—a TCP
   connection to a bridged port, say—uses the same HDLC-Lite framing.
+* A local stream socket between two processes on one host—a Unix domain
+  socket—uses HDLC-Lite as well; see [Local Sockets](#local-sockets).
 
 In this chapter, the **device** is the side that owns the transceiver and
 the **host** is the side that attaches to it over the local link (see
@@ -187,7 +189,8 @@ Id | Mnemonic             | Dir          | Description
 27 | `CMD_I2C_SCAN`       | Host->Device | Probe a range of I2C addresses
 
 The multi-property commands (21–23) are gated by `CAP_CMD_MULTI`,
-`CMD_REBOOT` by `CAP_REBOOT`, `CMD_ANNOUNCE` by `CAP_ADVERT`, and the
+`CMD_REBOOT`, `CMD_DFU`, and `CMD_FACTORY_RESET` by `CAP_REBOOT`,
+`CMD_ANNOUNCE` by `CAP_ADVERT`, and the
 bus-access commands (25–27) by `CAP_I2C` (see
 [Capabilities](#capabilities)); everything else is unconditional.
 
@@ -457,8 +460,10 @@ Value | Method
 An empty payload selects Default. The default is fixed by the platform,
 independent of the command's transport. XIAO nRF52 and SenseCAP Solar use
 BLE; T-Echo, T1000-E, and Wio Tracker L1 use UF2.
-Other mode values are undefined. There is no capability or discovery
-property for this command; the device decides whether its supported
+Other mode values are undefined. Entering the bootloader is a restart into
+it, so this command is only available on devices advertising `CAP_REBOOT`;
+a device without it answers `STATUS_UNIMPLEMENTED`. There is no discovery
+property for the methods; the device decides whether its supported
 bootloader can enter the requested mode.
 
 The device answers with `CMD_PROP_IS(PROP_LAST_STATUS)`:
@@ -1014,6 +1019,7 @@ How attach and detach are detected is defined by the transport binding:
 * **USB-CDC**—assertion and deassertion of DTR on the ULCP
   interface.
 * **TCP**—establishment and closure of the connection.
+* **Local socket**—establishment and closure of the connection.
 * **Bare UART**—implementation-defined. A device with no way to detect
   host presence MAY treat the host as permanently attached, in which case
   it never enters detached operation and offline assistance
@@ -1072,6 +1078,23 @@ current device- and host-domain state, and begins detached operation:
 accepted frames are queued rather than delivered, and acknowledgement
 delegation (if enabled) becomes active.
 
+### Local Sockets {#local-sockets}
+
+A device that runs as a process—a virtual radio hosted beside the
+application that attaches to it—may serve ULCP on a local stream socket,
+such as a Unix domain socket:
+
+* **Framing:** HDLC-Lite, as on a serial link.
+* **Attach and detach:** a connection opening is an attach, and its
+  closing is a detach.
+* **One host at a time:** a new connection replaces the current one,
+  which the device closes first. A host that went away without closing
+  never holds the device against its successor.
+* **Security binding:** access to the socket. The device **MUST** place
+  the socket where the operating system lets only the processes entitled
+  to the device reach it—a file in a directory private to those
+  processes—which stands in for physical possession.
+
 ## Provisioning Security {#provisioning-security}
 
 Provisioning moves real key material onto the device, within the limits of the
@@ -1096,6 +1119,7 @@ but never the host's private key. The rules:
   for the key tables, and any set of `PROP_DEV_PRIVATE_KEY`—**MUST NOT**
   be carried over a transport that does not meet the requirements of the
   transport's security binding: physical possession for serial transports,
+  access to the socket for a [local socket](#local-sockets),
   or an encrypted bonded LESC link as specified in
   [ULCP over BLE](ulcp-ble.md#ble-security).
 * A compromised or stolen device exposes the provisioned channels, the
@@ -1364,12 +1388,13 @@ Code | Name                      | Requires                             | Define
 60   | `CAP_I2C`                 | —                                    | [I2C Bus Access](ulcp-i2c.md#capabilities)
 61   | `CAP_TEMPERATURE` | — | [Device Domain](ulcp-device.md#capabilities)
 62   | `CAP_MESHCORE_FORWARDER`  | `CAP_REPEATER`                       | [Device Domain](ulcp-device.md#capabilities)
-63   | `CAP_LAN_BEARER`          | `CAP_DEV_IDENTITY`, `CAP_IPV4`       | [LAN Bearer](ulcp-lan-bearer.md#capabilities)
+63   | `CAP_LAN_BEARER`          | —                                    | [LAN Bearer](ulcp-lan-bearer.md#capabilities)
 515  | `CAP_PHY_LORA`            | —                                    | [Radio Control](ulcp-radio.md#capabilities)
 
 A device **MUST NOT** advertise a capability without also advertising the
 capabilities it requires. Apart from the multi-property commands, which
-`CAP_CMD_MULTI` gates, `CMD_REBOOT`, which `CAP_REBOOT` gates,
+`CAP_CMD_MULTI` gates, `CMD_REBOOT`, `CMD_DFU`, and
+`CMD_FACTORY_RESET`, which `CAP_REBOOT` gates,
 `CMD_ANNOUNCE`, which `CAP_ADVERT` gates, and the bus-access commands,
 which `CAP_I2C` gates, the
 commands and status codes defined in this chapter are unconditional and

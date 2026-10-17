@@ -21,9 +21,9 @@ Id | Mnemonic                                                     | Dir         
 12 | [`CMD_SAVE`](ulcp-saved-state.md#cmd-save)                   | Host->Device | `CAP_SAVE`
 13 | [`CMD_CLEAR`](ulcp-saved-state.md#cmd-clear)                 | Host->Device | —
 14 | [`CMD_RESTORE`](ulcp-saved-state.md#cmd-restore)             | Host->Device | `CAP_SAVE`
-15 | [`CMD_FACTORY_RESET`](ulcp-saved-state.md#cmd-factory-reset) | Host->Device | —
+15 | [`CMD_FACTORY_RESET`](ulcp-saved-state.md#cmd-factory-reset) | Host->Device | `CAP_REBOOT`
 16 | [`CMD_REBOOT`](ulcp-core.md#cmd-reboot)                      | Host->Device | `CAP_REBOOT`
-17 | [`CMD_DFU`](ulcp-core.md#cmd-dfu)                            | Host->Device | —
+17 | [`CMD_DFU`](ulcp-core.md#cmd-dfu)                            | Host->Device | `CAP_REBOOT`
 19 | [`CMD_ANNOUNCE`](ulcp-device.md#cmd-announce)                | Host->Device | `CAP_ADVERT`
 21 | [`CMD_PROP_MULTI_GET`](ulcp-core.md#cmd-prop-multi-get)      | Host->Device | `CAP_CMD_MULTI`
 22 | [`CMD_PROP_MULTI_SET`](ulcp-core.md#cmd-prop-multi-set)      | Host->Device | `CAP_CMD_MULTI`
@@ -117,11 +117,11 @@ Id   | Mnemonic                                                                 
 4842 | [`PROP_STAT_MESHCORE_FORWARDED_ROUTED`](ulcp-radio.md#prop-stat-meshcore-forwarded-routed) | Get, Set              | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
 4843 | [`PROP_STAT_MESHCORE_FORWARDED_FLOOD`](ulcp-radio.md#prop-stat-meshcore-forwarded-flood) | Get, Set                | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
 4844 | [`PROP_STAT_MESHCORE_DECLINED`](ulcp-radio.md#prop-stat-meshcore-declined)            | Get, Set                   | `CAP_STATS`, `CAP_MESHCORE_FORWARDER`
-4845 | [`PROP_STAT_LAN_RX`](ulcp-lan-bearer.md#counters)                                     | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`
-4846 | [`PROP_STAT_LAN_RX_LIMITED`](ulcp-lan-bearer.md#counters)                             | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`
-4847 | [`PROP_STAT_LAN_RX_MALFORMED`](ulcp-lan-bearer.md#counters)                           | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`
-4848 | [`PROP_STAT_LAN_EXPORTED`](ulcp-lan-bearer.md#counters)                               | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`
-4849 | [`PROP_STAT_LAN_EXPORT_DROPPED`](ulcp-lan-bearer.md#counters)                         | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`
+4845 | [`PROP_STAT_LAN_RX`](ulcp-lan-bearer.md#counters)                                     | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`, `CAP_REPEATER`
+4846 | [`PROP_STAT_LAN_RX_LIMITED`](ulcp-lan-bearer.md#counters)                             | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`, `CAP_REPEATER`
+4847 | [`PROP_STAT_LAN_RX_MALFORMED`](ulcp-lan-bearer.md#counters)                           | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`, `CAP_REPEATER`
+4848 | [`PROP_STAT_LAN_EXPORTED`](ulcp-lan-bearer.md#counters)                               | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`, `CAP_REPEATER`
+4849 | [`PROP_STAT_LAN_EXPORT_DROPPED`](ulcp-lan-bearer.md#counters)                         | Get, Set                   | `CAP_STATS`, `CAP_LAN_BEARER`, `CAP_REPEATER`
 4864 | [`PROP_BLE_PAIRING_PIN`](ulcp-ble.md#prop-ble-pairing-pin)                            | Set                        | BLE transport
 4865 | [`PROP_DEV_ADMINS`](app-node-management.md#prop-dev-admins)                           | Get, Set, Insert, Remove   | `CAP_ADMIN`
 4866 | [`PROP_TIME`](ulcp-device.md#prop-time)                                               | Get, Set, Is               | `CAP_TIME`
@@ -180,9 +180,9 @@ Id   | Mnemonic                                                                 
 4976 | [`PROP_MESHCORE_FORWARDING_ENABLED`](ulcp-device.md#prop-meshcore-forwarding-enabled) | Get, Set | `CAP_MESHCORE_FORWARDER`
 4977 | [`PROP_MESHCORE_REGION_POLICY`](ulcp-device.md#prop-meshcore-region-policy) | Get, Set | `CAP_MESHCORE_FORWARDER`
 4978 | [`PROP_MESHCORE_REGIONS`](ulcp-device.md#prop-meshcore-regions) | Get, Set, Insert, Remove | `CAP_MESHCORE_FORWARDER`
-4992 | [`PROP_LAN_BEARER_ENABLED`](ulcp-lan-bearer.md#prop-lan-bearer-enabled) | Get, Set | `CAP_LAN_BEARER`
+4992 | [`PROP_LAN_BEARER_ENABLED`](ulcp-lan-bearer.md#prop-lan-bearer-enabled) | Get, Set | `CAP_LAN_BEARER`, `CAP_REPEATER`
 4993 | [`PROP_LAN_BEARER_GROUP`](ulcp-lan-bearer.md#prop-lan-bearer-group) | Get, Set | `CAP_LAN_BEARER`
-4994 | [`PROP_LAN_BEARER_INGRESS_LIMIT`](ulcp-lan-bearer.md#prop-lan-bearer-ingress-limit) | Get, Set | `CAP_LAN_BEARER`
+4994 | [`PROP_LAN_BEARER_INGRESS_LIMIT`](ulcp-lan-bearer.md#prop-lan-bearer-ingress-limit) | Get, Set | `CAP_LAN_BEARER`, `CAP_REPEATER`
 4995 | [`PROP_LAN_BEARER_STATE`](ulcp-lan-bearer.md#prop-lan-bearer-state) | Get, Is | `CAP_LAN_BEARER`
 
 ## Capabilities
