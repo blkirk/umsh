@@ -70,7 +70,7 @@ Flooding works across bridges, and the two hops a crossing spends are what keep 
 > them: the flood hop count is bounded by the two hops a crossing spends, and deployments SHOULD
 > rate-limit each participant and MAY clamp the hop count further.
 
-A client–server tunnel realization of an internet bridge is specified in [Internet Bridging](internet-bridging.md). Repeaters sharing a local network bridge over it as described in [LAN Bearer](lan-bearer.md).
+A client–server tunnel realization of an internet bridge is specified in [Internet Bridging](internet-bridging.md). A node with a LoRa radio and its repeater enabled that joins an [IP multicast group](ip-multicast.md) is a bridge between the group and its LoRa channel.
 
 ## Forwarding Confirmation and Recovery
 

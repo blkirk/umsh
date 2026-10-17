@@ -81,7 +81,7 @@ over BLE, the UDP-multicast fake radio the workspace examples use, or—for a
 server that only joins clients together—no radio at all.
 
 Beside the radio, or instead of it, a participant can join a
-[LAN bearer](https://darconeous.github.io/umsh/docs/protocol/lan-bearer.html)
+[UMSH IP multicast](https://darconeous.github.io/umsh/docs/protocol/ip-multicast.html)
 group, so the radios, desktops, and phones on its local network cross the bridge
 too. A server's LAN is one more interface; a client with a radio and a LAN copies
 each frame from any of its radio, its LAN, and the tunnel to the other two. No
@@ -321,7 +321,7 @@ Selected by `type`; each type accepts only its own keys.
 
 ### `[server.lan]` / `[client.lan]`
 
-Membership in a LAN bearer group. Absent means no LAN.
+Membership in an IP multicast group. Absent means no LAN.
 
 | Key | Default | Description |
 | --- | --- | --- |

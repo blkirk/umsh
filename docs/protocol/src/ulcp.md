@@ -23,7 +23,7 @@ side. The protocol itself is specified in the chapters that follow:
   [Saved State](ulcp-saved-state.md),
   [Tethered Host Services](ulcp-host.md), [Wi-Fi](ulcp-wifi.md),
   [IP Connectivity](ulcp-ip.md), [Bridge Client](ulcp-bridge.md),
-  [LAN Bearer](ulcp-lan-bearer.md), and [I2C Bus Access](ulcp-i2c.md)
+  [IP Multicast](ulcp-ip-multicast.md), and [I2C Bus Access](ulcp-i2c.md)
 - [Minimum Requirements](ulcp-conformance.md) states what a device has to
   implement to be a ULCP device, and the
   [Command and Property Index](ulcp-index.md) locates every numeric
@@ -323,9 +323,9 @@ The device's own node connected to an [internet bridge](internet-bridging.md)
 over IP: where to connect, which server key to trust, whether the client
 is enabled, and what state the connection is in.
 
-### [LAN Bearer](ulcp-lan-bearer.md)
+### [IP Multicast](ulcp-ip-multicast.md)
 
-The device's own node joined to a [LAN bearer](lan-bearer.md): whether
+The device's own node joined to an [IP multicast group](ip-multicast.md): whether
 it is enabled, which multicast group it joins, how many frames from the
 network it takes, and whether it has joined.
 

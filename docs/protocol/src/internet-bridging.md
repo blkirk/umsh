@@ -277,8 +277,9 @@ and the `umsh-bridge/1` ALPN offer. Its eight-frame queues discard the oldest
 frame under pressure and expire queued frames after ten seconds. A connection
 boundary discards both queues and the partial HDLC decoder state.
 
-A device may run an integrated client and a [LAN bearer](lan-bearer.md)
-together. Both receive every frame the radio transmits, and both hand their
+A device may run an integrated client and be in an
+[IP multicast group](ip-multicast.md) at once. Both receive every frame the
+radio transmits, and both hand their
 frames to the node as receptions, so the node's repeater is the one
 forwarding decision between them: a frame from either crosses to the other by
 being repeated on the radio. With its repeater disabled the node carries
@@ -334,16 +335,16 @@ authority the device offers.
 
 ## LAN Interfaces {#lan-interfaces}
 
-A participant **MAY** join a [LAN bearer](lan-bearer.md) group as an
-interface: the server beside its radio and its clients, a client beside
+A participant **MAY** join an [IP multicast group](ip-multicast.md) as
+an interface: the server beside its radio and its clients, a client beside
 or instead of its radio. Each datagram from the group is a frame arriving
 on that interface, carrying no measurements, and each frame sent to the
 interface is one datagram.
 
 No repeater stands between the group and the bridge. A frame from the
-group comes either from a bridging radio, whose node has already forwarded
-it, or from an endpoint, whose frame no repeater has seen; a crossing from
-an endpoint spends one flood hop, as for a host interface. Nothing on the
+group comes either from a bridge, whose node has already forwarded it, or
+from another node, whose frame no repeater has seen; a crossing from such a
+node spends one flood hop, as for a host interface. Nothing on the
 bridge's side stops a frame circulating between two participants on one
 LAN, or between a participant and its own multicast echo, so a participant
 **MUST** carry a frame across a LAN interface at most once, in either

@@ -471,5 +471,5 @@ party.
   own access point is not one of these interfaces; see
   [`PROP_WIFI_AP_CONFIG`](ulcp-wifi.md#prop-wifi-ap-config).
 * **mDNS.** A service the device offers rather than a property of its
-  stack. A device running a [LAN bearer](lan-bearer.md#discovery)
+  stack. A device in an [IP multicast group](ip-multicast.md#discovery)
   advertises over it.

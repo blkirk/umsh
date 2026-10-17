@@ -20,6 +20,7 @@
 - [Channel Access](channel-access.md)
 - [Repeater Operation](repeater-operation.md)
 - [Beacons & Path Discovery](beacons.md)
+- [UMSH over IP Multicast](ip-multicast.md)
 
 # Application Layer
 
@@ -43,7 +44,7 @@
   - [Wi-Fi](ulcp-wifi.md)
   - [IP Connectivity](ulcp-ip.md)
   - [Bridge Client](ulcp-bridge.md)
-  - [LAN Bearer](ulcp-lan-bearer.md)
+  - [IP Multicast](ulcp-ip-multicast.md)
   - [I2C Bus Access](ulcp-i2c.md)
   - [Minimum Requirements](ulcp-conformance.md)
   - [Command and Property Index](ulcp-index.md)
@@ -52,7 +53,6 @@
   - [Superseded: Full Protocol](ulcp-full.md)
 - [Identity Export Format](identity-export.md)
 - [Internet Bridging](internet-bridging.md)
-- [LAN Bearer](lan-bearer.md)
 - [Security Considerations](security-considerations.md)
 - [Amateur Radio Operation](amateur-radio.md)
 - [Limitations & Open Items](limitations.md)

@@ -81,7 +81,7 @@ After computing the delay, the repeater waits. Other packets SHOULD continue to 
 
 If the repeater overhears the same packet forwarded by another node (identified by MIC in the duplicate cache) before the delay expires, it SHOULD defer rather than transmit. A safe default is to recalculate a new delay using the same `W_min`/`W_max` limits—including `D_ack` when it applies, since the overheard copy may itself elicit an immediate ACK from the destination—and restart the waiting period. The first two overheard copies each defer the pending forward this way; on overhearing a third copy, the repeater SHOULD abandon the pending forward.
 
-Only a copy received over the radio defers. A packet received from a [bearer](lan-bearer.md#channel-access), heard by every radio on that bearer at once, contends with a window drawn uniformly from `[W_min, W_max]`.
+Only a copy received over the radio defers. A packet received from an [IP multicast group](ip-multicast.md#channel-access), heard by every bridge in the group at once, contends with a window drawn uniformly from `[W_min, W_max]`.
 
 If the repeater instead overhears a MAC ack whose `ack_mic` matches the pending packet's MIC prefix, it SHOULD [cancel the pending forward outright](repeater-operation.md#ack-cancellation) rather than defer: the destination provably has the packet.
 

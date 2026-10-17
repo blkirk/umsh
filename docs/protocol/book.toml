@@ -8,3 +8,7 @@ src = "src"
 site-url = "/docs/protocol/"
 default-theme = "light"
 preferred-dark-theme = "ayu"
+
+[output.html.redirect]
+"/lan-bearer.html" = "ip-multicast.html"
+"/ulcp-lan-bearer.html" = "ulcp-ip-multicast.html"

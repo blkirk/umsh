@@ -1112,10 +1112,10 @@ does not produce excessive ULCP traffic.
 The first of the device-behavior settings (property identifiers 70–95).
 When true, the **device identity** acts as an
 autonomous mesh repeater: its on-board node forwards the routable UMSH
-frames it receives—off the air, from a [LAN bearer](lan-bearer.md), or over
+frames it receives—off the air, from an [IP multicast group](ip-multicast.md), or over
 [backhaul](#prop-mac-backhaul)—according to [Repeater
-Operation](repeater-operation.md) and [Forwarding Across
-Bearers](lan-bearer.md#forwarding-across-bearers), and it sets the repeater
+Operation](repeater-operation.md) and [Nodes With a LoRa
+Radio](ip-multicast.md#nodes-with-a-lora-radio), and it sets the repeater
 capability bit in its [node identity](node-identity.md). When false, the
 device identity forwards nothing on any medium—it sends only its own traffic
 and its attached host's—and the bit is clear.

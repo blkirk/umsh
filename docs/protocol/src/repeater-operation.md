@@ -124,7 +124,7 @@ A packet that arrives carrying an **empty** source-route option matched no hint 
 
 A [bridge](internet-bridging.md) rewrites nothing of its own: a repeater at each end of it forwards the packet by this procedure, so a crossing applies these rules twice.
 
-A node with [bearers](lan-bearer.md#forwarding-across-bearers) beside its radio applies this procedure once per packet, and offers the one rewritten packet to each egress its forwarding table allows.
+A bridge in an [IP multicast group](ip-multicast.md#nodes-with-a-lora-radio) applies this procedure once to a packet received from the group, as to one heard on its radio.
 
 ## Forwarding Confirmation
 
@@ -147,7 +147,7 @@ confirm_timeout = 2 × T_frame + W_max + 2 × W_jitter + D_ack
 
 where `W_max + 2 × W_jitter` bounds the intentional forwarding delay permitted for the path, including the wait of a repeater that heard the packet below the contention band, and `D_ack` is the [ACK protection interval](channel-access.md#ack-protection-interval) when it applies. With the suggested defaults `W_max = T_frame/2`, `W_jitter = T_frame/10`, and `D_ack = 0.25 × T_frame`, this yields `confirm_timeout = 2.95 × T_frame`.
 
-If the packet is heard before `confirm_timeout` expires, forwarding is confirmed. A copy received from a [bearer](lan-bearer.md#channel-access) does not confirm.
+If the packet is heard before `confirm_timeout` expires, forwarding is confirmed. A copy received from an [IP multicast group](ip-multicast.md#channel-access) confirms as one heard on the air does.
 
 If `confirm_timeout` expires without a retransmission, the node SHOULD schedule a retry after a jittered delay:
 

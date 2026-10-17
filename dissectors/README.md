@@ -50,9 +50,9 @@ SNR the radio reported, so the reception metadata survives into the capture.
 > prompt. Name a serial port in the capture options to sidestep it, or run
 > `tshark -i umsh` from a terminal.
 
-## Capturing the LAN Bearer
+## Capturing UMSH over IP Multicast
 
-The [LAN bearer](../docs/protocol/src/lan-bearer.md) carries one raw UMSH
+[UMSH over IP multicast](../docs/protocol/src/ip-multicast.md) carries one raw UMSH
 frame per UDP datagram, with no additional framing, to an IPv4 multicast group
 (by default `239.255.134.121:15056`).
 
