@@ -29,7 +29,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         .count();
     let mut joined: String<24> = String::new();
     _ = core::fmt::write(&mut joined, format_args!("{channels} joined"));
-    let category = |name, key, act, value: &str| {
+    let category = |name, key, act: fn(&mut State), value: &str| {
         let end = if value.is_empty() {
             End::Chevron
         } else {
@@ -92,6 +92,7 @@ pub fn page(state: &State, page: &DevicePage) -> impl View<Rgb565, State> + use<
         DevicePage::Share => super::share::view(state),
         DevicePage::Channels => super::channels::view(state),
         DevicePage::AddChannel { text } => super::add_channel::view(state, text),
+        DevicePage::Region => super::region::view(state, "Region"),
     })
 }
 
@@ -110,7 +111,7 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
                 row(
                     "Region",
                     keys::REGION,
-                    |_| {},
+                    State::open_regions,
                     End::value_chevron(&settings.region),
                     false,
                     ROW,

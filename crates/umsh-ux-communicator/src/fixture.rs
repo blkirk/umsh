@@ -269,6 +269,8 @@ pub struct Store {
     forgotten: RefCell<Vec<PeerId, KEPT>>,
     /// The radio's settings.
     preset: Cell<Preset>,
+    /// Where the radio's region sits in `REGIONS`.
+    region: Cell<usize>,
     forwarding: Cell<bool>,
     share_location: Cell<bool>,
 }
@@ -293,6 +295,7 @@ impl Store {
             pinged: RefCell::new(Vec::new()),
             forgotten: RefCell::new(Vec::new()),
             preset: Cell::new(Preset::LongRange),
+            region: Cell::new(0),
             forwarding: Cell::new(true),
             share_location: Cell::new(false),
         }
@@ -340,6 +343,18 @@ const FIRST_SAVED: PeerId = 0x100;
 /// Where channels joined since are numbered from.
 const FIRST_JOINED: ChatId = 0x200;
 const CHANNEL_INVITATION: &str = "umsh:ck:";
+
+/// The regions the radio can be set for, the mockup's first.
+const REGIONS: [&str; 8] = [
+    "United States",
+    "Canada",
+    "European Union",
+    "United Kingdom",
+    "Australia",
+    "New Zealand",
+    "Japan",
+    "India",
+];
 
 /// This node's address, as the mockup's Share screen shows it.
 const ADDRESS: &str = "Geb9QfXhe5f1vXHcFDnXbvcXShxAFhAxaRp1jr5Bqe3L";
@@ -696,9 +711,28 @@ impl Node for Store {
         }
     }
 
+    fn avatar(&self) -> AvatarStyle {
+        AvatarStyle::peer([150, 156, 166], &ADDRESS[..4], PeerShape::Circle)
+    }
+
+    fn set_name(&self, _name: &str) {
+        // Kept by the interface's status strip; there is nothing else to
+        // keep it in.
+    }
+
+    fn regions(&self) -> &[&'static str] {
+        &REGIONS
+    }
+
+    fn set_region(&self, index: usize) {
+        if index < REGIONS.len() {
+            self.region.set(index);
+        }
+    }
+
     fn radio(&self) -> RadioSettings {
         RadioSettings {
-            region: String::try_from("United States").expect("fixture text fits"),
+            region: s(REGIONS[self.region.get()]),
             preset: self.preset.get(),
             forwarding: self.forwarding.get(),
             share_location: self.share_location.get(),

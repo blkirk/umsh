@@ -48,14 +48,14 @@ impl End {
 // toolchain's Xtensa back end fail with `Cannot select:
 // XtensaISD::PCREL_WRAPPER TargetConstantPool` (rustc 1.95.0-nightly esp).
 #[inline(never)]
-pub(super) fn row(
+pub(super) fn row<A: Fn(&mut State)>(
     name: &'static str,
     key: FocusKey,
-    act: fn(&mut State),
+    act: A,
     end: End,
     danger: bool,
     height: u32,
-) -> impl View<Rgb565, State> + use<> {
+) -> impl View<Rgb565, State> + use<A> {
     let (value, chevron, switch) = match end {
         End::Nothing => (None, false, None),
         End::Chevron => (None, true, None),

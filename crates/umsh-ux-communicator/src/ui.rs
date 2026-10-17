@@ -29,7 +29,9 @@ mod member;
 mod peer;
 mod peers;
 mod rail;
+mod region;
 mod setting;
+mod setup;
 mod share;
 mod status;
 mod wake;
@@ -63,7 +65,7 @@ where
 #[must_use]
 pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
-        status::view(&state.status),
+        status::view(&state.status, state.in_setup()),
         match_view!(state.screen(), {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
@@ -87,6 +89,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
                 .peer(*peer)
                 .map(|summary| peer::view(summary, detail, *confirm)),
             Screen::Device { page, .. } => device::page(state, page),
+            Screen::Setup { page, .. } => setup::view(state, page),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),

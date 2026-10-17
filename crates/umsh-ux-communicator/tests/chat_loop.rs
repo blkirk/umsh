@@ -1259,3 +1259,39 @@ fn low_battery_while_dark_marks_only_the_strip() {
     assert!(app.state().status.battery_low);
     assert_eq!(app.state().banner, None);
 }
+
+#[test]
+fn first_run_takes_a_name_then_a_region_and_ends_on_the_chats() {
+    let mut app = app!();
+    app.state_mut().start_setup();
+    app.finalize_view();
+    assert!(app.state().in_setup());
+    assert_eq!(focus(app.state()), Some(keys::NAME_FIELD));
+    // Backspace has nothing to go back to.
+    run(&mut app, &[Input::Backspace]);
+    assert!(app.state().in_setup());
+    run(&mut app, &typed("Wren"));
+    run(&mut app, &[Input::Enter]);
+    assert_eq!(app.state().status.device_name.as_str(), "Wren");
+    assert_eq!(focus(app.state()), Some(keys::region(0)));
+    // Back to the name, and on again.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::NAME_FIELD));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::region(0)));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert!(!app.state().in_setup());
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(app.state().node.radio().region.as_str(), "Canada");
+}
+
+#[test]
+fn the_region_is_chosen_from_radio_too() {
+    let mut app = app!();
+    open_radio(&mut app);
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::region(0)));
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    assert_eq!(radio(app.state()).0.region.as_str(), "European Union");
+    assert_eq!(focus(app.state()), Some(keys::REGION));
+}

@@ -20,6 +20,8 @@ pub type JoinName = EditBuffer<String<32>>;
 pub type PeerText = EditBuffer<String<64>>;
 /// A channel's name or invitation, as it is typed into Add channel.
 pub type ChannelText = EditBuffer<String<96>>;
+/// This node's name, as it is typed on first run.
+pub type NameText = EditBuffer<String<24>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -35,6 +37,7 @@ pub mod keys {
     const DEVICE: u32 = 0x0D00_0000;
     const PRESET: u32 = 0x0E00_0010;
     const SHARE: u32 = 0x0F00_0000;
+    const REGION_ROW: u32 = 0x1300_0000;
     /// Set in a share key that names a channel.
     const SHARE_CHANNEL: u32 = 0x0080_0000;
 
@@ -71,6 +74,9 @@ pub mod keys {
     /// Add channel's field, and its Join.
     pub const CHANNEL_FIELD: FocusKey = FocusKey(0x1100_0000);
     pub const JOIN_ENTRY: FocusKey = FocusKey(0x1100_0001);
+    /// First run's name field and Continue.
+    pub const NAME_FIELD: FocusKey = FocusKey(0x1200_0000);
+    pub const CONTINUE: FocusKey = FocusKey(0x1200_0001);
     /// Add peer's field, and its Message.
     pub const PEER_FIELD: FocusKey = FocusKey(0x0B00_0000);
     pub const MESSAGE_PEER: FocusKey = FocusKey(0x0B00_0001);
@@ -131,6 +137,12 @@ pub mod keys {
         } else {
             Some(Shareable::Channel(key.0 & (SHARE_CHANNEL - 1)))
         }
+    }
+
+    /// A region in the list of them, by its place there.
+    #[must_use]
+    pub const fn region(index: usize) -> FocusKey {
+        FocusKey(REGION_ROW | (index as u32 & !KIND))
     }
 
     /// Whether `key` names one of the Device list's categories.
@@ -212,6 +224,17 @@ pub enum DevicePage {
     Channels,
     /// A channel's name or invitation, being typed.
     AddChannel { text: ChannelText },
+    /// The regions the radio can be set for.
+    Region,
+}
+
+/// A screen a new device starts on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupPage {
+    /// What to call this node, which may be left empty.
+    Name { text: NameText },
+    /// The region, which must be set before the radio sends.
+    Region,
 }
 
 /// A screen on the navigation stack.
@@ -254,6 +277,9 @@ pub enum Screen {
     },
     /// One of the screens under Device.
     Device { page: DevicePage, focus: FocusState },
+    /// One of the screens a new device starts on, over the Chats screen
+    /// it leads to.
+    Setup { page: SetupPage, focus: FocusState },
     /// A peer's address or invitation, being typed.
     AddPeer { text: PeerText, focus: FocusState },
     /// A channel an invitation offers, before it is joined.
@@ -289,6 +315,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Device { focus, .. }
+            | Self::Setup { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -303,6 +330,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Device { focus, .. }
+            | Self::Setup { focus, .. }
             | Self::Wake { focus } => focus,
         }
     }
@@ -687,6 +715,94 @@ impl State {
             self.node.set_share_location(!settings.share_location);
             self.refresh_radio();
         }
+    }
+
+    /// Shows the regions, the radio's own focused.
+    pub fn open_regions(&mut self) {
+        let current = self.current_region();
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::Region,
+            focus: FocusState::requesting(keys::region(current)),
+        });
+    }
+
+    /// Where the radio's region sits in the list of them; the first when it
+    /// is not there.
+    fn current_region(&self) -> usize {
+        let region = self.node.radio().region;
+        self.node
+            .regions()
+            .iter()
+            .position(|r| *r == region.as_str())
+            .unwrap_or(0)
+    }
+
+    /// Sets the radio for the region at `index`, and goes on: to the Chats
+    /// screen on first run, back to Radio otherwise.
+    pub fn choose_region(&mut self, index: usize) {
+        self.node.set_region(index);
+        match self.screens.last() {
+            Some(Screen::Setup { .. }) => self.finish_setup(),
+            _ => {
+                self.back();
+                self.refresh_radio();
+            }
+        }
+    }
+
+    /// Starts first run: what to call this node, then its region.
+    pub fn start_setup(&mut self) {
+        self.screens.truncate(1);
+        self.conversation = None;
+        _ = self.screens.push(Screen::Setup {
+            page: SetupPage::Name {
+                text: NameText::new(),
+            },
+            focus: FocusState::requesting(keys::NAME_FIELD),
+        });
+    }
+
+    /// Whether first run is still on screen.
+    #[must_use]
+    pub fn in_setup(&self) -> bool {
+        matches!(self.screens.last(), Some(Screen::Setup { .. }))
+    }
+
+    /// The name being typed on first run.
+    pub fn name_text_mut(&mut self) -> Option<&mut NameText> {
+        match self.screens.last_mut() {
+            Some(Screen::Setup {
+                page: SetupPage::Name { text },
+                ..
+            }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Keeps the name typed, empty or not, and goes on to the region.
+    pub fn continue_setup(&mut self) {
+        let Some(Screen::Setup {
+            page: SetupPage::Name { text },
+            ..
+        }) = self.screens.last()
+        else {
+            return;
+        };
+        let name = text.text().trim();
+        self.node.set_name(name);
+        self.status.device_name.clear();
+        _ = self.status.device_name.push_str(name);
+        let current = self.current_region();
+        _ = self.screens.push(Screen::Setup {
+            page: SetupPage::Region,
+            focus: FocusState::requesting(keys::region(current)),
+        });
+    }
+
+    /// Ends first run on the Chats screen.
+    fn finish_setup(&mut self) {
+        self.screens.truncate(1);
+        self.focus_list();
     }
 
     /// Shows the joined channels, Add channel focused.

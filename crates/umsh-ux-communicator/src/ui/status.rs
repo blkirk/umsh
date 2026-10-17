@@ -8,25 +8,30 @@ use super::{STRIP, label};
 use crate::model::{State, StatusStrip};
 use crate::{font, icon, theme};
 
-pub fn view(s: &StatusStrip) -> impl View<Rgb565, State> + use<> {
+/// The strip; on first run, the battery alone, there being no name or
+/// time yet to show.
+pub fn view(s: &StatusStrip, setup: bool) -> impl View<Rgb565, State> + use<> {
+    let shown = !setup;
     ZStack::new((
         // One stack, not a stack of indicators inside it: see `root_view`.
         HStack::new((
-            label::<24>(
-                &s.device_name,
-                &font::SEMIBOLD,
-                theme::SMALL,
-                theme::TEXT_SECONDARY,
-            ),
+            shown.then(|| {
+                label::<24>(
+                    &s.device_name,
+                    &font::SEMIBOLD,
+                    theme::SMALL,
+                    theme::TEXT_SECONDARY,
+                )
+            }),
             Spacer::default(),
-            s.silent.then(|| indicator(&icon::BELL_SLASH)),
-            s.phone_linked.then(|| indicator(&icon::BLUETOOTH)),
-            s.gnss.then(|| indicator(&icon::GNSS)),
+            (shown && s.silent).then(|| indicator(&icon::BELL_SLASH)),
+            (shown && s.phone_linked).then(|| indicator(&icon::BLUETOOTH)),
+            (shown && s.gnss).then(|| indicator(&icon::GNSS)),
             battery(s.battery_segments, s.battery_low),
         ))
         .with_spacing(3)
         .padding(Edges::Horizontal, 8),
-        label::<8>(&s.time, &font::BOLD, theme::SMALL, theme::TEXT),
+        shown.then(|| label::<8>(&s.time, &font::BOLD, theme::SMALL, theme::TEXT)),
     ))
     .frame()
     .with_height(STRIP)

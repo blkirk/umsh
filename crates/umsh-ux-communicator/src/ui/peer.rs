@@ -113,6 +113,10 @@ pub fn view(
 }
 
 /// Forget, confirmed, or Cancel, which is focused.
+// Kept out of line, as `setting::row` is and for the same back-end failure,
+// here on `State::forget_peer`'s address once `root_view` took the setup
+// screens.
+#[inline(never)]
 fn confirmation(name: &String<32>) -> impl View<Rgb565, State> + use<> {
     let mut forget: String<48> = String::new();
     _ = core::fmt::write(&mut forget, format_args!("Forget {name}"));

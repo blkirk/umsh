@@ -20,7 +20,7 @@
 //! message arrives), `identify` (the identity asked for arrives), `wait
 //! SECONDS` (the board's clock moves on), `dark` and `lit` (the panel goes
 //! dark and lights again), `battery-low PERCENT`, `battery-empty` (with
-//! `off` for the blink's dark half), or `shot NAME`, which writes `NAME.png` into the output directory. `#`
+//! `off` for the blink's dark half), `first-run`, or `shot NAME`, which writes `NAME.png` into the output directory. `#`
 //! starts a comment.
 //!
 //! Timing, and something for a profiler to watch:
@@ -220,6 +220,11 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 // Thirds of a full charge, as a board reports them.
                 app.state_mut().status.battery_segments = percent / 34;
                 app.state_mut().battery_low(percent, clock);
+                app.finalize_view();
+                None
+            }
+            "first-run" => {
+                app.state_mut().start_setup();
                 app.finalize_view();
                 None
             }

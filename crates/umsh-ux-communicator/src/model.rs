@@ -522,6 +522,18 @@ pub trait Node {
     /// This node's address.
     fn address(&self) -> String<44>;
 
+    /// How this node is drawn.
+    fn avatar(&self) -> AvatarStyle;
+
+    /// Calls this node `name`, which may be empty.
+    fn set_name(&self, name: &str);
+
+    /// The regions the radio can be set for, by name.
+    fn regions(&self) -> &[&'static str];
+
+    /// Sets the radio for the region at `index` in `regions`.
+    fn set_region(&self, index: usize);
+
     /// The link that shares `what`. `None` when it cannot be shared.
     fn share_uri(&self, what: Shareable) -> Option<ShareUri>;
 
