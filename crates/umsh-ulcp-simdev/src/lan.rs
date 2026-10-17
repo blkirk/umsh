@@ -14,9 +14,9 @@
 //! on a radio that forwards.
 //!
 //! The host's link is the caller's. [`run`] takes the host's side as
-//! [`HostEvent`]s and reports the device's side as [`DeviceOutput`]s, so
-//! one driver serves an in-memory pipe, a local socket, and anything else
-//! that carries HDLC-Lite.
+//! [`HostEvent`]s, each attach bringing the sink its replies go to, so one
+//! driver serves an in-memory pipe, a local socket ([`serve`]), and
+//! anything else that carries HDLC-Lite.
 
 use std::fs::{File, TryLockError};
 use std::io;
@@ -24,6 +24,10 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(unix)]
+use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use umsh_lan_bearer::socket::{LanConfig, LanSocket};
@@ -121,24 +125,20 @@ impl StateLock {
     }
 }
 
+/// Where an attached host's bytes go: one HDLC-Lite frame per call.
+pub type WireSink = Box<dyn FnMut(Vec<u8>) + Send>;
+
 /// What a host does on its side of the link.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostEvent {
-    /// The link came up.
-    Attach,
+    /// A link came up, taking the device's replies at its sink. A host
+    /// that attaches while another is attached replaces it: the earlier
+    /// sink is dropped and hears nothing more, not even what was owed to
+    /// its session.
+    Attach(WireSink),
     /// Bytes from the host, in HDLC-Lite.
     Bytes(Vec<u8>),
     /// The link went down.
     Detach,
-}
-
-/// What the device has for its owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DeviceOutput {
-    /// Bytes for the attached host, in HDLC-Lite: one encoded frame.
-    Wire(Vec<u8>),
-    /// A frame entered the inbound queue while no host was attached.
-    Queued(QueuedNotice),
 }
 
 /// How long to wait before trying the group again when it could not be
@@ -196,7 +196,8 @@ impl Membership {
 }
 
 /// Run `device` until the sender of `host` is dropped, joining its group
-/// on the interface and with the loopback `base` names.
+/// on the interface and with the loopback `base` names, and telling
+/// `queued` of each frame queued while no host is attached.
 ///
 /// The device starts detached; a [`HostEvent::Attach`] attaches it.
 /// Bytes that arrive while detached belong to no session and are
@@ -205,11 +206,11 @@ pub async fn run<P: SoftPlatform>(
     mut device: SoftDevice<P>,
     base: LanConfig,
     mut host: mpsc::UnboundedReceiver<HostEvent>,
-    mut output: impl FnMut(DeviceOutput),
+    mut queued: impl FnMut(QueuedNotice),
 ) {
     let started = Instant::now();
     let now_ms = || started.elapsed().as_millis() as u64;
-    let mut attached = false;
+    let mut sink: Option<WireSink> = None;
     let mut membership = Membership::default();
     let mut datagram = [0u8; MAX_FRAME + 1];
     loop {
@@ -218,7 +219,9 @@ pub async fn run<P: SoftPlatform>(
         // Whatever the device has to say goes out first: the attach's
         // own notice, then each reply in turn.
         while let Some(wire) = device.take_outbound() {
-            output(DeviceOutput::Wire(wire));
+            if let Some(sink) = &mut sink {
+                sink(wire);
+            }
         }
         for frame in device.take_transmitted() {
             // A send that fails, or finds no group, is a frame lost on
@@ -230,17 +233,20 @@ pub async fn run<P: SoftPlatform>(
         tokio::select! {
             event = host.recv() => match event {
                 None => break,
-                Some(HostEvent::Attach) => {
-                    attached = true;
+                Some(HostEvent::Attach(next)) => {
+                    if sink.replace(next).is_some() {
+                        device.detach();
+                    }
                     device.attach();
                 }
                 Some(HostEvent::Detach) => {
-                    attached = false;
-                    device.detach();
+                    if sink.take().is_some() {
+                        device.detach();
+                    }
                 }
                 // A garbled frame costs one frame: the decoder
                 // resynchronizes on the next flag.
-                Some(HostEvent::Bytes(bytes)) if attached => {
+                Some(HostEvent::Bytes(bytes)) if sink.is_some() => {
                     let _ = device.ingest(&bytes, now_ms());
                 }
                 Some(HostEvent::Bytes(_)) => {}
@@ -256,14 +262,85 @@ pub async fn run<P: SoftPlatform>(
                 {
                     device.inject_radio_rx(&datagram[..len], &RadioRxInfo::default(), now_ms());
                     if let Some(notice) = device.session_mut().take_queued_notice() {
-                        output(DeviceOutput::Queued(notice));
+                        queued(notice);
                     }
                 }
             }
         }
     }
-    if attached {
+    if sink.is_some() {
         device.detach();
+    }
+}
+
+/// Make the local socket a host attaches through at `path`, replacing
+/// whatever a previous holder of the state left there. The caller holds
+/// the state's [`StateLock`], so no live device owns that file.
+#[cfg(unix)]
+pub fn bind_local_socket(path: &Path) -> io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// How much of a local socket to take in one read. ULCP frames are
+/// small; this only bounds a burst.
+#[cfg(unix)]
+const READ_CHUNK: usize = 4096;
+
+/// Attach whoever connects to `listener`, until the receiver of `host`
+/// is dropped.
+///
+/// A connection is a session: connecting attaches, closing detaches, and
+/// a new connection replaces the current one, whose socket is closed.
+#[cfg(unix)]
+pub async fn serve(listener: UnixListener, host: mpsc::UnboundedSender<HostEvent>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut current: Option<OwnedReadHalf> = None;
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let event = tokio::select! {
+            accepted = listener.accept() => {
+                // A failed accept costs that one connection.
+                let Ok((stream, _)) = accepted else { continue };
+                let (read, mut write) = stream.into_split();
+                let (wire_tx, mut wire) = mpsc::unbounded_channel::<Vec<u8>>();
+                // The writer ends when the device drops this sink, which
+                // closes the connection.
+                tokio::spawn(async move {
+                    while let Some(bytes) = wire.recv().await {
+                        if write.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                current = Some(read);
+                HostEvent::Attach(Box::new(move |bytes| {
+                    let _ = wire_tx.send(bytes);
+                }))
+            }
+            read = async {
+                match &mut current {
+                    Some(read) => read.read(&mut buf).await,
+                    None => std::future::pending().await,
+                }
+            } => match read {
+                Ok(0) | Err(_) => {
+                    current = None;
+                    HostEvent::Detach
+                }
+                Ok(len) => HostEvent::Bytes(buf[..len].to_vec()),
+            },
+        };
+        if host.send(event).is_err() {
+            break;
+        }
     }
 }
 
@@ -296,24 +373,48 @@ mod tests {
         LanConfig::host_local(Ipv4Addr::new(239, 255, 42, 111), 47_111)
     }
 
-    async fn next(out: &mut mpsc::UnboundedReceiver<DeviceOutput>) -> Option<DeviceOutput> {
+    /// An attach whose replies arrive on the returned receiver.
+    fn attach() -> (HostEvent, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let event = HostEvent::Attach(Box::new(move |wire| {
+            let _ = tx.send(wire);
+        }));
+        (event, rx)
+    }
+
+    async fn next(out: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Option<Vec<u8>> {
         tokio::time::timeout(Duration::from_secs(1), out.recv())
             .await
             .ok()
             .flatten()
     }
 
-    /// The last byte of the next frame the host hears.
-    async fn next_value(out: &mut mpsc::UnboundedReceiver<DeviceOutput>) -> u8 {
-        let Some(DeviceOutput::Wire(wire)) = next(out).await else {
-            panic!("the device answers");
-        };
+    /// The frames in `wire`, decoded.
+    fn frames(wire: &[u8]) -> Vec<Vec<u8>> {
         let mut decoder = hdlc::Decoder::<512>::new();
-        let frame = wire
-            .into_iter()
-            .find_map(|byte| decoder.push(byte).map(|frame| frame.unwrap().to_vec()))
-            .unwrap();
-        *frame.last().unwrap()
+        wire.iter()
+            .filter_map(|&byte| decoder.push(byte).map(|frame| frame.unwrap().to_vec()))
+            .collect()
+    }
+
+    /// The last byte of the next frame the host hears.
+    async fn next_value(out: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> u8 {
+        let wire = next(out).await.expect("the device answers");
+        *frames(&wire)[0].last().unwrap()
+    }
+
+    fn running(
+        dir: &Path,
+    ) -> (
+        mpsc::UnboundedSender<HostEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let device = SoftDevice::new(session_config("test"), HostPlatform::new(dir).unwrap());
+        let (host, events) = mpsc::unbounded_channel();
+        (
+            host,
+            tokio::spawn(run(device, host_local(), events, |_| {})),
+        )
     }
 
     #[test]
@@ -327,33 +428,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The device answers only while attached, and announces each attach
-    /// with a session reset.
+    /// The device answers only while attached, announces each attach with
+    /// a session reset, and a second attach takes the link from the
+    /// first.
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_reach_the_device_only_while_attached() {
         let dir = scratch("attach");
-        let device = SoftDevice::new(session_config("test"), HostPlatform::new(&dir).unwrap());
-        let (host, events) = mpsc::unbounded_channel();
-        let (out_tx, mut out) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(device, host_local(), events, move |output| {
-            let _ = out_tx.send(output);
-        }));
+        let (host, task) = running(&dir);
 
         let mut request = [0u8; 16];
         let len = frame::prop_get(&mut request, 1, prop::PROTOCOL_VERSION).unwrap();
         host.send(HostEvent::Bytes(encoded(&request[..len])))
             .unwrap();
-        host.send(HostEvent::Attach).unwrap();
+        let (event, mut first) = attach();
+        host.send(event).unwrap();
         host.send(HostEvent::Bytes(encoded(&request[..len])))
             .unwrap();
 
         // The session reset, then the one answer: the request sent
         // before the attach went nowhere.
-        assert!(matches!(next(&mut out).await, Some(DeviceOutput::Wire(_))));
-        assert!(matches!(next(&mut out).await, Some(DeviceOutput::Wire(_))));
+        assert!(next(&mut first).await.is_some());
+        assert!(next(&mut first).await.is_some());
+
+        let (event, mut second) = attach();
+        host.send(event).unwrap();
+        assert!(next(&mut second).await.is_some());
+        // The first host's sink is gone.
+        assert_eq!(next(&mut first).await, None);
+
         drop(host);
         task.await.unwrap();
-        assert_eq!(out.try_recv().ok(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -369,11 +473,9 @@ mod tests {
         };
         device.session_mut().set_lan_bearer_group(Some(group));
         let (host, events) = mpsc::unbounded_channel();
-        let (out_tx, mut out) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(device, host_local(), events, move |output| {
-            let _ = out_tx.send(output);
-        }));
-        host.send(HostEvent::Attach).unwrap();
+        let task = tokio::spawn(run(device, host_local(), events, |_| {}));
+        let (event, mut out) = attach();
+        host.send(event).unwrap();
         let mut request = [0u8; 16];
         let len = frame::prop_get(&mut request, 1, prop::LAN_BEARER_STATE).unwrap();
         host.send(HostEvent::Bytes(encoded(&request[..len])))
@@ -386,7 +488,7 @@ mod tests {
         host.send(HostEvent::Bytes(encoded(&request[..len])))
             .unwrap();
         let mut heard = Vec::new();
-        while let Some(DeviceOutput::Wire(wire)) = next(&mut out).await {
+        while let Some(wire) = next(&mut out).await {
             heard.push(wire);
         }
         let active = encoded(&{
@@ -402,6 +504,48 @@ mod tests {
         });
         assert!(heard.contains(&active));
         drop(host);
+        task.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Over a local socket, connecting attaches and a second connection
+    /// replaces the first, whose socket closes.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_local_socket_connection_is_a_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+
+        let dir = scratch("socket");
+        let path = dir.join("ulcp");
+        // A stale file from an earlier holder is replaced.
+        std::fs::write(&path, b"").unwrap();
+        let listener = bind_local_socket(&path).unwrap();
+        let (host, task) = running(&dir);
+        let server = tokio::spawn(serve(listener, host));
+
+        let read_some = async |stream: &mut UnixStream| {
+            let mut buf = [0u8; 512];
+            match tokio::time::timeout(Duration::from_secs(1), stream.read(&mut buf)).await {
+                Ok(Ok(len)) => buf[..len].to_vec(),
+                _ => panic!("the device is silent"),
+            }
+        };
+        let mut first = UnixStream::connect(&path).await.unwrap();
+        // The session reset.
+        assert!(!read_some(&mut first).await.is_empty());
+        let mut request = [0u8; 16];
+        let len = frame::prop_get(&mut request, 1, prop::PROTOCOL_VERSION).unwrap();
+        first.write_all(&encoded(&request[..len])).await.unwrap();
+        assert!(!read_some(&mut first).await.is_empty());
+
+        let mut second = UnixStream::connect(&path).await.unwrap();
+        assert!(!read_some(&mut second).await.is_empty());
+        // Closed: end of stream.
+        assert!(read_some(&mut first).await.is_empty());
+
+        server.abort();
+        let _ = server.await;
         task.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

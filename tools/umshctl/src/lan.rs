@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use umsh::tokio_support::LanConfig;
 use umsh_ulcp_simdev::host::HostPlatform;
-use umsh_ulcp_simdev::lan::{self, DeviceOutput, HostEvent, StateLock};
+use umsh_ulcp_simdev::lan::{self, HostEvent, StateLock};
 use umsh_ulcp_simdev::soft::SoftDevice;
 
 /// How much of the pipe to take in one read. ULCP frames are small; this
@@ -84,16 +84,13 @@ pub async fn open(group: Option<SocketAddrV4>) -> Result<DuplexStream> {
     }
     let (events, host_events) = mpsc::unbounded_channel();
     let (wire_tx, wire_rx) = mpsc::unbounded_channel();
-    let _ = events.send(HostEvent::Attach);
+    let _ = events.send(HostEvent::Attach(Box::new(move |wire| {
+        let _ = wire_tx.send(wire);
+    })));
     tokio::task::spawn_local(async move {
-        lan::run(device, LanConfig::lan(), host_events, move |output| {
-            // Nobody is told of a queued frame: the tool is attached for
-            // as long as the device runs.
-            if let DeviceOutput::Wire(wire) = output {
-                let _ = wire_tx.send(wire);
-            }
-        })
-        .await;
+        // Nobody is told of a queued frame: the tool is attached for as
+        // long as the device runs.
+        lan::run(device, LanConfig::lan(), host_events, |_| {}).await;
         drop(lock);
     });
     tokio::task::spawn_local(relay(device_end, events, wire_rx));

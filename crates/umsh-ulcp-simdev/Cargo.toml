@@ -16,7 +16,7 @@ umsh-ulcp-device = { path = "../umsh-ulcp-device", features = ["wifi"] }
 # mutex; firmware images provide theirs via nrf-mpsl.
 critical-section = { version = "1", features = ["std"] }
 rand = { workspace = true, optional = true, features = ["std", "thread_rng", "sys_rng"] }
-tokio = { version = "1", optional = true, features = ["macros", "sync", "time"] }
+tokio = { version = "1", optional = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 umsh-lan-bearer = { path = "../umsh-lan-bearer", optional = true, features = ["tokio"] }
 
 [features]
