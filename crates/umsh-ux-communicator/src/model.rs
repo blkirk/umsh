@@ -105,7 +105,8 @@ pub enum Delivery {
     Sending,
     Sent,
     Delivered,
-    Failed,
+    /// No acknowledgment came back: it may not have arrived.
+    Unconfirmed,
 }
 
 /// A reaction to a message: one of UMSH's emote tokens.
@@ -263,6 +264,10 @@ pub trait History {
 
     /// How `message` in `chat` reached this device, when that is known.
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details>;
+
+    /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
+    /// it is on its way.
+    fn retry(&self, chat: ChatId, message: MessageId) -> bool;
 }
 
 /// The top-level lists the rail switches between.
@@ -285,6 +290,9 @@ pub struct State {
     /// The screens, the one shown last. The Chats screen is always first.
     pub screens: Vec<Screen, 4>,
     pub history: &'static dyn History,
+    /// Seconds until sending is allowed again, while the airtime it may use
+    /// is spent.
+    pub airtime_wait: Option<u16>,
 }
 
 impl core::fmt::Debug for State {
@@ -295,6 +303,7 @@ impl core::fmt::Debug for State {
             .field("chats", &self.chats)
             .field("conversation", &self.conversation)
             .field("screens", &self.screens)
+            .field("airtime_wait", &self.airtime_wait)
             .finish_non_exhaustive()
     }
 }
@@ -312,6 +321,7 @@ impl State {
             conversation: None,
             screens,
             history,
+            airtime_wait: None,
         }
     }
 
@@ -355,9 +365,12 @@ impl State {
     }
 
     /// Sends the draft of `chat`: it becomes the newest message, and the
-    /// chat moves to the top of the list. A draft the history has no room
-    /// for stays a draft.
+    /// chat moves to the top of the list. A draft stays a draft while airtime
+    /// is spent, or when the history has no room for it.
     pub fn send(&mut self, chat: ChatId) {
+        if self.airtime_wait.is_some() {
+            return;
+        }
         let Some(index) = self
             .chats
             .iter()
@@ -414,6 +427,27 @@ impl State {
         let mine = (target.my_reaction() != Some(reaction)).then_some(reaction);
         target.set_my_reaction(mine);
         self.history.react(conversation.chat, message, mine);
+    }
+
+    /// Sends `message` in the open chat again, if it is unconfirmed and
+    /// airtime allows.
+    pub fn retry(&mut self, message: MessageId) {
+        if self.airtime_wait.is_some() {
+            return;
+        }
+        let Some(conversation) = self.conversation.as_mut() else {
+            return;
+        };
+        let Some(target) = conversation
+            .messages
+            .iter_mut()
+            .find(|m| m.id == message && m.delivery == Delivery::Unconfirmed)
+        else {
+            return;
+        };
+        if self.history.retry(conversation.chat, message) {
+            target.delivery = Delivery::Sending;
+        }
     }
 }
 

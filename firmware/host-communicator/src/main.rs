@@ -13,7 +13,8 @@
 //!     host-communicator --script steps.txt --out shots/
 //!
 //! Each script line is one step: `turn N` (negative is up), `press`,
-//! `enter`, `backspace`, `type TEXT`, or `shot NAME`, which writes
+//! `enter`, `backspace`, `type TEXT`, `airtime SECONDS` (spent airtime
+//! that returns in that long; 0 for none), or `shot NAME`, which writes
 //! `NAME.png` into the output directory. `#` starts a comment.
 //!
 //! Timing, and something for a profiler to watch:
@@ -131,12 +132,21 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 }
                 None
             }
+            "airtime" => {
+                let wait: u16 = rest
+                    .parse()
+                    .map_err(|_| format!("line {}: airtime needs seconds", number + 1))?;
+                app.state_mut().airtime_wait = (wait > 0).then_some(wait);
+                app.finalize_view();
+                None
+            }
             "shot" => {
                 let mut target =
                     EmbeddedGraphicsRenderTarget::new_hinted(&mut display, theme::BACKGROUND);
                 target.clear(theme::BACKGROUND);
-                // Headless runs are not animated: draw where things settle.
-                app.set_time(std::time::Duration::from_secs(3600));
+                // Headless runs are not animated: draw where things settle,
+                // well after what the last steps started.
+                app.advance_time(std::time::Duration::from_secs(60));
                 app.render_animated(&mut target, &theme::TEXT);
                 let path = out.join(format!("{rest}.png"));
                 display

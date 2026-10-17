@@ -377,3 +377,69 @@ fn details_open_from_the_actions_and_back_returns_to_the_message() {
     assert_eq!(focus(app.state()), Some(keys::message(QUESTION)));
     assert_eq!(actions(app.state()), None);
 }
+
+/// Pat Okafor's last message, which went unconfirmed.
+const ANTENNA: u32 = (PAT << 8) | 2;
+
+fn delivery(state: &State, message: u32) -> Delivery {
+    let conversation = state.conversation.as_ref().expect("a chat is open");
+    conversation
+        .messages
+        .iter()
+        .find(|m| m.id == message)
+        .expect("the message")
+        .delivery
+}
+
+fn spend_airtime<V, F>(app: &mut App<V, State, F>, wait: Option<u16>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    app.state_mut().airtime_wait = wait;
+    app.finalize_view();
+}
+
+#[test]
+fn pressing_an_unconfirmed_message_sends_it_again() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    assert_in_conversation(app.state(), PAT);
+    run(&mut app, &[Input::Turn(-1)]);
+    assert_eq!(focus(app.state()), Some(keys::message(ANTENNA)));
+    assert_eq!(delivery(app.state(), ANTENNA), Delivery::Unconfirmed);
+    run(&mut app, &[Input::Press]);
+    assert_eq!(delivery(app.state(), ANTENNA), Delivery::Sending);
+    assert_eq!(actions(app.state()), None);
+    // On its way again, it is a message like any other.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(actions(app.state()), Some(ANTENNA));
+    // And it stays on its way when the chat opens again.
+    run(
+        &mut app,
+        &[Input::Backspace, Input::Backspace, Input::Press],
+    );
+    assert_eq!(delivery(app.state(), ANTENNA), Delivery::Sending);
+}
+
+#[test]
+fn spent_airtime_keeps_the_draft_and_holds_a_retry() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    spend_airtime(&mut app, Some(100));
+    run(&mut app, &typed("Also the 18650s"));
+    run(&mut app, &[Input::Enter]);
+    assert_eq!(draft(app.state(), PAT), "Also the 18650s");
+    assert_eq!(app.state().conversation.as_ref().unwrap().messages.len(), 3);
+    run(&mut app, &[Input::Turn(-1), Input::Press]);
+    assert_eq!(delivery(app.state(), ANTENNA), Delivery::Unconfirmed);
+
+    spend_airtime(&mut app, None);
+    run(&mut app, &[Input::Press]);
+    assert_eq!(delivery(app.state(), ANTENNA), Delivery::Sending);
+    // The first Enter takes up the draft again; the second sends it.
+    run(&mut app, &[Input::Turn(1), Input::Enter, Input::Enter]);
+    assert_eq!(draft(app.state(), PAT), "");
+}

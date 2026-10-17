@@ -48,7 +48,11 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
             (From::Peer, "See you at the hut"),
         ],
         2 => &[(From::Member("Sam"), "Will wait 10 min")],
-        3 => &[(From::Me, "Bring the spare antenna?")],
+        3 => &[
+            (From::Peer, "Is Bald Knob back up?"),
+            (From::Me, "Not yet, Saturday."),
+            (From::Me, "Bring the spare antenna?"),
+        ],
         4 => &[(From::Member("Kit"), "Anyone near Mill Creek?")],
         5 => &[
             (
@@ -67,6 +71,15 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
 /// The peer's reaction to a message of the fixture's.
 fn their_reaction(chat: ChatId, index: usize) -> Option<Reaction> {
     (chat == 1 && index == 1).then_some(Reaction::Heart)
+}
+
+/// How far a message of the fixture's got.
+fn delivery(chat: ChatId, index: usize) -> Delivery {
+    if chat == 3 && index == 2 {
+        Delivery::Unconfirmed
+    } else {
+        Delivery::Delivered
+    }
 }
 
 /// The fixture's message, with its text kept on `heap`, when there is room.
@@ -88,7 +101,7 @@ fn message(
             From::Me | From::Peer => None,
         },
         text: SharedText::new(heap, text)?,
-        delivery: Delivery::Delivered,
+        delivery: delivery(chat, index),
         reactions: their_reaction(chat, index)
             .map(|reaction| Reacted {
                 reaction,
@@ -110,6 +123,8 @@ pub struct Store {
     sent: RefCell<Vec<(ChatId, Message), SENT>>,
     /// My reactions, by message.
     mine: RefCell<Vec<(MessageId, Reaction), SENT>>,
+    /// Unconfirmed messages sent again.
+    retried: RefCell<Vec<MessageId, SENT>>,
     next: Cell<MessageId>,
 }
 
@@ -120,6 +135,7 @@ impl Store {
             heap,
             sent: RefCell::new(Vec::new()),
             mine: RefCell::new(Vec::new()),
+            retried: RefCell::new(Vec::new()),
             // Above the fixture's own messages.
             next: Cell::new(0x1_0000),
         }
@@ -131,6 +147,7 @@ impl core::fmt::Debug for Store {
         f.debug_struct("Store")
             .field("sent", &self.sent)
             .field("mine", &self.mine)
+            .field("retried", &self.retried)
             .field("next", &self.next)
             .finish_non_exhaustive()
     }
@@ -149,6 +166,11 @@ impl History for Store {
         for &(id, reaction) in self.mine.borrow().iter() {
             if let Some(message) = into.iter_mut().find(|m| m.id == id) {
                 message.set_my_reaction(Some(reaction));
+            }
+        }
+        for id in self.retried.borrow().iter() {
+            if let Some(message) = into.iter_mut().find(|m| m.id == *id) {
+                message.delivery = Delivery::Sending;
             }
         }
     }
@@ -180,6 +202,17 @@ impl History for Store {
             }
             _ = mine.push((message, reaction));
         }
+    }
+
+    fn retry(&self, _chat: ChatId, message: MessageId) -> bool {
+        let mut retried = self.retried.borrow_mut();
+        if !retried.contains(&message) {
+            if retried.is_full() {
+                retried.remove(0);
+            }
+            _ = retried.push(message);
+        }
+        true
     }
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
@@ -243,7 +276,7 @@ pub fn state(store: &'static Store) -> State {
             avatar: AvatarStyle::peer([179, 246, 158], "YmRG", PeerShape::Circle),
             name: "Pat Okafor",
             age: "41m",
-            hops: Some(1),
+            hops: Some(0),
             unread: false,
             muted: false,
             draft: "",

@@ -92,6 +92,7 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             summary.and_then(|s| s.hops),
         ),
         history(messages, actions),
+        state.airtime_wait.map(airtime_line),
         quoted,
         summary.map(|s| composer(chat, &s.draft, reading)),
     ))
@@ -156,14 +157,21 @@ pub(super) fn header(
 fn history(messages: &[Message], acting_on: Option<MessageId>) -> impl View<Rgb565, State> + use<> {
     let messages = Messages::from_slice(messages).unwrap_or_default();
     let ids: Vec<MessageId, MAX_MESSAGES> = messages.iter().map(|m| m.id).collect();
-    // Delivery shows under the newest message sent.
+    // Delivery shows under the newest message sent, the newest delivered,
+    // and every one unconfirmed.
     let newest_sent = messages
         .iter()
         .rposition(|m| m.direction == Direction::Outbound);
+    let newest_delivered = messages
+        .iter()
+        .rposition(|m| m.direction == Direction::Outbound && m.delivery == Delivery::Delivered);
     let count = messages.len();
     ScrollView::new(
         ForEach::<MAX_MESSAGES>::new_vertical(&INDICES[..count], move |&i| {
-            item(&messages, i, newest_sent == Some(i), acting_on)
+            let delivery = Some(i) == newest_sent
+                || Some(i) == newest_delivered
+                || messages[i].delivery == Delivery::Unconfirmed;
+            item(&messages, i, delivery, acting_on)
         })
         .keyed(move |&i| keys::message(ids[i])),
     )
@@ -246,9 +254,17 @@ fn bubble(message: &Message, acting_on: bool) -> impl View<Rgb565, State> + use<
     } else {
         Alignment::TopTrailing
     };
-    // Pressing a message opens its actions.
+    // Pressing a message opens its actions; pressing an unconfirmed one
+    // sends it again.
+    let unconfirmed = message.delivery == Delivery::Unconfirmed;
     Button::new(
-        move |s: &mut State| s.open_actions(id),
+        move |s: &mut State| {
+            if unconfirmed {
+                s.retry(id);
+            } else {
+                s.open_actions(id);
+            }
+        },
         move |button: ButtonState| {
             Text::new(text.clone(), &font::REGULAR)
                 .with_font_size(theme::BODY)
@@ -411,11 +427,29 @@ fn delivery_line(delivery: Delivery) -> impl View<Rgb565, State> + use<> {
         Delivery::Sending => ("Sending", theme::TEXT_TERTIARY),
         Delivery::Sent => ("Sent", theme::TEXT_TERTIARY),
         Delivery::Delivered => ("Delivered", theme::TEXT_TERTIARY),
-        Delivery::Failed => ("Not delivered", theme::AMBER),
+        Delivery::Unconfirmed => ("Unconfirmed", theme::AMBER),
     };
     label::<16>(text, &font::SEMIBOLD, theme::SMALL, color)
         .frame()
         .with_height(STATUS_LINE)
+        .padding(Edges::Trailing, SIDE)
+}
+
+/// When sending returns, while airtime is spent.
+fn airtime_line(wait: u16) -> impl View<Rgb565, State> + use<> {
+    let mut text: heapless::String<40> = heapless::String::new();
+    _ = core::fmt::write(
+        &mut text,
+        format_args!(
+            "Airtime limit \u{B7} Send in {}:{:02}",
+            wait / 60,
+            wait % 60
+        ),
+    );
+    label::<40>(&text, &font::BOLD, theme::SMALL, theme::AMBER)
+        .frame()
+        .with_height(STATUS_LINE)
+        .flex_infinite_width(HorizontalAlignment::Trailing)
         .padding(Edges::Trailing, SIDE)
 }
 
