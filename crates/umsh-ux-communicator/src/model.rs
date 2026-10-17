@@ -10,6 +10,8 @@ use crate::text::{DraftText, SharedText, TextHeap};
 
 /// The most chats the list holds at once.
 pub const MAX_CHATS: usize = 12;
+/// How many saved peers the Peers list holds.
+pub const MAX_PEERS: usize = 12;
 /// The most messages a conversation keeps; older ones are dropped.
 pub const MAX_MESSAGES: usize = 16;
 /// The longest message, in bytes: a UMSH text message is at most ten
@@ -95,6 +97,23 @@ impl ChatSummary {
             _ => push_cut(&mut self.preview, &message.text),
         }
     }
+}
+
+/// Names a saved peer.
+pub type PeerId = u32;
+
+/// A saved peer, as the Peers list shows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerSummary {
+    pub id: PeerId,
+    pub avatar: AvatarStyle,
+    pub name: String<32>,
+    /// How many hops away they are, when known; 0 is direct.
+    pub hops: Option<u8>,
+    /// Of four bars, how strongly they are heard, when direct.
+    pub signal: Option<u8>,
+    /// How long ago they were last heard, already formatted, such as `5m`.
+    pub heard: String<6>,
 }
 
 /// Whom a chat is with.
@@ -364,8 +383,9 @@ pub trait History {
     /// is none yet. `None` when there is no room for it.
     fn direct_chat(&self, member: &Member) -> Option<ChatSummary>;
 
-    /// Keeps `member`, whose identity is known, among my peers.
-    fn save_peer(&self, member: &Member);
+    /// Keeps `member`, whose identity is known, among my peers, and returns
+    /// them as the Peers list shows them. `None` when there is no room.
+    fn save_peer(&self, member: &Member) -> Option<PeerSummary>;
 
     /// Joins the channel `invite` invites to, called `name` here, and returns
     /// its chat: the one already joined, if it is. `None` when there is no
@@ -412,6 +432,8 @@ pub struct State {
     pub section: Section,
     /// Newest first.
     pub chats: Vec<ChatSummary, MAX_CHATS>,
+    /// Saved peers, most recently heard first.
+    pub peers: Vec<PeerSummary, MAX_PEERS>,
     /// The open chat's messages, while one is open.
     pub conversation: Option<Conversation>,
     /// The screens, the one shown last. The Chats screen is always first.
@@ -435,6 +457,7 @@ impl core::fmt::Debug for State {
             .field("status", &self.status)
             .field("section", &self.section)
             .field("chats", &self.chats)
+            .field("peers", &self.peers)
             .field("conversation", &self.conversation)
             .field("screens", &self.screens)
             .field("airtime_wait", &self.airtime_wait)
@@ -455,6 +478,7 @@ impl State {
             status: StatusStrip::default(),
             section: Section::default(),
             chats: Vec::new(),
+            peers: Vec::new(),
             conversation: None,
             screens,
             history,
@@ -474,6 +498,11 @@ impl State {
     #[must_use]
     pub fn chat(&self, chat: ChatId) -> Option<&ChatSummary> {
         self.chats.iter().find(|c| c.id == chat)
+    }
+
+    #[must_use]
+    pub fn peer(&self, peer: PeerId) -> Option<&PeerSummary> {
+        self.peers.iter().find(|p| p.id == peer)
     }
 
     fn chat_mut(&mut self, chat: ChatId) -> Option<&mut ChatSummary> {

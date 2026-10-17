@@ -784,6 +784,10 @@ fn save_peer_goes_once_saved_and_message_opens_a_direct_chat() {
     assert_eq!(focus(app.state()), Some(keys::SAVE_PEER));
     run(&mut app, &[Input::Press]);
     assert!(shown_member(app.state()).0.saved);
+    assert_eq!(
+        app.state().peers.first().map(|p| p.name.as_str()),
+        Some("Sam")
+    );
     assert_eq!(focus(app.state()), Some(keys::MESSAGE_MEMBER));
 
     run(&mut app, &[Input::Press]);
@@ -912,4 +916,23 @@ fn emergency_is_open_and_its_sends_end_at_sent() {
         conversation.messages.last().map(|m| m.delivery),
         Some(Delivery::Sent)
     );
+}
+
+#[test]
+fn the_rail_switches_to_peers_which_open_on_add_peer() {
+    let mut app = app!();
+    run(&mut app, &[Input::Backspace, Input::Turn(1)]);
+    assert_eq!(focus(app.state()), Some(keys::rail(Section::Peers)));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(app.state().section, Section::Peers);
+    assert_eq!(focus(app.state()), Some(keys::ADD_PEER));
+    run(&mut app, &[Input::Turn(1)]);
+    let first = app.state().peers.first().map(|p| keys::peer(p.id));
+    assert_eq!(focus(app.state()), first);
+    // Back on the rail, and into Chats, at its first chat.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::rail(Section::Peers)));
+    run(&mut app, &[Input::Turn(-1), Input::Press]);
+    assert_eq!(app.state().section, Section::Chats);
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
 }

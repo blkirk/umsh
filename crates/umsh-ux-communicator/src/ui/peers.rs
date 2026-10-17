@@ -1,0 +1,201 @@
+//! The Peers list: Add peer, then two lines per saved peer, most recently
+//! heard first. Backspace moves to the rail.
+
+use buoyant::event::{Key, KeyResponse};
+use buoyant::focus::BoundaryBehavior;
+use buoyant::view::prelude::*;
+use buoyant::view::scroll_view::ScrollBarVisibility;
+use embedded_graphics::pixelcolor::Rgb565;
+use heapless::{String, Vec};
+
+use super::{RAIL, label};
+use crate::model::{MAX_PEERS, PeerSummary, State};
+use crate::nav::keys;
+use crate::{font, icon, theme};
+
+const ROW: u32 = 44;
+const NAME_LINE: u32 = 24;
+const ROUTE_LINE: u32 = ROW - NAME_LINE;
+const AVATAR: u32 = 34;
+/// From the list's leading edge to the text.
+const TEXT_X: u32 = 51;
+const LIST_WIDTH: u32 = theme::WIDTH - RAIL;
+/// The signal bars: each one's width, the space between them, and the
+/// shortest one's height and how much taller each next one is.
+const BAR: u32 = 3;
+const BAR_GAP: u32 = 2;
+const BAR_BASE: u32 = 4;
+const BAR_STEP: u32 = 3;
+
+/// Indices `ForEach` can hold without borrowing the state.
+static INDICES: [usize; MAX_PEERS] = {
+    let mut a = [0; MAX_PEERS];
+    let mut i = 0;
+    while i < MAX_PEERS {
+        a[i] = i;
+        i += 1;
+    }
+    a
+};
+
+pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + use<> {
+    let rows = peers.clone();
+    let ids: Vec<u32, MAX_PEERS> = peers.iter().map(|p| p.id).collect();
+    let count = rows.len();
+    ScrollView::new(
+        VStack::new((
+            add_row(),
+            ForEach::<MAX_PEERS>::new_vertical(&INDICES[..count], move |&i| row(&rows[i]))
+                .keyed(move |&i| keys::peer(ids[i])),
+        ))
+        .with_spacing(0),
+    )
+    .with_bar_visibility(ScrollBarVisibility::Never)
+    .bound_focus(BoundaryBehavior::Stop)
+    .on_key(|key, s: &mut State| match key {
+        Key::Backspace => {
+            s.focus_rail();
+            KeyResponse::Handled
+        }
+        _ => KeyResponse::Ignored,
+    })
+}
+
+/// A row's focused look, under its content: filled, with the accent at its
+/// leading edge, as the Chats list's rows are.
+fn focused_row<V: View<Rgb565, State>>(
+    content: V,
+    focused: bool,
+) -> impl View<Rgb565, State> + use<V> {
+    content
+        .hint_background_color(if focused {
+            theme::FOCUS
+        } else {
+            theme::BACKGROUND
+        })
+        .background(
+            Alignment::Center,
+            focused.then(|| Rectangle.foreground_color(theme::FOCUS)),
+        )
+        .overlay(
+            Alignment::Leading,
+            focused.then(|| {
+                Rectangle
+                    .foreground_color(theme::ACCENT)
+                    .frame_sized(4, ROW)
+            }),
+        )
+        .overlay(
+            Alignment::BottomTrailing,
+            (!focused).then(|| {
+                Rectangle
+                    .foreground_color(theme::LINE)
+                    .frame_sized(LIST_WIDTH - TEXT_X, 1)
+            }),
+        )
+}
+
+fn add_row() -> impl View<Rgb565, State> + use<> {
+    Button::new(
+        |_: &mut State| {},
+        |button: ButtonState| {
+            focused_row(
+                label::<16>("Add peer", &font::SEMIBOLD, theme::BODY, theme::ACCENT)
+                    .padding(Edges::Leading, TEXT_X)
+                    .flex_infinite_width(HorizontalAlignment::Leading)
+                    .frame()
+                    .with_height(ROW)
+                    .overlay(
+                        Alignment::Leading,
+                        Image::new(&icon::ADD)
+                            .as_template()
+                            .foreground_color(theme::ACCENT)
+                            .frame()
+                            .with_width(TEXT_X),
+                    ),
+                button.is_focused(),
+            )
+        },
+    )
+    .focus_key(keys::ADD_PEER)
+}
+
+fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
+    let peer = peer.clone();
+    Button::new(
+        |_: &mut State| {},
+        move |button: ButtonState| {
+            focused_row(
+                VStack::new((
+                    HStack::new((
+                        label::<32>(&peer.name, &font::SEMIBOLD, theme::BODY, theme::TEXT),
+                        Spacer::default(),
+                        label::<6>(
+                            &peer.heard,
+                            &font::SEMIBOLD,
+                            theme::SMALL,
+                            theme::TEXT_TERTIARY,
+                        )
+                        .fixed_size(true, false),
+                    ))
+                    .with_spacing(4)
+                    .padding(Edges::Trailing, 10)
+                    .frame()
+                    .with_height(NAME_LINE),
+                    route_line(&peer).frame().with_height(ROUTE_LINE),
+                ))
+                .with_spacing(0)
+                .with_alignment(HorizontalAlignment::Leading)
+                .padding(Edges::Leading, TEXT_X)
+                .flex_infinite_width(HorizontalAlignment::Leading)
+                .frame()
+                .with_height(ROW)
+                .overlay(
+                    Alignment::Leading,
+                    super::avatar::view(&peer.avatar, AVATAR)
+                        .frame()
+                        .with_width(TEXT_X),
+                ),
+                button.is_focused(),
+            )
+        },
+    )
+}
+
+/// How far away the peer is, with how strongly they are heard when direct.
+fn route_line(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
+    let mut route: String<12> = String::new();
+    match peer.hops {
+        Some(0) => _ = route.push_str("Direct"),
+        Some(1) => _ = route.push_str("1 hop"),
+        Some(n) => _ = core::fmt::write(&mut route, format_args!("{n} hops")),
+        None => {}
+    }
+    HStack::new((
+        peer.signal.filter(|_| peer.hops == Some(0)).map(bars),
+        label::<12>(
+            &route,
+            &font::REGULAR,
+            theme::SECONDARY,
+            theme::TEXT_TERTIARY,
+        ),
+    ))
+    .with_spacing(6)
+    .with_alignment(VerticalAlignment::Center)
+}
+
+/// `lit` of four bars, rising.
+fn bars(lit: u8) -> impl View<Rgb565, State> + use<> {
+    let bar = move |i: u8| {
+        RoundedRectangle::new(1)
+            .foreground_color(if i < lit {
+                theme::GREEN
+            } else {
+                theme::TEXT_TERTIARY
+            })
+            .frame_sized(BAR, BAR_BASE + u32::from(i) * BAR_STEP)
+    };
+    HStack::new((bar(0), bar(1), bar(2), bar(3)))
+        .with_spacing(BAR_GAP)
+        .with_alignment(VerticalAlignment::Bottom)
+}

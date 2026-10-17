@@ -11,7 +11,7 @@ use buoyant::render::AnimatedJoin;
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
 
-use crate::model::State;
+use crate::model::{Section, State};
 use crate::nav::{Screen, keys};
 use crate::theme;
 
@@ -22,6 +22,7 @@ mod conversation;
 mod details;
 mod join;
 mod member;
+mod peers;
 mod rail;
 mod status;
 mod wake;
@@ -94,8 +95,13 @@ fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
     let shown = focus.and_then(keys::section).unwrap_or(state.section);
     ZStack::new((
         rail::view(shown, state.unread_chats()),
-        // Peers and Device are not built yet.
-        chats::view(&state.chats).padding(Edges::Leading, RAIL),
+        match_view!(shown, {
+            Section::Chats => chats::view(&state.chats),
+            Section::Peers => peers::view(&state.peers),
+            // Not built yet.
+            Section::Device => EmptyView,
+        })
+        .padding(Edges::Leading, RAIL),
     ))
     .with_alignment(Alignment::TopLeading)
 }

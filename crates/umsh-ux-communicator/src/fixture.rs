@@ -6,8 +6,8 @@ use core::cell::{Cell, RefCell};
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, History, Invite,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, Reacted, Reaction, Reactions, Sender, State,
-    StatusStrip, push_newest,
+    MESSAGE_LEN, Member, Message, MessageId, Messages, PeerId, PeerSummary, Reacted, Reaction,
+    Reactions, Sender, State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -287,6 +287,9 @@ impl Store {
 /// Where direct chats made with members are numbered from, above the
 /// fixture's own chats.
 const FIRST_DIRECT: ChatId = 0x100;
+/// Where members saved as peers are numbered from, above the fixture's own
+/// peers.
+const FIRST_SAVED: PeerId = 0x100;
 /// Where channels joined from invitations are numbered from.
 const FIRST_JOINED: ChatId = 0x200;
 
@@ -488,13 +491,24 @@ impl History for Store {
         Some(summary)
     }
 
-    fn save_peer(&self, member: &Member) {
+    fn save_peer(&self, member: &Member) -> Option<PeerSummary> {
+        let address = member.address.as_ref()?;
         let mut saved = self.saved.borrow_mut();
-        if let Some(address) = member.address.as_ref()
-            && !saved.contains(address)
-        {
-            _ = saved.push(address.clone());
-        }
+        let index = match saved.iter().position(|a| a == address) {
+            Some(index) => index,
+            None => {
+                saved.push(address.clone()).ok()?;
+                saved.len() - 1
+            }
+        };
+        Some(PeerSummary {
+            id: FIRST_SAVED + index as PeerId,
+            avatar: member.sender.avatar.clone(),
+            name: s(&member.sender.name),
+            hops: None,
+            signal: None,
+            heard: member.heard.clone(),
+        })
     }
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
@@ -619,6 +633,47 @@ pub fn state(store: &'static Store) -> State {
             summary.preview(&last);
         }
         let _ = state.chats.push(summary);
+    }
+    // The mockup's saved peers, most recently heard first.
+    let peers = [
+        (
+            AvatarStyle::peer([179, 246, 158], "YmRG", PeerShape::Circle),
+            "Pat Okafor",
+            Some(0),
+            Some(3),
+            "5m",
+        ),
+        (
+            AvatarStyle::peer([94, 10, 224], "H1x*", PeerShape::Circle),
+            "Jo Reyes",
+            Some(3),
+            None,
+            "1h",
+        ),
+        (
+            AvatarStyle::peer([178, 186, 92], "hhae", PeerShape::Circle),
+            "Rick Alvarez",
+            Some(3),
+            None,
+            "3h",
+        ),
+        (
+            AvatarStyle::peer([64, 160, 200], "Dc7q", PeerShape::Circle),
+            "Dana Cho",
+            Some(2),
+            None,
+            "4h",
+        ),
+    ];
+    for (id, (avatar, name, hops, signal, heard)) in (1..).zip(peers) {
+        let _ = state.peers.push(PeerSummary {
+            id,
+            avatar,
+            name: s(name),
+            hops,
+            signal,
+            heard: s(heard),
+        });
     }
     state.focus_list();
     state

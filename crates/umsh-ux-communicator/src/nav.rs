@@ -10,7 +10,7 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatSummary, Details, Invite, Member, MessageId, Reaction, Section, State,
+    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerId, Reaction, Section, State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -19,13 +19,14 @@ pub type JoinName = EditBuffer<String<32>>;
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
 pub mod keys {
-    use super::{ChatId, FocusKey, MessageId, Reaction, Section};
+    use super::{ChatId, FocusKey, MessageId, PeerId, Reaction, Section};
 
     const KIND: u32 = 0xFF00_0000;
     const RAIL: u32 = 0x0100_0000;
     const CHAT: u32 = 0x0200_0000;
     const MESSAGE: u32 = 0x0300_0000;
     const ACTION: u32 = 0x0500_0000;
+    const PEER: u32 = 0x0900_0000;
 
     /// A conversation's composer. Only one conversation is shown at a time.
     pub const COMPOSER: FocusKey = FocusKey(0x0400_0000);
@@ -42,6 +43,8 @@ pub mod keys {
     pub const REQUEST_IDENTITY: FocusKey = FocusKey(0x0700_0000);
     pub const MESSAGE_MEMBER: FocusKey = FocusKey(0x0700_0001);
     pub const SAVE_PEER: FocusKey = FocusKey(0x0700_0002);
+    /// The Peers list's Add peer, which heads it.
+    pub const ADD_PEER: FocusKey = FocusKey(0x0A00_0000);
     /// The join screen's Name and Join channel.
     pub const JOIN_NAME: FocusKey = FocusKey(0x0800_0000);
     pub const JOIN_CHANNEL: FocusKey = FocusKey(0x0800_0001);
@@ -61,6 +64,22 @@ pub mod keys {
     #[must_use]
     pub const fn chat(chat: ChatId) -> FocusKey {
         FocusKey(CHAT | (chat & !KIND))
+    }
+
+    /// A peer's row in the Peers list.
+    #[must_use]
+    pub const fn peer(peer: PeerId) -> FocusKey {
+        FocusKey(PEER | (peer & !KIND))
+    }
+
+    /// The peer whose row `key` names.
+    #[must_use]
+    pub const fn peer_of(key: FocusKey) -> Option<PeerId> {
+        if key.0 & KIND == PEER {
+            Some(key.0 & !KIND)
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -214,15 +233,36 @@ impl State {
             _ => None,
         };
         remembered
-            .filter(|row| keys::chat_of(*row).is_some_and(|chat| self.chat(chat).is_some()))
-            .or_else(|| self.chats.first().map(|c| keys::chat(c.id)))
+            .filter(|row| self.lists(*row))
+            .or_else(|| match self.section {
+                Section::Chats => self.chats.first().map(|c| keys::chat(c.id)),
+                Section::Peers => Some(keys::ADD_PEER),
+                Section::Device => None,
+            })
+    }
+
+    /// Whether `row` is a row of the list shown.
+    fn lists(&self, row: FocusKey) -> bool {
+        match self.section {
+            Section::Chats => keys::chat_of(row).is_some_and(|chat| self.chat(chat).is_some()),
+            Section::Peers => {
+                row == keys::ADD_PEER
+                    || keys::peer_of(row).is_some_and(|peer| self.peer(peer).is_some())
+            }
+            Section::Device => false,
+        }
     }
 
     /// Moves from the list to the rail, remembering the row left.
     pub fn focus_rail(&mut self) {
         let section = self.section;
+        let left = self
+            .screen()
+            .focus()
+            .current()
+            .filter(|key| self.lists(*key));
         if let Some(Screen::Chats { focus, row }) = self.screens.last_mut() {
-            *row = focus.current().filter(|key| keys::chat_of(*key).is_some());
+            *row = left;
             focus.request(keys::rail(section));
         }
     }
@@ -483,9 +523,17 @@ impl State {
         if member.address.is_none() || member.saved {
             return;
         }
-        history.save_peer(member);
+        let saved = history.save_peer(member);
         member.saved = true;
         focus.request(keys::MESSAGE_MEMBER);
+        if let Some(peer) = saved
+            && self.peer(peer.id).is_none()
+        {
+            if self.peers.is_full() {
+                self.peers.pop();
+            }
+            _ = self.peers.insert(0, peer);
+        }
     }
 
     /// Shows the chats that got messages while the panel was dark, the first
@@ -512,6 +560,7 @@ impl State {
     /// the list, at its row.
     fn go_to_chat(&mut self, chat: ChatId) {
         self.screens.truncate(1);
+        self.section = Section::Chats;
         self.conversation = None;
         self.focus().request(keys::chat(chat));
         self.open_chat(chat);
