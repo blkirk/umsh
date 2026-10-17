@@ -78,6 +78,12 @@ impl SharedText {
         }
     }
 
+    /// The heap the text is kept on.
+    #[must_use]
+    pub fn heap(&self) -> TextHeap {
+        self.header().heap
+    }
+
     fn header(&self) -> &Header {
         // SAFETY: the header lives as long as any reference to it.
         unsafe { self.0.as_ref() }

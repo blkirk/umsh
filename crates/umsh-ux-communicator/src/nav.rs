@@ -102,6 +102,9 @@ pub enum Screen {
         details: Details,
         focus: FocusState,
     },
+    /// The chats that got messages while the panel was dark, which the first
+    /// of them woke it to.
+    Wake { focus: FocusState },
 }
 
 impl Screen {
@@ -119,7 +122,8 @@ impl Screen {
         match self {
             Self::Chats { focus, .. }
             | Self::Conversation { focus, .. }
-            | Self::Details { focus, .. } => focus,
+            | Self::Details { focus, .. }
+            | Self::Wake { focus } => focus,
         }
     }
 
@@ -127,7 +131,8 @@ impl Screen {
         match self {
             Self::Chats { focus, .. }
             | Self::Conversation { focus, .. }
-            | Self::Details { focus, .. } => focus,
+            | Self::Details { focus, .. }
+            | Self::Wake { focus } => focus,
         }
     }
 }
@@ -271,14 +276,39 @@ impl State {
         });
     }
 
+    /// Shows the chats that got messages while the panel was dark, the first
+    /// focused, over wherever it went dark.
+    pub(crate) fn show_arrivals(&mut self) {
+        if matches!(self.screen(), Screen::Wake { .. }) || self.screens.is_full() {
+            return;
+        }
+        let first = self.arrived.first().map(|a| keys::chat(a.chat));
+        _ = self.screens.push(Screen::Wake {
+            focus: first.map_or_else(FocusState::new, FocusState::requesting),
+        });
+    }
+
+    /// Opens `chat` from the screen the panel woke to. The interface holds
+    /// one conversation, so whatever was open under it closes; Back from
+    /// the chat goes to the list, at its row.
+    pub fn open_arrival(&mut self, chat: ChatId) {
+        self.screens.truncate(1);
+        self.conversation = None;
+        self.arrived.clear();
+        self.focus().request(keys::chat(chat));
+        self.open_chat(chat);
+    }
+
     /// Returns to the screen before this one, focused where it was left.
     /// Returns `false` on the Chats screen, which nothing comes before.
     pub fn back(&mut self) -> bool {
         if self.screens.len() < 2 {
             return false;
         }
-        if let Some(Screen::Conversation { .. }) = self.screens.pop() {
-            self.conversation = None;
+        match self.screens.pop() {
+            Some(Screen::Conversation { .. }) => self.conversation = None,
+            Some(Screen::Wake { .. }) => self.arrived.clear(),
+            _ => {}
         }
         // Focus returns where it was, unless the screen was left asking for
         // somewhere else.

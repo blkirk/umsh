@@ -28,6 +28,8 @@ pub const GREEN: Rgb565 = rgb(0x3DD68C);
 pub const AMBER: Rgb565 = rgb(0xF5B544);
 pub const RED: Rgb565 = rgb(0xFF6B5E);
 pub const FIELD: Rgb565 = rgb(0x161A20);
+/// A card that is not focused.
+pub const PANEL: Rgb565 = rgb(0x11151A);
 pub const MENU: Rgb565 = rgb(0x1B2027);
 pub const MENU_LINE: Rgb565 = rgb(0x2E3540);
 /// Behind each reaction in the actions menu's palette.

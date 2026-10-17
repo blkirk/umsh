@@ -20,9 +20,11 @@ use umsh_ux_display_tracker::menu::UiInput;
 const FRAME: Duration = Duration::from_millis(16);
 /// How often the costs are reported.
 const REPORT: Duration = Duration::from_secs(1);
-/// How long after the last input the fixture's next message arrives, so
-/// that arrivals can be tried before a radio feeds the interface.
-const ARRIVAL_IDLE: Duration = Duration::from_secs(8);
+/// When the fixture's next message arrives, so that arrivals can be tried
+/// before a radio feeds the interface: soon after an input, while the panel
+/// is lit, and otherwise long after the last arrival, once it has gone dark.
+const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
+const ARRIVAL_AFTER_ARRIVAL: Duration = Duration::from_secs(40);
 
 #[embassy_executor::task]
 pub(crate) async fn task(
@@ -70,8 +72,7 @@ pub(crate) async fn task(
         Instant::now().as_millis(),
     );
 
-    // When the fixture's next message arrives: one after each pause in
-    // input, while it has any left.
+    // When the fixture's next message arrives, while it has any left.
     let mut arrivals_left = true;
     let mut arrival: Option<Instant> = None;
 
@@ -82,13 +83,13 @@ pub(crate) async fn task(
         let wake_at = [
             attention.next_deadline(),
             app.state().next_deadline(),
-            arrival.filter(|_| lit).map(|at| at.as_millis()),
+            arrival.map(|at| at.as_millis()),
         ]
         .into_iter()
         .flatten()
         .fold(tick, |at, deadline| at.min(Instant::from_millis(deadline)));
         let now = || Instant::now().as_millis();
-        let transition =
+        let mut transition =
             match select3(UI_INPUT_CH.receive(), UI_WAKE.wait(), Timer::at(wake_at)).await {
                 Either3::First(first) => {
                     // An input leaves the interface laid out and settled, so its
@@ -102,7 +103,7 @@ pub(crate) async fn task(
                         next = UI_INPUT_CH.try_receive().ok();
                     }
                     costs.layout = costs.layout.max(Instant::now() - began);
-                    arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_IDLE);
+                    arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
                     attention.wake(now())
                 }
                 Either3::Second(()) => attention.wake(now()),
@@ -111,12 +112,18 @@ pub(crate) async fn task(
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
         }
-        if attention.accepts_redraw() && arrival.is_some_and(|at| at <= Instant::now()) {
+        if arrival.is_some_and(|at| at <= Instant::now()) {
             arrival = None;
             match store.arrive() {
                 Some((chat, message)) => {
+                    arrival = Some(Instant::now() + ARRIVAL_AFTER_ARRIVAL);
+                    // Taken in while the panel is still dark, so that one
+                    // arriving then is listed for the screen it wakes to.
                     if app.state_mut().receive(chat, message, now()) {
                         pager::alert::tick();
+                        if let Some(woke) = attention.wake(now()) {
+                            transition = Some(woke);
+                        }
                     }
                 }
                 None => arrivals_left = false,
@@ -124,6 +131,9 @@ pub(crate) async fn task(
         }
         match transition {
             Some(Transition::Woke) => {
+                if app.state().dark {
+                    app.state_mut().dark = false;
+                }
                 // A fresh frame goes in before the panel lights, so a stale
                 // one is never seen.
                 let epoch = pager::input::interactive().await;
@@ -144,6 +154,7 @@ pub(crate) async fn task(
                 if display.set_display_on(false).await.is_ok() {
                     pager::input::dark(before);
                 }
+                app.state_mut().dark = true;
             }
             None => {}
         }

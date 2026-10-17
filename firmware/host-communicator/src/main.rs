@@ -16,7 +16,8 @@
 //! Each script line is one step: `turn N` (negative is up), `press`,
 //! `enter`, `backspace`, `type TEXT`, `airtime SECONDS` (spent airtime
 //! that returns in that long; 0 for none), `arrive` (the fixture's next
-//! message arrives), `wait SECONDS` (the board's clock moves on), or
+//! message arrives), `wait SECONDS` (the board's clock moves on), `dark`
+//! and `lit` (the panel goes dark and lights again), or
 //! `shot NAME`, which writes `NAME.png` into the output directory. `#`
 //! starts a comment.
 //!
@@ -169,6 +170,11 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 for c in rest.chars() {
                     input::apply(&mut app, Input::Character(c));
                 }
+                None
+            }
+            "dark" | "lit" => {
+                app.state_mut().dark = word == "dark";
+                app.finalize_view();
                 None
             }
             "arrive" => {

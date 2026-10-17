@@ -535,3 +535,104 @@ fn a_muted_chat_does_not_call_for_attention() {
     assert_eq!(app.state().banner, None);
     assert_eq!(app.state().chats[0].id, 4);
 }
+
+/// Jo Reyes, the chat of the fixture's last arrival.
+const JO: u32 = 5;
+
+fn set_dark<V, F>(app: &mut App<V, State, F>, dark: bool)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    app.state_mut().dark = dark;
+    app.finalize_view();
+}
+
+fn arrived(state: &State) -> Vec<(u32, String)> {
+    state
+        .arrived
+        .iter()
+        .map(|a| (a.chat, a.text.as_str().to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_message_while_dark_wakes_to_the_chats_that_got_messages() {
+    let store = store();
+    let mut app = app!(store);
+    set_dark(&mut app, true);
+    assert!(arrive(&mut app, store, 0));
+    assert!(matches!(app.state().screen(), Screen::Wake { .. }));
+    set_dark(&mut app, false);
+    // More arrive while it shows, and join it rather than a banner.
+    assert!(arrive(&mut app, store, 0));
+    assert!(arrive(&mut app, store, 0));
+    assert_eq!(app.state().banner, None);
+    assert_eq!(
+        arrived(app.state()),
+        [
+            (
+                TRAIL_CREW,
+                "Sam: Will wait 10 min at the saddle, then we head down".to_owned()
+            ),
+            (PAT, "Got the antenna. Bringing two.".to_owned()),
+            (JO, "Are you on the ridge yet?".to_owned()),
+        ]
+    );
+    assert_eq!(focus(app.state()), Some(keys::chat(TRAIL_CREW)));
+    // Press opens the focused chat; Back from it goes to its row.
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_in_conversation(app.state(), PAT);
+    assert!(app.state().arrived.is_empty());
+    run(&mut app, &[Input::Backspace]);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(focus(app.state()), Some(keys::chat(PAT)));
+}
+
+#[test]
+fn typing_on_the_wake_screen_starts_a_reply_in_the_focused_chat() {
+    let store = store();
+    let mut app = app!(store);
+    set_dark(&mut app, true);
+    arrive(&mut app, store, 0);
+    set_dark(&mut app, false);
+    run(&mut app, &typed("Ok"));
+    assert_in_conversation(app.state(), TRAIL_CREW);
+    assert_eq!(draft(app.state(), TRAIL_CREW), "Ok");
+}
+
+#[test]
+fn backspace_on_the_wake_screen_returns_to_where_it_went_dark() {
+    let store = store();
+    let mut app = app!(store);
+    // Reading Ridge Medic when the panel goes dark, and a message there
+    // wakes it: dark, nothing was being read.
+    run(&mut app, &[Input::Press, Input::Turn(-1)]);
+    set_dark(&mut app, true);
+    let (_, message) = store.arrive().expect("an arrival");
+    assert!(app.state_mut().receive(RIDGE, message, 0));
+    app.finalize_view();
+    set_dark(&mut app, false);
+    assert!(matches!(app.state().screen(), Screen::Wake { .. }));
+    assert!(app.state().chats[0].unread);
+    run(&mut app, &[Input::Backspace]);
+    assert!(matches!(
+        app.state().screen(),
+        Screen::Conversation { chat: RIDGE, .. }
+    ));
+    assert_eq!(focus(app.state()), Some(keys::message(SEE_YOU)));
+    assert!(app.state().arrived.is_empty());
+}
+
+#[test]
+fn a_muted_chat_does_not_wake_the_panel() {
+    let store = store();
+    let mut app = app!(store);
+    set_dark(&mut app, true);
+    let (_, message) = store.arrive().expect("an arrival");
+    assert!(!app.state_mut().receive(4, message, 0));
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert!(app.state().arrived.is_empty());
+}

@@ -282,6 +282,14 @@ pub struct Banner {
     pub until: u64,
 }
 
+/// A chat that got a message while the panel was dark.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Arrived {
+    pub chat: ChatId,
+    /// The newest message, with its sender ahead of it in a channel.
+    pub text: SharedText,
+}
+
 /// The top-level lists the rail switches between.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
@@ -307,6 +315,11 @@ pub struct State {
     pub airtime_wait: Option<u16>,
     /// A message that arrived in a chat not on screen, shown for a moment.
     pub banner: Option<Banner>,
+    /// The panel is dark: nothing on it is being read.
+    pub dark: bool,
+    /// The chats that got messages while the panel was dark, in the order
+    /// they first did, for the screen the first of them woke it to.
+    pub arrived: Vec<Arrived, MAX_CHATS>,
 }
 
 impl core::fmt::Debug for State {
@@ -319,6 +332,8 @@ impl core::fmt::Debug for State {
             .field("screens", &self.screens)
             .field("airtime_wait", &self.airtime_wait)
             .field("banner", &self.banner)
+            .field("dark", &self.dark)
+            .field("arrived", &self.arrived)
             .finish_non_exhaustive()
     }
 }
@@ -338,6 +353,8 @@ impl State {
             history,
             airtime_wait: None,
             banner: None,
+            dark: false,
+            arrived: Vec::new(),
         }
     }
 
@@ -469,15 +486,17 @@ impl State {
     /// Takes in `message`, which arrived in `chat` and is already in the
     /// history, at `now` on the board's clock. The chat moves to the top of
     /// the list. Returns whether the message calls for attention: it does
-    /// not while its chat is open on screen, or when the chat is muted.
+    /// not while its chat is being read, or when the chat is muted. One that
+    /// does while the panel is dark is listed for the screen it wakes to.
     pub fn receive(&mut self, chat: ChatId, message: Message, now: u64) -> bool {
         let Some(index) = self.chats.iter().position(|c| c.id == chat) else {
             return false;
         };
-        let reading = matches!(
-            self.screen(),
-            Screen::Conversation { chat: shown, .. } if *shown == chat
-        );
+        let reading = !self.dark
+            && matches!(
+                self.screen(),
+                Screen::Conversation { chat: shown, .. } if *shown == chat
+            );
         let mut summary = self.chats.remove(index);
         summary.preview(&message);
         summary.age.clear();
@@ -486,19 +505,43 @@ impl State {
         let muted = summary.muted;
         _ = self.chats.insert(0, summary);
         if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
-            conversation.push(message);
+            conversation.push(message.clone());
         }
         if reading || muted {
             return false;
         }
-        // The list shows it arrive; anywhere else, a banner does.
-        if !matches!(self.screen(), Screen::Chats { .. }) {
+        if self.dark || matches!(self.screen(), Screen::Wake { .. }) {
+            self.list_arrival(chat, &message);
+        } else if !matches!(self.screen(), Screen::Chats { .. }) {
+            // The list shows it arrive; anywhere else, a banner does.
             self.banner = Some(Banner {
                 chat,
                 until: now + BANNER_MS,
             });
         }
         true
+    }
+
+    /// Lists `message`, the newest of `chat`, for the screen the panel wakes
+    /// to, and shows that screen.
+    fn list_arrival(&mut self, chat: ChatId, message: &Message) {
+        let text = message
+            .sender
+            .as_ref()
+            .and_then(|sender| {
+                SharedText::joined(message.text.heap(), &[sender, ": ", &message.text])
+            })
+            .unwrap_or_else(|| message.text.clone());
+        match self.arrived.iter_mut().find(|a| a.chat == chat) {
+            Some(arrived) => arrived.text = text,
+            None => {
+                if self.arrived.is_full() {
+                    self.arrived.remove(0);
+                }
+                _ = self.arrived.push(Arrived { chat, text });
+            }
+        }
+        self.show_arrivals();
     }
 
     /// When the screen next changes by itself, on the board's clock.

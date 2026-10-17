@@ -22,6 +22,7 @@ mod conversation;
 mod details;
 mod rail;
 mod status;
+mod wake;
 
 /// Height of the status strip.
 pub const STRIP: u32 = 22;
@@ -57,6 +58,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
             Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
+            Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),
         // Over everything, and taking no input.
