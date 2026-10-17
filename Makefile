@@ -364,6 +364,12 @@ ESPFLASH_PORT_ARG = $(if $(ESPFLASH_PORT),--port $(ESPFLASH_PORT),)
 # layout, so a board previously flashed with the espflash default table
 # loses whatever lived past the old factory partition.
 ESPFLASH_PARTITIONS = --partition-table firmware-esp32/partitions-umsh.csv
+# A board whose image outgrows the shared table has its own, laid out over
+# its whole flash. The flash size goes into the bootloader header, which
+# bounds every flash access the firmware makes. Every other board gets
+# the shared table and the 4 MB it is laid out for.
+ESPFLASH_LAYOUT_tlora-pager = --partition-table firmware-esp32/partitions-umsh-tlora-pager.csv -s 16mb
+esp32_layout = $(or $(ESPFLASH_LAYOUT_$(1)),$(ESPFLASH_PARTITIONS) -s 4mb)
 
 # espup writes this on install; it puts the Xtensa GCC binaries on PATH and
 # points LIBCLANG_PATH at the Xtensa clang, without which the build fails in
@@ -467,7 +473,7 @@ build-tlora-pager: esp-toolchain-check
 	$(ESP_ENV) python3 scripts/check_xtensa_stack.py $(ESP32S3_TARGET_DIR)/firmware-tlora-pager --reserve 32768
 
 flash-tlora-pager: espflash-check build-tlora-pager
-	espflash flash --before usb-reset --after watchdog-reset $(ESPFLASH_PORT_ARG) $(ESPFLASH_PARTITIONS) \
+	espflash flash --before usb-reset --after watchdog-reset $(ESPFLASH_PORT_ARG) $(ESPFLASH_LAYOUT_tlora-pager) \
 		$(ESP32S3_TARGET_DIR)/firmware-tlora-pager
 
 # Main constructs the device task through a nested ~17 KiB frame.
@@ -498,16 +504,15 @@ flash-xiao-esp32s3: espflash-check build-xiao-esp32s3
 #
 # `--skip-padding` is not an optimization. Without it espflash pads the
 # image out to the full flash size with 0xFF, and writing that at 0x0 runs
-# straight over the `umsh` data partition at 0x300000—every device would
-# lose its identity and saved state on update. With it the image stops after
-# the application and 0x300000 is never touched.
+# straight over the `umsh` data partition—every device would lose its
+# identity and saved state on update. With it the image stops after the
+# application and the `umsh` partition is never touched.
 #
-# `-s 4mb` is the partition table's layout, not the chip's flash size—
-# every board fits 8 MiB or more and no image claims past 0x310000.
+# The shared table's `-s 4mb` is its layout, not the chip's flash size—
+# every board fits 8 MiB or more and no image on it claims past 0x310000.
 $(addprefix merged-bin-,$(RELEASE_BOARDS_ESP32)): merged-bin-%: espflash-check build-%
 	@mkdir -p $(FW_DIR)
-	espflash save-image --chip esp32s3 --merge --skip-padding -s 4mb \
-		$(ESPFLASH_PARTITIONS) \
+	espflash save-image --chip esp32s3 --merge --skip-padding $(call esp32_layout,$*) \
 		$(ESP32S3_TARGET_DIR)/firmware-$* \
 		$(FW_DIR)/umsh-$*-$(FW_VERSION).bin
 

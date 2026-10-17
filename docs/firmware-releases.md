@@ -142,15 +142,20 @@ espflash save-image --chip esp32s3 --merge --skip-padding -s 4mb \
     --partition-table firmware-esp32/partitions-umsh.csv <ELF> <OUT.bin>
 ```
 
-`-s 4mb` is the partition table's layout rather than the chip's flash size.
-Every released Espressif board fits 8 MiB or more and no image claims past `0x310000`;
-widening the table is a separate, deliberate change.
+`-s 4mb` is the shared partition table's layout rather than the chip's flash
+size. Every released Espressif board fits 8 MiB or more and no image on that
+table claims past `0x310000`; widening it is a separate, deliberate change.
+
+The T-LoRa Pager is the exception. Its image outgrows the shared table, so it
+has its own, `partitions-umsh-tlora-pager.csv`, laid out over its 16 MB with
+`umsh` at `0xFF0000`, and it is built with `-s 16mb`. The Makefile's
+`esp32_layout` picks each board's table and size.
 
 `--skip-padding` is load-bearing. Without it espflash pads the image out to
 the full flash size with `0xFF`, and writing that at `0x0` runs straight over
-the `umsh` data partition at `0x300000`—every device would lose its
-identity and saved state on update. With it the image stops after the
-application, around `0x13E000`, and `0x300000` is never touched.
+the `umsh` data partition—every device would lose its identity and saved
+state on update. With it the image stops after the application, and the
+`umsh` partition is never touched.
 
 ## Where the artifacts live
 
@@ -217,5 +222,5 @@ Before promoting a draft release:
 - [ ] Flash one nRF52 board from the staged UF2; confirm `PROP_DEV_VERSION` reads `umsh/fw-<version>` and `PROP_DEV_MODEL` names the board. This also proves `UMSH_FW_VERSION` reached the compiler.
 - [ ] Install a DFU package over serial DFU on a T1000-E (S140 7.3.0) and a T-Echo (S140 6.1.1). A wrong FWID is a clean init-packet rejection, not a damaged board. If either is refused, drop `--sd-req` back to the `0xFFFE` default and note it here. *(Both passed 2026-08-09; only re-check if the SoftDevice table above changes.)*
 - [ ] Confirm the negative: a T-Echo package must be **refused** by a T1000-E. Still unchecked—it proves the guard guards, rather than that a correct package installs. If it were ever to *succeed*, the wrong-base image is recoverable with a normal UF2 flash, since the bootloader is untouched.
-- [ ] Write the merged ESP32 image at offset zero with a plain flasher—`espflash write-bin 0x0 <bin>`, and again with `esptool.py --chip esp32s3 write_flash 0x0 <bin>`, since that is the path esptool-js mirrors. Set and save a device name first, and confirm it **survives** the reflash: that is what proves `--skip-padding` kept the image clear of `0x300000`.
+- [ ] Write the merged ESP32 image at offset zero with a plain flasher—`espflash write-bin 0x0 <bin>`, and again with `esptool.py --chip esp32s3 write_flash 0x0 <bin>`, since that is the path esptool-js mirrors. Set and save a device name first, and confirm it **survives** the reflash: that is what proves `--skip-padding` kept the image clear of the `umsh` partition.
 - [ ] After `release-mirror` and a push, fetch `https://umsh.dev/firmware/manifest.json` from a browser console on another origin, and spot-check one mirrored file's SHA-256 against it.

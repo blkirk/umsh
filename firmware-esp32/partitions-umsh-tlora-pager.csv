@@ -1,0 +1,26 @@
+# ESP-IDF partition table for the T-LoRa Pager (16 MB flash). Images
+# for it are built with `-s 16mb`: esp-storage refuses any address past
+# the flash size in the bootloader header, so a 4 MB header would put the
+# `umsh` region out of reach.
+#
+# The communicator interface carries its fonts and art in the image, so
+# the application outgrows the shared table's 2.94 MB. The `umsh` region
+# sits at the very end of flash, where the application can keep growing
+# toward it without the region ever moving again.
+#
+# `umsh_bsp_esp32::flash_store` finds the `umsh` row by label; nothing
+# hardcodes its offset.
+#
+# Layout:
+#   0x008000  partition table (0xC00)
+#   0x009000  nvs        24 KB
+#   0x00F000  phy_init    4 KB
+#   0x010000  factory  7.94 MB
+#   0x800000  (unused)
+#   0xFF0000  umsh       64 KB   <- UMSH sequential-storage region
+#
+# Name,     Type, SubType,   Offset,   Size,     Flags
+nvs,        data, nvs,       0x9000,   0x6000,
+phy_init,   data, phy,       0xF000,   0x1000,
+factory,    app,  factory,   0x10000,  0x7F0000,
+umsh,       data, undefined, 0xFF0000, 0x10000,
