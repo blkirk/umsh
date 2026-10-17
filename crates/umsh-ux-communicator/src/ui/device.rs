@@ -41,7 +41,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
             category(
                 "Identity",
                 keys::IDENTITY,
-                |_| {},
+                State::open_share,
                 &state.status.device_name,
             ),
             category("Channels", keys::CHANNELS, |_| {}, &joined),

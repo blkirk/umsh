@@ -195,7 +195,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "buoyant"
 version = "0.8.0-alpha.1"
-source = "git+https://github.com/darconeous/buoyant?rev=2a319e967885d809a19eca0d0f0a255d66e083ba#2a319e967885d809a19eca0d0f0a255d66e083ba"
+source = "git+https://github.com/darconeous/buoyant?rev=519647c51f67fe707cc3e8f64f58b2fb8b4fbeaa#519647c51f67fe707cc3e8f64f58b2fb8b4fbeaa"
 dependencies = [
  "embedded-graphics",
  "embedded-graphics-core",
@@ -2668,6 +2668,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcodegen-no-heap"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0e2c0bf8be8a1c4a4f48973dabf26943f05da2bfc2d3180aae62409dbba6f0c"
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3802,6 +3808,7 @@ dependencies = [
  "embedded-graphics",
  "heapless 0.9.3",
  "libm",
+ "qrcodegen-no-heap",
  "swash",
  "umsh-core",
 ]

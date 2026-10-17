@@ -28,6 +28,7 @@ mod peer;
 mod peers;
 mod rail;
 mod setting;
+mod share;
 mod status;
 mod wake;
 
@@ -86,6 +87,7 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Radio {
                 settings, picker, ..
             } => device::radio(settings, *picker),
+            Screen::Share { .. } => share::view(state),
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),

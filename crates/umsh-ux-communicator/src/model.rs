@@ -112,6 +112,16 @@ pub struct PeerDetail {
     pub ping: Option<String<8>>,
 }
 
+/// What Share shows as a code: this node, or a channel it has joined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shareable {
+    Identity,
+    Channel(ChatId),
+}
+
+/// A link that shares a node or a channel, such as `umsh:n:…`.
+pub type ShareUri = String<96>;
+
 /// How the radio trades reach for speed, farthest reaching first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -482,6 +492,12 @@ pub trait Node {
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.
     fn retry(&self, chat: ChatId, message: MessageId) -> bool;
+
+    /// This node's address.
+    fn address(&self) -> String<44>;
+
+    /// The link that shares `what`. `None` when it cannot be shared.
+    fn share_uri(&self, what: Shareable) -> Option<ShareUri>;
 
     /// The radio's settings as they stand.
     fn radio(&self) -> RadioSettings;

@@ -9,7 +9,7 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChatKind, Delivery, Direction, Preset, Reaction, Section, State,
+    ChannelAccess, ChatKind, Delivery, Direction, Preset, Reaction, Section, Shareable, State,
 };
 use umsh_ux_communicator::nav::{Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
@@ -1129,4 +1129,24 @@ fn a_switch_flips_on_press() {
     assert!(radio(app.state()).0.share_location);
     run(&mut app, &[Input::Turn(-1), Input::Press]);
     assert!(!radio(app.state()).0.forwarding);
+}
+
+#[test]
+fn turning_on_share_moves_between_this_node_and_its_channels() {
+    let mut app = app!();
+    run(
+        &mut app,
+        &[Input::Backspace, Input::Turn(2), Input::Press, Input::Press],
+    );
+    assert!(matches!(app.state().screen(), Screen::Share { .. }));
+    assert_eq!(app.state().shared(), Shareable::Identity);
+    run(&mut app, &[Input::Turn(1)]);
+    assert_eq!(app.state().shared(), Shareable::Channel(2));
+    run(&mut app, &[Input::Turn(2)]);
+    assert_eq!(app.state().shared(), Shareable::Channel(6));
+    // The last stays put.
+    run(&mut app, &[Input::Turn(1)]);
+    assert_eq!(app.state().shared(), Shareable::Channel(6));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::IDENTITY));
 }

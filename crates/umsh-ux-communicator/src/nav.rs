@@ -10,8 +10,8 @@ use buoyant::view::EditBuffer;
 use heapless::String;
 
 use crate::model::{
-    ChatId, ChatSummary, Details, Invite, Member, MessageId, PeerDetail, PeerEntry, PeerId, Preset,
-    RadioSettings, Reaction, Section, State,
+    ChatId, ChatKind, ChatSummary, Details, Invite, MAX_CHATS, Member, MessageId, PeerDetail,
+    PeerEntry, PeerId, Preset, RadioSettings, Reaction, Section, Shareable, State,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -22,7 +22,7 @@ pub type PeerText = EditBuffer<String<64>>;
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
 pub mod keys {
-    use super::{ChatId, FocusKey, MessageId, PeerId, Preset, Reaction, Section};
+    use super::{ChatId, FocusKey, MessageId, PeerId, Preset, Reaction, Section, Shareable};
 
     const KIND: u32 = 0xFF00_0000;
     const RAIL: u32 = 0x0100_0000;
@@ -32,6 +32,9 @@ pub mod keys {
     const PEER: u32 = 0x0900_0000;
     const DEVICE: u32 = 0x0D00_0000;
     const PRESET: u32 = 0x0E00_0010;
+    const SHARE: u32 = 0x0F00_0000;
+    /// Set in a share key that names a channel.
+    const SHARE_CHANNEL: u32 = 0x0080_0000;
 
     /// A conversation's composer. Only one conversation is shown at a time.
     pub const COMPOSER: FocusKey = FocusKey(0x0400_0000);
@@ -96,6 +99,30 @@ pub mod keys {
     #[must_use]
     pub const fn preset(preset: Preset) -> FocusKey {
         FocusKey(PRESET | preset as u32)
+    }
+
+    /// Share's Shows, at `shareable`: turning moves focus between these,
+    /// and what is focused is what is shown.
+    #[must_use]
+    pub const fn share(shareable: Shareable) -> FocusKey {
+        match shareable {
+            Shareable::Identity => FocusKey(SHARE),
+            Shareable::Channel(chat) => {
+                FocusKey(SHARE | SHARE_CHANNEL | (chat & (SHARE_CHANNEL - 1)))
+            }
+        }
+    }
+
+    /// What the share key `key` shows.
+    #[must_use]
+    pub const fn shareable(key: FocusKey) -> Option<Shareable> {
+        if key.0 & KIND != SHARE {
+            None
+        } else if key.0 & SHARE_CHANNEL == 0 {
+            Some(Shareable::Identity)
+        } else {
+            Some(Shareable::Channel(key.0 & (SHARE_CHANNEL - 1)))
+        }
     }
 
     /// Whether `key` names one of the Device list's categories.
@@ -200,6 +227,8 @@ pub enum Screen {
         confirm: bool,
         focus: FocusState,
     },
+    /// A code that shares this node or a joined channel.
+    Share { focus: FocusState },
     /// The radio's settings.
     Radio {
         settings: RadioSettings,
@@ -242,6 +271,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Radio { focus, .. }
+            | Self::Share { focus }
             | Self::Wake { focus } => focus,
         }
     }
@@ -256,6 +286,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Radio { focus, .. }
+            | Self::Share { focus }
             | Self::Wake { focus } => focus,
         }
     }
@@ -529,6 +560,37 @@ impl State {
             .or_else(|| self.peers.last())
             .map_or(keys::ADD_PEER, |p| keys::peer(p.id));
         self.focus().request(next);
+    }
+
+    /// Shows this node's code.
+    pub fn open_share(&mut self) {
+        _ = self.screens.push(Screen::Share {
+            focus: FocusState::requesting(keys::share(Shareable::Identity)),
+        });
+    }
+
+    /// What Share can show: this node, then the joined channels in list
+    /// order.
+    #[must_use]
+    pub fn shareables(&self) -> heapless::Vec<Shareable, { MAX_CHATS + 1 }> {
+        let channels = self
+            .chats
+            .iter()
+            .filter(|c| matches!(c.kind, ChatKind::Channel { .. }))
+            .map(|c| Shareable::Channel(c.id));
+        core::iter::once(Shareable::Identity)
+            .chain(channels)
+            .collect()
+    }
+
+    /// What Share shows: the one focused.
+    #[must_use]
+    pub fn shared(&self) -> Shareable {
+        self.screen()
+            .focus()
+            .current()
+            .and_then(keys::shareable)
+            .unwrap_or(Shareable::Identity)
     }
 
     /// Shows the radio's settings, Region focused.

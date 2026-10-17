@@ -7,8 +7,8 @@ use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction, Invite,
     MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId,
-    PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender, State, StatusStrip,
-    push_newest,
+    PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender, ShareUri, Shareable,
+    State, StatusStrip, push_newest,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -340,6 +340,32 @@ const FIRST_SAVED: PeerId = 0x100;
 /// Where channels joined from invitations are numbered from.
 const FIRST_JOINED: ChatId = 0x200;
 
+/// This node's address, as the mockup's Share screen shows it.
+const ADDRESS: &str = "Geb9QfXhe5f1vXHcFDnXbvcXShxAFhAxaRp1jr5Bqe3L";
+/// Private channels' keys: Trail Crew's, and any joined from an invitation.
+const TRAIL_CREW_KEY: &str = "5BFn8YGKJ6pZR4qV3tW7mNhDrXsCxEaL9kUv2wAjT8bP";
+const JOINED_KEY: &str = "8xQvW3mZr7KpN2sTfYhB6cLdJ4gE9aUoRiV5tHnXkM1w";
+
+/// `name` as a URI parameter: what is not a letter, a digit, or `-._~` is
+/// percent-encoded.
+fn push_encoded(uri: &mut ShareUri, name: &str) -> Option<()> {
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            uri.push(char::from(byte)).ok()?;
+        } else {
+            core::fmt::write(uri, format_args!("%{byte:02X}")).ok()?;
+        }
+    }
+    Some(())
+}
+
+fn private_uri(key: &str, name: &str) -> Option<ShareUri> {
+    let mut uri = ShareUri::new();
+    core::fmt::write(&mut uri, format_args!("umsh:ck:{key}?n=")).ok()?;
+    push_encoded(&mut uri, name)?;
+    Some(uri)
+}
+
 impl Store {
     /// The next message to arrive, the ones on the T-LoRa Pager mockup's
     /// wake screen, and the chat it arrived in. It is kept as the newest
@@ -562,6 +588,28 @@ impl Node for Store {
 
     fn forget_peer(&self, peer: PeerId) {
         _ = self.forgotten.borrow_mut().push(peer);
+    }
+
+    fn address(&self) -> String<44> {
+        s(ADDRESS)
+    }
+
+    fn share_uri(&self, what: Shareable) -> Option<ShareUri> {
+        match what {
+            Shareable::Identity => {
+                let mut uri = ShareUri::new();
+                core::fmt::write(&mut uri, format_args!("umsh:n:{ADDRESS}")).ok()?;
+                Some(uri)
+            }
+            Shareable::Channel(2) => private_uri(TRAIL_CREW_KEY, "Trail Crew"),
+            Shareable::Channel(4) => ShareUri::try_from("umsh:cs:public").ok(),
+            Shareable::Channel(6) => ShareUri::try_from("umsh:cs:emergency").ok(),
+            Shareable::Channel(chat) => {
+                let index = chat.checked_sub(FIRST_JOINED)? as usize;
+                let joined = self.joined.borrow();
+                private_uri(JOINED_KEY, joined.get(index)?)
+            }
+        }
     }
 
     fn radio(&self) -> RadioSettings {

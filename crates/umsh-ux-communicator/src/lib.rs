@@ -29,6 +29,7 @@ pub mod icon;
 pub mod input;
 pub mod model;
 pub mod nav;
+pub mod qr;
 pub mod text;
 pub mod theme;
 pub mod ui;
