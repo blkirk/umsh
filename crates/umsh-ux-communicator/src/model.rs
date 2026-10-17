@@ -33,6 +33,7 @@ pub struct StatusStrip {
     pub time: String<8>,
     /// Remaining charge in thirds, 0 to 3.
     pub battery_segments: u8,
+    /// External power is charging the battery, or has charged it.
     pub charging: bool,
     /// A phone is connected.
     pub phone_linked: bool,
@@ -610,6 +611,24 @@ pub trait Node {
     fn set_share_location(&self, on: bool);
 }
 
+/// At or below this charge, in percent, the battery is low.
+pub const BATTERY_LOW_PERCENT: u8 = 10;
+/// The charge, in percent, at which a low battery stops being low.
+const BATTERY_RECOVERED_PERCENT: u8 = 15;
+
+/// The strip's lit thirds for a charge of `percent`. Each count is centered
+/// on the level it depicts, and the ends are narrower: a body should look
+/// neither full at 80 % nor empty at 20 %.
+#[must_use]
+pub const fn battery_segments(percent: u8) -> u8 {
+    match percent {
+        0..=16 => 0,
+        17..=49 => 1,
+        50..=82 => 2,
+        _ => 3,
+    }
+}
+
 /// How long a banner stays, in milliseconds.
 pub const BANNER_MS: u64 = 4000;
 
@@ -907,11 +926,25 @@ impl State {
         self.show_arrivals();
     }
 
-    /// The charge has fallen low, to `percent`: the strip's battery says so
-    /// from now on, and a banner says it once while the panel is lit.
-    pub fn battery_low(&mut self, percent: u8, now: u64) {
-        self.status.battery_low = true;
-        if !self.dark {
+    /// The battery as the board last read it: its charge in percent, when
+    /// that is known, and whether external power is charging it. The strip
+    /// shows it; falling to [`BATTERY_LOW_PERCENT`] with nothing charging
+    /// turns the strip's battery amber, and a banner says so once while the
+    /// panel is lit.
+    pub fn battery(&mut self, percent: Option<u8>, charging: bool, now: u64) {
+        self.status.battery_segments = percent.map_or(0, battery_segments);
+        self.status.charging = charging;
+        let was = self.status.battery_low;
+        // Low until it charges or climbs clear, so a reading wavering at
+        // the threshold says so once.
+        let low = !charging
+            && match percent {
+                Some(percent) if was => percent < BATTERY_RECOVERED_PERCENT,
+                Some(percent) => percent <= BATTERY_LOW_PERCENT,
+                None => was,
+            };
+        self.status.battery_low = low;
+        if let Some(percent) = percent.filter(|_| low && !was && !self.dark) {
             self.banner = Some(Banner {
                 notice: Notice::BatteryLow { percent },
                 until: now + BANNER_MS,

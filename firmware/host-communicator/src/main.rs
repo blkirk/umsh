@@ -19,7 +19,7 @@
 //! that returns in that long; 0 for none), `arrive` (the fixture's next
 //! message arrives), `identify` (the identity asked for arrives), `wait
 //! SECONDS` (the board's clock moves on), `dark` and `lit` (the panel goes
-//! dark and lights again), `battery-low PERCENT`, `battery-empty` (with
+//! dark and lights again), `battery PERCENT [charging]`, `battery-empty` (with
 //! `off` for the blink's dark half), `first-run`, or `shot NAME`, which writes `NAME.png` into the output directory. `#`
 //! starts a comment.
 //!
@@ -213,13 +213,15 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 expire(&mut app, clock);
                 None
             }
-            "battery-low" => {
-                let percent: u8 = rest
-                    .parse()
-                    .map_err(|_| format!("line {}: battery-low needs a percent", number + 1))?;
-                // Thirds of a full charge, as a board reports them.
-                app.state_mut().status.battery_segments = percent / 34;
-                app.state_mut().battery_low(percent, clock);
+            "battery" => {
+                // `battery PERCENT`, with `charging` after it while plugged in.
+                let mut words = rest.split_whitespace();
+                let percent: u8 = words
+                    .next()
+                    .and_then(|w| w.parse().ok())
+                    .ok_or_else(|| format!("line {}: battery needs a percent", number + 1))?;
+                let charging = words.next() == Some("charging");
+                app.state_mut().battery(Some(percent), charging, clock);
                 app.finalize_view();
                 None
             }

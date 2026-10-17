@@ -1,7 +1,7 @@
 //! The communicator interface on the Pager's panel, in place of the
-//! tracker's menus. For now it shows the fixture's chats and reports what
-//! each frame costs: layout, painting, the panel transfer, and
-//! the least stack left free.
+//! tracker's menus. For now it shows the fixture's chats with the board's
+//! own battery, and reports what each frame costs: layout, painting, the
+//! panel transfer, and the least stack left free.
 use super::*;
 use board::display::{Brightness, Display, brightness_from_permille};
 use static_cell::ConstStaticCell;
@@ -27,6 +27,12 @@ const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
 const ARRIVAL_AFTER_ARRIVAL: Duration = Duration::from_secs(40);
 /// How long the fixture's identity takes to arrive once asked for.
 const IDENTITY_DELAY: Duration = Duration::from_secs(2);
+/// The empty battery's blink before the power path opens: how many times,
+/// and how long it is lit and dark each time. Inside the two seconds
+/// [`ui::farewell`](crate::ui::farewell) waits.
+const EMPTY_BLINKS: u8 = 3;
+const EMPTY_LIT: Duration = Duration::from_millis(300);
+const EMPTY_DARK: Duration = Duration::from_millis(200);
 
 #[embassy_executor::task]
 pub(crate) async fn task(
@@ -61,6 +67,8 @@ pub(crate) async fn task(
         "communicator: app={} bytes",
         core::mem::size_of_val(app)
     ));
+    app.state_mut()
+        .battery(battery_percent(), battery_charging(), 0);
     let mut costs = Costs::default();
     let mut animating = draw(&mut display, app, start, &mut costs).await;
     let _ = display.set_display_on(true).await;
@@ -94,29 +102,42 @@ pub(crate) async fn task(
         .flatten()
         .fold(tick, |at, deadline| at.min(Instant::from_millis(deadline)));
         let now = || Instant::now().as_millis();
-        let mut transition =
-            match select3(UI_INPUT_CH.receive(), UI_WAKE.wait(), Timer::at(wake_at)).await {
-                Either3::First(first) => {
-                    // An input leaves the interface laid out and settled, so its
-                    // layout is counted here rather than in the frame. Everything
-                    // queued is taken before drawing, so typing outpacing the
-                    // frames only skips frames.
-                    let began = Instant::now();
-                    let mut next = Some(first);
-                    while let Some(ui) = next {
-                        input::apply(app, translate(ui));
-                        next = UI_INPUT_CH.try_receive().ok();
-                    }
-                    costs.layout = costs.layout.max(Instant::now() - began);
-                    arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
-                    if store.identity_asked() {
-                        identity = Some(Instant::now() + IDENTITY_DELAY);
-                    }
-                    attention.wake(now())
+        let mut transition = match select4(
+            UI_INPUT_CH.receive(),
+            UI_WAKE.wait(),
+            Timer::at(wake_at),
+            select(BATTERY_UI_CHANGED.wait(), DISPLAY_SHUTDOWN.wait()),
+        )
+        .await
+        {
+            Either4::First(first) => {
+                // An input leaves the interface laid out and settled, so its
+                // layout is counted here rather than in the frame. Everything
+                // queued is taken before drawing, so typing outpacing the
+                // frames only skips frames.
+                let began = Instant::now();
+                let mut next = Some(first);
+                while let Some(ui) = next {
+                    input::apply(app, translate(ui));
+                    next = UI_INPUT_CH.try_receive().ok();
                 }
-                Either3::Second(()) => attention.wake(now()),
-                Either3::Third(()) => attention.poll(now()),
-            };
+                costs.layout = costs.layout.max(Instant::now() - began);
+                arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
+                if store.identity_asked() {
+                    identity = Some(Instant::now() + IDENTITY_DELAY);
+                }
+                attention.wake(now())
+            }
+            Either4::Second(()) => attention.wake(now()),
+            Either4::Third(()) => attention.poll(now()),
+            // A reading redraws the strip but never lights the panel.
+            Either4::Fourth(Either::First(())) => {
+                app.state_mut()
+                    .battery(battery_percent(), battery_charging(), now());
+                None
+            }
+            Either4::Fourth(Either::Second(cause)) => farewell(&mut display, app, cause).await,
+        };
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
         }
@@ -177,6 +198,48 @@ pub(crate) async fn task(
         }
         costs.report(animating);
     }
+}
+
+/// The charge the board last read, in percent.
+fn battery_percent() -> Option<u8> {
+    Some(BATTERY_LEVEL.load(Ordering::Acquire)).filter(|&level| level != 0xFF)
+}
+
+/// Whether external power is charging the battery, or has charged it.
+fn battery_charging() -> bool {
+    matches!(BATTERY_CHARGE.load(Ordering::Acquire), 2 | 3)
+}
+
+/// The board is turning off. With the battery empty, its icon blinks a few
+/// times first; either way the panel ends dark, and nothing more is drawn.
+async fn farewell<V, F>(
+    display: &mut Display,
+    app: &mut App<V, State, F>,
+    cause: ShutdownCause,
+) -> !
+where
+    V: View<embedded_graphics::pixelcolor::Rgb565, State>,
+    F: Fn(&State) -> V,
+{
+    if cause == ShutdownCause::BatteryEmpty {
+        let start = Instant::now();
+        let mut costs = Costs::default();
+        for _ in 0..EMPTY_BLINKS {
+            for (lit, hold) in [(true, EMPTY_LIT), (false, EMPTY_DARK)] {
+                app.state_mut().battery_empty(lit);
+                draw(display, app, start, &mut costs).await;
+                // Lit at full brightness, whatever the panel was doing.
+                if lit {
+                    let _ = display.set_brightness(Brightness::NORMAL).await;
+                    let _ = display.set_display_on(true).await;
+                }
+                Timer::after(hold).await;
+            }
+        }
+    }
+    let _ = display.set_display_on(false).await;
+    DISPLAY_SHUTDOWN_DONE.signal(());
+    core::future::pending().await
 }
 
 fn translate(input: UiInput) -> Input {

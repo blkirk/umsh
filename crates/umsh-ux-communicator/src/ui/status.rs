@@ -27,6 +27,7 @@ pub fn view(s: &StatusStrip, setup: bool) -> impl View<Rgb565, State> + use<> {
             (shown && s.silent).then(|| indicator(&icon::BELL_SLASH)),
             (shown && s.phone_linked).then(|| indicator(&icon::BLUETOOTH)),
             (shown && s.gnss).then(|| indicator(&icon::GNSS)),
+            s.charging.then(|| indicator(&icon::BOLT)),
             battery(s.battery_segments, s.battery_low),
         ))
         .with_spacing(3)

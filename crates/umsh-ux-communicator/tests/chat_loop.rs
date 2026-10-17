@@ -1238,24 +1238,34 @@ fn low_battery_says_so_once_without_taking_a_key() {
     let mut app = app!();
     // Typing in Ridge Medic.
     run(&mut app, &[Input::Press, Input::Enter]);
-    app.state_mut().battery_low(9, 1000);
+    app.state_mut().battery(Some(11), false, 0);
+    assert!(!app.state().status.battery_low);
+    app.state_mut().battery(Some(9), false, 1000);
     app.finalize_view();
     assert!(app.state().status.battery_low);
+    assert_eq!(app.state().status.battery_segments, 0);
     let banner = app.state().banner.expect("a banner");
     assert_eq!(banner.notice, Notice::BatteryLow { percent: 9 });
     run(&mut app, &typed("!"));
     assert!(draft(app.state(), RIDGE).ends_with('!'));
     app.state_mut().expire(banner.until);
     assert_eq!(app.state().banner, None);
-    // The strip keeps saying it.
+    // The strip keeps saying it, and wavering does not say it again.
+    app.state_mut().battery(Some(11), false, 6000);
+    app.state_mut().battery(Some(9), false, 7000);
     assert!(app.state().status.battery_low);
+    assert_eq!(app.state().banner, None);
+    // Charging ends it.
+    app.state_mut().battery(Some(9), true, 8000);
+    assert!(!app.state().status.battery_low);
+    assert!(app.state().status.charging);
 }
 
 #[test]
 fn low_battery_while_dark_marks_only_the_strip() {
     let mut app = app!();
     app.state_mut().dark = true;
-    app.state_mut().battery_low(9, 1000);
+    app.state_mut().battery(Some(9), false, 1000);
     assert!(app.state().status.battery_low);
     assert_eq!(app.state().banner, None);
 }
@@ -1336,4 +1346,16 @@ fn backspace_ends_find_and_turning_moves_into_the_results() {
     run(&mut app, &[Input::Backspace]);
     assert_eq!(app.state().find_query(), None);
     assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+}
+
+#[test]
+fn the_strip_counts_thirds_centered_on_their_levels() {
+    use umsh_ux_communicator::model::battery_segments;
+    assert_eq!(battery_segments(16), 0);
+    assert_eq!(battery_segments(17), 1);
+    assert_eq!(battery_segments(49), 1);
+    assert_eq!(battery_segments(50), 2);
+    assert_eq!(battery_segments(82), 2);
+    assert_eq!(battery_segments(83), 3);
+    assert_eq!(battery_segments(100), 3);
 }

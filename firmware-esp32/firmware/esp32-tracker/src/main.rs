@@ -642,15 +642,27 @@ static UI_NOTICE: Signal<CriticalSectionRawMutex, UiNotice> = Signal::new();
 /// began it, so a press that answers the fade brings the panel back and
 /// goes no further.
 static SCREEN_FADED: AtomicBool = AtomicBool::new(false);
-/// The four-second power-off hold fired: button task → heartbeat task,
-/// which owns the shutdown sequence (deep sleep through its `Rtc`, or
-/// a PMIC power-off on `pmic-axp2101` boards).
-static SHUTDOWN_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Why the board is turning itself off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownCause {
+    /// The power-off hold.
+    Hold,
+    /// The battery stayed below its floor, with no external power. Only the
+    /// Pager watches for that.
+    #[cfg(feature = "board-tlora-pager")]
+    BatteryEmpty,
+}
+
+/// The board is to turn off: the power-off hold fired (button task), or the
+/// battery ran out (the Pager's battery task) → heartbeat task, which owns
+/// the shutdown sequence (deep sleep through its `Rtc`, or a PMIC power-off
+/// on `pmic-axp2101` boards).
+static SHUTDOWN_REQUEST: Signal<CriticalSectionRawMutex, ShutdownCause> = Signal::new();
 /// Shutdown sequence → display task. Distinct from `SHUTDOWN_REQUEST`
 /// so the two consumers cannot race for one signal: whichever awaited
 /// first would consume it and leave the other waiting forever.
 #[cfg(feature = "display")]
-static DISPLAY_SHUTDOWN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static DISPLAY_SHUTDOWN: Signal<CriticalSectionRawMutex, ShutdownCause> = Signal::new();
 /// The display task has rendered its farewell and powered the panel
 /// down (dropping `Vext` where it owns the rail).
 #[cfg(feature = "display")]
@@ -662,7 +674,7 @@ static BATTERY_MV: AtomicU16 = AtomicU16::new(0);
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 static BATTERY_LEVEL: AtomicU8 = AtomicU8::new(0xFF);
 /// Last charge classification: 0 unknown, 1 discharging, 2 charging,
-/// 3 charged. Display only.
+/// 3 charged, 4 powered but not charging. Display only.
 #[cfg(any(feature = "pmic-axp2101", feature = "board-tlora-pager"))]
 static BATTERY_CHARGE: AtomicU8 = AtomicU8::new(0);
 /// Battery request/reply pair between the session env and the sampler
@@ -2289,7 +2301,7 @@ async fn button_task(mut button: Input<'static>) {
                 Disposition::Deliver if matches!(event, ButtonEvent::VeryLong) => {
                     pressed = false;
                     fsm = ButtonFsm::new(umsh_ux_display_tracker::button_timings());
-                    SHUTDOWN_REQUEST.signal(());
+                    SHUTDOWN_REQUEST.signal(ShutdownCause::Hold);
                 }
                 Disposition::Deliver => ui::gesture(event).await,
             }
@@ -2326,11 +2338,9 @@ async fn heartbeat_task(
         let wait = led.show_until(feed_by);
         #[cfg(not(feature = "status-led"))]
         let wait = Timer::at(feed_by);
-        if matches!(
-            select(SHUTDOWN_REQUEST.wait(), wait).await,
-            Either::First(())
-        ) {
+        if let Either::First(cause) = select(SHUTDOWN_REQUEST.wait(), wait).await {
             shutdown(
+                cause,
                 #[cfg(feature = "status-led")]
                 &mut led,
                 &mut rtc,
@@ -2360,16 +2370,17 @@ async fn heartbeat_task(
 /// flushes it as it goes, so there is no buffered state to lose.
 #[cfg(feature = "power-off-deep-sleep")]
 async fn shutdown(
+    cause: ShutdownCause,
     #[cfg(feature = "status-led")] led: &mut status_led::StatusLed,
     rtc: &mut Rtc<'static>,
     deep_sleep: &mut esp_rtos::sleep::DeepSleep,
 ) -> ! {
-    debug_log(format_args!("shutdown: power-off hold"));
+    debug_log(format_args!("shutdown: {cause:?}"));
     DEVICE_CTL.shutdown();
     #[cfg(feature = "status-led")]
-    embassy_futures::join::join(ui::farewell(), led.power_off()).await;
+    embassy_futures::join::join(ui::farewell(cause), led.power_off()).await;
     #[cfg(not(feature = "status-led"))]
-    ui::farewell().await;
+    ui::farewell(cause).await;
 
     // `button_task` owns the button for the life of the board.
     // Temporarily duplicate its input to await release; neither handle
@@ -2416,14 +2427,13 @@ async fn heartbeat_task(mut rtc: Rtc<'static>, pmic: &'static SharedPmic) -> ! {
         // The feed cadence caps light-sleep residency (each feed is a
         // timer wake), so it runs as slow as the watchdog allows; the
         // shutdown signal still lands instantly through the timeout.
-        if with_timeout(
+        if let Ok(cause) = with_timeout(
             Duration::from_secs(HEARTBEAT_FEED_SECS),
             SHUTDOWN_REQUEST.wait(),
         )
         .await
-        .is_ok()
         {
-            shutdown(&mut rtc, pmic).await;
+            shutdown(cause, &mut rtc, pmic).await;
         }
     }
 }
@@ -2450,10 +2460,10 @@ async fn heartbeat_task(mut rtc: Rtc<'static>, pmic: &'static SharedPmic) -> ! {
 /// the PMIC refuses the power-off, the abandoned RWDT resets the board
 /// back to a running state—worse than off, better than wedged.
 #[cfg(feature = "pmic-axp2101")]
-async fn shutdown(rtc: &mut Rtc<'static>, pmic: &'static SharedPmic) -> ! {
-    debug_log(format_args!("shutdown: power-off hold"));
+async fn shutdown(cause: ShutdownCause, rtc: &mut Rtc<'static>, pmic: &'static SharedPmic) -> ! {
+    debug_log(format_args!("shutdown: {cause:?}"));
     DEVICE_CTL.shutdown();
-    ui::farewell().await;
+    ui::farewell(cause).await;
 
     // GPIO0 is stolen rather than handed over: `button_task` holds an
     // `Input` on it for the life of the board. Both uses are read-only,

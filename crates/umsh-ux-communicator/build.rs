@@ -424,6 +424,15 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             stroke("M2 2 L5 5", 1.4),
         ],
     ),
+    // Beside the strip's battery while it charges.
+    (
+        "BOLT",
+        14,
+        1.3,
+        &[fill(
+            "M0.25 -5.5 L-2.75 0.5 H-0.25 L-1.75 5.5 L2.75 -1 H0.25 Z",
+        )],
+    ),
     // A battery with only its last cell left: the banner's at 22, and the
     // screen's when it is empty at five times that.
     ("BATTERY_LOW", 22, 1.0, BATTERY),

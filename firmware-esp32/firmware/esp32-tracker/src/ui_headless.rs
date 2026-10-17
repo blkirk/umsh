@@ -19,7 +19,7 @@ pub(crate) async fn gesture(event: ButtonEvent) {
 }
 
 /// Nothing to say goodbye on.
-pub(crate) async fn farewell() {}
+pub(crate) async fn farewell(_cause: ShutdownCause) {}
 
 /// With no menu, holding the button through boot is how the pairing
 /// window is opened over existing bonds. Two flashes acknowledge it.

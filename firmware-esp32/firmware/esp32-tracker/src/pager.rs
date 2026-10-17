@@ -526,7 +526,7 @@ pub async fn battery_task(bus: &'static board::I2cBus, initial: board_battery::R
                     BATTERY_UI_CHANGED.signal(());
                 }
                 if low.sample(sampled_at.as_millis(), Some(&reading)) {
-                    SHUTDOWN_REQUEST.signal(());
+                    SHUTDOWN_REQUEST.signal(ShutdownCause::BatteryEmpty);
                 }
             }
             Err(_) => {
@@ -566,15 +566,13 @@ pub async fn heartbeat_task(
     expander: &'static board::SharedExpander,
     bus: &'static board::I2cBus,
 ) -> ! {
-    loop {
+    let cause = loop {
         rtc.rwdt.feed();
-        if with_timeout(Duration::from_secs(2), SHUTDOWN_REQUEST.wait())
-            .await
-            .is_ok()
-        {
-            break;
+        if let Ok(cause) = with_timeout(Duration::from_secs(2), SHUTDOWN_REQUEST.wait()).await {
+            break cause;
         }
-    }
+    };
+    debug_log(format_args!("shutdown: {cause:?}"));
     alert::shutdown().await;
     input::shutdown().await;
     #[cfg(not(feature = "motion-qualification"))]
@@ -585,7 +583,7 @@ pub async fn heartbeat_task(
         rtc.rwdt.feed();
     }
     DEVICE_CTL.shutdown();
-    ui::farewell().await;
+    ui::farewell(cause).await;
     // Journal writes are synchronous on this executor; no flash operation can
     // be suspended halfway here. MAC counters are persisted before transmission.
     // Inputs are reborrowed only for the terminal shutdown path; never driven.

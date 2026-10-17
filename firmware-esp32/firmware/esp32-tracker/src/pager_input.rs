@@ -383,7 +383,7 @@ async fn run_button(pin: &mut Input<'static>, boot: bool) {
             }
         }
         if shutdown_at.is_some_and(|at| now >= at) {
-            SHUTDOWN_REQUEST.signal(());
+            SHUTDOWN_REQUEST.signal(ShutdownCause::Hold);
             shutdown_at = None;
         }
         let debouncing = match (debounce.deadline(), press_cycle.deadline()) {

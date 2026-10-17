@@ -32,10 +32,10 @@ pub(crate) async fn gesture(event: ButtonEvent) {
 
 /// Say goodbye on the panel and switch it off, dropping `Vext` where the
 /// display task owns it. Bounded, so a wedged panel cannot strand a board
-/// the user has asked to turn off.
-pub(crate) async fn farewell() {
+/// that is turning off.
+pub(crate) async fn farewell(cause: ShutdownCause) {
     DISPLAY_SHUTDOWN_DONE.reset();
-    DISPLAY_SHUTDOWN.signal(());
+    DISPLAY_SHUTDOWN.signal(cause);
     let _ = with_timeout(Duration::from_secs(2), DISPLAY_SHUTDOWN_DONE.wait()).await;
 }
 
@@ -597,7 +597,7 @@ pub(crate) async fn display_task(
                     }
                 }
             },
-            Either4::Third(()) => {
+            Either4::Third(_) => {
                 render_message(
                     &mut display,
                     &ui_status(&name, &identity),
