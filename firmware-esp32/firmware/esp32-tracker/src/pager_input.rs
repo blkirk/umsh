@@ -61,6 +61,7 @@ pub fn activity() -> u32 {
 pub fn dark(before_display_off: u32) {
     let accepted = control(|c| c.policy.dark(before_display_off));
     if accepted {
+        super::set_battery_display_lit(false);
         CHANGED.signal(());
     } else {
         wake_display();
@@ -101,6 +102,7 @@ pub fn shown(epoch: u32) {
     // Publish before allowing queued post-wake gestures through the display.
     SCREEN_FADED.store(false, Ordering::Release);
     control(|c| c.policy.shown(epoch));
+    super::set_battery_display_lit(true);
     DISPLAY_READY.signal(());
     KEYBOARD_RETRY.signal(());
 }

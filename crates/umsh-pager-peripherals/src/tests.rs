@@ -952,20 +952,22 @@ fn low_battery_uses_elapsed_time_and_rejects_invalid_or_stale_evidence() {
 }
 
 #[test]
-fn battery_polling_is_minimal_until_visible_low_or_unknown() {
+fn battery_polling_is_minimal_until_lit_visible_low_or_unknown() {
+    use BatteryWatch::{Dark, Details, Lit};
     use umsh_ulcp::{battery_diagnostics::Fields, ids::prop};
     let mut r = decode_reading(0, false, Some((4000, 8, 75, 0x20)));
-    assert_eq!(battery_poll_interval_ms(Some(&r), false), 60_000);
-    assert_eq!(battery_poll_interval_ms(Some(&r), true), 1000);
-    // Hiding the Battery page immediately restores the idle interval.
-    assert_eq!(battery_poll_interval_ms(Some(&r), false), 60_000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Dark), 60_000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Lit), 5000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Details), 1000);
+    // Hiding the Battery page immediately restores the lit interval.
+    assert_eq!(battery_poll_interval_ms(Some(&r), Lit), 5000);
     r.voltage_mv = Some(3500);
-    assert_eq!(battery_poll_interval_ms(Some(&r), false), 1000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Dark), 1000);
     r.vbus = true;
-    assert_eq!(battery_poll_interval_ms(Some(&r), false), 60_000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Dark), 60_000);
     r.voltage_mv = None;
-    assert_eq!(battery_poll_interval_ms(Some(&r), false), 1000);
-    assert_eq!(battery_poll_interval_ms(None, false), 1000);
+    assert_eq!(battery_poll_interval_ms(Some(&r), Dark), 1000);
+    assert_eq!(battery_poll_interval_ms(None, Dark), 1000);
     assert_eq!(
         battery_poll_fields(false),
         Fields::SNAPSHOT.union(Fields::for_key(prop::BATTERY_EXT_POWER_PRESENT))

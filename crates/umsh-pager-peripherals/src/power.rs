@@ -513,13 +513,27 @@ impl LowBattery {
     }
 }
 
-/// Refresh a minimal snapshot once per minute normally. A visible diagnostics
-/// page, unknown voltage, or battery voltage near shutdown needs quicker reads.
-pub fn battery_poll_interval_ms(reading: Option<&Reading>, details_visible: bool) -> u64 {
-    if details_visible
+/// Who is looking at the battery, which sets how fresh its readings must be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryWatch {
+    /// The panel is dark.
+    Dark,
+    /// The panel is lit, and its status shows the battery.
+    Lit,
+    /// A diagnostics page is visible.
+    Details,
+}
+
+/// Refresh a minimal snapshot every few seconds while the panel is lit and
+/// once per minute while it is dark. A visible diagnostics page, unknown
+/// voltage, or battery voltage near shutdown needs quicker reads.
+pub fn battery_poll_interval_ms(reading: Option<&Reading>, watch: BatteryWatch) -> u64 {
+    if watch == BatteryWatch::Details
         || reading.is_none_or(|r| r.voltage_mv.is_none_or(|mv| !r.vbus && mv <= 3500))
     {
         1000
+    } else if watch == BatteryWatch::Lit {
+        5000
     } else {
         60_000
     }

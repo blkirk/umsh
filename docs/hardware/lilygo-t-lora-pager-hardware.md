@@ -559,13 +559,15 @@ PCF85063 retained time uses its
 own register layout, with oscillator-stop, invalid dates, and implausible
 epochs reported as unknown. The unused RTC clock output is disabled.
 
-Idle battery sampling reads only voltage, SOC, gauge status, charger status,
-and external-power presence every 60 seconds. Visible Battery detail pages
-enable one-second scalar diagnostic updates; other detailed readings are
-acquired only on request. With USB absent, voltage at or below 3.5 V changes
-the snapshot interval to one second. Missing/failed voltage readings also
-use one-second retries. USB/charging status can consequently take up to a
-minute to update while idle; an explicit battery request reads fresh data.
+Routine battery sampling reads only voltage, SOC, gauge status, charger
+status, and external-power presence: once as the panel lights, every 5
+seconds while it stays lit, and every 60 seconds while it is dark. Visible
+Battery detail pages enable one-second scalar diagnostic updates; other
+detailed readings are acquired only on request. With USB absent, voltage at
+or below 3.5 V changes the snapshot interval to one second. Missing/failed
+voltage readings also use one-second retries. The board has no charger
+interrupt line, so USB/charging status can take up to a minute to update
+while the panel is dark; an explicit battery request reads fresh data.
 
 Every sampling pass reads OperationStatus first. If CFGUPDATE is set, it
 performs no further battery or charger I2C operations, retains the cached UI

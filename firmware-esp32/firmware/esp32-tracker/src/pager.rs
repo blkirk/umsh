@@ -6,7 +6,9 @@ use esp_hal::peripherals;
 use esp_hal::ram;
 use umsh_pager_peripherals::{
     input::{Debounce, KeyEvent, Keyboard, Quadrature},
-    power::{Battery, Expander, LowBattery, battery_poll_fields, battery_poll_interval_ms},
+    power::{
+        Battery, BatteryWatch, Expander, LowBattery, battery_poll_fields, battery_poll_interval_ms,
+    },
 };
 use umsh_ulcp::battery_diagnostics::{
     Fields as BatteryFieldsRequested, Sample as BatterySample, Value as BatteryValue,
@@ -126,7 +128,10 @@ fn screen_battery(sample: &BatterySample) -> Option<screen::BatteryDiagnostics> 
     })
 }
 static BATTERY_DETAILS_ACTIVE: AtomicBool = AtomicBool::new(false);
-static BATTERY_DETAILS_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// The panel is lit, so the status's battery is in view.
+static BATTERY_DISPLAY_LIT: AtomicBool = AtomicBool::new(false);
+/// Either of the above changed, so the battery task's cadence has.
+static BATTERY_WATCH_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static BATTERY_DETAILS: critical_section::Mutex<RefCell<Option<screen::BatteryDiagnostics>>> =
     critical_section::Mutex::new(RefCell::new(None));
 
@@ -136,7 +141,24 @@ pub fn battery_diagnostics() -> Option<screen::BatteryDiagnostics> {
 
 pub fn set_battery_details_visible(visible: bool) {
     if BATTERY_DETAILS_ACTIVE.swap(visible, Ordering::AcqRel) != visible {
-        BATTERY_DETAILS_CHANGED.signal(());
+        BATTERY_WATCH_CHANGED.signal(());
+    }
+}
+
+/// The panel has lit or gone dark. Lighting it reads the battery at once.
+fn set_battery_display_lit(lit: bool) {
+    if BATTERY_DISPLAY_LIT.swap(lit, Ordering::AcqRel) != lit {
+        BATTERY_WATCH_CHANGED.signal(());
+    }
+}
+
+fn battery_watch() -> BatteryWatch {
+    if BATTERY_DETAILS_ACTIVE.load(Ordering::Acquire) {
+        BatteryWatch::Details
+    } else if BATTERY_DISPLAY_LIT.load(Ordering::Acquire) {
+        BatteryWatch::Lit
+    } else {
+        BatteryWatch::Dark
     }
 }
 #[repr(C, align(4))]
@@ -354,12 +376,17 @@ pub async fn battery_task(bus: &'static board::I2cBus, initial: board_battery::R
     let mut last_periodic = None::<Instant>;
     let mut last_reading = Some(initial);
     let mut next_acquisition = Instant::now();
+    let mut watched = BatteryWatch::Dark;
     loop {
-        let details_visible = BATTERY_DETAILS_ACTIVE.load(Ordering::Acquire);
-        let interval = Duration::from_millis(battery_poll_interval_ms(
-            last_reading.as_ref(),
-            details_visible,
-        ));
+        let watch = battery_watch();
+        if watched == BatteryWatch::Dark && watch != BatteryWatch::Dark {
+            // The panel just lit: what it shows must be current.
+            last_periodic = None;
+        }
+        watched = watch;
+        let details_visible = watch == BatteryWatch::Details;
+        let interval =
+            Duration::from_millis(battery_poll_interval_ms(last_reading.as_ref(), watch));
         #[cfg(feature = "input-qualification")]
         let interval = interval.min(Duration::from_secs(1));
         let next_tick = last_periodic.map_or_else(Instant::now, |last| last + interval);
@@ -367,12 +394,13 @@ pub async fn battery_task(bus: &'static board::I2cBus, initial: board_battery::R
             Timer::at(next_tick),
             BATTERY_REQUEST.wait(),
             select(GROUP_REQUEST.wait(), TEMPERATURE_REQUEST.wait()),
-            BATTERY_DETAILS_CHANGED.wait(),
+            BATTERY_WATCH_CHANGED.wait(),
         )
         .await;
         if matches!(event, Either4::Fourth(())) {
-            // Recompute the deadline when entering/leaving a visible detail
-            // page; do not wait out the old minute or perform a stale fast read.
+            // Recompute the deadline when the panel lights or goes dark, or a
+            // detail page opens or closes; do not wait out the old minute or
+            // perform a stale fast read.
             continue;
         }
         if let Either4::Third(Either::Second(generation)) = event {
