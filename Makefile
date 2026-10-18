@@ -30,6 +30,7 @@
 	merged-bin-xiao-esp32s3 \
 	release-artifacts release-stage release-publish release-mirror \
 	ios-mobile-core ios-archive ios-upload \
+	build-simulator-communicator run-simulator-communicator \
 	install-umshctl install-umsh-bridge install-dissector install-extcap \
 	install-colorfilters
 
@@ -703,6 +704,24 @@ install-umshctl:
 
 install-umsh-bridge:
 	cargo install --path tools/umsh-bridge
+
+# ─── Communicator simulator ──────────────────────────────────────────────────
+#
+# The communicator interface in a window on the host, at the T-LoRa Pager's
+# 480x222, over the fixture's chats (firmware/host-communicator). The window
+# needs SDL2 (`brew install sdl2`). Its controls are in the crate's docs.
+# Built for release: unoptimized, layout and painting lag the input.
+#
+# SIMULATOR_ARGS passes arguments through, for a scripted run instead of
+# the window or a benchmark:
+#   make run-simulator-communicator SIMULATOR_ARGS="--script steps.txt --out shots"
+#   make run-simulator-communicator SIMULATOR_ARGS="--bench 200"
+
+build-simulator-communicator:
+	cargo build --release -p firmware-host-communicator
+
+run-simulator-communicator:
+	cargo run --release -p firmware-host-communicator -- $(SIMULATOR_ARGS)
 
 # ─── Wireshark ───────────────────────────────────────────────────────────────
 #
