@@ -4622,6 +4622,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "umsh-communicator"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "umsh-core",
+ "umsh-text",
+]
+
+[[package]]
 name = "umsh-core"
 version = "0.1.0"
 dependencies = [

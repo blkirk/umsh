@@ -1,0 +1,17 @@
+[package]
+name = "umsh-communicator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A communicator's durable chat state: the ChatStore interface and its in-memory back end"
+
+[features]
+# The conformance suite, for a back end in another crate to run against
+# itself. This crate's own tests always have it.
+conformance = []
+
+[dependencies]
+umsh-text = { path = "../umsh-text", default-features = false }
+umsh-core = { path = "../umsh-core", default-features = false }
+heapless = { workspace = true }
