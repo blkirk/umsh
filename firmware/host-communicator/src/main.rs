@@ -9,7 +9,8 @@
 //! a click presses it. Return, Backspace, Space, and the letters are the
 //! Pager's; Shift is CAP, and Alt the orange key.
 //! Tab brings the fixture's next message in, as if it arrived. An
-//! identity asked for arrives two seconds later.
+//! identity asked for arrives two seconds later, as the fixture's own
+//! clock has it.
 //!
 //! Headless, for scripted runs and comparisons with the mockup:
 //!
@@ -21,7 +22,8 @@
 //! `shift` and `alt` (tapped), `alt-down` and `alt-up`, `airtime SECONDS`
 //! (spent airtime that returns in that long; 0 for none), `arrive` (the
 //! fixture's next message arrives), `identify` (the identity asked for
-//! arrives), `wait SECONDS` (the board's clock moves on), `dark` and `lit`
+//! arrives at once), `wait SECONDS` (the board's clock moves on, and the
+//! fixture's with it), `dark` and `lit`
 //! (the panel goes dark and lights again), `battery PERCENT [charging]`,
 //! `battery-empty` (with `off` for the blink's dark half), `first-run`,
 //! `shot NAME`, which writes `NAME.png` into the output directory once
@@ -52,7 +54,7 @@ use embedded_graphics_simulator::{OutputSettings, SimulatorDisplay};
 use umsh_pager_peripherals::input::alt_legend;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::State;
+use umsh_ux_communicator::model::{NodeEvent, State};
 use umsh_ux_communicator::{fixture, theme, ui};
 
 const SIZE: Size = Size::new(theme::WIDTH, theme::HEIGHT);
@@ -62,37 +64,23 @@ fn store() -> &'static fixture::Store {
     Box::leak(Box::new(fixture::Store::new(&std::alloc::System)))
 }
 
-/// Takes in the fixture's next message to arrive, at `now` in milliseconds,
-/// as a board would.
-fn arrive<V, F>(app: &mut App<V, State, F>, store: &fixture::Store, now: u64)
+/// Moves the fixture on to `now` on the board's clock, in milliseconds, and
+/// takes in what that brings as a board would: the minute turning over,
+/// and what the fixture has to say.
+fn advance<V, F>(app: &mut App<V, State, F>, store: &fixture::Store, now: u64)
 where
     V: ViewLayout<State>,
     V::FocusTree: DefaultFocus,
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
-    if let Some((chat, message)) = store.arrive() {
-        app.state_mut().receive(chat, message, now);
+    store.advance(now);
+    let time = store.time();
+    if app.state().wall_time.map(|t| t / 60) != Some(time / 60) {
+        app.state_mut().set_wall_time(Some(time));
         app.finalize_view();
     }
-}
-
-/// How long an identity takes to arrive once asked for, in the window.
-#[cfg(feature = "window")]
-const IDENTITY_DELAY_MS: u64 = 2000;
-
-/// Takes in the identity asked for, as a board would, if one was.
-fn identify<V, F>(app: &mut App<V, State, F>, store: &fixture::Store)
-where
-    V: ViewLayout<State>,
-    V::FocusTree: DefaultFocus,
-    V::Renderables: AnimatedJoin,
-    F: Fn(&State) -> V,
-{
-    if store.answer_identity() {
-        app.state_mut().identities_arrived();
-        app.finalize_view();
-    }
+    input::events(app, now);
 }
 
 /// Lets go of whatever on screen has had its time by `now`.
@@ -209,11 +197,11 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 vec![]
             }
             "arrive" => {
-                arrive(&mut app, store, clock);
+                store.arrive();
                 vec![]
             }
             "identify" => {
-                identify(&mut app, store);
+                store.answer_identity();
                 vec![]
             }
             "wait" => {
@@ -251,7 +239,8 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 let wait: u16 = rest
                     .parse()
                     .map_err(|_| format!("line {}: airtime needs seconds", number + 1))?;
-                app.state_mut().airtime_wait = (wait > 0).then_some(wait);
+                let wait = (wait > 0).then_some(wait);
+                app.state_mut().apply(NodeEvent::Airtime { wait }, clock);
                 app.finalize_view();
                 vec![]
             }
@@ -285,7 +274,9 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
         for input in inputs {
             clock += INPUT_MS;
             input::apply(&mut app, input, clock);
+            advance(&mut app, store, clock);
         }
+        advance(&mut app, store, clock);
     }
     Ok(())
 }
@@ -338,8 +329,6 @@ fn window() -> ExitCode {
     let store = store();
     let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
-    // When the identity asked for arrives.
-    let mut identity_at: Option<u64> = None;
     loop {
         app.set_time(start.elapsed());
         let now = start.elapsed().as_millis() as u64;
@@ -357,7 +346,7 @@ fn window() -> ExitCode {
                     Keycode::Backspace => Some(Input::Backspace),
                     Keycode::Space => Some(Input::Space),
                     Keycode::Tab => {
-                        arrive(&mut app, store, now);
+                        store.arrive();
                         None
                     }
                     // The Pager's keyboard does not repeat.
@@ -394,16 +383,9 @@ fn window() -> ExitCode {
             };
             if let Some(input) = input {
                 input::apply(&mut app, input, now);
-                // An identity asked for arrives a moment later.
-                if store.identity_asked() {
-                    identity_at = Some(now + IDENTITY_DELAY_MS);
-                }
             }
         }
-        if identity_at.is_some_and(|at| at <= now) {
-            identity_at = None;
-            identify(&mut app, store);
-        }
+        advance(&mut app, store, now);
         if app.should_redraw() || target.clear_animation_status() {
             target.clear(theme::BACKGROUND);
             app.render_animated(&mut target, &theme::TEXT);

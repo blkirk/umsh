@@ -31,8 +31,8 @@ mod join;
 mod member;
 mod peer;
 mod peers;
+mod profile;
 mod rail;
-mod region;
 mod setting;
 mod setup;
 mod share;
@@ -199,7 +199,7 @@ fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
         rail::view(shown, state.unread_chats()),
         match_view!(list, {
-            List::Chats => chats::view(&state.chats),
+            List::Chats => chats::view(&state.chats, state.wall_time),
             List::Find => find.map(|text| find::view(state, text)),
             List::Peers => peers::view(&state.peers),
             List::Device => device::view(state),

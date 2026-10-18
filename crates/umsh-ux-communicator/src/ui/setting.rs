@@ -23,25 +23,43 @@ const SWITCH_MOTION: Animation = Animation::ease_in_out(core::time::Duration::fr
 const CHOICE: u32 = 34;
 const CHECK: u32 = 26;
 
+/// A row's value: room for a radio profile's name.
+type Value = String<32>;
+
 /// What a row shows at its end.
 pub(super) enum End {
     Nothing,
     /// It goes to another screen, or opens choices.
     Chevron,
-    Value(String<24>),
+    Value(Value),
     /// A value, and that pressing changes it.
-    ValueChevron(String<24>),
+    ValueChevron(Value),
     Switch(bool),
 }
 
 impl End {
     pub(super) fn value(text: &str) -> Self {
-        Self::Value(String::try_from(text).unwrap_or_default())
+        Self::Value(value(text))
     }
 
     pub(super) fn value_chevron(text: &str) -> Self {
-        Self::ValueChevron(String::try_from(text).unwrap_or_default())
+        Self::ValueChevron(value(text))
     }
+}
+
+/// `text` as a row's value, cut short with an ellipsis when it is longer
+/// than a value holds.
+fn value(text: &str) -> Value {
+    let mut value = Value::new();
+    for c in text.chars() {
+        if value.push(c).is_err() {
+            while value.push('\u{2026}').is_err() {
+                value.pop();
+            }
+            break;
+        }
+    }
+    value
 }
 
 /// A row `height` tall: an action, or a readout that takes focus so the
@@ -74,7 +92,7 @@ pub(super) fn row<A: Fn(&mut State)>(
             super::line(name, face, theme::BODY, color),
             Spacer::default(),
             value.as_ref().map(|value| {
-                label::<24>(
+                label::<32>(
                     value,
                     &font::REGULAR,
                     theme::SECONDARY,

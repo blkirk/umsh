@@ -13,7 +13,7 @@ use crate::keyboard::Field;
 use crate::model::{
     ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Found, FoundKind, Invite,
     KeyboardSettings, MAX_CHATS, MAX_FOUND, Member, MessageId, PeerDetail, PeerEntry, PeerId,
-    Preset, RadioSettings, Reaction, Section, Shareable, State, TRANSMIT_POWER, word_match,
+    Profile, RadioSettings, Reaction, Section, Shareable, State, TRANSMIT_POWER, word_match,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -32,7 +32,7 @@ pub type PowerText = EditBuffer<String<4>>;
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
 pub mod keys {
-    use super::{ChatId, FocusKey, MessageId, PeerId, Preset, Reaction, Section, Shareable};
+    use super::{ChatId, FocusKey, MessageId, PeerId, Reaction, Section, Shareable};
 
     const KIND: u32 = 0xFF00_0000;
     const RAIL: u32 = 0x0100_0000;
@@ -41,9 +41,8 @@ pub mod keys {
     const ACTION: u32 = 0x0500_0000;
     const PEER: u32 = 0x0900_0000;
     const DEVICE: u32 = 0x0D00_0000;
-    const PRESET: u32 = 0x0E00_0010;
     const SHARE: u32 = 0x0F00_0000;
-    const REGION_ROW: u32 = 0x1300_0000;
+    const PROFILE_ROW: u32 = 0x1300_0000;
     const FOUND: u32 = 0x1500_0000;
     /// Set in a share key that names a channel.
     const SHARE_CHANNEL: u32 = 0x0080_0000;
@@ -107,7 +106,7 @@ pub mod keys {
     pub const PERIOD: FocusKey = FocusKey(0x1700_0001);
     pub const KEYBOARD_LIGHT: FocusKey = FocusKey(0x1700_0002);
     /// Radio's Transmit power row, and the field it opens.
-    pub const TRANSMIT_POWER: FocusKey = FocusKey(0x0E00_0005);
+    pub const TRANSMIT_POWER: FocusKey = FocusKey(0x0E00_0001);
     pub const POWER_FIELD: FocusKey = FocusKey(0x1800_0000);
 
     /// The text field `key` names, as the keyboard treats it.
@@ -125,9 +124,8 @@ pub mod keys {
     /// Shut down's confirmation.
     pub const SHUT_DOWN_CONFIRM: FocusKey = FocusKey(0x1600_0000);
     pub const SHUT_DOWN_CANCEL: FocusKey = FocusKey(0x1600_0001);
-    /// The Radio screen's settings and readout, in order.
-    pub const REGION: FocusKey = FocusKey(0x0E00_0000);
-    pub const PRESET_ROW: FocusKey = FocusKey(0x0E00_0001);
+    /// The Radio screen's Profile, its switches, and its readout.
+    pub const PROFILE: FocusKey = FocusKey(0x0E00_0000);
     pub const FORWARDING: FocusKey = FocusKey(0x0E00_0002);
     pub const SHARE_LOCATION: FocusKey = FocusKey(0x0E00_0003);
     pub const AIRTIME: FocusKey = FocusKey(0x0E00_0004);
@@ -141,12 +139,6 @@ pub mod keys {
     #[must_use]
     pub const fn rail(section: Section) -> FocusKey {
         FocusKey(RAIL | section as u32)
-    }
-
-    /// A preset among Preset's choices.
-    #[must_use]
-    pub const fn preset(preset: Preset) -> FocusKey {
-        FocusKey(PRESET | preset as u32)
     }
 
     /// Share's Shows, at `shareable`: turning moves focus between these,
@@ -179,10 +171,20 @@ pub mod keys {
         FocusKey(FOUND | (index as u32 & !KIND))
     }
 
-    /// A region in the list of them, by its place there.
+    /// A radio profile in the list of them, by its place there.
     #[must_use]
-    pub const fn region(index: usize) -> FocusKey {
-        FocusKey(REGION_ROW | (index as u32 & !KIND))
+    pub const fn profile(index: usize) -> FocusKey {
+        FocusKey(PROFILE_ROW | (index as u32 & !KIND))
+    }
+
+    /// The place of the radio profile whose row `key` names.
+    #[must_use]
+    pub const fn profile_of(key: FocusKey) -> Option<usize> {
+        if key.0 & KIND == PROFILE_ROW {
+            Some((key.0 & !KIND) as usize)
+        } else {
+            None
+        }
     }
 
     /// Whether `key` names one of the Device list's categories.
@@ -265,19 +267,15 @@ fn distance(hops: Option<u8>) -> String<12> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DevicePage {
     /// The radio's settings.
-    Radio {
-        settings: RadioSettings,
-        /// Preset's choices are open.
-        picker: bool,
-    },
+    Radio { settings: RadioSettings },
     /// A code that shares this node or a joined channel.
     Share,
     /// The joined channels.
     Channels,
     /// A channel's name or invitation, being typed.
     AddChannel { text: ChannelText },
-    /// The regions the radio can be set for.
-    Region,
+    /// The radio profiles the radio can be set to.
+    Profiles,
     /// The keyboard's settings.
     Keyboard { settings: KeyboardSettings },
     /// The radio's transmit power, being typed.
@@ -289,8 +287,8 @@ pub enum DevicePage {
 pub enum SetupPage {
     /// What to call this node, which may be left empty.
     Name { text: NameText },
-    /// The region, which must be set before the radio sends.
-    Region,
+    /// The radio profile, which must be set before the radio sends.
+    Profile,
 }
 
 /// A screen on the navigation stack.
@@ -530,7 +528,7 @@ impl State {
                     avatar: chat.avatar.clone(),
                     name: chat.name.clone(),
                     distance: String::new(),
-                    age: chat.age.clone(),
+                    age: self.age(chat),
                 });
             }
         }
@@ -595,6 +593,7 @@ impl State {
         if let Some(summary) = self.chats.iter_mut().find(|c| c.id == chat) {
             summary.unread = false;
         }
+        self.node.opened(chat);
         _ = self.screens.push(Screen::Conversation {
             chat,
             focus: FocusState::requesting(keys::COMPOSER),
@@ -697,7 +696,7 @@ impl State {
     }
 
     /// Reads the saved peer shown from the node again.
-    fn refresh_peer(&mut self) {
+    pub(crate) fn refresh_peer(&mut self) {
         let node = self.node;
         if let Some(Screen::Peer { peer, detail, .. }) = self.screens.last_mut()
             && let Some(fresh) = node.peer_detail(*peer)
@@ -760,21 +759,36 @@ impl State {
     /// Forgets the saved peer shown and returns to the Peers list, at the
     /// row that took its place.
     pub fn forget_peer(&mut self) {
-        let Some(peer) = self.shown_peer() else {
-            return;
-        };
-        self.node.forget_peer(peer);
+        if let Some(peer) = self.shown_peer() {
+            self.node.forget_peer(peer);
+            self.remove_peer(peer);
+        }
+    }
+
+    /// Lets go of `peer`, no longer saved: its row, and its screen, which
+    /// returns to the Peers list at the row that took its place.
+    pub(crate) fn remove_peer(&mut self, peer: PeerId) {
         let Some(index) = self.peers.iter().position(|p| p.id == peer) else {
             return;
         };
         self.peers.remove(index);
-        self.back();
         let next = self
             .peers
             .get(index)
             .or_else(|| self.peers.last())
             .map_or(keys::ADD_PEER, |p| keys::peer(p.id));
-        self.focus().request(next);
+        if self.shown_peer() == Some(peer) {
+            self.back();
+            self.focus().request(next);
+        }
+        if let Some(Screen::Chats { focus, row, .. }) = self.screens.first_mut() {
+            if *row == Some(keys::peer(peer)) {
+                *row = Some(next);
+            }
+            if focus.current() == Some(keys::peer(peer)) {
+                focus.request(next);
+            }
+        }
     }
 
     /// Shows this node's code.
@@ -809,65 +823,51 @@ impl State {
             .unwrap_or(Shareable::Identity)
     }
 
-    /// Shows the radio's settings, Region focused.
+    /// Shows the radio's settings, Profile focused.
     pub fn open_radio(&mut self) {
         _ = self.screens.push(Screen::Device {
             page: DevicePage::Radio {
                 settings: self.node.radio(),
-                picker: false,
             },
-            focus: FocusState::requesting(keys::REGION),
+            focus: FocusState::requesting(keys::PROFILE),
         });
     }
 
-    /// Reads the radio's settings shown from the node again.
-    fn refresh_radio(&mut self) {
+    /// Reads the settings shown from the node again: this node's name, and
+    /// the radio's and the keyboard's settings.
+    pub(crate) fn refresh_settings(&mut self) {
         let node = self.node;
-        if let Some(Screen::Device {
-            page: DevicePage::Radio { settings, .. },
-            ..
-        }) = self.screens.last_mut()
-        {
-            *settings = node.radio();
+        self.status.device_name = node.device_name();
+        for screen in &mut self.screens {
+            match screen {
+                Screen::Device {
+                    page: DevicePage::Radio { settings },
+                    ..
+                } => *settings = node.radio(),
+                Screen::Device {
+                    page: DevicePage::Keyboard { settings },
+                    ..
+                } => *settings = node.keyboard(),
+                _ => {}
+            }
         }
     }
 
-    /// Opens Preset's choices, the current one focused.
-    pub fn open_presets(&mut self) {
-        if let Some(Screen::Device {
-            page: DevicePage::Radio { settings, picker },
-            focus,
-        }) = self.screens.last_mut()
-        {
-            *picker = true;
-            focus.request(keys::preset(settings.preset));
+    /// The name of the radio's profile, or Custom when it has settings no
+    /// profile has.
+    #[must_use]
+    pub fn profile_name(&self, settings: &RadioSettings) -> &'static str {
+        match settings.profile {
+            Profile::Vetted(index) => self.node.profile(index).unwrap_or_default(),
+            Profile::Custom => "Custom",
         }
-    }
-
-    /// Closes Preset's choices, Preset focused.
-    pub fn close_presets(&mut self) {
-        if let Some(Screen::Device {
-            page: DevicePage::Radio { picker, .. },
-            focus,
-        }) = self.screens.last_mut()
-        {
-            *picker = false;
-            focus.request(keys::PRESET_ROW);
-        }
-    }
-
-    /// Sets the radio to `preset` and closes Preset's choices.
-    pub fn choose_preset(&mut self, preset: Preset) {
-        self.node.set_preset(preset);
-        self.refresh_radio();
-        self.close_presets();
     }
 
     /// The radio's settings shown.
     fn shown_radio(&self) -> Option<&RadioSettings> {
         match self.screens.last() {
             Some(Screen::Device {
-                page: DevicePage::Radio { settings, .. },
+                page: DevicePage::Radio { settings },
                 ..
             }) => Some(settings),
             _ => None,
@@ -877,7 +877,7 @@ impl State {
     pub fn toggle_forwarding(&mut self) {
         if let Some(settings) = self.shown_radio() {
             self.node.set_forwarding(!settings.forwarding);
-            self.refresh_radio();
+            self.refresh_settings();
         }
     }
 
@@ -920,7 +920,7 @@ impl State {
         };
         self.node.set_transmit_power(dbm);
         self.back();
-        self.refresh_radio();
+        self.refresh_settings();
     }
 
     /// Opens the keyboard's settings.
@@ -938,15 +938,7 @@ impl State {
         let mut settings = self.node.keyboard();
         change(&mut settings);
         self.node.set_keyboard(settings);
-        for screen in &mut self.screens {
-            if let Screen::Device {
-                page: DevicePage::Keyboard { settings: shown },
-                ..
-            } = screen
-            {
-                *shown = settings;
-            }
-        }
+        self.refresh_settings();
     }
 
     pub fn toggle_capitalize(&mut self) {
@@ -964,47 +956,45 @@ impl State {
     pub fn toggle_share_location(&mut self) {
         if let Some(settings) = self.shown_radio() {
             self.node.set_share_location(!settings.share_location);
-            self.refresh_radio();
+            self.refresh_settings();
         }
     }
 
-    /// Shows the regions, the radio's own focused.
-    pub fn open_regions(&mut self) {
-        let current = self.current_region();
+    /// Shows the radio profiles, the radio's own focused.
+    pub fn open_profiles(&mut self) {
+        let current = self.current_profile();
         _ = self.screens.push(Screen::Device {
-            page: DevicePage::Region,
-            focus: FocusState::requesting(keys::region(current)),
+            page: DevicePage::Profiles,
+            focus: FocusState::requesting(keys::profile(current)),
         });
     }
 
-    /// Where the radio's region sits in the list of them; the first when it
-    /// is not there.
-    fn current_region(&self) -> usize {
-        let region = self.node.radio().region;
-        self.node
-            .regions()
-            .iter()
-            .position(|r| *r == region.as_str())
-            .unwrap_or(0)
+    /// Where the radio's profile sits in the list of them; the first when
+    /// it has settings no profile has.
+    fn current_profile(&self) -> usize {
+        match self.node.radio().profile {
+            Profile::Vetted(index) => index,
+            Profile::Custom => 0,
+        }
     }
 
-    /// Sets the radio for the region at `index`, and goes on: to the Chats
+    /// Sets the radio to the profile at `index`, and goes on: to the Chats
     /// screen on first run, back to Radio otherwise.
-    pub fn choose_region(&mut self, index: usize) {
-        self.node.set_region(index);
+    pub fn choose_profile(&mut self, index: usize) {
+        self.node.set_profile(index);
         match self.screens.last() {
             Some(Screen::Setup { .. }) => self.finish_setup(),
             _ => {
                 self.back();
-                self.refresh_radio();
+                self.refresh_settings();
             }
         }
     }
 
-    /// Starts first run: what to call this node, then its region.
+    /// Starts first run: what to call this node, then its radio profile.
     pub fn start_setup(&mut self) {
+        self.close_conversation();
         self.screens.truncate(1);
-        self.conversation = None;
         _ = self.screens.push(Screen::Setup {
             page: SetupPage::Name {
                 text: NameText::new(),
@@ -1030,7 +1020,8 @@ impl State {
         }
     }
 
-    /// Keeps the name typed, empty or not, and goes on to the region.
+    /// Keeps the name typed, empty or not, and goes on to the radio
+    /// profile.
     pub fn continue_setup(&mut self) {
         let Some(Screen::Setup {
             page: SetupPage::Name { text },
@@ -1039,14 +1030,12 @@ impl State {
         else {
             return;
         };
-        let name = text.text().trim();
-        self.node.set_name(name);
-        self.status.device_name.clear();
-        _ = self.status.device_name.push_str(name);
-        let current = self.current_region();
+        self.node.set_name(text.text().trim());
+        self.refresh_settings();
+        let current = self.current_profile();
         _ = self.screens.push(Screen::Setup {
-            page: SetupPage::Region,
-            focus: FocusState::requesting(keys::region(current)),
+            page: SetupPage::Profile,
+            focus: FocusState::requesting(keys::profile(current)),
         });
     }
 
@@ -1308,13 +1297,20 @@ impl State {
 
     /// Shows the identities the node has learned since they were drawn:
     /// members' names and addresses in the conversation and on the member
-    /// screen. Focus on a Request identity that is no longer offered moves
-    /// to Message.
-    pub fn identities_arrived(&mut self) {
+    /// screen.
+    pub(crate) fn identities_learned(&mut self) {
+        if let Some(chat) = self.conversation.as_ref().map(|c| c.chat) {
+            self.load_conversation(chat);
+        }
+        self.refresh_members();
+    }
+
+    /// Reads the members shown from the node again. Focus on a Request
+    /// identity that is no longer offered moves to Message.
+    pub(crate) fn refresh_members(&mut self) {
         let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
             return;
         };
-        self.load_conversation(chat);
         let node = self.node;
         for screen in &mut self.screens {
             let Screen::Member {
@@ -1402,11 +1398,24 @@ impl State {
     /// conversation, so whatever was open closes; Back from the chat goes to
     /// the list, at its row.
     fn go_to_chat(&mut self, chat: ChatId) {
+        self.close_conversation();
         self.screens.truncate(1);
         self.section = Section::Chats;
-        self.conversation = None;
         self.focus().request(keys::chat(chat));
         self.open_chat(chat);
+    }
+
+    /// Lets go of the open chat's messages, and keeps its draft in the node
+    /// as it was left.
+    fn close_conversation(&mut self) {
+        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
+            return;
+        };
+        // Dropped where it lies: a conversation is too large to move aside.
+        self.conversation = None;
+        if let Some(summary) = self.chat(chat) {
+            self.node.save_draft(chat, summary.draft.text());
+        }
     }
 
     /// Returns to the screen before this one, focused where it was left.
@@ -1416,7 +1425,7 @@ impl State {
             return false;
         }
         match self.screens.pop() {
-            Some(Screen::Conversation { .. }) => self.conversation = None,
+            Some(Screen::Conversation { .. }) => self.close_conversation(),
             Some(Screen::Wake { .. }) => self.arrived.clear(),
             _ => {}
         }
