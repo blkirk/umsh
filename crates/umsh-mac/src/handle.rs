@@ -560,6 +560,12 @@ impl<
         }
     }
 
+    /// Return the public key of a local identity, if that slot is occupied.
+    pub async fn identity_public_key(&self, id: LocalIdentityId) -> Option<PublicKey> {
+        let mac = self.mac.borrow().await;
+        Some(*mac.identity(id)?.identity().public_key())
+    }
+
     /// Return the route currently cached for `peer`, if the peer is registered
     /// and a route has been learned for it.
     pub async fn peer_route(&self, peer: &umsh_core::PublicKey) -> Option<crate::CachedRoute> {

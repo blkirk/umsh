@@ -117,6 +117,7 @@ pub const TOPICS: &[Topic] = &[
                 prop::STAT_FORWARDED,
                 prop::STAT_FORWARD_DROPPED,
                 prop::STAT_FORWARD_CANCELLED,
+                prop::STAT_RX_OWN_HINT,
                 prop::STAT_MESHCORE_SEEN,
                 prop::STAT_MESHCORE_FORWARDED_ROUTED,
                 prop::STAT_MESHCORE_FORWARDED_FLOOD,
@@ -552,6 +553,7 @@ const STAT_FIELDS: &[(u32, &str, &str)] = &[
         "forwards cancelled",
         "FORWARD_CANCELLED",
     ),
+    (prop::STAT_RX_OWN_HINT, "rx own hint", "RX_OWN_HINT"),
     (prop::STAT_MESHCORE_SEEN, "meshcore seen", "MESHCORE_SEEN"),
     (
         prop::STAT_MESHCORE_FORWARDED_ROUTED,

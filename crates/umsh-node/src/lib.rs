@@ -967,6 +967,7 @@ mod tests {
         peers: Vec<(PublicKey, PeerId)>,
         channels: Vec<umsh_core::ChannelKey>,
         observations: Vec<umsh_mac::TransmitterObservation>,
+        own_key: Option<PublicKey>,
     }
 
     #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]
@@ -1010,6 +1011,10 @@ mod tests {
                 rssi_snr: Some((rssi_dbm, snr)),
                 last_seen_ms,
             });
+        }
+
+        fn set_own_key(&self, key: PublicKey) {
+            self.state.borrow_mut().own_key = Some(key);
         }
     }
 
@@ -1162,6 +1167,10 @@ mod tests {
             for observation in observations {
                 f(observation);
             }
+        }
+
+        async fn identity_public_key(&self, _id: LocalIdentityId) -> Option<PublicKey> {
+            self.state.borrow().own_key
         }
     }
 
@@ -1984,6 +1993,28 @@ mod tests {
             other => panic!("expected a Peer Repeaters Response, got {other:?}"),
         };
         (sent.to, body)
+    }
+
+    /// A node is not its own neighbor, whichever source names it: its own
+    /// advertisement heard back, or a trace that begins with its own hint.
+    #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]
+    #[test]
+    fn the_listing_never_names_the_node_itself() {
+        let mac = FakeMac::new(Vec::new());
+        let own = PublicKey([0x5A; 32]);
+        mac.set_own_key(own);
+        let node = responder_node(&mac);
+        node.observe_peer_identity(own, &peer_identity("Myself", &[]), None, 0);
+        node.observe_peer_identity(PublicKey([0xAA; 32]), &peer_identity("Ridge", &[]), None, 0);
+        mac.observe(
+            umsh_core::RouterHint([own.0[0], own.0[1]]),
+            -82,
+            umsh_hal::Snr::from_decibels(27),
+        );
+
+        let peers = block_on_ready(node.peer_repeaters());
+        let names: Vec<Option<&str>> = peers.iter().map(|peer| peer.name.as_deref()).collect();
+        assert_eq!(names, [Some("Ridge")]);
     }
 
     #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]

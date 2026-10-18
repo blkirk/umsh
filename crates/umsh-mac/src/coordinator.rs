@@ -963,6 +963,11 @@ pub struct MacCounters {
     /// operator made about *this* frame—counting them here would bury
     /// the refusals a repeater's settings can actually move.
     pub forward_dropped_policy: u32,
+    /// Receptions off the air whose trace route names this node as the
+    /// hop just heard. A radio cannot hear itself, so each is a copy of
+    /// one of this node's own repeats put back on the air without a hop
+    /// added, or a repeater sharing this node's router hint.
+    pub rx_own_hint: u32,
 }
 
 impl MacCounters {
@@ -5168,6 +5173,18 @@ impl<
         else {
             return;
         };
+        // A node never hears itself forward, so a trace naming this node as
+        // the hop just heard is a copy of one of its own repeats—or a
+        // repeater sharing its router hint, which nothing here can tell
+        // apart. Either way it is not a neighbor. Off the air no such copy
+        // should exist, so those are counted; a LAN or a bridge's link
+        // hands a node its own traffic back as a matter of course.
+        if Some(hint) == self.repeater_router_hint() {
+            if rx.origin.is_measured() {
+                MacCounters::bump(&mut self.counters.rx_own_hint);
+            }
+            return;
+        }
         let now_ms = self.clock.now_ms();
         let rssi_snr = rx.origin.is_measured().then_some((rx.rssi, rx.snr));
         self.transmitter_observations

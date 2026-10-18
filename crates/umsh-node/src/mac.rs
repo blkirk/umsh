@@ -169,6 +169,12 @@ pub trait MacBackend: Clone {
         let _ = f;
     }
 
+    /// Return the public key of the local identity `id`.
+    async fn identity_public_key(&self, id: LocalIdentityId) -> Option<PublicKey> {
+        let _ = id;
+        None
+    }
+
     /// Return the route the MAC currently has cached for `peer`.
     async fn peer_route(&self, peer: &PublicKey) -> Option<CachedRoute> {
         let _ = peer;
@@ -419,6 +425,10 @@ impl<
         f: &mut dyn FnMut(umsh_mac::TransmitterObservation),
     ) {
         self.for_each_transmitter_observation(f).await
+    }
+
+    async fn identity_public_key(&self, id: LocalIdentityId) -> Option<PublicKey> {
+        self.identity_public_key(id).await
     }
 
     async fn peer_route(&self, peer: &PublicKey) -> Option<CachedRoute> {

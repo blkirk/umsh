@@ -357,6 +357,12 @@ pub mod prop {
     /// (`PROP_STAT_LAN_EXPORT_DROPPED`)—`UINT32_LE`. Requires `CAP_STATS`
     /// and `CAP_LAN_BEARER`.
     pub const STAT_LAN_EXPORT_DROPPED: u32 = 4849;
+    /// Receptions off the air whose trace route names this device's node
+    /// as the hop just heard (`PROP_STAT_RX_OWN_HINT`)—`UINT32_LE`. A
+    /// radio cannot hear itself, so each is a copy of one of the node's own
+    /// repeats put back on the air without a hop added, or a repeater
+    /// sharing its router hint. Requires `CAP_STATS` and `CAP_REPEATER`.
+    pub const STAT_RX_OWN_HINT: u32 = 4850;
     /// Persisted, write-only BLE pairing passkey (`PROP_BLE_PAIRING_PIN`).
     pub const BLE_PAIRING_PIN: u32 = 4864;
     /// Nodes authorized to manage this device over the mesh

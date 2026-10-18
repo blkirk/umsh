@@ -52,6 +52,7 @@ Id   | Mnemonic              | Commands | Description
 4842 | `PROP_STAT_MESHCORE_FORWARDED_ROUTED` | Get, Set | MeshCore packets forwarded along their source route
 4843 | `PROP_STAT_MESHCORE_FORWARDED_FLOOD` | Get, Set | MeshCore packets flooded
 4844 | `PROP_STAT_MESHCORE_DECLINED` | Get, Set | MeshCore packets neither forwarded nor duplicates
+4850 | `PROP_STAT_RX_OWN_HINT` | Get, Set | Received packets whose trace names this device as the last hop
 
 ### PROP 32: `PROP_PHY_ENABLED` {#prop-phy-enabled}
 
@@ -344,3 +345,15 @@ MeshCore packets this device neither forwarded nor recognized as duplicates:
 declined by MeshCore's own forwarding rules or by the region policy, below
 the configured signal thresholds, malformed, or dropped for want of queue
 space. Requires `CAP_STATS` and `CAP_MESHCORE_FORWARDER`.
+
+### PROP 4850: `PROP_STAT_RX_OWN_HINT` {#prop-stat-rx-own-hint}
+
+Packets received over the air whose [trace route](packet-options.md#trace-route-option-2)
+begins with this device's own router hint. A radio cannot receive its own
+transmission, so each is a copy of one of this device's repeats retransmitted
+without a hop being added, or a packet repeated by another node sharing this
+device's router hint. Packets received over a point-to-point link or a shared
+IP bearer are not counted. None of these names a neighbor, and a device does
+not list itself in a [Peer Repeaters
+Response](mac-commands.md#peer-repeaters-response-11). Requires `CAP_STATS` and
+`CAP_REPEATER`.

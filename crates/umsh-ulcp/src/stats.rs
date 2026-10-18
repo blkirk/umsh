@@ -77,10 +77,13 @@ pub enum Counter {
     LanExported,
     /// Frames lost from the LAN's transmit queue.
     LanExportDropped,
+    /// Receptions off the air naming the device's node as the hop just
+    /// heard.
+    RxOwnHint,
 }
 
 /// How many counters a ledger holds.
-pub const COUNTERS: usize = 18;
+pub const COUNTERS: usize = 19;
 
 impl Counter {
     /// Every counter, in identifier order.
@@ -103,6 +106,7 @@ impl Counter {
         Counter::LanRxMalformed,
         Counter::LanExported,
         Counter::LanExportDropped,
+        Counter::RxOwnHint,
     ];
 
     /// The property identifier this counter is read and cleared through.
@@ -126,6 +130,7 @@ impl Counter {
             Counter::LanRxMalformed => prop::STAT_LAN_RX_MALFORMED,
             Counter::LanExported => prop::STAT_LAN_EXPORTED,
             Counter::LanExportDropped => prop::STAT_LAN_EXPORT_DROPPED,
+            Counter::RxOwnHint => prop::STAT_RX_OWN_HINT,
         }
     }
 
@@ -150,6 +155,7 @@ impl Counter {
             prop::STAT_LAN_RX_MALFORMED => Counter::LanRxMalformed,
             prop::STAT_LAN_EXPORTED => Counter::LanExported,
             prop::STAT_LAN_EXPORT_DROPPED => Counter::LanExportDropped,
+            prop::STAT_RX_OWN_HINT => Counter::RxOwnHint,
             _ => return None,
         })
     }
@@ -157,7 +163,7 @@ impl Counter {
     /// Whether this counter can only be answered by a device running a
     /// node of its own.
     ///
-    /// The four that come from the MAC, and the MeshCore forwarder's,
+    /// The five that come from the MAC, and the MeshCore forwarder's,
     /// which needs one too. A session with nothing behind it does not
     /// have these properties at all, rather than reporting a zero that
     /// reads as "this repeater has never repeated anything".
@@ -168,6 +174,7 @@ impl Counter {
                 | Counter::Forwarded
                 | Counter::ForwardDropped
                 | Counter::ForwardCancelled
+                | Counter::RxOwnHint
         ) || self.needs_meshcore()
             || self.needs_lan_bearer()
     }
@@ -402,7 +409,8 @@ mod tests {
                 Counter::RxAccepted,
                 Counter::Forwarded,
                 Counter::ForwardDropped,
-                Counter::ForwardCancelled
+                Counter::ForwardCancelled,
+                Counter::RxOwnHint
             ]
         );
     }

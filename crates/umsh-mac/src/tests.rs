@@ -3331,6 +3331,57 @@ fn receive_one_observes_a_backhaul_neighbor_unmeasured_and_never_its_own_antenna
     );
 }
 
+/// A trace that names this node as the hop just heard names no neighbor. Off
+/// the air it is counted, since no such copy should exist there; a link that
+/// routinely hands a node its own traffic back is not.
+#[test]
+fn receive_one_never_observes_its_own_router_hint() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_id = mac.add_peer(*remote.public_key()).unwrap();
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    let local_key = *mac.identity(local_id).unwrap().identity().public_key();
+    let dst_hint = local_key.hint();
+    let trace = [local_key.router_hint(), RouterHint([0x01, 0x02])];
+
+    mac.radio_mut().queue_received_unicast_with_route(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello",
+        false,
+        7,
+        None,
+        Some(&trace),
+        None,
+    );
+    let _ = block_on(mac.receive_one(|_, _| {}));
+    assert!(mac.transmitter_observations().is_empty());
+    assert_eq!(mac.counters().rx_own_hint, 1);
+
+    mac.radio_mut().rx_origin = RxOrigin::Backhaul;
+    mac.radio_mut().queue_received_unicast_with_route(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"again",
+        false,
+        8,
+        None,
+        Some(&trace),
+        None,
+    );
+    let _ = block_on(mac.receive_one(|_, _| {}));
+    assert!(mac.transmitter_observations().is_empty());
+    assert_eq!(mac.counters().rx_own_hint, 1, "only the air is counted");
+}
+
 /// A frame that arrives with no trace hint came off its originator, and an
 /// originator is not a repeater merely for having been heard.
 #[test]

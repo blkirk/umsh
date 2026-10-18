@@ -922,6 +922,7 @@ impl<M: MacBackend> LocalNode<M> {
     /// forwarding.
     pub async fn peer_repeaters(&self) -> Vec<peer_repeaters::MergedPeerRepeater> {
         let now_ms = self.mac.now_ms().await;
+        let own_key = self.mac.identity_public_key(self.identity_id).await;
         let mut observations = Vec::new();
         self.mac
             .for_each_transmitter_observation(&mut |observation| observations.push(observation))
@@ -929,7 +930,14 @@ impl<M: MacBackend> LocalNode<M> {
         // The borrow ends before the merge so a handler holding the state
         // across an await cannot deadlock against it.
         let identities = self.state.borrow().peer_repeaters.clone();
-        peer_repeaters::merge(&identities, observations.iter(), now_ms)
+        let mut peers = peer_repeaters::merge(&identities, observations.iter(), now_ms);
+        // A node is not its own neighbor. A copy of its own advertisement can
+        // come back off the air, and delivery does not screen a broadcast's
+        // source, so the identity table can hold this node too.
+        if let Some(own_key) = own_key {
+            peers.retain(|peer| !own_key.0.starts_with(&peer.hint));
+        }
+        peers
     }
 
     /// Build and send one page of this node's peer-repeater list.

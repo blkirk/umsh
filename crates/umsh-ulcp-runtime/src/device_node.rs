@@ -314,6 +314,7 @@ static MAC_RX_ACCEPTED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARDED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARD_CANCELLED: AtomicU32 = AtomicU32::new(0);
 static MAC_FORWARD_DROPPED_POLICY: AtomicU32 = AtomicU32::new(0);
+static MAC_RX_OWN_HINT: AtomicU32 = AtomicU32::new(0);
 
 /// The most recently published MAC tallies.
 ///
@@ -329,6 +330,7 @@ pub fn mac_counters() -> MacCounters {
         forwarded: MAC_FORWARDED.load(Ordering::Relaxed),
         forward_cancelled: MAC_FORWARD_CANCELLED.load(Ordering::Relaxed),
         forward_dropped_policy: MAC_FORWARD_DROPPED_POLICY.load(Ordering::Relaxed),
+        rx_own_hint: MAC_RX_OWN_HINT.load(Ordering::Relaxed),
     }
 }
 
@@ -340,6 +342,7 @@ fn publish_mac_counters(counters: MacCounters) {
     MAC_FORWARDED.store(counters.forwarded, Ordering::Relaxed);
     MAC_FORWARD_CANCELLED.store(counters.forward_cancelled, Ordering::Relaxed);
     MAC_FORWARD_DROPPED_POLICY.store(counters.forward_dropped_policy, Ordering::Relaxed);
+    MAC_RX_OWN_HINT.store(counters.rx_own_hint, Ordering::Relaxed);
 }
 
 /// The transmit power the radio was last configured with, in dBm, offset
@@ -801,6 +804,7 @@ struct MacMirrors {
     forwarded: Mirror,
     forward_dropped_policy: Mirror,
     forward_cancelled: Mirror,
+    rx_own_hint: Mirror,
 }
 
 impl MacMirrors {
@@ -810,6 +814,7 @@ impl MacMirrors {
             forwarded: Mirror::new(),
             forward_dropped_policy: Mirror::new(),
             forward_cancelled: Mirror::new(),
+            rx_own_hint: Mirror::new(),
         }
     }
 
@@ -828,6 +833,8 @@ impl MacMirrors {
             Counter::ForwardCancelled,
             counters.forward_cancelled,
         );
+        self.rx_own_hint
+            .advance(stats, Counter::RxOwnHint, counters.rx_own_hint);
     }
 }
 
