@@ -195,7 +195,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "buoyant"
 version = "0.8.0-alpha.1"
-source = "git+https://github.com/darconeous/buoyant?rev=7ec04e34452f97e9cc376dc186ac68d36e6173ee#7ec04e34452f97e9cc376dc186ac68d36e6173ee"
+source = "git+https://github.com/darconeous/buoyant?rev=9b1369807dd7c98f267107addc42e763c4ac6c14#9b1369807dd7c98f267107addc42e763c4ac6c14"
 dependencies = [
  "embedded-graphics",
  "embedded-graphics-core",
@@ -3403,6 +3403,7 @@ checksum = "e87a2ed6b42ec5e28cc3b94c09982969e9227600b2e3dcbc1db927a84c06bd69"
 name = "umsh-bhi260"
 version = "0.1.0"
 dependencies = [
+ "embassy-futures",
  "embedded-hal-async",
 ]
 

@@ -5,7 +5,7 @@ use esp_hal::gpio::Io;
 use esp_hal::peripherals;
 use esp_hal::ram;
 use umsh_pager_peripherals::{
-    input::{Debounce, KeyEvent, Keyboard, Quadrature},
+    input::{Debounce, KeyEvent, Keyboard, Modifier, Quadrature},
     power::{
         Battery, BatteryWatch, Expander, LowBattery, battery_poll_fields, battery_poll_interval_ms,
     },
@@ -145,10 +145,41 @@ pub fn set_battery_details_visible(visible: bool) {
     }
 }
 
-/// The panel has lit or gone dark. Lighting it reads the battery at once.
-fn set_battery_display_lit(lit: bool) {
+/// The panel has lit or gone dark. Lighting it reads the battery at once,
+/// and runs the CPU at full speed until it goes dark, so that drawing is
+/// quick; dark, the CPU returns to [`CPU_CLOCK`].
+fn display_lit(lit: bool) {
+    set_cpu_clock(if lit { CpuClock::max() } else { CPU_CLOCK });
     if BATTERY_DISPLAY_LIT.swap(lit, Ordering::AcqRel) != lit {
         BATTERY_WATCH_CHANGED.signal(());
+    }
+}
+
+/// Moves the CPU to `clock` while running. The PLL stays at 480 MHz, so APB
+/// and every peripheral on it keep their timing; the clock tree raises the
+/// core voltage before a faster clock and lowers it after a slower one.
+fn set_cpu_clock(clock: CpuClock) {
+    use esp_hal::clock::ll::{
+        ClockTree, CpuClkConfig, CpuPllDivOutConfig, configure_cpu_clk, configure_cpu_pll_div_out,
+    };
+    let divided = match clock {
+        CpuClock::_80MHz => CpuPllDivOutConfig::_80,
+        CpuClock::_160MHz => CpuPllDivOutConfig::_160,
+        _ => CpuPllDivOutConfig::_240,
+    };
+    let changed = ClockTree::with(|clocks| {
+        let changed = clocks.cpu_pll_div_out() != Some(divided);
+        if changed {
+            configure_cpu_pll_div_out(clocks, divided);
+            configure_cpu_clk(clocks, CpuClkConfig::Pll);
+        }
+        changed
+    });
+    if changed {
+        debug_log(format_args!(
+            "pager: CPU {} MHz",
+            esp_hal::clock::cpu_clock().as_mhz()
+        ));
     }
 }
 

@@ -424,6 +424,65 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             stroke("M2 2 L5 5", 1.4),
         ],
     ),
+    // Shift and Alt in the strip: outlined while armed for one key,
+    // filled with a bar beneath while locked. Alt is drawn as its key.
+    ("SHIFT_ONCE", 20, 1.15, &[stroke(SHIFT, 1.5)]),
+    (
+        "SHIFT_LOCK",
+        20,
+        1.15,
+        &[fill(SHIFT), stroke(SHIFT, 1.2), fill(LOCK_BAR)],
+    ),
+    (
+        "ALT_ONCE",
+        20,
+        1.15,
+        &[stroke(
+            "M-3.25 -6.25 H3.25 A3.5 3.5 0 0 1 6.75 -2.75 V-1.25 A3.5 3.5 0 0 1 3.25 2.25 H-3.25 A3.5 3.5 0 0 1 -6.75 -1.25 V-2.75 A3.5 3.5 0 0 1 -3.25 -6.25 Z",
+            1.5,
+        )],
+    ),
+    (
+        "ALT_LOCK",
+        20,
+        1.15,
+        &[
+            fill(
+                "M-3.5 -7 H3.5 A4 4 0 0 1 7.5 -3 V-1 A4 4 0 0 1 3.5 3 H-3.5 A4 4 0 0 1 -7.5 -1 V-3 A4 4 0 0 1 -3.5 -7 Z",
+            ),
+            fill(LOCK_BAR),
+        ],
+    ),
+    // The keyboard light's glance: the keyboard, with rays while lit.
+    (
+        "KEYBOARD_LIT",
+        48,
+        1.5,
+        &[
+            stroke(KEYBOARD_BODY, 1.8),
+            fill(KEYBOARD_KEYS),
+            stroke("M-11.5 -6 L-13.5 -11 M0 -6 L0 -11 M11.5 -6 L13.5 -11", 1.8),
+        ],
+    ),
+    (
+        "KEYBOARD_UNLIT",
+        48,
+        1.5,
+        &[stroke(KEYBOARD_BODY, 1.8), fill(KEYBOARD_KEYS)],
+    ),
+    // Brightness's glance.
+    (
+        "SUN",
+        24,
+        1.0,
+        &[
+            fill("M-5 0 A5 5 0 1 0 5 0 A5 5 0 1 0 -5 0 Z"),
+            stroke(
+                "M8 0 L11 0 M5.66 5.66 L7.78 7.78 M0 8 L0 11 M-5.66 5.66 L-7.78 7.78 M-8 0 L-11 0 M-5.66 -5.66 L-7.78 -7.78 M0 -8 L0 -11 M5.66 -5.66 L7.78 -7.78",
+                2.0,
+            ),
+        ],
+    ),
     // Beside the strip's battery while it charges.
     (
         "BOLT",
@@ -467,6 +526,14 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
         ],
     ),
 ];
+
+/// Shift's arrow, and the bar under a locked modifier.
+const SHIFT: &str = "M0 -7.5 L7 -0.5 H3.2 V3.5 H-3.2 V-0.5 H-7 Z";
+const LOCK_BAR: &str = "M-4.5 5.5 H4.5 V7.7 H-4.5 Z";
+
+/// The keyboard's outline, and its keys and space bar.
+const KEYBOARD_BODY: &str = "M-11 -2 H11 A3 3 0 0 1 14 1 V11 A3 3 0 0 1 11 14 H-11 A3 3 0 0 1 -14 11 V1 A3 3 0 0 1 -11 -2 Z";
+const KEYBOARD_KEYS: &str = "M-10.5 1.5 H-7.9 V3.9 H-10.5 Z M-5.9 1.5 H-3.3 V3.9 H-5.9 Z M-1.3 1.5 H1.3 V3.9 H-1.3 Z M3.3 1.5 H5.9 V3.9 H3.3 Z M7.9 1.5 H10.5 V3.9 H7.9 Z M-10.5 5.7 H-7.9 V8.1 H-10.5 Z M-5.9 5.7 H-3.3 V8.1 H-5.9 Z M-1.3 5.7 H1.3 V8.1 H-1.3 Z M3.3 5.7 H5.9 V8.1 H3.3 Z M7.9 5.7 H10.5 V8.1 H7.9 Z M-6 9.6 H6 V11.6 H-6 Z";
 
 const BATTERY: &[Layer] = &[
     stroke(

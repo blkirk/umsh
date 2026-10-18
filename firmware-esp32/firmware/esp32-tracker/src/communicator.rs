@@ -3,7 +3,7 @@
 //! own battery, and reports what each frame costs: layout, painting, the
 //! panel transfer, and the least stack left free.
 use super::*;
-use board::display::{Brightness, Display, brightness_from_permille};
+use board::display::{Brightness, Display};
 use static_cell::ConstStaticCell;
 use umsh_ux_communicator::buoyant::app::App;
 use umsh_ux_communicator::buoyant::render_target::{
@@ -11,10 +11,11 @@ use umsh_ux_communicator::buoyant::render_target::{
 };
 use umsh_ux_communicator::buoyant::view::View;
 use umsh_ux_communicator::input::{self, Input};
+use umsh_ux_communicator::keyboard::Modifier;
 use umsh_ux_communicator::model::State;
 use umsh_ux_communicator::{fixture, theme, ui};
 use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
-use umsh_ux_display_tracker::menu::UiInput;
+use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
 
 /// How often an animation advances.
 const FRAME: Duration = Duration::from_millis(16);
@@ -72,6 +73,13 @@ pub(crate) async fn task(
     app.state_mut()
         .battery(battery_percent(), battery_charging(), 0);
     let mut costs = Costs::default();
+    // The panel's brightness level and the keyboard light, as last set.
+    let mut lights = (
+        app.state().node.brightness(),
+        app.state().node.keyboard().light,
+    );
+    let _ = display.set_brightness(Brightness::level(lights.0)).await;
+    display.set_keyboard_light(lights.1);
     let mut animating = draw(&mut display, app, start, &mut costs).await;
     let _ = display.set_display_on(true).await;
     pager::input::shown(epoch);
@@ -104,14 +112,16 @@ pub(crate) async fn task(
         .flatten()
         .fold(tick, |at, deadline| at.min(Instant::from_millis(deadline)));
         let now = || Instant::now().as_millis();
-        let mut transition = match select4(
+        let woken = select4(
             UI_INPUT_CH.receive(),
             UI_WAKE.wait(),
             Timer::at(wake_at),
             select(BATTERY_UI_CHANGED.wait(), DISPLAY_SHUTDOWN.wait()),
         )
-        .await
-        {
+        .await;
+        // Whatever this changes animates from now, not from the last frame.
+        app.set_time((Instant::now() - start).into());
+        let mut transition = match woken {
             Either4::First(first) => {
                 // An input leaves the interface laid out and settled, so its
                 // layout is counted here rather than in the frame. Everything
@@ -120,10 +130,19 @@ pub(crate) async fn task(
                 let began = Instant::now();
                 let mut next = Some(first);
                 while let Some(ui) = next {
-                    input::apply(app, translate(ui));
+                    input::apply(app, translate(ui), now());
                     next = UI_INPUT_CH.try_receive().ok();
                 }
                 costs.layout = costs.layout.max(Instant::now() - began);
+                let set = (
+                    app.state().node.brightness(),
+                    app.state().node.keyboard().light,
+                );
+                if set != lights {
+                    lights = set;
+                    let _ = display.set_brightness(Brightness::level(lights.0)).await;
+                    display.set_keyboard_light(lights.1);
+                }
                 arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
                 if store.identity_asked() {
                     identity = Some(Instant::now() + IDENTITY_DELAY);
@@ -179,16 +198,15 @@ pub(crate) async fn task(
                 // one is never seen.
                 let epoch = pager::input::interactive().await;
                 animating = draw(&mut display, app, start, &mut costs).await;
-                let _ = display.set_brightness(Brightness::NORMAL).await;
+                let _ = display.set_brightness(Brightness::level(lights.0)).await;
                 if display.set_display_on(true).await.is_ok() {
                     pager::input::shown(epoch);
                 }
                 continue;
             }
             Some(Transition::Dimming) => {
-                let _ = display
-                    .set_brightness(brightness_from_permille(attention.brightness_permille()))
-                    .await;
+                let dimmed = Brightness::level(lights.0).dimmed(attention.brightness_permille());
+                let _ = display.set_brightness(dimmed).await;
             }
             Some(Transition::Lapsed) => {
                 let before = pager::input::activity();
@@ -265,7 +283,15 @@ fn translate(input: UiInput) -> Input {
         UiInput::Select => Input::Press,
         UiInput::Back => Input::Backspace,
         UiInput::Enter => Input::Enter,
-        UiInput::Character(c) => Input::Character(c),
+        UiInput::Key { plain, alt } => Input::Key { plain, alt },
+        UiInput::Space => Input::Space,
+        UiInput::Modifier { modifier, down } => Input::Modifier {
+            modifier: match modifier {
+                KeyModifier::Shift => Modifier::Shift,
+                KeyModifier::Alt => Modifier::Alt,
+            },
+            down,
+        },
     }
 }
 
@@ -288,16 +314,17 @@ impl Costs {
             return;
         }
         // Frames, animating, the worst layout, paint, and flush in
-        // ms, and the least stack left free so far.
+        // ms, the least stack left free so far, and the CPU clock.
         #[cfg(feature = "debug-log")]
         debug_log(format_args!(
-            "ui f={} a={} l={} p={} s={} free={}",
+            "ui f={} a={} l={} p={} s={} free={} mhz={}",
             self.frames,
             u8::from(animating),
             self.layout.as_millis(),
             self.paint.as_millis(),
             self.flush.as_millis(),
             memory_probe::stack().margin,
+            esp_hal::clock::cpu_clock().as_mhz(),
         ));
         #[cfg(not(feature = "debug-log"))]
         let _ = animating;

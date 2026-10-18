@@ -42,6 +42,13 @@ pub const KNOB_OFF: Rgb565 = rgb(0xC9CED6);
 /// A card that is not focused.
 pub const PANEL: Rgb565 = rgb(0x11151A);
 pub const MENU: Rgb565 = rgb(0x1B2027);
+/// The Alt key's orange, which its legends and its strip icon share.
+pub const ALT: Rgb565 = rgb(0xF5A524);
+/// A glance: a brief card for a setting changed from the keyboard.
+pub const GLANCE: Rgb565 = rgb(0x1E2631);
+pub const GLANCE_LINE: Rgb565 = rgb(0x34414F);
+/// A level bar's unlit steps.
+pub const LEVEL_OFF: Rgb565 = rgb(0x3A414B);
 pub const MENU_LINE: Rgb565 = rgb(0x2E3540);
 /// Behind each reaction in the actions menu's palette.
 pub const REACTION_PAD: Rgb565 = rgb(0x2A313B);

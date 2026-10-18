@@ -157,7 +157,9 @@ only characters the panel's fonts can draw.
 
 ## Keyboard light and brightness
 
-**Alt+Space, then Space** toggles the keyboard light: it is the picker's Space.
+**Alt and a double-tapped Space** toggle the keyboard light anywhere, with Alt
+held or one-shot. In an active text field, the second Space is the picker's.
+Elsewhere, Alt+Space alone does nothing.
 A brief card shows the keyboard lit or unlit, with no words. The
 **Keyboard light** switch in Device › Keyboard follows it.
 

@@ -13,7 +13,7 @@ use buoyant::view::prelude::*;
 use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 
-use crate::model::{Ending, Section, State};
+use crate::model::{Ending, Overlay, Section, State};
 use crate::nav::{Screen, keys};
 use crate::{font, theme};
 
@@ -37,6 +37,7 @@ mod setting;
 mod setup;
 mod share;
 mod status;
+mod typing;
 mod wake;
 
 /// Height of the status strip.
@@ -82,7 +83,7 @@ where
 #[must_use]
 pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
-        status::view(&state.status, state.in_setup()),
+        status::view(&state.status, state.in_setup(), state.keyboard.latches()),
         match_view!(state.screen(), {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
@@ -110,15 +111,25 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),
-        // Over everything, and taking no input.
-        state.banner.map(|banner| banner::view(state, banner.notice)),
-        // The last thing shown before power goes.
-        state.ending.map(ending),
+        // Over everything: one slot, the topmost of what could be here.
+        state.overlay().map(|overlay| overlay_view(state, overlay)),
     ))
     .with_alignment(Alignment::TopLeading)
     .flex_infinite_width(HorizontalAlignment::Leading)
     .flex_infinite_height(VerticalAlignment::Top)
     .background_color(theme::BACKGROUND, Rectangle)
+}
+
+/// What lies over the screen: a banner, a glance, or the character
+/// picker, none of which takes focus; or, over even the strip, what the
+/// screen says as the board turns off.
+fn overlay_view(state: &State, overlay: Overlay) -> impl View<Rgb565, State> + use<> {
+    match_view!(overlay, {
+        Overlay::Ending(end) => ending(end),
+        Overlay::Picker(at) => typing::picker(state, at),
+        Overlay::Glance(glance) => typing::glance(glance),
+        Overlay::Banner(notice) => banner::view(state, notice),
+    })
 }
 
 /// What the screen says as the board turns off.

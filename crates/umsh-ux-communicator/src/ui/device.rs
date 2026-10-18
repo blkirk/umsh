@@ -67,6 +67,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                 if state.status.silent { "Silent" } else { "" },
             ),
             category("Display", keys::DISPLAY, |_| {}, ""),
+            category("Keyboard", keys::KEYBOARD, State::open_keyboard, ""),
             category(
                 "Phone link",
                 keys::PHONE_LINK,
@@ -140,6 +141,8 @@ pub fn page(state: &State, page: &DevicePage) -> impl View<Rgb565, State> + use<
         DevicePage::Channels => super::channels::view(state),
         DevicePage::AddChannel { text } => super::add_channel::view(state, text),
         DevicePage::Region => super::region::view(state, "Region"),
+        DevicePage::Keyboard { settings } => super::typing::settings(settings),
+        DevicePage::TransmitPower { text } => super::typing::transmit_power(text),
     })
 }
 
@@ -151,6 +154,8 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
         format_args!("{}% this hour", settings.airtime),
     );
     let preset = settings.preset;
+    let mut power: String<24> = String::new();
+    _ = core::fmt::write(&mut power, format_args!("{} dBm", settings.transmit_power));
     VStack::new((
         header("Radio", None, None),
         super::list(
@@ -168,6 +173,14 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
                     keys::PRESET_ROW,
                     State::open_presets,
                     End::value_chevron(preset.name()),
+                    false,
+                    ROW,
+                ),
+                row(
+                    "Transmit power",
+                    keys::TRANSMIT_POWER,
+                    State::open_transmit_power,
+                    End::value_chevron(&power),
                     false,
                     ROW,
                 ),

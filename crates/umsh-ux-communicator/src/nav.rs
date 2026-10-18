@@ -9,10 +9,11 @@ use buoyant::focus::{FocusKey, FocusState};
 use buoyant::view::EditBuffer;
 use heapless::String;
 
+use crate::keyboard::Field;
 use crate::model::{
-    ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Found, FoundKind, Invite, MAX_CHATS,
-    MAX_FOUND, Member, MessageId, PeerDetail, PeerEntry, PeerId, Preset, RadioSettings, Reaction,
-    Section, Shareable, State, word_match,
+    ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Found, FoundKind, Invite,
+    KeyboardSettings, MAX_CHATS, MAX_FOUND, Member, MessageId, PeerDetail, PeerEntry, PeerId,
+    Preset, RadioSettings, Reaction, Section, Shareable, State, TRANSMIT_POWER, word_match,
 };
 
 /// What a joined channel is to be called here, as it is edited.
@@ -25,6 +26,8 @@ pub type ChannelText = EditBuffer<String<96>>;
 pub type NameText = EditBuffer<String<24>>;
 /// What Find looks for, as it is typed.
 pub type FindText = EditBuffer<String<24>>;
+/// A transmit power in dBm, as it is typed.
+pub type PowerText = EditBuffer<String<4>>;
 
 /// The names of focusable elements. The high byte says what kind of element
 /// a key names, so keys of different kinds never collide.
@@ -98,6 +101,27 @@ pub mod keys {
     pub const PHONE_LINK: FocusKey = FocusKey(DEVICE | 5);
     pub const MAINTENANCE: FocusKey = FocusKey(DEVICE | 6);
     pub const SHUT_DOWN: FocusKey = FocusKey(DEVICE | 7);
+    pub const KEYBOARD: FocusKey = FocusKey(DEVICE | 8);
+    /// The Keyboard screen's switches, in order.
+    pub const CAPITALIZE: FocusKey = FocusKey(0x1700_0000);
+    pub const PERIOD: FocusKey = FocusKey(0x1700_0001);
+    pub const KEYBOARD_LIGHT: FocusKey = FocusKey(0x1700_0002);
+    /// Radio's Transmit power row, and the field it opens.
+    pub const TRANSMIT_POWER: FocusKey = FocusKey(0x0E00_0005);
+    pub const POWER_FIELD: FocusKey = FocusKey(0x1800_0000);
+
+    /// The text field `key` names, as the keyboard treats it.
+    #[must_use]
+    pub const fn field(key: FocusKey) -> Option<super::Field> {
+        use super::Field;
+        match key {
+            COMPOSER => Some(Field::Prose),
+            NAME_FIELD | JOIN_NAME => Some(Field::Name),
+            FIND_FIELD | PEER_FIELD | CHANNEL_FIELD => Some(Field::Literal),
+            POWER_FIELD => Some(Field::Number),
+            _ => None,
+        }
+    }
     /// Shut down's confirmation.
     pub const SHUT_DOWN_CONFIRM: FocusKey = FocusKey(0x1600_0000);
     pub const SHUT_DOWN_CANCEL: FocusKey = FocusKey(0x1600_0001);
@@ -254,6 +278,10 @@ pub enum DevicePage {
     AddChannel { text: ChannelText },
     /// The regions the radio can be set for.
     Region,
+    /// The keyboard's settings.
+    Keyboard { settings: KeyboardSettings },
+    /// The radio's transmit power, being typed.
+    TransmitPower { text: PowerText },
 }
 
 /// A screen a new device starts on.
@@ -851,6 +879,86 @@ impl State {
             self.node.set_forwarding(!settings.forwarding);
             self.refresh_radio();
         }
+    }
+
+    /// Opens Transmit power, its field focused.
+    pub fn open_transmit_power(&mut self) {
+        let mut text = PowerText::default();
+        let mut dbm: String<4> = String::new();
+        _ = core::fmt::write(
+            &mut dbm,
+            format_args!("{}", self.node.radio().transmit_power),
+        );
+        for c in dbm.chars() {
+            text.insert(c);
+        }
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::TransmitPower { text },
+            focus: FocusState::requesting(keys::POWER_FIELD),
+        });
+    }
+
+    pub fn power_text_mut(&mut self) -> Option<&mut PowerText> {
+        match self.screens.last_mut() {
+            Some(Screen::Device {
+                page: DevicePage::TransmitPower { text },
+                ..
+            }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Sets the transmit power typed, and returns to Radio. A power the
+    /// radio cannot use leaves the field as it is, to be corrected.
+    pub fn submit_transmit_power(&mut self) {
+        let Some(dbm) = self
+            .power_text_mut()
+            .and_then(|text| text.text().trim().parse::<i8>().ok())
+            .filter(|dbm| TRANSMIT_POWER.contains(dbm))
+        else {
+            return;
+        };
+        self.node.set_transmit_power(dbm);
+        self.back();
+        self.refresh_radio();
+    }
+
+    /// Opens the keyboard's settings.
+    pub fn open_keyboard(&mut self) {
+        _ = self.screens.push(Screen::Device {
+            page: DevicePage::Keyboard {
+                settings: self.node.keyboard(),
+            },
+            focus: FocusState::requesting(keys::CAPITALIZE),
+        });
+    }
+
+    /// Changes the keyboard's settings by `change`, and shows them.
+    fn change_keyboard(&mut self, change: impl FnOnce(&mut KeyboardSettings)) {
+        let mut settings = self.node.keyboard();
+        change(&mut settings);
+        self.node.set_keyboard(settings);
+        for screen in &mut self.screens {
+            if let Screen::Device {
+                page: DevicePage::Keyboard { settings: shown },
+                ..
+            } = screen
+            {
+                *shown = settings;
+            }
+        }
+    }
+
+    pub fn toggle_capitalize(&mut self) {
+        self.change_keyboard(|s| s.capitalize = !s.capitalize);
+    }
+
+    pub fn toggle_period(&mut self) {
+        self.change_keyboard(|s| s.period = !s.period);
+    }
+
+    pub fn toggle_keyboard_light(&mut self) {
+        self.change_keyboard(|s| s.light = !s.light);
     }
 
     pub fn toggle_share_location(&mut self) {

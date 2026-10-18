@@ -629,7 +629,7 @@ static UI_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Resolved menu gestures, button task → display task.
 #[cfg(feature = "display")]
-static UI_INPUT_CH: Channel<CriticalSectionRawMutex, UiInput, 8> = Channel::new();
+static UI_INPUT_CH: Channel<CriticalSectionRawMutex, UiInput, 16> = Channel::new();
 /// Latched at the first press, including before display initialization.
 /// A headless board has no splash for a press to dismiss.
 static BOOT_SPLASH_ACTIVE: AtomicBool = AtomicBool::new(cfg!(feature = "display"));
@@ -2552,21 +2552,23 @@ fn boot_reason(panicked: bool) -> Status {
     Status::RESET_POWER_ON
 }
 
+/// The CPU clock, except while a panel that asks for more is lit. 80 MHz, not
+/// `CpuClock::max()`: this workload is idle-dominated and an idle `waiti`
+/// core still clocks its way through every wakeup, so the frequency is a
+/// direct battery cost (Meshtastic parks its ESP32 targets at 80 MHz for
+/// the same reason). esp-radio's documented floor is 80 MHz, and APB stays
+/// at 80 MHz either way so SPI/UART timing is unchanged.
+const CPU_CLOCK: CpuClock = CpuClock::_80MHz;
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
     // Point the shared runtime's log seam at this board's debug channel
     // before anything shared runs, so the journal mount lines are not
     // lost.
     umsh_ulcp_runtime::log::set_debug_log(debug_log);
-    // 80 MHz, not `CpuClock::max()`: this workload is idle-dominated and
-    // an idle `waiti` core still clocks its way through every wakeup, so
-    // the frequency is a direct battery cost (Meshtastic parks its ESP32
-    // targets at 80 MHz for the same reason). esp-radio's documented
-    // floor is 80 MHz, and APB stays at 80 MHz either way so SPI/UART
-    // timing is unchanged.
     let clocks = {
         #[allow(unused_mut)]
-        let mut clocks = esp_hal::clock::ClockConfig::from(CpuClock::_80MHz);
+        let mut clocks = esp_hal::clock::ClockConfig::from(CPU_CLOCK);
         #[cfg(feature = "chip-esp32s3")]
         {
             // The main crystal supports BLE light sleep without requiring

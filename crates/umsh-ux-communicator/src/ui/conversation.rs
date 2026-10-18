@@ -618,6 +618,7 @@ fn field(
     .with_font_size(theme::BODY)
     .with_max_lines(3)
     .on_submit(move |s: &mut State| s.send(chat))
+    .on_active(State::field_active)
     .with_label(move |status: TextFieldStatus, area| {
         field_look(status, area, open, empty.then_some(&placeholder))
     })

@@ -5,12 +5,18 @@ use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
 
 use super::{STRIP, label};
+use crate::keyboard::Latch;
 use crate::model::{State, StatusStrip};
 use crate::{font, icon, theme};
 
 /// The strip; on first run, the battery alone, there being no name or
-/// time yet to show.
-pub fn view(s: &StatusStrip, setup: bool) -> impl View<Rgb565, State> + use<> {
+/// time yet to show. Shift's and Alt's states come first among the
+/// indicators, in the keyboard's order.
+pub fn view(
+    s: &StatusStrip,
+    setup: bool,
+    (shift, alt): (Latch, Latch),
+) -> impl View<Rgb565, State> + use<> {
     let shown = !setup;
     ZStack::new((
         // One stack, not a stack of indicators inside it: see `root_view`.
@@ -24,6 +30,8 @@ pub fn view(s: &StatusStrip, setup: bool) -> impl View<Rgb565, State> + use<> {
                 )
             }),
             Spacer::default(),
+            modifier(alt, &icon::ALT_ONCE, &icon::ALT_LOCK, theme::ALT),
+            modifier(shift, &icon::SHIFT_ONCE, &icon::SHIFT_LOCK, theme::TEXT),
             (shown && s.silent).then(|| indicator(&icon::BELL_SLASH)),
             (shown && s.phone_linked).then(|| indicator(&icon::BLUETOOTH)),
             (shown && s.gnss).then(|| indicator(&icon::GNSS)),
@@ -37,6 +45,23 @@ pub fn view(s: &StatusStrip, setup: bool) -> impl View<Rgb565, State> + use<> {
     .frame()
     .with_height(STRIP)
     .background_color(theme::CHROME, Rectangle)
+}
+
+type Mask = embedded_graphics::image::ImageRaw<'static, embedded_graphics::pixelcolor::Gray4>;
+
+/// A modifier armed for one key, or locked.
+fn modifier(
+    latch: Latch,
+    once: &'static Mask,
+    locked: &'static Mask,
+    color: Rgb565,
+) -> Option<impl View<Rgb565, State> + use<>> {
+    let image = match latch {
+        Latch::Off => return None,
+        Latch::Once => once,
+        Latch::Locked => locked,
+    };
+    Some(Image::new(image).as_template().foreground_color(color))
 }
 
 fn indicator(

@@ -20,6 +20,22 @@ pub struct Brightness(u8);
 impl Brightness {
     pub const NORMAL: Self = Self(8);
     pub const ALERT: Self = Self(16);
+    /// AW9364 steps for levels 1 through 10; level 5 is [`Self::NORMAL`].
+    const LEVELS: [u8; 10] = [1, 2, 4, 6, 8, 10, 12, 13, 14, 16];
+    /// The brightness at `level`, from 1 to 10.
+    pub const fn level(level: u8) -> Self {
+        let index = match level {
+            0 => 0,
+            1..=10 => level - 1,
+            _ => 9,
+        };
+        Self(Self::LEVELS[index as usize])
+    }
+    /// This brightness dimmed to `p` permille of itself, never dark.
+    pub const fn dimmed(self, p: u16) -> Self {
+        let p = if p > 1000 { 1000 } else { p };
+        Self(1 + ((self.0 - 1) as u16 * p / 1000) as u8)
+    }
 }
 pub const fn brightness_from_permille(p: u16) -> Brightness {
     Brightness(1 + ((if p > 1000 { 1000 } else { p }) * 7 / 1000) as u8)
@@ -48,6 +64,8 @@ pub struct Display {
     stripe: &'static mut [u8; STRIPE_BYTES],
     backlight: Output<'static>,
     keyboard_light: Output<'static>,
+    /// Whether the keyboard lights with the panel.
+    keyboard_lit: bool,
     brightness: u8,
     physical_brightness: u8,
     on: bool,
@@ -75,6 +93,7 @@ impl Display {
             stripe,
             backlight: lights.display,
             keyboard_light: lights.keyboard,
+            keyboard_lit: true,
             brightness: 8,
             physical_brightness: 16,
             on: false,
@@ -153,9 +172,18 @@ impl Display {
         self.on = on;
         if on {
             self.backlight(self.brightness).await;
-            self.keyboard_light.set_high();
+            if self.keyboard_lit {
+                self.keyboard_light.set_high();
+            }
         }
         Ok(())
+    }
+    /// Whether the keyboard lights while the panel is on.
+    pub fn set_keyboard_light(&mut self, lit: bool) {
+        self.keyboard_lit = lit;
+        if self.on {
+            self.keyboard_light.set_level(Level::from(lit));
+        }
     }
 }
 impl OriginDimensions for Display {

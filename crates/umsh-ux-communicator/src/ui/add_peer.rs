@@ -86,6 +86,7 @@ fn field(text: &PeerText) -> impl View<Rgb565, State> + use<> {
         // Enter messages the peer once the address is whole.
         .on_submit(State::message_entry)
         // Half an address to a line, so its groups line up.
+        .on_active(State::field_active)
         .with_label(|status, area| field_look(status, area, COLUMN * ADVANCE + CARET))
         .focus_key(keys::PEER_FIELD)
         .padding(Edges::Horizontal, INSET)

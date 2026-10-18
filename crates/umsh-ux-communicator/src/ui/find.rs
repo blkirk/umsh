@@ -55,6 +55,7 @@ pub fn view(state: &State, text: &FindText) -> impl View<Rgb565, State> + use<> 
             .with_max_lines(1)
             .with_caret_width(CARET)
             .on_submit(State::open_top_found)
+            .on_active(State::field_active)
             .with_label(move |status, area| field_look(status, area, count))
             .focus_key(keys::FIND_FIELD)
             .padding(Edges::Horizontal, FIELD_INSET)

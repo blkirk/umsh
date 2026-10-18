@@ -5,6 +5,7 @@ use buoyant::view::EditBuffer;
 use heapless::{String, Vec};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel};
+use crate::keyboard::{Aids, Keyboard};
 use crate::nav::Screen;
 use crate::text::{DraftText, SharedText, TextHeap};
 
@@ -230,9 +231,38 @@ pub struct RadioSettings {
     /// Repeats what it hears for others.
     pub forwarding: bool,
     pub share_location: bool,
+    /// The radio's transmit power, in dBm.
+    pub transmit_power: i8,
     /// How much of this hour's airtime is spent, in percent.
     pub airtime: u8,
 }
+
+/// The transmit powers the radio can be set to, in dBm.
+pub const TRANSMIT_POWER: core::ops::RangeInclusive<i8> = -9..=22;
+
+/// The keyboard's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyboardSettings {
+    /// Shift arms itself at the start of a sentence.
+    pub capitalize: bool,
+    /// Two quick spaces after a word type a period.
+    pub period: bool,
+    /// The keyboard is lit while the screen is.
+    pub light: bool,
+}
+
+impl KeyboardSettings {
+    #[must_use]
+    pub const fn aids(self) -> Aids {
+        Aids {
+            capitalize: self.capitalize,
+            period: self.period,
+        }
+    }
+}
+
+/// The screen's brightness levels, from 1 to this.
+pub const BRIGHTNESS_LEVELS: u8 = 10;
 
 /// What the text typed into Add peer names, as far as it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -609,6 +639,18 @@ pub trait Node {
     fn set_forwarding(&self, on: bool);
 
     fn set_share_location(&self, on: bool);
+
+    /// Sets the radio's transmit power, within [`TRANSMIT_POWER`].
+    fn set_transmit_power(&self, dbm: i8);
+
+    fn keyboard(&self) -> KeyboardSettings;
+
+    fn set_keyboard(&self, settings: KeyboardSettings);
+
+    /// The screen's brightness, from 1 to [`BRIGHTNESS_LEVELS`].
+    fn brightness(&self) -> u8;
+
+    fn set_brightness(&self, level: u8);
 }
 
 /// At or below this charge, in percent, the battery is low.
@@ -693,6 +735,41 @@ pub struct State {
     /// The board is turning off: shown over everything, and the end of
     /// input.
     pub ending: Option<Ending>,
+    /// What keys type: the focused field's modifiers and aids.
+    pub keyboard: Keyboard,
+    /// The character picker is open, with this character focused.
+    pub picker: Option<u8>,
+    /// A brief card for a setting a key changed.
+    pub glance: Option<Glance>,
+}
+
+/// A brief card, with no words, for a setting changed from the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glance {
+    /// The screen's brightness, now at this level.
+    Brightness { level: u8, until: u64 },
+    /// The keyboard light, now on or off.
+    KeyboardLight { on: bool, until: u64 },
+}
+
+impl Glance {
+    const fn until(self) -> u64 {
+        match self {
+            Self::Brightness { until, .. } | Self::KeyboardLight { until, .. } => until,
+        }
+    }
+}
+
+/// How long a glance stays, in milliseconds.
+const GLANCE_MS: u64 = 1500;
+
+/// What lies over the screen: the topmost of what could.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    Ending(Ending),
+    Picker(u8),
+    Glance(Glance),
+    Banner(Notice),
 }
 
 /// What the screen says as the board turns off.
@@ -719,6 +796,9 @@ impl core::fmt::Debug for State {
             .field("dark", &self.dark)
             .field("arrived", &self.arrived)
             .field("ending", &self.ending)
+            .field("keyboard", &self.keyboard)
+            .field("picker", &self.picker)
+            .field("glance", &self.glance)
             .finish_non_exhaustive()
     }
 }
@@ -742,6 +822,9 @@ impl State {
             dark: false,
             arrived: Vec::new(),
             ending: None,
+            keyboard: Keyboard::default(),
+            picker: None,
+            glance: None,
         }
     }
 
@@ -975,7 +1058,12 @@ impl State {
     /// When the screen next changes by itself, on the board's clock.
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
-        self.banner.map(|b| b.until)
+        let banner = self.banner.map(|b| b.until);
+        let glance = self.glance.map(Glance::until);
+        match (banner, glance) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Lets go of whatever has had its time by `now`.
@@ -983,6 +1071,40 @@ impl State {
         if self.banner.is_some_and(|b| b.until <= now) {
             self.banner = None;
         }
+        if self.glance.is_some_and(|g| g.until() <= now) {
+            self.glance = None;
+        }
+    }
+
+    /// What lies over the screen.
+    #[must_use]
+    pub fn overlay(&self) -> Option<Overlay> {
+        self.ending
+            .map(Overlay::Ending)
+            .or(self.picker.map(Overlay::Picker))
+            .or(self.glance.map(Overlay::Glance))
+            .or(self.banner.map(|b| Overlay::Banner(b.notice)))
+    }
+
+    /// Turns the screen's brightness by `detents` levels, and shows it:
+    /// turned up, it brightens, and turned down, it dims.
+    pub fn adjust_brightness(&mut self, detents: i8, now: u64) {
+        let level = (i16::from(self.node.brightness()) - i16::from(detents))
+            .clamp(1, i16::from(BRIGHTNESS_LEVELS)) as u8;
+        self.node.set_brightness(level);
+        self.glance = Some(Glance::Brightness {
+            level,
+            until: now + GLANCE_MS,
+        });
+    }
+
+    /// Switches the keyboard light, and shows it.
+    pub fn switch_keyboard_light(&mut self, now: u64) {
+        self.toggle_keyboard_light();
+        self.glance = Some(Glance::KeyboardLight {
+            on: self.node.keyboard().light,
+            until: now + GLANCE_MS,
+        });
     }
 }
 

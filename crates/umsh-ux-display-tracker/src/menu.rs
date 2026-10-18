@@ -41,9 +41,10 @@
 /// still use that entry, so the two never need to be told apart
 /// downstream.
 ///
-/// A board with a keyboard also sends what it types, as
-/// [`Enter`](UiInput::Enter) and [`Character`](UiInput::Character). Screens
-/// without text entry ignore them.
+/// A board with a keyboard also sends its keys: [`Enter`](UiInput::Enter),
+/// the keys that type, and its modifiers going down and up. What a key
+/// types under the modifiers is for the interface that takes text to
+/// decide. Screens without text entry ignore them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiInput {
     Forward,
@@ -51,7 +52,25 @@ pub enum UiInput {
     Backward,
     Back,
     Enter,
-    Character(char),
+    /// A key that types `plain`, and `alt` under Alt where it has a
+    /// second legend.
+    Key {
+        plain: char,
+        alt: Option<char>,
+    },
+    Space,
+    /// A modifier key went down, or up.
+    Modifier {
+        modifier: KeyModifier,
+        down: bool,
+    },
+}
+
+/// A keyboard's modifier keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyModifier {
+    Shift,
+    Alt,
 }
 
 /// One list in the tree.
@@ -683,7 +702,10 @@ impl UiModel {
         self.notice = None;
         match (self.page, input) {
             // Nothing here takes text.
-            (_, UiInput::Enter | UiInput::Character(_)) => None,
+            (
+                _,
+                UiInput::Enter | UiInput::Key { .. } | UiInput::Space | UiInput::Modifier { .. },
+            ) => None,
             (Page::WifiNetworks { .. }, UiInput::Back)
             | (Page::WifiNetworks { selected: None }, UiInput::Select) => {
                 self.page = Page::Menu(MenuItem::WifiNetworks);

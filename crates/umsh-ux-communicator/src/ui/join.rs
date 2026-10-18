@@ -69,6 +69,7 @@ fn name_row(name: &JoinName) -> impl View<Rgb565, State> + use<> {
         .with_max_lines(1)
         // Enter ends the edit.
         .on_submit(|_: &mut State| {})
+        .on_active(State::field_active)
         .with_label(move |status, area| name_look(status, area, &shown))
         .focus_key(keys::JOIN_NAME)
 }

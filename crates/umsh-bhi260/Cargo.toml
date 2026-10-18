@@ -7,7 +7,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-embedded-hal-async.workspace = true
-
-[dev-dependencies]
 embassy-futures = "0.1"
+embedded-hal-async.workspace = true

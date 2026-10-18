@@ -23,6 +23,7 @@ window = ["embedded-graphics-simulator/with-sdl"]
 
 [dependencies]
 umsh-ux-communicator = { path = "../../crates/umsh-ux-communicator", features = ["fixture"] }
+umsh-pager-peripherals = { path = "../../crates/umsh-pager-peripherals" }
 embedded-graphics = "0.8"
 embedded-graphics-simulator = { version = "0.8", default-features = false }
 heapless = "0.9"

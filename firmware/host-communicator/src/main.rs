@@ -6,7 +6,8 @@
 //!     host-communicator
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
-//! a click presses it. Return, Backspace, and the letters are themselves.
+//! a click presses it. Return, Backspace, Space, and the letters are the
+//! Pager's; Shift is CAP, and Alt the orange key.
 //! Tab brings the fixture's next message in, as if it arrived. An
 //! identity asked for arrives two seconds later.
 //!
@@ -15,13 +16,18 @@
 //!     host-communicator --script steps.txt --out shots/
 //!
 //! Each script line is one step: `turn N` (negative is up), `press`,
-//! `enter`, `backspace`, `type TEXT`, `airtime SECONDS` (spent airtime
-//! that returns in that long; 0 for none), `arrive` (the fixture's next
-//! message arrives), `identify` (the identity asked for arrives), `wait
-//! SECONDS` (the board's clock moves on), `dark` and `lit` (the panel goes
-//! dark and lights again), `battery PERCENT [charging]`, `battery-empty` (with
-//! `off` for the blink's dark half), `first-run`, or `shot NAME`, which writes `NAME.png` into the output directory. `#`
-//! starts a comment.
+//! `enter`, `backspace`, `type TEXT` (typed as it is), `keys TEXT` (pressed
+//! as Pager keys, so the modifiers and typing aids act on them), `space`,
+//! `shift` and `alt` (tapped), `alt-down` and `alt-up`, `airtime SECONDS`
+//! (spent airtime that returns in that long; 0 for none), `arrive` (the
+//! fixture's next message arrives), `identify` (the identity asked for
+//! arrives), `wait SECONDS` (the board's clock moves on), `dark` and `lit`
+//! (the panel goes dark and lights again), `battery PERCENT [charging]`,
+//! `battery-empty` (with `off` for the blink's dark half), `first-run`,
+//! `shot NAME`, which writes `NAME.png` into the output directory once
+//! everything has settled, or `peek MS NAME`, which writes it MS
+//! milliseconds into what the last steps started. `#` starts a comment.
+//! Each input takes 50 ms of the board's clock.
 //!
 //! Timing, and something for a profiler to watch:
 //!
@@ -43,7 +49,9 @@ use buoyant::view::ViewLayout;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics_simulator::{OutputSettings, SimulatorDisplay};
+use umsh_pager_peripherals::input::alt_legend;
 use umsh_ux_communicator::input::{self, Input};
+use umsh_ux_communicator::keyboard::Modifier;
 use umsh_ux_communicator::model::State;
 use umsh_ux_communicator::{fixture, theme, ui};
 
@@ -143,7 +151,7 @@ fn bench(count: u32) {
     for turn in 0..count {
         // Four steps down, four back, so the focus keeps moving.
         let step = if turn / 4 % 2 == 0 { 1 } else { -1 };
-        input::apply(&mut app, Input::Turn(step));
+        input::apply(&mut app, Input::Turn(step), 0);
         let began = Instant::now();
         app.finalize_view();
         let laid_out = Instant::now();
@@ -168,7 +176,7 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
     let store = store();
     let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
-    // The board's clock, which only `wait` moves.
+    // The board's clock: each input takes a moment, and `wait` moves it on.
     let mut clock = 0;
     for (number, line) in steps.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -177,33 +185,36 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
         }
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
-        let input = match word {
+        let inputs = match word {
             "turn" => {
-                Some(Input::Turn(rest.parse().map_err(|_| {
+                vec![Input::Turn(rest.parse().map_err(|_| {
                     format!("line {}: turn needs a count", number + 1)
-                })?))
+                })?)]
             }
-            "press" => Some(Input::Press),
-            "enter" => Some(Input::Enter),
-            "backspace" => Some(Input::Backspace),
-            "type" => {
-                for c in rest.chars() {
-                    input::apply(&mut app, Input::Character(c));
-                }
-                None
-            }
+            "press" => vec![Input::Press],
+            "enter" => vec![Input::Enter],
+            "backspace" => vec![Input::Backspace],
+            "type" => rest.chars().map(Input::Character).collect(),
+            "keys" => rest.chars().map(pager_key).collect(),
+            "space" => vec![Input::Space],
+            "shift" => tap(Modifier::Shift).to_vec(),
+            "alt" => tap(Modifier::Alt).to_vec(),
+            "alt-down" | "alt-up" => vec![Input::Modifier {
+                modifier: Modifier::Alt,
+                down: word == "alt-down",
+            }],
             "dark" | "lit" => {
                 app.state_mut().dark = word == "dark";
                 app.finalize_view();
-                None
+                vec![]
             }
             "arrive" => {
                 arrive(&mut app, store, clock);
-                None
+                vec![]
             }
             "identify" => {
                 identify(&mut app, store);
-                None
+                vec![]
             }
             "wait" => {
                 let seconds: u64 = rest
@@ -211,7 +222,7 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                     .map_err(|_| format!("line {}: wait needs seconds", number + 1))?;
                 clock += seconds * 1000;
                 expire(&mut app, clock);
-                None
+                vec![]
             }
             "battery" => {
                 // `battery PERCENT`, with `charging` after it while plugged in.
@@ -223,18 +234,18 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 let charging = words.next() == Some("charging");
                 app.state_mut().battery(Some(percent), charging, clock);
                 app.finalize_view();
-                None
+                vec![]
             }
             "first-run" => {
                 app.state_mut().start_setup();
                 app.finalize_view();
-                None
+                vec![]
             }
             "battery-empty" => {
                 // `battery-empty off` draws the blink's dark half.
                 app.state_mut().battery_empty(rest != "off");
                 app.finalize_view();
-                None
+                vec![]
             }
             "airtime" => {
                 let wait: u16 = rest
@@ -242,36 +253,76 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                     .map_err(|_| format!("line {}: airtime needs seconds", number + 1))?;
                 app.state_mut().airtime_wait = (wait > 0).then_some(wait);
                 app.finalize_view();
-                None
+                vec![]
             }
-            "shot" => {
+            "shot" | "peek" => {
+                // Headless runs are not animated: a shot draws where things
+                // settle, well after what the last steps started, and a peek
+                // that many milliseconds into it.
+                let (after, name) = if word == "shot" {
+                    (60_000, rest)
+                } else {
+                    let (ms, name) = rest.split_once(' ').unwrap_or((rest, ""));
+                    let ms = ms.parse().map_err(|_| {
+                        format!("line {}: peek needs milliseconds and a name", number + 1)
+                    })?;
+                    (ms, name.trim())
+                };
                 let mut target =
                     EmbeddedGraphicsRenderTarget::new_hinted(&mut display, theme::BACKGROUND);
                 target.clear(theme::BACKGROUND);
-                // Headless runs are not animated: draw where things settle,
-                // well after what the last steps started.
-                app.advance_time(std::time::Duration::from_secs(60));
+                app.advance_time(std::time::Duration::from_millis(after));
                 app.render_animated(&mut target, &theme::TEXT);
-                let path = out.join(format!("{rest}.png"));
+                let path = out.join(format!("{name}.png"));
                 display
                     .to_rgb_output_image(&OutputSettings::default())
                     .save_png(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
-                None
+                vec![]
             }
             other => return Err(format!("line {}: unknown step {other:?}", number + 1)),
         };
-        if let Some(input) = input {
-            input::apply(&mut app, input);
+        for input in inputs {
+            clock += INPUT_MS;
+            input::apply(&mut app, input, clock);
         }
     }
     Ok(())
 }
 
+/// How long one input takes in a script.
+const INPUT_MS: u64 = 50;
+
+/// The Pager key that types `c`, with its Alt legend.
+fn pager_key(c: char) -> Input {
+    if c == ' ' {
+        Input::Space
+    } else {
+        Input::Key {
+            plain: c.to_ascii_lowercase(),
+            alt: alt_legend(c),
+        }
+    }
+}
+
+/// A modifier pressed and let go.
+fn tap(modifier: Modifier) -> [Input; 2] {
+    [true, false].map(|down| Input::Modifier { modifier, down })
+}
+
 #[cfg(feature = "window")]
 fn window() -> ExitCode {
-    use embedded_graphics_simulator::sdl2::{Keycode, Mod, MouseButton};
+    use embedded_graphics_simulator::sdl2::{Keycode, MouseButton};
     use embedded_graphics_simulator::{SimulatorEvent, Window};
+
+    /// The Pager modifier a host key stands for.
+    fn modifier(key: Keycode) -> Option<Modifier> {
+        match key {
+            Keycode::LShift | Keycode::RShift => Some(Modifier::Shift),
+            Keycode::LAlt | Keycode::RAlt => Some(Modifier::Alt),
+            _ => None,
+        }
+    }
 
     let mut window = Window::new(
         "UMSH communicator",
@@ -297,30 +348,41 @@ fn window() -> ExitCode {
             let input = match event {
                 SimulatorEvent::Quit => return ExitCode::SUCCESS,
                 SimulatorEvent::KeyDown {
-                    keycode, keymod, ..
+                    keycode, repeat, ..
                 } => match keycode {
                     Keycode::Up => Some(Input::Turn(-1)),
                     Keycode::Down => Some(Input::Turn(1)),
                     Keycode::Right => Some(Input::Press),
                     Keycode::Return => Some(Input::Enter),
                     Keycode::Backspace => Some(Input::Backspace),
-                    Keycode::Space => Some(Input::Character(' ')),
+                    Keycode::Space => Some(Input::Space),
                     Keycode::Tab => {
                         arrive(&mut app, store, now);
                         None
                     }
-                    other => {
-                        // Letters and digits, by their key names.
-                        let shifted = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                        let name = other.name();
-                        let mut chars = name.chars();
-                        match (chars.next(), chars.next()) {
-                            (Some(c), None) if shifted => Some(Input::Character(c)),
-                            (Some(c), None) => Some(Input::Character(c.to_ascii_lowercase())),
-                            _ => None,
-                        }
-                    }
+                    // The Pager's keyboard does not repeat.
+                    _ if repeat => None,
+                    other => modifier(other)
+                        .map(|modifier| Input::Modifier {
+                            modifier,
+                            down: true,
+                        })
+                        .or_else(|| {
+                            // Letters, by their key names.
+                            let name = other.name();
+                            let mut chars = name.chars();
+                            match (chars.next(), chars.next()) {
+                                (Some(c), None) if c.is_ascii_alphabetic() => Some(pager_key(c)),
+                                _ => None,
+                            }
+                        }),
                 },
+                SimulatorEvent::KeyUp { keycode, .. } => {
+                    modifier(keycode).map(|modifier| Input::Modifier {
+                        modifier,
+                        down: false,
+                    })
+                }
                 SimulatorEvent::MouseWheel { scroll_delta, .. } => {
                     Some(Input::Turn(if scroll_delta.y > 0 { -1 } else { 1 }))
                 }
@@ -331,7 +393,7 @@ fn window() -> ExitCode {
                 _ => None,
             };
             if let Some(input) = input {
-                input::apply(&mut app, input);
+                input::apply(&mut app, input, now);
                 // An identity asked for arrives a moment later.
                 if store.identity_asked() {
                     identity_at = Some(now + IDENTITY_DELAY_MS);

@@ -57,6 +57,7 @@ fn name(state: &State, text: &NameText) -> impl View<Rgb565, State> + use<> {
             .with_max_lines(1)
             .with_caret_width(CARET)
             .on_submit(State::continue_setup)
+            .on_active(State::field_active)
             .with_label(|status, area| field_look(status, area, TEXT_WIDTH))
             .focus_key(keys::NAME_FIELD)
             .padding(Edges::Horizontal, INSET),

@@ -126,9 +126,13 @@ fn every_wake_phase_discards_the_incomplete_cycle_then_counts_normally() {
 #[test]
 fn keyboard_backspace_uses_one_based_fifo_and_suppresses_repeat() {
     let mut kb = Keyboard::new(Bus(VecDeque::new()));
-    assert_eq!(kb.decode(0x9d), KeyEvent::Press);
+    let cap = |down| KeyEvent::Modifier {
+        modifier: Modifier::Shift,
+        down,
+    };
+    assert_eq!(kb.decode(0x9d), cap(true));
     assert_eq!(kb.decode(0x9d), KeyEvent::Other);
-    assert_eq!(kb.decode(0x1d), KeyEvent::Release);
+    assert_eq!(kb.decode(0x1d), cap(false));
     assert_eq!(kb.decode(0x1d), KeyEvent::Other);
     assert_eq!(kb.decode(0x80), KeyEvent::Other);
     assert_eq!(kb.decode(0xff), KeyEvent::Other);
@@ -145,51 +149,44 @@ fn tap(kb: &mut Keyboard<Bus>, position: u8) -> KeyEvent {
 }
 
 #[test]
-fn keyboard_types_letters_enter_and_space() {
+fn keyboard_reports_keys_with_both_legends() {
     let mut kb = Keyboard::new(Bus(VecDeque::new()));
-    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('q'));
-    assert_eq!(tap(&mut kb, 18), KeyEvent::Character('l'));
-    assert_eq!(tap(&mut kb, 27), KeyEvent::Character('m'));
+    let key = |plain, alt| KeyEvent::Key { plain, alt };
+    assert_eq!(tap(&mut kb, 0), key('q', Some('1')));
+    assert_eq!(tap(&mut kb, 18), key('l', Some('@')));
+    assert_eq!(tap(&mut kb, 27), key('m', Some('.')));
+    assert_eq!(tap(&mut kb, 13), key('f', Some('-')));
     assert_eq!(tap(&mut kb, 19), KeyEvent::Enter);
-    assert_eq!(tap(&mut kb, 30), KeyEvent::Character(' '));
+    assert_eq!(tap(&mut kb, 30), KeyEvent::Space);
     assert_eq!(tap(&mut kb, 29), KeyEvent::BackPress);
 }
 
 #[test]
-fn keyboard_modifiers_apply_while_held() {
+fn keyboard_reports_modifiers_down_and_up() {
     let mut kb = Keyboard::new(Bus(VecDeque::new()));
-    assert_eq!(kb.decode(0x80 | 29), KeyEvent::Press); // CAP down
-    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('Q'));
-    assert_eq!(tap(&mut kb, 1), KeyEvent::Character('W'));
-    assert_eq!(kb.decode(29), KeyEvent::Release);
-    // Used while held, so it does not carry over to the next key.
-    assert_eq!(tap(&mut kb, 2), KeyEvent::Character('e'));
-
-    kb.decode(0x80 | 21); // Sym down
-    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('1'));
-    assert_eq!(tap(&mut kb, 27), KeyEvent::Character('.'));
-    assert_eq!(tap(&mut kb, 17), KeyEvent::Character('"'));
-    // Keys with nothing on the symbol layer type as usual.
-    assert_eq!(tap(&mut kb, 19), KeyEvent::Enter);
-    kb.decode(21);
-    assert_eq!(tap(&mut kb, 0), KeyEvent::Character('q'));
+    let alt = |down| KeyEvent::Modifier {
+        modifier: Modifier::Alt,
+        down,
+    };
+    assert_eq!(kb.decode(0x80 | 21), alt(true));
+    // Keys still report both legends; what Alt does is not decided here.
+    assert_eq!(
+        tap(&mut kb, 0),
+        KeyEvent::Key {
+            plain: 'q',
+            alt: Some('1')
+        }
+    );
+    assert_eq!(kb.decode(21), alt(false));
 }
 
 #[test]
-fn keyboard_modifiers_tapped_alone_apply_to_the_next_key() {
-    let mut kb = Keyboard::new(Bus(VecDeque::new()));
-    tap(&mut kb, 28); // CAP
-    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('A'));
-    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('a'));
-
-    tap(&mut kb, 20); // Sym
-    assert_eq!(tap(&mut kb, 25), KeyEvent::Character('!'));
-    assert_eq!(tap(&mut kb, 25), KeyEvent::Character('b'));
-
-    // A second tap cancels the first.
-    tap(&mut kb, 28);
-    tap(&mut kb, 28);
-    assert_eq!(tap(&mut kb, 10), KeyEvent::Character('a'));
+fn every_letter_has_an_alt_legend() {
+    for letter in 'a'..='z' {
+        assert!(alt_legend(letter).is_some(), "{letter}");
+    }
+    assert_eq!(alt_legend('Q'), Some('1'));
+    assert_eq!(alt_legend('1'), None);
 }
 
 #[test]

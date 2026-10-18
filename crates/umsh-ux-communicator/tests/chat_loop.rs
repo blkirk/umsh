@@ -8,9 +8,10 @@ use buoyant::view::ViewLayout;
 use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
+use umsh_ux_communicator::keyboard::{Latch, Modifier, PICKER};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Notice, Preset,
-    Reaction, Section, Shareable, State,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Glance, Notice,
+    Preset, Reaction, Section, Shareable, State,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
@@ -47,9 +48,32 @@ where
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
+    // A second apart: never quick enough to be a double tap.
     for &input in inputs {
-        input::apply(app, input);
+        input::apply(app, input, tick(1000));
     }
+}
+
+/// Inputs in quick succession, a tenth of a second apart.
+fn quick<V, F>(app: &mut App<V, State, F>, inputs: &[Input])
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    for &input in inputs {
+        input::apply(app, input, tick(100));
+    }
+}
+
+/// Moves the test's clock on by `ms`, and returns it.
+fn tick(ms: u64) -> u64 {
+    thread_local!(static CLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) });
+    CLOCK.with(|clock| {
+        clock.set(clock.get() + ms);
+        clock.get()
+    })
 }
 
 fn typed(text: &str) -> Vec<Input> {
@@ -1124,7 +1148,7 @@ fn a_preset_is_chosen_from_its_choices_and_backspace_cancels() {
 fn a_switch_flips_on_press() {
     let mut app = app!();
     open_radio(&mut app);
-    run(&mut app, &[Input::Turn(3)]);
+    run(&mut app, &[Input::Turn(4)]);
     assert_eq!(focus(app.state()), Some(keys::SHARE_LOCATION));
     assert!(!radio(app.state()).0.share_location);
     run(&mut app, &[Input::Press]);
@@ -1364,7 +1388,7 @@ fn the_strip_counts_thirds_centered_on_their_levels() {
 fn shut_down_asks_first_and_then_ends_input() {
     let mut app = app!();
     run(&mut app, &[Input::Backspace, Input::Turn(2), Input::Press]);
-    run(&mut app, &[Input::Turn(7)]);
+    run(&mut app, &[Input::Turn(8)]);
     assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
     // Cancel is focused, and Backspace cancels too.
     run(&mut app, &[Input::Press]);
@@ -1378,4 +1402,213 @@ fn shut_down_asks_first_and_then_ends_input() {
     // Nothing moves under the card.
     run(&mut app, &[Input::Turn(-3), Input::Backspace]);
     assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
+}
+
+/// A key of the Pager's keyboard: its letter, and its top-row digit under
+/// Alt where it has one.
+fn key(plain: char) -> Input {
+    let alt = "qwertyuiop"
+        .find(plain)
+        .map(|i| char::from(b"1234567890"[i]));
+    Input::Key { plain, alt }
+}
+
+fn keys_for(text: &str) -> Vec<Input> {
+    text.chars()
+        .map(|c| if c == ' ' { Input::Space } else { key(c) })
+        .collect()
+}
+
+fn tap(modifier: Modifier) -> [Input; 2] {
+    [
+        Input::Modifier {
+            modifier,
+            down: true,
+        },
+        Input::Modifier {
+            modifier,
+            down: false,
+        },
+    ]
+}
+
+/// Opens Trail Crew, whose draft is empty, its composer focused.
+fn open_trail_crew<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(app, &[Input::Turn(1), Input::Press]);
+    assert_in_conversation(app.state(), TRAIL_CREW);
+    assert_eq!(draft(app.state(), TRAIL_CREW), "");
+}
+
+#[test]
+fn a_message_starts_with_a_capital_and_two_quick_spaces_end_a_sentence() {
+    let mut app = app!();
+    open_trail_crew(&mut app);
+    run(&mut app, &keys_for("on my way"));
+    quick(&mut app, &[Input::Space, Input::Space]);
+    assert_eq!(draft(app.state(), TRAIL_CREW), "On my way. ");
+    // The period starts a sentence, so Shift is armed again.
+    assert_eq!(app.state().keyboard.latches(), (Latch::Once, Latch::Off));
+    run(&mut app, &keys_for("ok"));
+    assert_eq!(draft(app.state(), TRAIL_CREW), "On my way. Ok");
+}
+
+#[test]
+fn the_aids_stay_off_when_switched_off() {
+    let mut app = app!();
+    // Device › Keyboard, Capitalize sentences and Period on double space.
+    run(&mut app, &[Input::Backspace, Input::Turn(2), Input::Press]);
+    run(&mut app, &[Input::Turn(5), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CAPITALIZE));
+    run(&mut app, &[Input::Press, Input::Turn(1), Input::Press]);
+    let settings = app.state().node.keyboard();
+    assert!(!settings.capitalize && !settings.period && settings.light);
+    run(&mut app, &[Input::Backspace, Input::Backspace]);
+    run(&mut app, &[Input::Turn(-2), Input::Press]);
+
+    open_trail_crew(&mut app);
+    run(&mut app, &keys_for("on"));
+    quick(&mut app, &[Input::Space, Input::Space]);
+    assert_eq!(draft(app.state(), TRAIL_CREW), "on  ");
+}
+
+#[test]
+fn caps_lock_and_alt_type_capitals_and_symbols() {
+    let mut app = app!();
+    open_trail_crew(&mut app);
+    // Alt then Shift is caps lock.
+    run(&mut app, &tap(Modifier::Alt));
+    run(&mut app, &tap(Modifier::Shift));
+    assert_eq!(app.state().keyboard.latches(), (Latch::Locked, Latch::Off));
+    run(&mut app, &keys_for("hut"));
+    run(&mut app, &tap(Modifier::Shift));
+    // Alt, once: the next key types its digit.
+    run(&mut app, &tap(Modifier::Alt));
+    run(&mut app, &keys_for("qq"));
+    assert_eq!(draft(app.state(), TRAIL_CREW), "HUT1q");
+}
+
+#[test]
+fn alt_then_space_opens_the_picker_and_a_press_types_from_it() {
+    let mut app = app!();
+    open_trail_crew(&mut app);
+    run(&mut app, &keys_for("a"));
+    run(&mut app, &tap(Modifier::Alt));
+    run(&mut app, &[Input::Space]);
+    assert_eq!(app.state().picker, Some(0));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(app.state().picker, None);
+    assert_eq!(draft(app.state(), TRAIL_CREW), format!("A{}", PICKER[1]));
+    // The field is still being edited.
+    run(&mut app, &keys_for("b"));
+    assert_eq!(draft(app.state(), TRAIL_CREW), format!("A{}b", PICKER[1]));
+
+    // Space in the picker switches the keyboard light instead.
+    run(&mut app, &tap(Modifier::Alt));
+    run(&mut app, &[Input::Space, Input::Space]);
+    assert_eq!(app.state().picker, None);
+    assert!(!app.state().node.keyboard().light);
+    assert!(matches!(
+        app.state().glance,
+        Some(Glance::KeyboardLight { on: false, .. })
+    ));
+}
+
+#[test]
+fn alt_and_two_quick_spaces_switch_the_keyboard_light_anywhere() {
+    let mut app = app!();
+    // On the Chats list, with no field: Alt+Space alone does nothing.
+    run(&mut app, &tap(Modifier::Alt));
+    run(&mut app, &[Input::Space]);
+    assert_eq!(app.state().picker, None);
+    assert!(app.state().node.keyboard().light);
+    // Held Alt, then one-shot Alt, each with two quick spaces.
+    quick(
+        &mut app,
+        &[
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: true,
+            },
+            Input::Space,
+            Input::Space,
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: false,
+            },
+        ],
+    );
+    assert!(!app.state().node.keyboard().light);
+    assert!(matches!(
+        app.state().glance,
+        Some(Glance::KeyboardLight { on: false, .. })
+    ));
+    run(&mut app, &tap(Modifier::Alt));
+    quick(&mut app, &[Input::Space, Input::Space]);
+    assert!(app.state().node.keyboard().light);
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+}
+
+#[test]
+fn turning_with_alt_held_sets_brightness() {
+    let mut app = app!();
+    let before = app.state().node.brightness();
+    run(
+        &mut app,
+        &[
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: true,
+            },
+            Input::Turn(-2),
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: false,
+            },
+        ],
+    );
+    assert_eq!(app.state().node.brightness(), before + 2);
+    assert!(
+        matches!(app.state().glance, Some(Glance::Brightness { level, .. }) if level == before + 2)
+    );
+    // Focus did not move, and letting go of Alt armed nothing.
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+    assert_eq!(app.state().keyboard.latches(), (Latch::Off, Latch::Off));
+}
+
+#[test]
+fn transmit_power_is_typed_in_symbol_lock() {
+    let mut app = app!();
+    open_radio(&mut app);
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::POWER_FIELD));
+    assert_eq!(app.state().keyboard.latches(), (Latch::Off, Latch::Locked));
+    // The field holds 22; a key types its digit.
+    run(&mut app, &[key('q')]);
+    assert!(matches!(
+        app.state().screen(),
+        Screen::Device { page: DevicePage::TransmitPower { text }, .. } if text.text() == "221"
+    ));
+    // Too much for the radio: the field stays to be corrected.
+    run(&mut app, &[Input::Enter]);
+    assert_eq!(focus(app.state()), Some(keys::POWER_FIELD));
+    assert_eq!(app.state().keyboard.latches(), (Latch::Off, Latch::Locked));
+    run(
+        &mut app,
+        &[
+            key('q'),
+            Input::Backspace,
+            Input::Backspace,
+            Input::Backspace,
+            Input::Backspace,
+        ],
+    );
+    run(&mut app, &[key('r'), Input::Enter]);
+    assert_eq!(radio(app.state()).0.transmit_power, 4);
+    assert_eq!(focus(app.state()), Some(keys::TRANSMIT_POWER));
 }

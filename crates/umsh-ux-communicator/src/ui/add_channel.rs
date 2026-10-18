@@ -47,6 +47,7 @@ pub fn view(state: &State, text: &ChannelText) -> impl View<Rgb565, State> + use
             .with_caret_width(CARET)
             // Enter joins once the text names a channel.
             .on_submit(State::add_channel)
+            .on_active(State::field_active)
             .with_label(|status, area| field_look(status, area, TEXT_WIDTH))
             .focus_key(keys::CHANNEL_FIELD)
             .padding(Edges::Horizontal, INSET),

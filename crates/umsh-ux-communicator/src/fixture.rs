@@ -5,10 +5,11 @@ use core::cell::{Cell, RefCell};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Delivery, Details, Direction,
-    Heard, Invite, MAX_HEARD, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, PeerDetail,
-    PeerEntry, PeerId, PeerSummary, Preset, RadioSettings, Reacted, Reaction, Reactions, Sender,
-    ShareUri, Shareable, State, StatusStrip, push_newest, word_match,
+    BRIGHTNESS_LEVELS, ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Delivery,
+    Details, Direction, Heard, Invite, KeyboardSettings, MAX_HEARD, MESSAGE_LEN, Member, Message,
+    MessageId, Messages, Node, PeerDetail, PeerEntry, PeerId, PeerSummary, Preset, RadioSettings,
+    Reacted, Reaction, Reactions, Sender, ShareUri, Shareable, State, StatusStrip, TRANSMIT_POWER,
+    push_newest, word_match,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -273,6 +274,9 @@ pub struct Store {
     region: Cell<usize>,
     forwarding: Cell<bool>,
     share_location: Cell<bool>,
+    transmit_power: Cell<i8>,
+    keyboard: Cell<KeyboardSettings>,
+    brightness: Cell<u8>,
 }
 
 impl Store {
@@ -298,6 +302,13 @@ impl Store {
             region: Cell::new(0),
             forwarding: Cell::new(true),
             share_location: Cell::new(false),
+            transmit_power: Cell::new(22),
+            keyboard: Cell::new(KeyboardSettings {
+                capitalize: true,
+                period: true,
+                light: true,
+            }),
+            brightness: Cell::new(5),
         }
     }
 }
@@ -782,6 +793,7 @@ impl Node for Store {
             preset: self.preset.get(),
             forwarding: self.forwarding.get(),
             share_location: self.share_location.get(),
+            transmit_power: self.transmit_power.get(),
             airtime: 3,
         }
     }
@@ -796,6 +808,28 @@ impl Node for Store {
 
     fn set_share_location(&self, on: bool) {
         self.share_location.set(on);
+    }
+
+    fn set_transmit_power(&self, dbm: i8) {
+        if TRANSMIT_POWER.contains(&dbm) {
+            self.transmit_power.set(dbm);
+        }
+    }
+
+    fn keyboard(&self) -> KeyboardSettings {
+        self.keyboard.get()
+    }
+
+    fn set_keyboard(&self, settings: KeyboardSettings) {
+        self.keyboard.set(settings);
+    }
+
+    fn brightness(&self) -> u8 {
+        self.brightness.get()
+    }
+
+    fn set_brightness(&self, level: u8) {
+        self.brightness.set(level.clamp(1, BRIGHTNESS_LEVELS));
     }
 
     fn inspect_peer(&self, text: &str) -> PeerEntry {

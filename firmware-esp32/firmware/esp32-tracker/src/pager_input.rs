@@ -4,6 +4,7 @@ use core::{future::Future, pin::pin, task::Poll};
 use esp_hal::rtc_cntl::WakeLock;
 use umsh_pager_peripherals::input::PressLatch;
 use umsh_pager_peripherals::input_power::{Gesture, InputPower, Mode};
+use umsh_ux_display_tracker::menu::KeyModifier;
 
 struct Control {
     policy: InputPower,
@@ -61,7 +62,7 @@ pub fn activity() -> u32 {
 pub fn dark(before_display_off: u32) {
     let accepted = control(|c| c.policy.dark(before_display_off));
     if accepted {
-        super::set_battery_display_lit(false);
+        super::display_lit(false);
         CHANGED.signal(());
     } else {
         wake_display();
@@ -102,7 +103,7 @@ pub fn shown(epoch: u32) {
     // Publish before allowing queued post-wake gestures through the display.
     SCREEN_FADED.store(false, Ordering::Release);
     control(|c| c.policy.shown(epoch));
-    super::set_battery_display_lit(true);
+    super::display_lit(true);
     DISPLAY_READY.signal(());
     KEYBOARD_RETRY.signal(());
 }
@@ -425,61 +426,115 @@ pub async fn keyboard_task(mut irq: Input<'static>, bus: &'static board::I2cBus)
     STOP_PROGRESS.signal(());
 }
 
+/// The modifiers whose going down reached the interface, so that their
+/// going up does too, and only theirs: a release must never wake the
+/// panel, and a press that only woke it was never seen.
+#[derive(Default)]
+struct Modifiers {
+    delivered: [bool; 2],
+}
+
+impl Modifiers {
+    fn event(&mut self, modifier: Modifier, down: bool) {
+        let index = match modifier {
+            Modifier::Shift => 0,
+            Modifier::Alt => 1,
+        };
+        let input = UiInput::Modifier {
+            modifier: match modifier {
+                Modifier::Shift => KeyModifier::Shift,
+                Modifier::Alt => KeyModifier::Alt,
+            },
+            down,
+        };
+        if down {
+            let gesture = start_gesture();
+            self.delivered[index] = gesture == Gesture::Navigate && !super::alert::active();
+            finish_gesture(input, gesture);
+        } else if core::mem::take(&mut self.delivered[index]) && NAVIGATION.try_send(input).is_err()
+        {
+            INPUT_OVERFLOW.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Why a pass over the keyboard controller failed.
+#[derive(Debug)]
+enum KeyboardFault {
+    Bus,
+    /// Its interrupt stayed asserted with nothing to read.
+    Stuck,
+    Timeout,
+}
+
+/// The wait before the controller is tried again after a failure: it
+/// doubles while failures repeat, and a display wake cuts it short.
+const KEYBOARD_RETRY_FIRST: Duration = Duration::from_millis(250);
+const KEYBOARD_RETRY_MOST: Duration = Duration::from_secs(8);
+
 async fn run_keyboard(irq: &mut Input<'static>, bus: &'static board::I2cBus) {
     let mut keyboard = Keyboard::new(I2cDevice::new(bus));
+    let mut modifiers = Modifiers::default();
+    let mut initialized = false;
+    let mut retry = KEYBOARD_RETRY_FIRST;
     loop {
-        let mut attempts = 0;
-        let mut initialized = false;
-        while attempts < 3 {
-            // Idle waits have no timer. Only controller transactions and
-            // asserted-IRQ drains are bounded by the acquisition timeout.
-            if initialized && irq.is_high() {
-                irq.wait_for(Event::LowLevel).await;
+        // Idle waits have no timer. Only controller transactions and
+        // asserted-IRQ drains are bounded by the acquisition timeout.
+        if initialized && irq.is_high() {
+            irq.wait_for(Event::LowLevel).await;
+        }
+        let result = with_timeout(Duration::from_millis(500), async {
+            if !initialized {
+                keyboard.init().await.map_err(|_| KeyboardFault::Bus)?;
+                initialized = true;
             }
-            let result = with_timeout(Duration::from_millis(500), async {
-                if !initialized {
-                    keyboard.init().await.map_err(|_| ())?;
-                    initialized = true;
-                }
-                if irq.is_high() {
-                    return Ok(());
-                }
-                for _ in 0..16 {
-                    match keyboard.next().await.map_err(|_| ())? {
-                        Some(KeyEvent::BackPress) => finish_gesture(UiInput::Back, start_gesture()),
-                        Some(KeyEvent::Enter) => finish_gesture(UiInput::Enter, start_gesture()),
-                        Some(KeyEvent::Character(c)) => {
-                            finish_gesture(UiInput::Character(c), start_gesture())
-                        }
-                        Some(KeyEvent::Press) if super::alert::active() => super::alert::cancel(),
-                        Some(KeyEvent::Overflow) => debug_log(format_args!(
-                            "pager: keyboard FIFO overflow; keyboard gestures discarded"
-                        )),
-                        Some(_) => {}
-                        None if irq.is_high() => return Ok(()),
-                        None => {}
+            if irq.is_high() {
+                return Ok(());
+            }
+            let mut read = false;
+            for _ in 0..16 {
+                let event = keyboard.next().await.map_err(|_| KeyboardFault::Bus)?;
+                read |= event.is_some();
+                match event {
+                    Some(KeyEvent::BackPress) => finish_gesture(UiInput::Back, start_gesture()),
+                    Some(KeyEvent::Enter) => finish_gesture(UiInput::Enter, start_gesture()),
+                    Some(KeyEvent::Key { plain, alt }) => {
+                        finish_gesture(UiInput::Key { plain, alt }, start_gesture())
                     }
+                    Some(KeyEvent::Space) => finish_gesture(UiInput::Space, start_gesture()),
+                    Some(KeyEvent::Modifier { modifier, down }) => modifiers.event(modifier, down),
+                    Some(KeyEvent::Overflow) => debug_log(format_args!(
+                        "pager: keyboard FIFO overflow; keyboard gestures discarded"
+                    )),
+                    Some(_) => {}
+                    None if irq.is_high() => return Ok(()),
+                    None => {}
                 }
-                Err(())
-            })
-            .await;
-            match result {
-                Ok(Ok(())) => attempts = 0,
-                _ => {
-                    attempts += 1;
-                    initialized = false;
-                    if attempts < 3 {
-                        Timer::after_millis(250).await;
-                    }
-                }
+            }
+            // More keys than one pass takes are taken by the next.
+            if read {
+                Ok(())
+            } else {
+                Err(KeyboardFault::Stuck)
+            }
+        })
+        .await
+        .unwrap_or(Err(KeyboardFault::Timeout));
+        match result {
+            Ok(()) => retry = KEYBOARD_RETRY_FIRST,
+            Err(fault) => {
+                // Set up afresh on the next attempt, which drains whatever
+                // the controller holds.
+                initialized = false;
+                debug_log(format_args!(
+                    "pager: keyboard {fault:?}; retry in {} ms",
+                    retry.as_millis()
+                ));
+                KEYBOARD_RETRY.reset();
+                select(Timer::after(retry), KEYBOARD_RETRY.wait()).await;
+                retry = (retry * 2).min(KEYBOARD_RETRY_MOST);
             }
         }
-        // Only a wake after entering quarantine may restart recovery.
-        KEYBOARD_RETRY.reset();
-        debug_log(format_args!(
-            "pager: keyboard IRQ/bus failed; retry on next display wake"
-        ));
-        KEYBOARD_RETRY.wait().await;
     }
 }
 

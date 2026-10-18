@@ -27,6 +27,7 @@ pub mod fixture;
 pub mod font;
 pub mod icon;
 pub mod input;
+pub mod keyboard;
 pub mod model;
 pub mod nav;
 pub mod qr;

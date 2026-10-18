@@ -129,70 +129,61 @@ const CAP: u8 = 28;
 const BACKSPACE: u8 = BACKSPACE_EVENT - 1;
 const SPACE: u8 = 30;
 
-/// What the first three rows type, and with Sym. Zero is a key that types
-/// nothing on that layer. The fourth row is the space bar alone.
+/// What the first three rows type, and with Alt (the orange key, Sym on
+/// the matrix). Zero is a key that types nothing on that layer. The fourth
+/// row is the space bar alone.
 const LETTERS: [&[u8; 10]; 3] = [b"qwertyuiop", b"asdfghjkl\0", b"\0zxcvbnm\0\0"];
 const SYMBOLS: [&[u8; 10]; 3] = [b"1234567890", b"*/+-=:'\"@\0", b"\0_$;?!,.\0\0"];
 
+/// What the key that types `letter` types under Alt, if it has a second
+/// legend.
+#[must_use]
+pub fn alt_legend(letter: char) -> Option<char> {
+    let letter = u8::try_from(letter.to_ascii_lowercase()).ok()?;
+    LETTERS.iter().zip(SYMBOLS).find_map(|(letters, symbols)| {
+        let column = letters.iter().position(|&l| l == letter && l != 0)?;
+        (symbols[column] != 0).then(|| char::from(symbols[column]))
+    })
+}
+
+/// The keyboard's modifier keys: Shift is CAP, and Alt the orange key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Modifier {
+    Shift,
+    Alt,
+}
+
+/// What happened on the keyboard. Keys are reported as they are, not as
+/// what they type: what the modifiers make of them is for the interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEvent {
     BackPress,
     BackRelease,
     Enter,
-    /// A key typed `char`, with Sym and CAP applied.
-    Character(char),
-    /// A key that types nothing, such as a modifier, went down.
-    Press,
+    /// A key that types `plain`, and `alt` under Alt, went down.
+    Key {
+        plain: char,
+        alt: Option<char>,
+    },
+    Space,
+    /// A modifier went down, or up.
+    Modifier {
+        modifier: Modifier,
+        down: bool,
+    },
+    /// A key other than a modifier or Backspace went up.
     Release,
     Other,
     Overflow,
 }
 
-/// Sym or CAP: held, it applies to the keys typed while it is down; tapped
-/// alone, to the next key typed. Tapping it again cancels that.
-#[derive(Clone, Copy, Debug, Default)]
-struct Modifier {
-    down: bool,
-    /// A key was typed while it was down.
-    used: bool,
-    /// It was tapped, and applies to the next key.
-    latched: bool,
-}
-impl Modifier {
-    fn press(&mut self) {
-        self.down = true;
-        self.used = false;
-    }
-    fn release(&mut self) {
-        self.down = false;
-        if !self.used {
-            self.latched = !self.latched;
-        }
-    }
-    fn active(self) -> bool {
-        self.down || self.latched
-    }
-    /// A key was typed, with this applied if it was active.
-    fn typed(&mut self) {
-        self.used |= self.down;
-        self.latched = false;
-    }
-}
-
 pub struct Keyboard<I> {
     i2c: I,
     down: u64,
-    sym: Modifier,
-    cap: Modifier,
 }
 impl<I: I2c> Keyboard<I> {
     pub fn new(i2c: I) -> Self {
-        Self {
-            i2c,
-            down: 0,
-            sym: Modifier::default(),
-            cap: Modifier::default(),
-        }
+        Self { i2c, down: 0 }
     }
     pub async fn init(&mut self) -> Result<(), I::Error> {
         // No auto-increment required: every register is addressed explicitly.
@@ -220,8 +211,6 @@ impl<I: I2c> Keyboard<I> {
             let _ = crate::read(&mut self.i2c, KEYBOARD_ADDRESS, 4).await?;
         }
         self.down = 0;
-        self.sym = Modifier::default();
-        self.cap = Modifier::default();
         self.i2c.write(KEYBOARD_ADDRESS, &[2, 0x1f]).await
     }
     pub async fn next(&mut self) -> Result<Option<KeyEvent>, I::Error> {
@@ -259,17 +248,15 @@ impl<I: I2c> Keyboard<I> {
         }
         let position = key - 1;
         let modifier = match position {
-            SYM => Some(&mut self.sym),
-            CAP => Some(&mut self.cap),
+            SYM => Some(Modifier::Alt),
+            CAP => Some(Modifier::Shift),
             _ => None,
         };
         if let Some(modifier) = modifier {
-            if pressed {
-                modifier.press();
-                return KeyEvent::Press;
-            }
-            modifier.release();
-            return KeyEvent::Release;
+            return KeyEvent::Modifier {
+                modifier,
+                down: pressed,
+            };
         }
         if !pressed {
             return if key == BACKSPACE_EVENT {
@@ -278,31 +265,22 @@ impl<I: I2c> Keyboard<I> {
                 KeyEvent::Release
             };
         }
-        let event = self.typed(position);
-        self.sym.typed();
-        self.cap.typed();
-        event
-    }
-
-    /// What pressing the key at matrix `position` types.
-    fn typed(&self, position: u8) -> KeyEvent {
         match position {
             BACKSPACE => return KeyEvent::BackPress,
             ENTER => return KeyEvent::Enter,
-            SPACE => return KeyEvent::Character(' '),
+            SPACE => return KeyEvent::Space,
             _ => {}
         }
         let (row, column) = (usize::from(position / 10), usize::from(position % 10));
         let Some(letters) = LETTERS.get(row) else {
-            return KeyEvent::Press;
+            return KeyEvent::Other;
         };
-        let symbol = SYMBOLS[row][column];
-        let c = match letters[column] {
-            0 => return KeyEvent::Press,
-            _ if self.sym.active() && symbol != 0 => symbol,
-            letter if self.cap.active() => letter.to_ascii_uppercase(),
-            letter => letter,
-        };
-        KeyEvent::Character(char::from(c))
+        match (letters[column], SYMBOLS[row][column]) {
+            (0, _) => KeyEvent::Other,
+            (plain, alt) => KeyEvent::Key {
+                plain: char::from(plain),
+                alt: (alt != 0).then(|| char::from(alt)),
+            },
+        }
     }
 }

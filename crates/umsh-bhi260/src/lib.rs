@@ -169,6 +169,9 @@ impl<I: I2c> Bhi260<I> {
         first[4..4 + first_len].copy_from_slice(&firmware[..first_len]);
         self.write(0, &first[..4 + first_len]).await?;
         for chunk in firmware[first_len..].chunks(TRANSFER_BYTES) {
+            // The upload takes seconds of a bus others share: between chunks,
+            // let whoever is waiting for the bus have it.
+            embassy_futures::yield_now().await;
             self.write(0, chunk).await?;
         }
         self.wait_boot(0x30, delay).await?;

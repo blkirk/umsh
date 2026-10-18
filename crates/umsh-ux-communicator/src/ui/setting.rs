@@ -17,6 +17,8 @@ const RADIUS: u16 = 8;
 const SWITCH_WIDTH: u32 = 40;
 const SWITCH_HEIGHT: u32 = 22;
 const KNOB_INSET: u32 = 3;
+/// How a switch moves from one side to the other.
+const SWITCH_MOTION: Animation = Animation::ease_in_out(core::time::Duration::from_millis(180));
 /// A choice in a card, and the room its check mark takes.
 const CHOICE: u32 = 34;
 const CHECK: u32 = 26;
@@ -123,7 +125,8 @@ pub(super) fn row<A: Fn(&mut State)>(
     .focus_key(key)
 }
 
-/// An on/off setting: where the knob sits and the fill say which.
+/// An on/off setting: where the knob sits and the fill say which. Changed,
+/// the knob slides across as the fill changes color.
 fn switch_look(on: bool) -> impl View<Rgb565, State> + use<> {
     let (track, knob, alignment) = if on {
         (
@@ -147,6 +150,9 @@ fn switch_look(on: bool) -> impl View<Rgb565, State> + use<> {
             .padding(Edges::Horizontal, KNOB_INSET)
             .flex_infinite_width(alignment),
     ))
+    .animated(SWITCH_MOTION, on)
+    // Moves within the switch, whatever the row does.
+    .geometry_group()
     .frame_sized(SWITCH_WIDTH, SWITCH_HEIGHT)
 }
 
