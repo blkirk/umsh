@@ -131,7 +131,21 @@ How a node persists and recovers its frame counter across reboots is implementat
 
 #### Counter Resynchronization
 
-On first contact with a new peer, the received frame counter is accepted at face value and recorded as the baseline for future replay detection. If a known peer's frame counter subsequently falls outside the forward window—for example, after the peer reboots and loses its persisted counter—the receiver MAY use the Echo Request MAC command (including a nonce, see [MAC Commands](mac-commands.md#echo-request)) to determine the peer's current counter value and re-establish a valid baseline.
+On first contact with a new peer, the received frame counter is accepted at face value and recorded as the baseline for future replay detection.
+
+An authenticated packet from a known peer whose frame counter is far outside the window means the two nodes disagree about that counter—for example, because the peer rebooted and lost its persisted counter. Far outside means past the forward window, or far enough behind the baseline that reordering cannot explain it (the suggested threshold is **1024**). The receiver MAY then re-establish a baseline with one of the two exchanges below. It SHOULD send at most one such probe to a peer every **5 seconds**, and a [Verify Frame](mac-commands.md#verify-frame-12) or [Frame Verified](mac-commands.md#frame-verified-13) never prompts one.
+
+When the packet requested an acknowledgement, the receiver—the requester—holds it without acknowledging it and sends Verify Frame to the peer, naming the packet in an [Ack MIC option](packet-options.md#ack-mic-option-8). The peer—the responder—proceeds as follows:
+
+1. It matches the option against the acknowledgement-requested packets it sent to the requester that are still awaiting acknowledgement. If none matches, it ignores the Verify Frame.
+2. It stops retransmitting the matched packet and answers with Frame Verified, which requests an acknowledgement.
+3. When Frame Verified is acknowledged, it treats the matched packet as acknowledged. If Frame Verified is never acknowledged, the matched packet has failed.
+
+The responder processes a Verify Frame whose own counter falls outside its window for the requester, since the match with an outstanding packet already shows the request is fresh. When Frame Verified is acknowledged, it adopts that counter as the requester's new baseline. A Verify Frame whose counter falls within the window is subject to the ordinary replay rules.
+
+When a Frame Verified arrives echoing the nonce of a Verify Frame for a packet the requester still holds, the requester adopts its frame counter as the peer's new baseline, whatever the value. It then delivers the held packet and acknowledges Frame Verified; that acknowledgement stands for the held packet too, which is not acknowledged separately. A requester that no longer holds the packet discards Frame Verified without acknowledging it, so the responder reports the packet as failed. The requester MUST choose nonces so that a Frame Verified recorded from an earlier exchange cannot match a later one.
+
+When the packet did not request an acknowledgement, the peer has nothing outstanding to match, so the receiver MAY instead send an [Echo Request](mac-commands.md#echo-request-4) carrying a nonce. An Echo Response echoing it establishes the response's frame counter as the peer's new baseline. The packet that prompted the probe is dropped.
 
 
 ### Salt

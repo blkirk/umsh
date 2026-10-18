@@ -3758,6 +3758,922 @@ fn receive_one_resynchronizes_peer_counter_after_out_of_window_restart() {
     assert_eq!(delivered_again, Some((local_id, b"works again".to_vec())));
 }
 
+/// A MAC holding a baseline of 10,000 for `remote`, so a frame from it at
+/// counter 7 is far behind, the way it is after `remote` loses its counter.
+fn desynchronized_peer() -> (
+    TestMac,
+    LocalIdentityId,
+    DummyIdentity,
+    PeerId,
+    PairwiseKeys,
+    umsh_core::NodeHint,
+) {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_id = mac.add_peer(*remote.public_key()).unwrap();
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.identity_mut(local_id)
+        .unwrap()
+        .peer_crypto_mut()
+        .get_mut(&peer_id)
+        .unwrap()
+        .replay_window
+        .reset(10_000, 1);
+    (mac, local_id, remote, peer_id, keys, dst_hint)
+}
+
+/// The first four bytes of a frame's on-wire MIC: its `ack_mic`.
+fn ack_mic_of(frame: &[u8]) -> [u8; 4] {
+    let header = PacketHeader::parse(frame).unwrap();
+    frame[header.mic_range.clone()][..4].try_into().unwrap()
+}
+
+/// The command and nonce of a Verify Frame or Frame Verified payload.
+fn resync_command_of(payload: &[u8]) -> Option<(u8, u32)> {
+    match payload {
+        [payload_type, command @ (12 | 13), a, b, c, d]
+            if *payload_type == PayloadType::MacCommand as u8 =>
+        {
+            Some((*command, u32::from_be_bytes([*a, *b, *c, *d])))
+        }
+        _ => None,
+    }
+}
+
+/// Pop the queued Verify Frame: its nonce and the ack MIC it names.
+fn pop_verify_frame(mac: &mut TestMac, keys: &PairwiseKeys) -> (u32, [u8; 4]) {
+    let queued = mac
+        .tx_queue_mut()
+        .pop_next()
+        .expect("a verify frame should be queued");
+    let frame = queued.frame.as_slice();
+    let header = PacketHeader::parse(frame).unwrap();
+    assert_eq!(header.packet_type(), PacketType::Unicast);
+    let payload = decrypt_unicast_payload(frame, keys);
+    let Some((12, nonce)) = resync_command_of(payload.as_slice()) else {
+        panic!("unexpected verify frame payload: {:?}", payload.as_slice());
+    };
+    let named = ack_mic_option_of(frame).expect("a verify frame names the frame it asks about");
+    (nonce, named.as_slice().try_into().unwrap())
+}
+
+fn last_queued_received(mac: &TestMac) -> std::vec::Vec<u8> {
+    mac.radio().received.back().unwrap().to_vec()
+}
+
+fn frame_verified_payload(nonce: u32) -> heapless::Vec<u8, 32> {
+    encode_echo_command_payload(13, &nonce.to_be_bytes())
+}
+
+/// Receive one frame, returning what was delivered and what got queued.
+fn receive_and_collect(
+    mac: &mut TestMac,
+) -> (
+    std::vec::Vec<std::vec::Vec<u8>>,
+    std::vec::Vec<std::vec::Vec<u8>>,
+) {
+    let mut delivered = std::vec::Vec::new();
+    let _ = block_on(mac.receive_one(|_, event| {
+        if let MacEventRef::Received(packet) = event {
+            delivered.push(packet.payload_bytes().to_vec());
+        }
+    }))
+    .unwrap();
+    let mut queued = std::vec::Vec::new();
+    while let Some(entry) = mac.tx_queue_mut().pop_next() {
+        queued.push(entry.frame.to_vec());
+    }
+    (delivered, queued)
+}
+
+#[test]
+fn far_behind_ack_frame_is_held_and_verified() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let held = last_queued_received(&mac);
+
+    let mut delivered = false;
+    assert!(
+        block_on(mac.receive_one(|_, event| {
+            delivered |= matches!(event, MacEventRef::Received(_));
+        }))
+        .unwrap()
+    );
+    assert!(
+        !delivered,
+        "a held frame waits for its sender to vouch for it"
+    );
+
+    let (_, named) = pop_verify_frame(&mut mac, &keys);
+    assert_eq!(named, ack_mic_of(&held));
+    assert!(
+        mac.tx_queue().is_empty(),
+        "nothing acknowledges the held frame yet"
+    );
+}
+
+#[test]
+fn frame_verified_delivers_the_held_frame_and_adopts_its_counter() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let held = last_queued_received(&mac);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (nonce, _) = pop_verify_frame(&mut mac, &keys);
+
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(nonce),
+        true,
+        8,
+    );
+    let answer = last_queued_received(&mac);
+    let (delivered, queued) = receive_and_collect(&mut mac);
+
+    // The held frame is delivered; the answer is the MAC's own business.
+    assert_eq!(delivered, [b"hello after reboot".to_vec()]);
+    // One acknowledgment, the answer's, standing for the held frame too.
+    assert_eq!(queued.len(), 1);
+    let ack = PacketHeader::parse(&queued[0]).unwrap();
+    assert_eq!(ack.packet_type(), PacketType::MacAck);
+    assert_eq!(queued[0][ack.mic_range.clone()][..4], ack_mic_of(&answer));
+    assert_ne!(ack_mic_of(&answer), ack_mic_of(&held));
+
+    // The answer's counter is the new baseline: what follows it is taken,
+    // what precedes it—the held frame's copies included—is not.
+    mac.radio_mut().queue_received_frame(&held);
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty() && queued.is_empty());
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"works again",
+        false,
+        9,
+    );
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"works again".to_vec()]);
+}
+
+#[test]
+fn frame_verified_with_a_foreign_nonce_is_discarded_unacked() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (nonce, _) = pop_verify_frame(&mut mac, &keys);
+
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(nonce ^ 1),
+        true,
+        8,
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(queued.is_empty(), "a refused answer is never acknowledged");
+
+    // The frame is still held for the real answer.
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(nonce),
+        true,
+        9,
+    );
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"hello after reboot".to_vec()]);
+}
+
+#[test]
+fn frame_verified_after_the_hold_expires_is_not_acked() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (nonce, _) = pop_verify_frame(&mut mac, &keys);
+
+    mac.clock().advance_ms(10 * 60 * 1000);
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(nonce),
+        true,
+        8,
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(
+        queued.is_empty(),
+        "an answer for a frame no longer held is not acknowledged, so its sender reports it failed"
+    );
+}
+
+#[test]
+fn recorded_frame_verified_cannot_release_a_later_hold() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let held = last_queued_received(&mac);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (nonce, _) = pop_verify_frame(&mut mac, &keys);
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(nonce),
+        true,
+        8,
+    );
+    let answer = last_queued_received(&mac);
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"hello after reboot".to_vec()]);
+
+    // The peer moves on, far enough that the old frame reads as a gap again.
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"later", false, 3_000);
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"later".to_vec()]);
+
+    // A replay of the old frame is held and asked about afresh...
+    mac.radio_mut().queue_received_frame(&held);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (second_nonce, _) = pop_verify_frame(&mut mac, &keys);
+    assert_ne!(second_nonce, nonce);
+
+    // ...and the answer recorded from the first exchange no longer matches.
+    mac.radio_mut().queue_received_frame(&answer);
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(queued.is_empty());
+}
+
+#[test]
+fn verify_is_rate_limited_per_peer_and_reuses_its_nonce() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+        7,
+    );
+    let held = last_queued_received(&mac);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (nonce, _) = pop_verify_frame(&mut mac, &keys);
+
+    // Another copy inside the interval: still held, not asked about again.
+    mac.radio_mut().queue_received_frame(&held);
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty() && queued.is_empty());
+
+    // After it, the same frame is asked about again, with the same nonce.
+    mac.clock().advance_ms(5_000);
+    mac.radio_mut().queue_received_frame(&held);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (again, _) = pop_verify_frame(&mut mac, &keys);
+    assert_eq!(again, nonce);
+
+    // A different frame inside the interval is dropped, not asked about.
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"another", true, 6);
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty() && queued.is_empty());
+
+    // After it, the different frame takes the held one's place.
+    mac.clock().advance_ms(5_000);
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"another", true, 6);
+    // (Its nonce differs too, being derived from the frame; that needs a
+    // real cipher to show, so `verify_nonce_binds_frame_baseline_and_key`
+    // covers it.)
+    let replacement = last_queued_received(&mac);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    let (_, named) = pop_verify_frame(&mut mac, &keys);
+    assert_eq!(named, ack_mic_of(&replacement));
+}
+
+#[test]
+fn resync_commands_never_prompt_a_probe() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    // An answer with nothing held, far outside the window, asking for an ack.
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        &frame_verified_payload(0x0102_0304),
+        true,
+        7,
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(queued.is_empty());
+
+    // A request naming nothing outstanding, far outside the window.
+    mac.radio_mut().queue_received_unicast_naming(
+        &remote,
+        &keys,
+        &dst_hint,
+        &encode_echo_command_payload(12, &[1, 2, 3, 4]),
+        false,
+        8,
+        [9; 4],
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(queued.is_empty());
+}
+
+#[test]
+fn near_gap_frame_is_dropped_without_a_probe() {
+    let (mut mac, local_id, remote, peer_id, keys, dst_hint) = desynchronized_peer();
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"late",
+        true,
+        10_000 - 100,
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(queued.is_empty(), "reordering is dropped, not probed");
+
+    let channel_key = ChannelKey([0x5A; 32]);
+    let channel_keys = mac.crypto().derive_channel_keys(&channel_key);
+    mac.add_channel(channel_key).unwrap();
+    mac.identity_mut(local_id)
+        .unwrap()
+        .peer_crypto_mut()
+        .get_mut(&peer_id)
+        .unwrap()
+        .replay_window
+        .reset(13 + 100, 1);
+    mac.radio_mut().queue_received_blind_unicast(
+        &remote,
+        &keys,
+        &channel_keys,
+        &dst_hint,
+        b"late",
+        true,
+    );
+    let (delivered, queued) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+    assert!(
+        queued.is_empty(),
+        "blind unicast follows the same threshold"
+    );
+}
+
+#[test]
+fn blind_far_behind_ack_frame_is_verified_over_its_channel() {
+    let (mut mac, _, remote, _, keys, dst_hint) = desynchronized_peer();
+    let channel_key = ChannelKey([0x5A; 32]);
+    let channel_id = mac.crypto().derive_channel_id(&channel_key);
+    let channel_keys = mac.crypto().derive_channel_keys(&channel_key);
+    mac.add_channel(channel_key).unwrap();
+    mac.radio_mut().queue_received_blind_unicast(
+        &remote,
+        &keys,
+        &channel_keys,
+        &dst_hint,
+        b"hello after reboot",
+        true,
+    );
+    let held = last_queued_received(&mac);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+
+    let queued = mac
+        .tx_queue_mut()
+        .pop_next()
+        .expect("a verify frame should be queued");
+    let header = PacketHeader::parse(queued.frame.as_slice()).unwrap();
+    assert_eq!(header.packet_type(), PacketType::BlindUnicast);
+    assert_eq!(header.channel, Some(channel_id));
+    let payload = decrypt_blind_payload(queued.frame.as_slice(), &keys, &channel_keys);
+    let Some((12, nonce)) = resync_command_of(payload.as_slice()) else {
+        panic!("unexpected verify frame payload: {:?}", payload.as_slice());
+    };
+    assert_eq!(
+        ack_mic_option_of(queued.frame.as_slice()).as_deref(),
+        Some(ack_mic_of(&held).as_slice())
+    );
+
+    mac.radio_mut().queue_received_blind_unicast_with_counter(
+        &remote,
+        &keys,
+        &channel_keys,
+        &dst_hint,
+        &frame_verified_payload(nonce),
+        true,
+        14,
+    );
+    let mut delivered = std::vec::Vec::new();
+    let _ = block_on(mac.receive_one(|_, event| {
+        if let MacEventRef::Received(packet) = event {
+            delivered.push((
+                packet.payload_bytes().to_vec(),
+                packet.channel().map(|channel| channel.id),
+            ));
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        delivered,
+        [(b"hello after reboot".to_vec(), Some(channel_id))]
+    );
+    let ack = mac.tx_queue_mut().pop_next().expect("the answer is acked");
+    assert_eq!(
+        PacketHeader::parse(ack.frame.as_slice())
+            .unwrap()
+            .packet_type(),
+        PacketType::MacAck
+    );
+}
+
+/// A stand-in block cipher that actually mixes: every output byte depends
+/// on the key and every input byte. Neither invertible nor secure—only
+/// enough that a truncated CMAC over it reflects all of its input, which
+/// the identity `DummyCipher` does not.
+struct MixingCipher([u8; 32]);
+impl AesCipher for MixingCipher {
+    fn encrypt_block(&self, block: &mut [u8; 16]) {
+        use std::hash::{Hash, Hasher};
+        let input = *block;
+        for (index, chunk) in block.chunks_mut(8).enumerate() {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (index, &self.0, &input).hash(&mut hasher);
+            chunk.copy_from_slice(&hasher.finish().to_be_bytes());
+        }
+    }
+    fn decrypt_block(&self, _block: &mut [u8; 16]) {
+        unimplemented!("CMAC only encrypts")
+    }
+}
+
+struct MixingAes;
+impl AesProvider for MixingAes {
+    type Cipher = MixingCipher;
+    fn new_cipher(&self, key: &[u8; 32]) -> Self::Cipher {
+        MixingCipher(*key)
+    }
+}
+
+#[test]
+fn verify_nonce_binds_frame_baseline_and_key() {
+    let crypto = CryptoEngine::new(MixingAes, DummySha);
+    let key = [7u8; 32];
+    let mut window = ReplayWindow::new();
+    window.reset(10_000, 1);
+    let trailer = [1, 2, 3, 4, 5, 6, 7, 8];
+    let nonce = crate::coordinator::derive_verify_nonce(&crypto, &key, &trailer, &window);
+
+    // Derived again, not stored: the same inputs give the same nonce.
+    assert_eq!(
+        crate::coordinator::derive_verify_nonce(&crypto, &key, &trailer, &window),
+        nonce
+    );
+    // A different frame held in its place, even one differing only in the
+    // keyed half of its trailer, gets its own.
+    let mut other = trailer;
+    other[7] ^= 1;
+    assert_ne!(
+        crate::coordinator::derive_verify_nonce(&crypto, &key, &other, &window),
+        nonce
+    );
+    // Once the window moves, as an exchange moves it, the old nonce is gone.
+    let mut moved = window.clone();
+    moved.accept(10_001, &[0; 16], 2);
+    assert_ne!(
+        crate::coordinator::derive_verify_nonce(&crypto, &key, &trailer, &moved),
+        nonce
+    );
+    // So is a window that was never established.
+    let mut fresh = ReplayWindow::new();
+    fresh.last_accepted = window.last_accepted;
+    assert_ne!(
+        crate::coordinator::derive_verify_nonce(&crypto, &key, &trailer, &fresh),
+        nonce
+    );
+    // And a new boot draws a new key.
+    assert_ne!(
+        crate::coordinator::derive_verify_nonce(&crypto, &[8u8; 32], &trailer, &window),
+        nonce
+    );
+}
+
+/// Receive a Verify Frame from `remote` naming `ack_mic`, at `counter`.
+fn receive_verify_frame(
+    mac: &mut TestMac,
+    local_id: LocalIdentityId,
+    remote: &DummyIdentity,
+    keys: &PairwiseKeys,
+    ack_mic: [u8; 4],
+    nonce: u32,
+    counter: u32,
+) -> std::vec::Vec<(SendReceipt, bool)> {
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.radio_mut().queue_received_unicast_naming(
+        remote,
+        keys,
+        &dst_hint,
+        &encode_echo_command_payload(12, &nonce.to_be_bytes()),
+        false,
+        counter,
+        ack_mic,
+    );
+    let mut outcomes = std::vec::Vec::new();
+    let _ = block_on(mac.receive_one(|_, event| match event {
+        MacEventRef::AckReceived { receipt, .. } => outcomes.push((receipt, true)),
+        MacEventRef::AckTimeout { receipt, .. } => outcomes.push((receipt, false)),
+        MacEventRef::Received(_) => panic!("a verify frame is never delivered"),
+        _ => {}
+    }))
+    .unwrap();
+    outcomes
+}
+
+/// The queued Frame Verified: its receipt, its frame, and its nonce.
+fn find_frame_verified(
+    mac: &TestMac,
+    keys: &PairwiseKeys,
+) -> Option<(SendReceipt, std::vec::Vec<u8>, u32)> {
+    mac.tx_queue().iter().find_map(|entry| {
+        let payload = decrypt_unicast_payload(entry.frame.as_slice(), keys);
+        match resync_command_of(payload.as_slice()) {
+            Some((13, nonce)) => Some((entry.receipt?, entry.frame.to_vec(), nonce)),
+            _ => None,
+        }
+    })
+}
+
+#[test]
+fn verify_frame_holds_the_named_send_and_answers() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let request = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .resend
+        .frame
+        .to_vec();
+
+    let outcomes = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        0xA1B2_C3D4,
+        40,
+    );
+    assert!(
+        outcomes.is_empty(),
+        "the named Ack MIC asks about the send; it does not acknowledge it"
+    );
+
+    let (answer_receipt, answer, nonce) =
+        find_frame_verified(&mac, &keys).expect("the send is vouched for");
+    assert_eq!(nonce, 0xA1B2_C3D4);
+    assert!(PacketHeader::parse(&answer).unwrap().ack_requested());
+    assert_eq!(
+        answer_receipt, receipt,
+        "the answer runs under the send's receipt"
+    );
+    assert!(
+        mac.tx_queue()
+            .iter()
+            .all(|entry| entry.frame.as_slice() != request.as_slice()),
+        "the send itself is no longer retransmitted"
+    );
+    let pending = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap();
+    assert_ne!(pending.ack_trailer, trailer);
+
+    // A second request naming the same send finds nothing left to answer.
+    let queued_before = mac.tx_queue().len();
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        0xA1B2_C3D4,
+        41,
+    );
+    assert_eq!(mac.tx_queue().len(), queued_before);
+}
+
+#[test]
+fn frame_verified_ack_completes_the_held_send() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        7,
+        40,
+    );
+    while block_on(mac.transmit_next(&mut |_, _| {}))
+        .unwrap()
+        .is_some()
+    {}
+    let answer_trailer = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .ack_trailer;
+
+    mac.radio_mut().queue_received_mac_ack(answer_trailer);
+    let mut acked = std::vec::Vec::new();
+    let _ = block_on(mac.receive_one(|_, event| {
+        if let MacEventRef::AckReceived { receipt, .. } = event {
+            acked.push(receipt);
+        }
+    }))
+    .unwrap();
+    assert_eq!(acked, [receipt]);
+    assert!(
+        mac.identity(local_id)
+            .unwrap()
+            .pending_ack(&receipt)
+            .is_none()
+    );
+}
+
+#[test]
+fn unanswered_frame_verified_fails_the_held_send() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        7,
+        40,
+    );
+    let mut outcomes = std::vec::Vec::new();
+    for _ in 0..200 {
+        while block_on(mac.transmit_next(&mut |_, _| {}))
+            .unwrap()
+            .is_some()
+        {}
+        mac.clock().advance_ms(1_000);
+        mac.service_pending_ack_timeouts(|_, event| match event {
+            MacEventRef::AckReceived { receipt, .. } => outcomes.push((receipt, true)),
+            MacEventRef::AckTimeout { receipt, .. } => outcomes.push((receipt, false)),
+            _ => {}
+        })
+        .unwrap();
+        if !outcomes.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(outcomes, [(receipt, false)]);
+}
+
+#[test]
+fn verify_frame_naming_nothing_outstanding_is_ignored() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let queued_before = mac.tx_queue().len();
+    let outcomes = receive_verify_frame(&mut mac, local_id, &remote, &keys, [0xEE; 4], 7, 40);
+    assert!(outcomes.is_empty());
+    assert!(find_frame_verified(&mac, &keys).is_none());
+    assert_eq!(mac.tx_queue().len(), queued_before);
+    assert_eq!(
+        mac.identity(local_id)
+            .unwrap()
+            .pending_ack(&receipt)
+            .unwrap()
+            .ack_trailer,
+        trailer
+    );
+}
+
+#[test]
+fn verify_frame_outside_the_window_adopts_its_counter_on_ack() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let peer_id = mac
+        .peer_registry()
+        .lookup_by_key(remote.public_key())
+        .unwrap()
+        .0;
+    mac.identity_mut(local_id)
+        .unwrap()
+        .peer_crypto_mut()
+        .get_mut(&peer_id)
+        .unwrap()
+        .replay_window
+        .reset(10_000, 1);
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+
+    // The requester lost its counter too: its Verify Frame is far behind.
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        7,
+        40,
+    );
+    assert!(
+        find_frame_verified(&mac, &keys).is_some(),
+        "answered all the same"
+    );
+    while block_on(mac.transmit_next(&mut |_, _| {}))
+        .unwrap()
+        .is_some()
+    {}
+
+    // Until the answer is acknowledged, the requester's next counter is
+    // still refused.
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"too soon",
+        false,
+        41,
+    );
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+
+    let answer_trailer = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .ack_trailer;
+    mac.radio_mut().queue_received_mac_ack(answer_trailer);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+
+    // Now the Verify Frame's counter is the baseline.
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"in step", false, 42);
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"in step".to_vec()]);
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"behind", false, 39);
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert!(delivered.is_empty());
+}
+
+#[test]
+fn verify_frame_inside_the_window_follows_the_ordinary_rules() {
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    let (mut mac, local_id, receipt, trailer) = pending_request_to(&remote, &keys);
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"earlier", false, 50);
+    let _ = receive_and_collect(&mut mac);
+
+    // A replay inside the window is dropped, unanswered.
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        7,
+        50,
+    );
+    assert!(find_frame_verified(&mac, &keys).is_none());
+
+    // A fresh one is accepted as usual and answered, and acknowledging the
+    // answer resets nothing: the backward window still takes a late frame,
+    // where a fresh baseline would have spent it.
+    let _ = receive_verify_frame(
+        &mut mac,
+        local_id,
+        &remote,
+        &keys,
+        trailer[..4].try_into().unwrap(),
+        7,
+        60,
+    );
+    assert!(find_frame_verified(&mac, &keys).is_some());
+    while block_on(mac.transmit_next(&mut |_, _| {}))
+        .unwrap()
+        .is_some()
+    {}
+    let answer_trailer = mac
+        .identity(local_id)
+        .unwrap()
+        .pending_ack(&receipt)
+        .unwrap()
+        .ack_trailer;
+    mac.radio_mut().queue_received_mac_ack(answer_trailer);
+    let _ = block_on(mac.receive_one(|_, _| {})).unwrap();
+    mac.radio_mut()
+        .queue_received_unicast_with_counter(&remote, &keys, &dst_hint, b"late", false, 55);
+    let (delivered, _) = receive_and_collect(&mut mac);
+    assert_eq!(delivered, [b"late".to_vec()]);
+}
+
 #[test]
 fn receive_one_unicast_with_ambiguous_hint_tries_candidate_peers() {
     let mut mac = make_mac();
@@ -8969,14 +9885,10 @@ fn modeled_unknown_multicast_senders_deliver_unique_messages_without_peer_regist
     );
 }
 
-#[test]
-fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
-    // Alice and Bob first learn routes in both directions. Alice then
-    // "restarts" by rewinding its local frame counter and sending another
-    // multi-hop packet. Bob should respond by issuing a routed Echo Request,
-    // and Alice should answer with a routed Echo Response. What becomes of
-    // the frame that provoked the probe is covered in
-    // `receive_one_resynchronizes_peer_counter_after_out_of_window_restart`.
+/// A six-node line where Alice (node 0) and Bob (node 5) have learned
+/// routes in both directions, after which Alice "restarts": its frame
+/// counter rewinds far behind the baseline Bob holds for it.
+fn modeled_line_with_restarted_alice() -> ModeledScenario {
     let mut scenario = build_modeled_line_scenario(6);
     let alice = 0usize;
     let bob = 5usize;
@@ -9081,6 +9993,19 @@ fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
         .unwrap()
         .set_frame_counter(1);
 
+    scenario
+}
+
+#[test]
+fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
+    // After Alice's restart, a frame that asks for no ack can't be vouched
+    // for, so Bob probes with a routed Echo Request and Alice answers with
+    // a routed Echo Response. What becomes of the frame that provoked the
+    // probe is covered in
+    // `receive_one_resynchronizes_peer_counter_after_out_of_window_restart`.
+    let scenario = modeled_line_with_restarted_alice();
+    let alice = 0usize;
+    let bob = 5usize;
     {
         let mut alice_mac = scenario.macs[alice].borrow_mut();
         alice_mac
@@ -9088,9 +10013,7 @@ fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
                 scenario.identity_ids[alice],
                 &scenario.keys[bob],
                 b"after-restart",
-                &SendOptions::default()
-                    .with_ack_requested(true)
-                    .with_flood_hops(6),
+                &SendOptions::default().with_flood_hops(6),
             )
             .unwrap();
     };
@@ -9122,6 +10045,104 @@ fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
         || alice_echo_requests.get() >= 1 && bob_echo_responses.get() >= 1,
         "the multi-hop resync exchange should carry both the Echo Request and the Echo Response",
     );
+}
+
+#[test]
+fn modeled_multihop_verify_frame_delivers_the_frame_that_found_the_gap() {
+    // After Alice's restart, a frame that asks for an ack is held by Bob
+    // while Alice vouches for it across the line: Verify Frame out, Frame
+    // Verified back. Bob takes the frame once, and Alice hears its send
+    // acknowledged rather than timed out.
+    let scenario = modeled_line_with_restarted_alice();
+    let alice = 0usize;
+    let bob = 5usize;
+    let receipt = {
+        let mut alice_mac = scenario.macs[alice].borrow_mut();
+        alice_mac
+            .queue_unicast(
+                scenario.identity_ids[alice],
+                &scenario.keys[bob],
+                b"after-restart",
+                &SendOptions::default()
+                    .with_ack_requested(true)
+                    .with_flood_hops(6),
+            )
+            .unwrap()
+            .unwrap()
+    };
+    let bob_deliveries = Cell::new(0usize);
+    let resync_commands_delivered = Cell::new(0usize);
+    let alice_acked = Cell::new(false);
+    let alice_timed_out = Cell::new(false);
+    pump_modeled_until(
+        &scenario.network,
+        &scenario.macs,
+        25,
+        1400,
+        |node_index, _, event| {
+            match event {
+                MacEventRef::AckReceived { receipt: acked, .. }
+                    if node_index == alice && *acked == receipt =>
+                {
+                    alice_acked.set(true);
+                }
+                MacEventRef::AckTimeout {
+                    receipt: failed, ..
+                } if node_index == alice && *failed == receipt => {
+                    alice_timed_out.set(true);
+                }
+                _ => {}
+            }
+            let Some(packet) = received_of_type(event, PacketType::Unicast) else {
+                return;
+            };
+            match packet.payload_bytes() {
+                b"after-restart" if node_index == bob => {
+                    bob_deliveries.set(bob_deliveries.get() + 1);
+                }
+                [payload_type, 12 | 13, ..] if *payload_type == PayloadType::MacCommand as u8 => {
+                    resync_commands_delivered.set(resync_commands_delivered.get() + 1);
+                }
+                _ => {}
+            }
+        },
+        || alice_acked.get(),
+        "the frame alice sent after restarting should be vouched for and acknowledged",
+    );
+    // Let the line settle for a few seconds: late flood copies of the frame
+    // must not be taken again, and nothing may report the send as failed.
+    let settle_checks = Cell::new(0usize);
+    pump_modeled_until(
+        &scenario.network,
+        &scenario.macs,
+        25,
+        1000,
+        |node_index, _, event| {
+            if let MacEventRef::AckTimeout {
+                receipt: failed, ..
+            } = event
+                && node_index == alice
+                && *failed == receipt
+            {
+                alice_timed_out.set(true);
+            }
+            if node_index == bob
+                && received_of_type(event, PacketType::Unicast)
+                    .is_some_and(|packet| packet.payload_bytes() == b"after-restart")
+            {
+                bob_deliveries.set(bob_deliveries.get() + 1);
+            }
+        },
+        || {
+            // Asked twice a step.
+            settle_checks.set(settle_checks.get() + 1);
+            settle_checks.get() > 600
+        },
+        "the line to settle",
+    );
+    assert_eq!(bob_deliveries.get(), 1);
+    assert!(!alice_timed_out.get());
+    assert_eq!(resync_commands_delivered.get(), 0);
 }
 
 #[test]
@@ -12264,6 +13285,38 @@ impl DummyRadio {
         self.received.push_back(stored).unwrap();
     }
 
+    /// A unicast from `source` at `frame_counter` carrying an Ack MIC option
+    /// naming `ack_mic`.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_received_unicast_naming(
+        &mut self,
+        source: &DummyIdentity,
+        keys: &PairwiseKeys,
+        dst: &umsh_core::NodeHint,
+        payload: &[u8],
+        ack_requested: bool,
+        frame_counter: u32,
+        ack_mic: [u8; 4],
+    ) {
+        let mut buf = [0u8; 256];
+        let builder = PacketBuilder::new(&mut buf)
+            .unicast(*dst)
+            .source_full(source.public_key())
+            .frame_counter(frame_counter)
+            .encrypted()
+            .option(OptionNumber::AckMic, &ack_mic);
+        let builder = if ack_requested {
+            builder.ack_requested()
+        } else {
+            builder
+        };
+        let mut packet = builder.payload(payload).build().unwrap();
+        CryptoEngine::new(DummyAes, DummySha)
+            .seal_packet(&mut packet, keys)
+            .unwrap();
+        self.queue_received_frame(packet.as_bytes());
+    }
+
     fn queue_received_unicast_with_counter(
         &mut self,
         source: &DummyIdentity,
@@ -12381,13 +13434,60 @@ impl DummyRadio {
         ack_requested: bool,
         source_route: Option<&[RouterHint]>,
     ) {
+        self.queue_received_blind_unicast_full(
+            source,
+            pairwise,
+            channel_keys,
+            dst,
+            payload,
+            ack_requested,
+            13,
+            source_route,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_received_blind_unicast_with_counter(
+        &mut self,
+        source: &DummyIdentity,
+        pairwise: &PairwiseKeys,
+        channel_keys: &DerivedChannelKeys,
+        dst: &umsh_core::NodeHint,
+        payload: &[u8],
+        ack_requested: bool,
+        frame_counter: u32,
+    ) {
+        self.queue_received_blind_unicast_full(
+            source,
+            pairwise,
+            channel_keys,
+            dst,
+            payload,
+            ack_requested,
+            frame_counter,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_received_blind_unicast_full(
+        &mut self,
+        source: &DummyIdentity,
+        pairwise: &PairwiseKeys,
+        channel_keys: &DerivedChannelKeys,
+        dst: &umsh_core::NodeHint,
+        payload: &[u8],
+        ack_requested: bool,
+        frame_counter: u32,
+        source_route: Option<&[RouterHint]>,
+    ) {
         let engine = CryptoEngine::new(DummyAes, DummySha);
         let blind_keys = engine.derive_blind_keys(pairwise, channel_keys);
         let mut buf = [0u8; 256];
         let builder = PacketBuilder::new(&mut buf)
             .blind_unicast(channel_keys.channel_id, *dst)
             .source_full(source.public_key())
-            .frame_counter(13);
+            .frame_counter(frame_counter);
         let builder = if ack_requested {
             builder.ack_requested()
         } else {

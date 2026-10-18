@@ -621,6 +621,7 @@ local function parse_options(buf, start_off, bound, tree, static_opts_out, pinfo
         local item = opts_tree:add(f.opt_ack_mic, buf(opt_off, consumed))
         if val_len == 4 then
           item:set_text("Ack MIC: " .. bytes_to_hex(val))
+          _ctx.ack_mic = bytes_to_hex(val)
           local origin = resolve_piggyback_ack(pinfo, bytes_to_hex(val))
           if origin then
             item:add(f.opt_ack_frame, buf(val_off, 4), origin.frame)

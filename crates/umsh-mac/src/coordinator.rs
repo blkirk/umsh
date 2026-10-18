@@ -9,7 +9,10 @@ use umsh_core::{
     RouterHint, SourceAddrRef, UnsealedPacket, established_route_slack, feed_aad,
     options::{OptionEncoder, TraceSignalEntry},
 };
-use umsh_crypto::{CryptoEngine, CryptoError, DerivedChannelKeys, NodeIdentity, PairwiseKeys};
+use umsh_crypto::{
+    AesProvider, CryptoEngine, CryptoError, DerivedChannelKeys, NodeIdentity, PairwiseKeys,
+    Sha256Provider,
+};
 use umsh_hal::{Clock, CounterStore, Radio, RxInfo, RxOrigin, Snr, TxError, TxOptions};
 
 use crate::{
@@ -17,7 +20,7 @@ use crate::{
     DEFAULT_CHANNELS, DEFAULT_DUP, DEFAULT_IDENTITIES, DEFAULT_PEERS, DEFAULT_ROUTE_HOLDS,
     DEFAULT_TX, MAX_ACK_FORWARD_RETRIES, MAX_CAD_ATTEMPTS, MAX_FLOOD_HOPS, MAX_FORWARD_RETRIES,
     MAX_RESEND_FRAME_LEN, MAX_SOURCE_ROUTE_HINTS, Platform, ReplayVerdict, ReplayWindow,
-    TRACE_ROUTE_REFRESH_MS,
+    TRACE_ROUTE_REFRESH_MS, VERIFY_HELD_FRAMES,
     cache::{DupCacheKey, DuplicateCache},
     peers::CachedRoute,
     peers::{
@@ -26,11 +29,34 @@ use crate::{
     },
     route_score::{Hop, path_score},
     send::{
-        CompletionSignal, PendingAck, PendingAckError, ResendRecord, SendOptions, SendReceipt,
-        TxPriority, TxQueue,
+        CompletionSignal, PendingAck, PendingAckError, ResendRecord, RxBaselineAdoption,
+        SendOptions, SendReceipt, TxPriority, TxQueue,
     },
     uplinks::Uplink,
 };
+
+/// The nonce [`Mac::verify_nonce`] gives a held frame: the leading four
+/// bytes of a CMAC, under `key`, over the frame's ack trailer and the
+/// window it failed against.
+pub(crate) fn derive_verify_nonce<A: AesProvider, S: Sha256Provider>(
+    crypto: &CryptoEngine<A, S>,
+    key: &[u8; 32],
+    ack_trailer: &[u8; 8],
+    window: &ReplayWindow,
+) -> u32 {
+    let last_accepted = window.last_accepted.to_be_bytes();
+    let established = [u8::from(window.is_established())];
+    let tag = crypto.aes_cmac(
+        key,
+        &[
+            VERIFY_NONCE_LABEL,
+            &ack_trailer[..],
+            &last_accepted[..],
+            &established[..],
+        ],
+    );
+    u32::from_be_bytes([tag[0], tag[1], tag[2], tag[3]])
+}
 
 /// Why [`Mac::poll_wait_for_wake`] returned ready.
 ///
@@ -60,6 +86,10 @@ const COUNTER_RESYNC_REQUEST_RETRY_MS: u64 = 5_000;
 /// real desync (peer reboot, lost persistence boundary) typically produces a
 /// jump much larger than this.
 const COUNTER_RESYNC_GAP_THRESHOLD: u32 = 1024;
+const MAC_COMMAND_VERIFY_FRAME_ID: u8 = 12;
+const MAC_COMMAND_FRAME_VERIFIED_ID: u8 = 13;
+/// Domain separation for [`Mac::verify_nonce`].
+const VERIFY_NONCE_LABEL: &[u8] = b"UMSH-VERIFY-FRAME-NONCE";
 
 /// The carriage a request arrived on, and so the carriage its response owes
 /// it back.
@@ -89,6 +119,50 @@ enum RouteTraffic {
 struct PendingCounterResync {
     nonce: u32,
     requested_ms: u64,
+}
+
+/// An acknowledgment-requested frame whose counter fell far outside the
+/// window, held while its sender is asked to vouch for it with a Verify
+/// Frame ([Counter Resynchronization][spec]).
+///
+/// No nonce is kept: [`Mac::verify_nonce`] derives it again from what is
+/// here and from the window the frame failed against.
+///
+/// [spec]: https://darconeous.github.io/umsh/docs/protocol/security.html#counter-resynchronization
+struct HeldFrame<const FRAME: usize> {
+    local_id: LocalIdentityId,
+    peer_id: PeerId,
+    /// The trailer that would have acknowledged the frame. Its `ack_mic`
+    /// half is what the Verify Frame names.
+    ack_trailer: [u8; 8],
+    /// The frame as it arrived, still sealed.
+    frame: Vec<u8, FRAME>,
+    rx: RxInfo,
+    received_at_ms: u64,
+    verify_sent_ms: u64,
+    expires_ms: u64,
+    /// A Frame Verified vouched for it; it is delivered once the frame
+    /// that carried the answer is finished with.
+    released: bool,
+}
+
+/// A held frame taken out of the table for delivery. The frame bytes go
+/// straight into the receive buffer; only the metadata travels.
+struct ReleasedFrame {
+    local_id: LocalIdentityId,
+    peer_id: PeerId,
+    len: usize,
+    rx: RxInfo,
+    received_at_ms: u64,
+}
+
+/// The one frame the replay window is not asked about: a held frame its
+/// sender vouched for, delivered without acknowledgment, since the
+/// acknowledgment of the Frame Verified stands for it.
+#[derive(Clone, Copy)]
+struct VerifiedFrame {
+    local_id: LocalIdentityId,
+    peer_id: PeerId,
 }
 
 /// How many acknowledgments are remembered after they complete, so later
@@ -994,6 +1068,10 @@ pub struct Mac<
     operating_policy: OperatingPolicy,
     auto_register_full_key_peers: bool,
     counters: MacCounters,
+    held_frames: Vec<HeldFrame<FRAME>, VERIFY_HELD_FRAMES>,
+    /// Keys [`Self::verify_nonce`]. Drawn the first time a frame is held,
+    /// kept only in RAM, and so new on every boot.
+    verify_key: Option<[u8; 32]>,
 }
 
 impl<
@@ -1045,6 +1123,8 @@ impl<
             operating_policy,
             auto_register_full_key_peers: false,
             counters: MacCounters::default(),
+            held_frames: Vec::new(),
+            verify_key: None,
         }
     }
 
@@ -1384,6 +1464,7 @@ impl<
                 .unwrap_or(false);
             if should_remove {
                 *slot = None;
+                self.held_frames.retain(|held| held.local_id != id);
                 return true;
             }
         }
@@ -1423,7 +1504,8 @@ impl<
     }
 
     /// Removes a registered peer and every piece of per-peer transport state:
-    /// pairwise crypto, replay windows, and pending counter resyncs. Returns
+    /// pairwise crypto, replay windows, pending counter resyncs, and frames
+    /// held for verification. Returns
     /// whether the peer was registered.
     ///
     /// The peer registry is dense, so removal moves the last entry into the
@@ -2693,17 +2775,71 @@ impl<
         buf: &mut [u8; FRAME],
         frame_len: usize,
         rx: &RxInfo,
-        on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
+        mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
     ) -> bool {
         MacCounters::bump(&mut self.counters.rx_frames);
         self.note_transmitter_observation(&buf[..frame_len], rx);
         let handled = self
-            .process_received_frame_inner(buf, frame_len, rx, on_event)
+            .process_received_frame_inner(buf, frame_len, rx, &mut on_event)
             .await;
         if handled {
             MacCounters::bump(&mut self.counters.rx_accepted);
         }
+        // A Frame Verified releases the frame it vouches for. That frame is
+        // delivered now, after its answer, through this same buffer, and in
+        // sequence rather than from inside the answer's own processing.
+        if let Some(released) = self.take_released_frame(buf) {
+            self.process_released_frame(buf, released, &mut on_event)
+                .await;
+        }
         handled
+    }
+
+    /// Deliver a held frame its sender vouched for. It already passed the
+    /// forwarding decision when it first arrived, and its acknowledgment is
+    /// the Frame Verified's, so only delivery is left.
+    async fn process_released_frame(
+        &mut self,
+        buf: &mut [u8; FRAME],
+        released: ReleasedFrame,
+        mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
+    ) {
+        let Ok(header) = PacketHeader::parse(&buf[..released.len]) else {
+            return;
+        };
+        let verified = Some(VerifiedFrame {
+            local_id: released.local_id,
+            peer_id: released.peer_id,
+        });
+        match header.packet_type() {
+            PacketType::Unicast | PacketType::UnicastAckReq => {
+                self.process_unicast(
+                    buf,
+                    released.len,
+                    &header,
+                    &released.rx,
+                    released.received_at_ms,
+                    false,
+                    verified,
+                    &mut on_event,
+                )
+                .await;
+            }
+            PacketType::BlindUnicast | PacketType::BlindUnicastAckReq => {
+                self.process_blind_unicast(
+                    buf,
+                    released.len,
+                    &header,
+                    &released.rx,
+                    released.received_at_ms,
+                    false,
+                    verified,
+                    &mut on_event,
+                )
+                .await;
+            }
+            _ => {}
+        }
     }
 
     async fn process_received_frame_inner(
@@ -2775,6 +2911,7 @@ impl<
                     rx,
                     received_at_ms,
                     forwarding_confirmed,
+                    None,
                     &mut on_event,
                 )
                 .await
@@ -2796,6 +2933,7 @@ impl<
                     rx,
                     received_at_ms,
                     forwarding_confirmed,
+                    None,
                     &mut on_event,
                 )
                 .await
@@ -2907,6 +3045,7 @@ impl<
         forwarding_confirmed || self.maybe_forward_received(&buf[..frame_len], header, rx, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_unicast(
         &mut self,
         buf: &mut [u8; FRAME],
@@ -2915,6 +3054,7 @@ impl<
         rx: &RxInfo,
         received_at_ms: u64,
         forwarding_confirmed: bool,
+        verified: Option<VerifiedFrame>,
         mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
     ) -> bool {
         let mut original = [0u8; FRAME];
@@ -2973,64 +3113,147 @@ impl<
                     handled = true;
                     break;
                 }
-                match self.unicast_replay_verdict(local_id, peer_id, header, &buf[..frame_len]) {
-                    Some(ReplayVerdict::Accept) => {
-                        let _ = self.accept_unicast_replay(
-                            local_id,
-                            peer_id,
-                            header,
-                            &buf[..frame_len],
-                        );
-                    }
-                    Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
-                        if !self.try_accept_counter_resync_response(
-                            local_id,
-                            peer_id,
-                            header,
-                            &buf[..frame_len],
-                            payload,
-                        ) {
-                            // Only initiate a counter resync if the backward
-                            // gap is large enough that out-of-order delivery
-                            // can't explain it. Small gaps (handful of packets)
-                            // are silently dropped to avoid resync churn from
-                            // normal mesh reordering. See
-                            // `COUNTER_RESYNC_GAP_THRESHOLD`. The frame that
-                            // provokes a probe is dropped too: it falls behind
-                            // the baseline the resync sets.
-                            let counter = Self::replay_metadata(header, &buf[..frame_len])
-                                .map(|(c, _)| c)
-                                .unwrap_or(0);
-                            let gap = self
-                                .identity(local_id)
-                                .and_then(|slot| slot.peer_crypto().get(&peer_id))
-                                .map(|state| {
-                                    state.replay_window.last_accepted.wrapping_sub(counter)
-                                })
-                                .unwrap_or(0);
-                            if gap >= COUNTER_RESYNC_GAP_THRESHOLD {
-                                self.maybe_request_counter_resync(
+                let verified =
+                    verified.is_some_and(|v| v.local_id == local_id && v.peer_id == peer_id);
+                if !verified {
+                    match Self::resync_command(payload) {
+                        Some((MAC_COMMAND_VERIFY_FRAME_ID, nonce)) => {
+                            if self
+                                .answer_verify_frame(
                                     local_id,
                                     peer_id,
                                     peer_key,
                                     ReplyCarriage::Unicast,
+                                    header,
+                                    &buf[..frame_len],
+                                    &original[..frame_len],
+                                    nonce,
                                 )
-                                .await;
+                                .await
+                            {
+                                handled = true;
+                                break;
                             }
                             continue;
                         }
-                    }
-                    Some(ReplayVerdict::Replay) => {
-                        // A later copy of a frame already taken. It carries
-                        // the path it came by, which may be better than the
-                        // first copy's—and the first may have been
-                        // overheard before its source route ran out.
-                        if self.is_fresh_duplicate(local_id, peer_id, header, &buf[..frame_len]) {
+                        Some((_, nonce)) => {
+                            if !self.accept_frame_verified(
+                                local_id,
+                                peer_id,
+                                header,
+                                &buf[..frame_len],
+                                nonce,
+                            ) {
+                                continue;
+                            }
                             self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
+                            if header.ack_requested()
+                                && self.should_emit_destination_ack(&buf[..frame_len], header, rx)
+                            {
+                                let ack_trailer = self.compute_received_ack_trailer(
+                                    &buf[..frame_len],
+                                    header,
+                                    body_range.clone(),
+                                    &keys,
+                                );
+                                self.queue_received_mac_ack(
+                                    local_id,
+                                    peer_id,
+                                    ack_trailer,
+                                    &buf[..frame_len],
+                                    header,
+                                    false,
+                                );
+                            }
+                            handled = true;
+                            break;
                         }
-                        continue;
+                        None => {}
                     }
-                    None => continue,
+                    match self.unicast_replay_verdict(local_id, peer_id, header, &buf[..frame_len])
+                    {
+                        Some(ReplayVerdict::Accept) => {
+                            let _ = self.accept_unicast_replay(
+                                local_id,
+                                peer_id,
+                                header,
+                                &buf[..frame_len],
+                            );
+                            self.settle_counter_resync_response(
+                                local_id,
+                                peer_id,
+                                header,
+                                &buf[..frame_len],
+                                payload,
+                                false,
+                            );
+                        }
+                        Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
+                            if !self.settle_counter_resync_response(
+                                local_id,
+                                peer_id,
+                                header,
+                                &buf[..frame_len],
+                                payload,
+                                true,
+                            ) {
+                                // Only a gap that reordering can't explain
+                                // starts a resync (see
+                                // `COUNTER_RESYNC_GAP_THRESHOLD`); a nearer
+                                // one is dropped. A frame asking for an ack
+                                // is held while its sender vouches for it.
+                                // Any other is dropped behind the probe: it
+                                // falls behind the baseline the resync sets.
+                                if self.is_counter_discontinuity(local_id, peer_id, header) {
+                                    if header.ack_requested() {
+                                        let ack_trailer = self.compute_received_ack_trailer(
+                                            &buf[..frame_len],
+                                            header,
+                                            body_range.clone(),
+                                            &keys,
+                                        );
+                                        if self
+                                            .hold_and_verify(
+                                                local_id,
+                                                peer_id,
+                                                peer_key,
+                                                ReplyCarriage::Unicast,
+                                                &original[..frame_len],
+                                                ack_trailer,
+                                                rx,
+                                                received_at_ms,
+                                            )
+                                            .await
+                                        {
+                                            handled = true;
+                                            break;
+                                        }
+                                    } else {
+                                        self.maybe_request_counter_resync(
+                                            local_id,
+                                            peer_id,
+                                            peer_key,
+                                            ReplyCarriage::Unicast,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        Some(ReplayVerdict::Replay) => {
+                            // A later copy of a frame already taken. It carries
+                            // the path it came by, which may be better than the
+                            // first copy's—and the first may have been
+                            // overheard before its source route ran out.
+                            if self.is_fresh_duplicate(local_id, peer_id, header, &buf[..frame_len])
+                            {
+                                self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
+                            }
+                            continue;
+                        }
+                        None => continue,
+                    }
                 }
                 self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
                 // Ahead of delivery, so whoever handles a response finds
@@ -3042,7 +3265,10 @@ impl<
                     &mut on_event,
                 );
 
-                if header.ack_requested()
+                // A verified frame's acknowledgment is the one its Frame
+                // Verified already got.
+                if !verified
+                    && header.ack_requested()
                     && self.should_emit_destination_ack(&buf[..frame_len], header, rx)
                 {
                     let ack_trailer = self.compute_received_ack_trailer(
@@ -3063,7 +3289,7 @@ impl<
 
                 if let Some(data) = Self::echo_request_data(payload) {
                     let response =
-                        Self::build_echo_command_payload(MAC_COMMAND_ECHO_RESPONSE_ID, data);
+                        Self::build_mac_command_payload(MAC_COMMAND_ECHO_RESPONSE_ID, data);
                     let options = Self::echo_response_options(&original[..frame_len], header);
                     let _ = self
                         .send_response(
@@ -3203,6 +3429,7 @@ impl<
         delivered || forwarding_confirmed || forwarded
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_blind_unicast(
         &mut self,
         buf: &mut [u8; FRAME],
@@ -3211,6 +3438,7 @@ impl<
         rx: &RxInfo,
         received_at_ms: u64,
         forwarding_confirmed: bool,
+        verified: Option<VerifiedFrame>,
         mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
     ) -> bool {
         let mut original = [0u8; FRAME];
@@ -3288,59 +3516,165 @@ impl<
                             handled = true;
                             break;
                         }
-                        match self.unicast_replay_verdict(
-                            local_id,
-                            peer_id,
-                            header,
-                            &buf[..frame_len],
-                        ) {
-                            Some(ReplayVerdict::Accept) => {
-                                let _ = self.accept_unicast_replay(
-                                    local_id,
-                                    peer_id,
-                                    header,
-                                    &buf[..frame_len],
-                                );
-                            }
-                            Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
-                                if !self.try_accept_counter_resync_response(
-                                    local_id,
-                                    peer_id,
-                                    header,
-                                    &buf[..frame_len],
-                                    payload,
-                                ) {
-                                    // Dropped: it falls behind the baseline
-                                    // the resync sets.
-                                    self.maybe_request_counter_resync(
-                                        local_id,
-                                        peer_id,
-                                        peer_key,
-                                        ReplyCarriage::Blind(&channel_keys),
-                                    )
-                                    .await;
+                        let verified = verified
+                            .is_some_and(|v| v.local_id == local_id && v.peer_id == peer_id);
+                        if !verified {
+                            match Self::resync_command(payload) {
+                                Some((MAC_COMMAND_VERIFY_FRAME_ID, nonce)) => {
+                                    if self
+                                        .answer_verify_frame(
+                                            local_id,
+                                            peer_id,
+                                            peer_key,
+                                            ReplyCarriage::Blind(&channel_keys),
+                                            header,
+                                            &buf[..frame_len],
+                                            &original[..frame_len],
+                                            nonce,
+                                        )
+                                        .await
+                                    {
+                                        handled = true;
+                                        break;
+                                    }
                                     continue;
                                 }
-                            }
-                            Some(ReplayVerdict::Replay) => {
-                                // As on the unicast path: a later copy still
-                                // carries the path it came by.
-                                if self.is_fresh_duplicate(
-                                    local_id,
-                                    peer_id,
-                                    header,
-                                    &buf[..frame_len],
-                                ) {
+                                Some((_, nonce)) => {
+                                    if !self.accept_frame_verified(
+                                        local_id,
+                                        peer_id,
+                                        header,
+                                        &buf[..frame_len],
+                                        nonce,
+                                    ) {
+                                        continue;
+                                    }
                                     self.learn_route_for_peer(
                                         peer_id,
                                         &buf[..frame_len],
                                         header,
                                         rx,
                                     );
+                                    if header.ack_requested()
+                                        && self.should_emit_destination_ack(
+                                            &buf[..frame_len],
+                                            header,
+                                            rx,
+                                        )
+                                    {
+                                        let ack_trailer = self.compute_received_ack_trailer(
+                                            &buf[..frame_len],
+                                            header,
+                                            body_range.clone(),
+                                            &blind_keys,
+                                        );
+                                        self.queue_received_mac_ack(
+                                            local_id,
+                                            peer_id,
+                                            ack_trailer,
+                                            &buf[..frame_len],
+                                            header,
+                                            false,
+                                        );
+                                    }
+                                    handled = true;
+                                    break;
                                 }
-                                continue;
+                                None => {}
                             }
-                            None => continue,
+                            match self.unicast_replay_verdict(
+                                local_id,
+                                peer_id,
+                                header,
+                                &buf[..frame_len],
+                            ) {
+                                Some(ReplayVerdict::Accept) => {
+                                    let _ = self.accept_unicast_replay(
+                                        local_id,
+                                        peer_id,
+                                        header,
+                                        &buf[..frame_len],
+                                    );
+                                    self.settle_counter_resync_response(
+                                        local_id,
+                                        peer_id,
+                                        header,
+                                        &buf[..frame_len],
+                                        payload,
+                                        false,
+                                    );
+                                }
+                                Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
+                                    if !self.settle_counter_resync_response(
+                                        local_id,
+                                        peer_id,
+                                        header,
+                                        &buf[..frame_len],
+                                        payload,
+                                        true,
+                                    ) {
+                                        // As on the unicast path, and the
+                                        // probe rides the channel the frame
+                                        // came on.
+                                        if self.is_counter_discontinuity(local_id, peer_id, header)
+                                        {
+                                            if header.ack_requested() {
+                                                let ack_trailer = self
+                                                    .compute_received_ack_trailer(
+                                                        &buf[..frame_len],
+                                                        header,
+                                                        body_range.clone(),
+                                                        &blind_keys,
+                                                    );
+                                                if self
+                                                    .hold_and_verify(
+                                                        local_id,
+                                                        peer_id,
+                                                        peer_key,
+                                                        ReplyCarriage::Blind(&channel_keys),
+                                                        &original[..frame_len],
+                                                        ack_trailer,
+                                                        rx,
+                                                        received_at_ms,
+                                                    )
+                                                    .await
+                                                {
+                                                    handled = true;
+                                                    break;
+                                                }
+                                            } else {
+                                                self.maybe_request_counter_resync(
+                                                    local_id,
+                                                    peer_id,
+                                                    peer_key,
+                                                    ReplyCarriage::Blind(&channel_keys),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                                Some(ReplayVerdict::Replay) => {
+                                    // As on the unicast path: a later copy
+                                    // still carries the path it came by.
+                                    if self.is_fresh_duplicate(
+                                        local_id,
+                                        peer_id,
+                                        header,
+                                        &buf[..frame_len],
+                                    ) {
+                                        self.learn_route_for_peer(
+                                            peer_id,
+                                            &buf[..frame_len],
+                                            header,
+                                            rx,
+                                        );
+                                    }
+                                    continue;
+                                }
+                                None => continue,
+                            }
                         }
                         self.learn_route_for_peer(peer_id, &buf[..frame_len], header, rx);
                         self.complete_ack_from_option(
@@ -3350,7 +3684,8 @@ impl<
                             &mut on_event,
                         );
 
-                        if header.ack_requested()
+                        if !verified
+                            && header.ack_requested()
                             && self.should_emit_destination_ack(&buf[..frame_len], header, rx)
                         {
                             let ack_trailer = self.compute_received_ack_trailer(
@@ -3370,10 +3705,8 @@ impl<
                         }
 
                         if let Some(data) = Self::echo_request_data(payload) {
-                            let response = Self::build_echo_command_payload(
-                                MAC_COMMAND_ECHO_RESPONSE_ID,
-                                data,
-                            );
+                            let response =
+                                Self::build_mac_command_payload(MAC_COMMAND_ECHO_RESPONSE_ID, data);
                             let options =
                                 Self::echo_response_options(&original[..frame_len], header);
                             let _ = self
@@ -3488,6 +3821,17 @@ impl<
                 let mut via_route_retry = false;
                 if let Some(pending) = slot.pending_acks.remove(&receipt) {
                     via_route_retry = Self::frame_is_route_retry(pending.resend.frame.as_slice());
+                    // The acknowledgment of a Frame Verified: the requester
+                    // now holds our answer, so the counter its Verify Frame
+                    // carried is its baseline—unless something accepted from
+                    // it since has already put the window in step.
+                    if let Some(adoption) = pending.adopt_on_ack
+                        && let Some((peer_id, _)) = self.peer_registry.lookup_by_key(peer)
+                        && let Some(state) = slot.peer_crypto_mut().get_mut(&peer_id)
+                        && state.replay_window.last_accepted == adoption.seen_last_accepted
+                    {
+                        Self::adopt_rx_baseline_in(state, adoption.counter, None, now_ms);
+                    }
                     self.peer_registry
                         .confirm_route(peer, pending.cached_route_revision, now_ms);
                     if pending.held_route_missed {
@@ -4558,13 +4902,20 @@ impl<
         }
     }
 
-    fn try_accept_counter_resync_response(
+    /// Settle an Echo Response that answers our counter-resync probe.
+    ///
+    /// With `adopt`—the response fell outside the window—its counter becomes
+    /// the peer's new baseline. Within the window the response was accepted
+    /// as usual, and only the probe is cleared. Returns whether `payload`
+    /// answered the pending probe.
+    fn settle_counter_resync_response(
         &mut self,
         local_id: LocalIdentityId,
         peer_id: PeerId,
         header: &PacketHeader,
         frame: &[u8],
         payload: &[u8],
+        adopt: bool,
     ) -> bool {
         let Some(nonce) = Self::echo_response_nonce(payload) else {
             return false;
@@ -4572,27 +4923,369 @@ impl<
         let Some((counter, mic)) = Self::replay_metadata(header, frame) else {
             return false;
         };
-        let now_ms = self.clock.now_ms();
         let Some(slot) = self.identity_mut(local_id) else {
             return false;
         };
-        let Some(pending) = slot.pending_counter_resync().get(&peer_id).copied() else {
-            return false;
-        };
-        if pending.nonce != nonce {
+        if slot
+            .pending_counter_resync()
+            .get(&peer_id)
+            .is_none_or(|pending| pending.nonce != nonce)
+        {
             return false;
         }
-        let Some(state) = slot.peer_crypto_mut().get_mut(&peer_id) else {
+        let _ = slot.pending_counter_resync_mut().remove(&peer_id);
+        !adopt || self.adopt_rx_baseline(local_id, peer_id, counter, Some(mic))
+    }
+
+    /// Make `counter` the peer's new baseline, whatever it is relative to
+    /// the old one. With `mic`, the frame that carried it is accepted too,
+    /// so its later copies are recognized as duplicates.
+    fn adopt_rx_baseline(
+        &mut self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        counter: u32,
+        mic: Option<&[u8]>,
+    ) -> bool {
+        let now_ms = self.clock.now_ms();
+        let Some(state) = self
+            .identity_mut(local_id)
+            .and_then(|slot| slot.peer_crypto_mut().get_mut(&peer_id))
+        else {
             return false;
         };
+        Self::adopt_rx_baseline_in(state, counter, mic, now_ms);
+        true
+    }
+
+    fn adopt_rx_baseline_in(
+        state: &mut crate::peers::PeerCryptoState,
+        counter: u32,
+        mic: Option<&[u8]>,
+        now_ms: u64,
+    ) {
         state.replay_window.reset(counter, now_ms);
-        state.replay_window.accept(counter, mic, now_ms);
-        // A resync resets the window; treat the new counter as a fresh baseline
-        // and schedule a persist so the new boundary survives a reboot.
+        if let Some(mic) = mic {
+            state.replay_window.accept(counter, mic, now_ms);
+        }
+        // A fresh baseline, persisted at once so it survives a reboot.
         state.persisted_rx_counter = 0;
         state.needs_rx_persist = true;
-        let _ = slot.pending_counter_resync_mut().remove(&peer_id);
+    }
+
+    /// Whether a counter the window refused is so far out that the two
+    /// ends must disagree about it: past the forward window, or
+    /// [`COUNTER_RESYNC_GAP_THRESHOLD`] or more behind the baseline.
+    /// Anything nearer is ordinary mesh reordering and is dropped without
+    /// a probe.
+    fn is_counter_discontinuity(
+        &self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        header: &PacketHeader,
+    ) -> bool {
+        let Some(counter) = header.sec_info.map(|sec_info| sec_info.frame_counter) else {
+            return false;
+        };
+        self.identity(local_id)
+            .and_then(|slot| slot.peer_crypto().get(&peer_id))
+            .is_some_and(|state| {
+                state.replay_window.last_accepted.wrapping_sub(counter)
+                    >= COUNTER_RESYNC_GAP_THRESHOLD
+            })
+    }
+
+    /// The nonce a Verify Frame for a held frame carries, and that its
+    /// Frame Verified has to echo.
+    ///
+    /// Derived rather than stored. The boot key makes it unpredictable.
+    /// The held frame's trailer ties it to that frame, so a different frame
+    /// held in its place gets a nonce of its own. The window the frame
+    /// failed against ties it to this exchange: a Frame Verified moves that
+    /// window, so one recorded from an earlier exchange cannot release the
+    /// same frame replayed later.
+    fn verify_nonce(
+        &mut self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        ack_trailer: &[u8; 8],
+    ) -> Option<u32> {
+        let verify_key = *self.verify_key.get_or_insert_with(|| {
+            let mut key = [0u8; 32];
+            self.rng.fill_bytes(&mut key);
+            key
+        });
+        let window = &self
+            .identity(local_id)?
+            .peer_crypto()
+            .get(&peer_id)?
+            .replay_window;
+        Some(derive_verify_nonce(
+            &self.crypto,
+            &verify_key,
+            ack_trailer,
+            window,
+        ))
+    }
+
+    /// How long a frame stays held waiting for its Frame Verified: the
+    /// longest ladder this MAC would run that answer through, a forwarded
+    /// wait at the full flood budget and the same again for its route retry.
+    fn verify_hold_ms(&self) -> u64 {
+        self.forwarded_ack_timeout_ms(MAX_FLOOD_HOPS)
+            .saturating_mul(2)
+    }
+
+    fn expire_held_frames(&mut self, now_ms: u64) {
+        self.held_frames
+            .retain(|held| held.released || now_ms < held.expires_ms);
+    }
+
+    /// Hold an acknowledgment-requested frame whose counter fell far outside
+    /// the window, and ask its sender to vouch for it with a Verify Frame.
+    ///
+    /// Returns whether the frame is held. A later copy of a held frame asks
+    /// again once [`COUNTER_RESYNC_REQUEST_RETRY_MS`] has passed, with the
+    /// same nonce, since the nonce comes from the frame. A different frame
+    /// from the same peer is dropped inside that interval and takes the held
+    /// frame's place after it.
+    #[allow(clippy::too_many_arguments)]
+    async fn hold_and_verify(
+        &mut self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        peer_key: PublicKey,
+        carriage: ReplyCarriage<'_>,
+        frame: &[u8],
+        ack_trailer: [u8; 8],
+        rx: &RxInfo,
+        received_at_ms: u64,
+    ) -> bool {
+        let now_ms = self.clock.now_ms();
+        self.expire_held_frames(now_ms);
+        if let Some(held) = self
+            .held_frames
+            .iter()
+            .find(|held| held.local_id == local_id && held.peer_id == peer_id)
+            && now_ms.saturating_sub(held.verify_sent_ms) < COUNTER_RESYNC_REQUEST_RETRY_MS
+        {
+            return held.ack_trailer == ack_trailer;
+        }
+        let Some(nonce) = self.verify_nonce(local_id, peer_id, &ack_trailer) else {
+            return false;
+        };
+        let payload = Self::resync_command_payload(MAC_COMMAND_VERIFY_FRAME_ID, nonce);
+        let mut ack_mic = [0u8; 4];
+        ack_mic.copy_from_slice(&ack_trailer[..4]);
+        let options = SendOptions::default().with_ack_mic(ack_mic);
+        if self
+            .send_response(local_id, &peer_key, carriage, &payload, &options)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        // Copied only now, so the copy is never part of the state carried
+        // across the send.
+        let Ok(stored) = Vec::from_slice(frame) else {
+            return false;
+        };
+        let held = HeldFrame {
+            local_id,
+            peer_id,
+            ack_trailer,
+            frame: stored,
+            rx: *rx,
+            received_at_ms,
+            verify_sent_ms: now_ms,
+            expires_ms: now_ms.saturating_add(self.verify_hold_ms()),
+            released: false,
+        };
+        let index = self
+            .held_frames
+            .iter()
+            .position(|held| held.local_id == local_id && held.peer_id == peer_id)
+            .or_else(|| {
+                self.held_frames.is_full().then(|| {
+                    self.held_frames
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, held)| held.verify_sent_ms)
+                        .map_or(0, |(index, _)| index)
+                })
+            });
+        match index {
+            Some(index) => self.held_frames[index] = held,
+            None => {
+                let _ = self.held_frames.push(held);
+            }
+        }
         true
+    }
+
+    /// Settle a Frame Verified, releasing the held frame it vouches for.
+    ///
+    /// It must echo the nonce of a frame still held from its sender. Its
+    /// counter then becomes the sender's baseline—accepted as usual when it
+    /// falls in the window, adopted outright when not—and the held frame is
+    /// released for delivery. Anything else is refused, and so never
+    /// acknowledged: the sender reports the frame it vouched for as failed
+    /// rather than delivered.
+    fn accept_frame_verified(
+        &mut self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        header: &PacketHeader,
+        frame: &[u8],
+        nonce: u32,
+    ) -> bool {
+        let now_ms = self.clock.now_ms();
+        self.expire_held_frames(now_ms);
+        let Some(index) = self.held_frames.iter().position(|held| {
+            held.local_id == local_id && held.peer_id == peer_id && !held.released
+        }) else {
+            return false;
+        };
+        let ack_trailer = self.held_frames[index].ack_trailer;
+        if self.verify_nonce(local_id, peer_id, &ack_trailer) != Some(nonce) {
+            return false;
+        }
+        let Some((counter, mic)) = Self::replay_metadata(header, frame) else {
+            return false;
+        };
+        let accepted = match self.unicast_replay_verdict(local_id, peer_id, header, frame) {
+            Some(ReplayVerdict::Accept) => {
+                self.accept_unicast_replay(local_id, peer_id, header, frame)
+            }
+            Some(_) => self.adopt_rx_baseline(local_id, peer_id, counter, Some(mic)),
+            None => false,
+        };
+        if accepted {
+            self.held_frames[index].released = true;
+        }
+        accepted
+    }
+
+    /// Take the frame a Frame Verified released, copying it into `buf`.
+    fn take_released_frame(&mut self, buf: &mut [u8; FRAME]) -> Option<ReleasedFrame> {
+        let index = self.held_frames.iter().position(|held| held.released)?;
+        let held = self.held_frames.swap_remove(index);
+        let len = held.frame.len();
+        buf[..len].copy_from_slice(&held.frame);
+        Some(ReleasedFrame {
+            local_id: held.local_id,
+            peer_id: held.peer_id,
+            len,
+            rx: held.rx,
+            received_at_ms: held.received_at_ms,
+        })
+    }
+
+    /// Answer a Verify Frame: vouch for the send it names, if that send is
+    /// still awaiting acknowledgment, with a Frame Verified that carries the
+    /// send to its outcome from here on.
+    ///
+    /// Inside the window the Verify Frame's counter is treated as usual:
+    /// accepted, or dropped as a replay. Outside it the request is answered
+    /// anyway—naming a send still outstanding is what shows it fresh—and its
+    /// counter waits to become the requester's baseline until the Frame
+    /// Verified is acknowledged. Returns whether the Verify Frame was taken,
+    /// answered or not.
+    #[allow(clippy::too_many_arguments)]
+    async fn answer_verify_frame(
+        &mut self,
+        local_id: LocalIdentityId,
+        peer_id: PeerId,
+        peer_key: PublicKey,
+        carriage: ReplyCarriage<'_>,
+        header: &PacketHeader,
+        frame: &[u8],
+        original: &[u8],
+        nonce: u32,
+    ) -> bool {
+        let Some((counter, _)) = Self::replay_metadata(header, frame) else {
+            return false;
+        };
+        let adopt_on_ack = match self.unicast_replay_verdict(local_id, peer_id, header, frame) {
+            Some(ReplayVerdict::Accept) => {
+                let _ = self.accept_unicast_replay(local_id, peer_id, header, frame);
+                None
+            }
+            Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => self
+                .identity(local_id)
+                .and_then(|slot| slot.peer_crypto().get(&peer_id))
+                .map(|state| RxBaselineAdoption {
+                    counter,
+                    seen_last_accepted: state.replay_window.last_accepted,
+                }),
+            Some(ReplayVerdict::Replay) | None => return false,
+        };
+        let Some(named) = Self::ack_mic_option(original, header) else {
+            return true;
+        };
+        let Some(vouched) = self.identity(local_id).and_then(|slot| {
+            slot.pending_acks.iter().find_map(|(receipt, pending)| {
+                (pending.expects_ack()
+                    && pending.peer == peer_key
+                    && pending.ack_trailer[..4] == named)
+                    .then_some(*receipt)
+            })
+        }) else {
+            return true;
+        };
+        let payload = Self::resync_command_payload(MAC_COMMAND_FRAME_VERIFIED_ID, nonce);
+        let options = Self::echo_response_options(original, header).with_ack_requested(true);
+        if let Ok(Some(answer)) = self
+            .send_response(local_id, &peer_key, carriage, &payload, &options)
+            .await
+        {
+            self.retarget_pending_ack(local_id, answer, vouched, adopt_on_ack);
+        }
+        true
+    }
+
+    /// Put a just-queued Frame Verified in the place of the send it vouches
+    /// for.
+    ///
+    /// The send keeps its receipt, and the answer's acknowledgment ladder
+    /// decides its outcome from here: acknowledged, it is delivered; given
+    /// up on, it failed. Its own retransmissions stop, since each copy would
+    /// only meet the counter the requester could not accept. Its route is
+    /// neither confirmed nor failed—the frame got through, and the answer
+    /// is measured on its own.
+    fn retarget_pending_ack(
+        &mut self,
+        identity_id: LocalIdentityId,
+        answer: SendReceipt,
+        vouched: SendReceipt,
+        adopt_on_ack: Option<RxBaselineAdoption>,
+    ) {
+        let Some(slot) = self.identity_mut(identity_id) else {
+            return;
+        };
+        let Some(mut pending) = slot.pending_acks.remove(&answer) else {
+            return;
+        };
+        let Some(entry) = slot.pending_acks.get_mut(&vouched) else {
+            // Settled while the answer was built: nothing left to vouch for.
+            self.tx_queue.remove_all_matching(|queued| {
+                queued.receipt == Some(answer) && queued.identity_id == Some(identity_id)
+            });
+            return;
+        };
+        pending.adopt_on_ack = adopt_on_ack;
+        *entry = pending;
+        self.tx_queue.remove_all_matching(|queued| {
+            queued.receipt == Some(vouched) && queued.identity_id == Some(identity_id)
+        });
+        self.tx_queue.relabel_receipt(identity_id, answer, vouched);
+        if self
+            .post_tx_listen
+            .as_ref()
+            .is_some_and(|listen| listen.identity_id == identity_id && listen.receipt == vouched)
+        {
+            self.post_tx_listen = None;
+        }
     }
 
     /// Probe a desynchronized peer with an echo request.
@@ -4624,7 +5317,7 @@ impl<
 
         let nonce = self.rng.next_u32();
         let payload =
-            Self::build_echo_command_payload(MAC_COMMAND_ECHO_REQUEST_ID, &nonce.to_be_bytes());
+            Self::build_mac_command_payload(MAC_COMMAND_ECHO_REQUEST_ID, &nonce.to_be_bytes());
         let options = SendOptions::default();
         if self
             .send_response(local_id, &peer_key, carriage, payload.as_slice(), &options)
@@ -4679,6 +5372,7 @@ impl<
         for channel in self.channels.iter_mut() {
             let _ = channel.replay.remove(&peer_id);
         }
+        self.held_frames.retain(|held| held.peer_id != peer_id);
     }
 
     /// Move every piece of `PeerId`-keyed state from `old_id` to `new_id`
@@ -4697,6 +5391,11 @@ impl<
         for channel in self.channels.iter_mut() {
             if let Some(window) = channel.replay.remove(&old_id) {
                 let _ = channel.replay.insert(new_id, window);
+            }
+        }
+        for held in self.held_frames.iter_mut() {
+            if held.peer_id == old_id {
+                held.peer_id = new_id;
             }
         }
     }
@@ -4740,7 +5439,7 @@ impl<
         Some((counter, mic))
     }
 
-    fn build_echo_command_payload(command_id: u8, data: &[u8]) -> Vec<u8, FRAME> {
+    fn build_mac_command_payload(command_id: u8, data: &[u8]) -> Vec<u8, FRAME> {
         let mut payload = Vec::new();
         let _ = payload.push(PayloadType::MacCommand as u8);
         let _ = payload.push(command_id);
@@ -4795,6 +5494,30 @@ impl<
             return None;
         }
         Some(u32::from_be_bytes(data.try_into().ok()?))
+    }
+
+    /// A Verify Frame or Frame Verified payload, sized to what it holds
+    /// rather than to a frame.
+    fn resync_command_payload(command_id: u8, nonce: u32) -> [u8; 2 + COUNTER_RESYNC_NONCE_LEN] {
+        let [a, b, c, d] = nonce.to_be_bytes();
+        [PayloadType::MacCommand as u8, command_id, a, b, c, d]
+    }
+
+    /// The command and nonce of a Verify Frame or Frame Verified payload.
+    /// A shorter one is ignored, and bytes past the nonce are too.
+    fn resync_command(payload: &[u8]) -> Option<(u8, u32)> {
+        let (&payload_type, rest) = payload.split_first()?;
+        let (&command_id, data) = rest.split_first()?;
+        if PayloadType::from_byte(payload_type)? != PayloadType::MacCommand
+            || !matches!(
+                command_id,
+                MAC_COMMAND_VERIFY_FRAME_ID | MAC_COMMAND_FRAME_VERIFIED_ID
+            )
+        {
+            return None;
+        }
+        let nonce = data.get(..COUNTER_RESYNC_NONCE_LEN)?;
+        Some((command_id, u32::from_be_bytes(nonce.try_into().ok()?)))
     }
 
     fn full_key_at(frame: &[u8], offset: usize) -> Option<PublicKey> {

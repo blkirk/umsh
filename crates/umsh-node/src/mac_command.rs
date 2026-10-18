@@ -106,6 +106,8 @@ pub enum CommandId {
     Noop = 9,
     PeerRepeatersRequest = 10,
     PeerRepeatersResponse = 11,
+    VerifyFrame = 12,
+    FrameVerified = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +159,16 @@ pub enum MacCommand<'a> {
     PeerRepeatersResponse {
         body: &'a [u8],
     },
+    /// Ask the destination to vouch for a frame it sent whose counter the
+    /// requester could not accept. The MAC sends and answers it itself.
+    VerifyFrame {
+        nonce: u32,
+    },
+    /// Vouch for the frame a Verify Frame named, echoing its nonce. The MAC
+    /// sends and answers it itself.
+    FrameVerified {
+        nonce: u32,
+    },
 }
 
 /// Parse a MAC command. A fixed-length command reads the bytes it defines
@@ -204,7 +216,23 @@ pub fn parse(payload: &[u8]) -> Result<MacCommand<'_>, AppParseError> {
         // The entry list past the end marker is walked lazily: broken entry
         // framing ends the walk, keeping the entries decoded before it.
         11 => Ok(MacCommand::PeerRepeatersResponse { body }),
+        12 => Ok(MacCommand::VerifyFrame {
+            nonce: parse_nonce(body)?,
+        }),
+        13 => Ok(MacCommand::FrameVerified {
+            nonce: parse_nonce(body)?,
+        }),
         other => Err(AppParseError::InvalidCommandId(other)),
+    }
+}
+
+fn parse_nonce(body: &[u8]) -> Result<u32, AppParseError> {
+    match body {
+        [a, b, c, d, ..] => Ok(u32::from_be_bytes([*a, *b, *c, *d])),
+        _ => Err(AppParseError::InvalidLength {
+            expected: 4,
+            actual: body.len(),
+        }),
     }
 }
 
@@ -262,6 +290,12 @@ pub enum OwnedMacCommand {
     PeerRepeatersResponse {
         body: Vec<u8>,
     },
+    VerifyFrame {
+        nonce: u32,
+    },
+    FrameVerified {
+        nonce: u32,
+    },
 }
 
 impl From<MacCommand<'_>> for OwnedMacCommand {
@@ -302,6 +336,8 @@ impl From<MacCommand<'_>> for OwnedMacCommand {
             MacCommand::PeerRepeatersResponse { body } => Self::PeerRepeatersResponse {
                 body: Vec::from(body),
             },
+            MacCommand::VerifyFrame { nonce } => Self::VerifyFrame { nonce },
+            MacCommand::FrameVerified { nonce } => Self::FrameVerified { nonce },
         }
     }
 }
@@ -354,6 +390,14 @@ pub fn encode(cmd: &MacCommand<'_>, buf: &mut [u8]) -> Result<usize, AppEncodeEr
         MacCommand::PeerRepeatersResponse { body } => {
             push_byte(buf, &mut pos, CommandId::PeerRepeatersResponse as u8)?;
             copy_into(buf, &mut pos, body)?;
+        }
+        MacCommand::VerifyFrame { nonce } => {
+            push_byte(buf, &mut pos, CommandId::VerifyFrame as u8)?;
+            copy_into(buf, &mut pos, &nonce.to_be_bytes())?;
+        }
+        MacCommand::FrameVerified { nonce } => {
+            push_byte(buf, &mut pos, CommandId::FrameVerified as u8)?;
+            copy_into(buf, &mut pos, &nonce.to_be_bytes())?;
         }
     }
     Ok(pos)

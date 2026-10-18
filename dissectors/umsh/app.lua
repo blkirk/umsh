@@ -97,6 +97,7 @@ local MAC_COMMANDS = {
   [6]="PFS Session Request",[7]="PFS Session Response",
   [8]="End PFS Session",    [9]="No-op",
   [10]="Peer Repeaters Req",[11]="Peer Repeaters Resp",
+  [12]="Verify Frame",      [13]="Frame Verified",
 }
 f.mac_cmd_id   = ProtoField.uint8  ("umsh.app.mac.cmd",     "Command",        base.HEX, MAC_COMMANDS)
 f.mac_nonce    = ProtoField.bytes  ("umsh.app.mac.nonce",   "Nonce")
@@ -612,6 +613,30 @@ local function dissect_mac_command(payload, subtree, tvb, ctx, pinfo)
     if rest > 0 then
       subtree:add(f.mac_echo, tvb(1, rest))
       detail = string.format("%d byte%s", rest, rest == 1 and "" or "s")
+    end
+
+  elseif cmd == 12 or cmd == 13 then
+    -- Verify Frame / Frame Verified (security.md, Counter Resynchronization):
+    -- a 4-byte nonce. The Verify Frame names the frame it asks about in an
+    -- Ack MIC option; the Frame Verified must ask to be acknowledged, since
+    -- its acknowledgement is the verified frame's too.
+    if rest >= 4 then
+      subtree:add(f.mac_nonce, tvb(1, 4))
+      detail = string.format("nonce 0x%02X%02X%02X%02X",
+        byte_at(payload, 2), byte_at(payload, 3),
+        byte_at(payload, 4), byte_at(payload, 5))
+    elseif ctx and ctx.flag then
+      ctx.flag(subtree, tvb(0, len), string.format(
+        "%s needs a 4-byte nonce, got %d byte%s",
+        cmd_name, rest, rest == 1 and "" or "s"))
+    end
+    if cmd == 12 and ctx and ctx.flag and ctx.ack_mic == nil then
+      ctx.flag(subtree, tvb(0, 1),
+        "Verify Frame must carry an Ack MIC option naming the frame to verify")
+    end
+    if cmd == 13 and ctx and ctx.flag and (ctx.pkt_type == 2 or ctx.pkt_type == 6) then
+      ctx.flag(subtree, tvb(0, 1),
+        "Frame Verified must request an acknowledgement")
     end
 
   elseif cmd == 6 or cmd == 7 then

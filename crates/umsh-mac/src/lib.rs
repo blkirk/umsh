@@ -198,6 +198,14 @@ pub(crate) const MAX_FORWARD_RETRIES: u8 = 3;
 /// retry lands inside its ack duplicate-cache lifetime and is suppressed, so
 /// further retries cannot be confirmed and only spend airtime.
 pub(crate) const MAX_ACK_FORWARD_RETRIES: u8 = 1;
+/// Frames held at once while their senders are asked to vouch for them
+/// ([Counter Resynchronization][spec]). A frame is held only when its
+/// sender's counter has diverged, which takes lost state, so two covers
+/// two peers recovering at once; a third replaces the oldest, and that
+/// sender's send fails.
+///
+/// [spec]: https://darconeous.github.io/umsh/docs/protocol/security.html#counter-resynchronization
+pub(crate) const VERIFY_HELD_FRAMES: usize = 2;
 
 /// CAD attempts a frame gets before it is dropped, from
 /// [Channel Access § Backoff Procedure][spec]: one initial attempt and

@@ -127,6 +127,8 @@ The option is a courtesy to the original sender. A sender that cannot fit it int
 
 Because the option sits in the plaintext options block, forwarders read it under the same terms as a standalone MAC ack, including for [ack cancellation](repeater-operation.md#ack-cancellation).
 
+On a [Verify Frame](mac-commands.md#verify-frame-12) the option names the packet to be verified instead of acknowledging it: the sender holds that packet but has not accepted it, so the original sender MUST NOT treat the option as an acknowledgement (see [Counter Resynchronization](security.md#counter-resynchronization)). Forwarders still apply ack cancellation, since the named packet has reached its destination.
+
 ### Minimum SNR (option 9)
 - Type: signed 1-byte integer, in dB
 - Semantics: packet must be received with at least this SNR to be flood-forwarded. This option does not apply to source-routed hops.

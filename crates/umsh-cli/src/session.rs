@@ -1737,6 +1737,8 @@ fn mac_cmd_id(cmd: &OwnedMacCommand) -> u8 {
         OwnedMacCommand::Noop => CommandId::Noop as u8,
         OwnedMacCommand::PeerRepeatersRequest { .. } => CommandId::PeerRepeatersRequest as u8,
         OwnedMacCommand::PeerRepeatersResponse { .. } => CommandId::PeerRepeatersResponse as u8,
+        OwnedMacCommand::VerifyFrame { .. } => CommandId::VerifyFrame as u8,
+        OwnedMacCommand::FrameVerified { .. } => CommandId::FrameVerified as u8,
     }
 }
 

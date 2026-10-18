@@ -930,7 +930,7 @@ local app = require("app")
 
 -- Dissect a whole payload, type byte included, and return what the tree,
 -- the columns, and the violation sink ended up holding.
-local function dissect_payload(payload_hex, pkt_type)
+local function dissect_payload(payload_hex, pkt_type, ack_mic)
   tree_log = {}
   local violations = {}
   local pinfo = new_pinfo()
@@ -938,6 +938,7 @@ local function dissect_payload(payload_hex, pkt_type)
   local ctx   = {
     pkt_type = pkt_type or 2,  -- unicast unless the test says otherwise
     full_src = true,
+    ack_mic  = ack_mic,        -- the header's Ack MIC option, when it has one
     flag     = function(_tree, _range, text) violations[#violations + 1] = text end,
   }
   app.dissect(from_hex(payload_hex), root, pinfo, nil, nil, ctx)
@@ -1262,6 +1263,48 @@ check("a one-byte RSSI/SNR is flagged",
       pr_thin_signal.violations[1] and
         pr_thin_signal.violations[1]:find("must be 2 bytes", 1, true) ~= nil,
       true)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Verify Frame / Frame Verified (docs/protocol/src/mac-commands.md)
+--
+-- Both carry a 4-byte nonce. A Verify Frame names the frame it asks about in
+-- the header's Ack MIC option; a Frame Verified asks to be acknowledged.
+-- ─────────────────────────────────────────────────────────────────────────────
+section("Verify Frame")
+
+local vf = dissect_payload("02 0C 0A0B0C0D", 2, "11223344")
+check("verify frame names the command", has(vf, "Command: Verify Frame (12)"), true)
+check("verify frame nonce", has(vf, "Nonce: 0A0B0C0D"), true)
+check("verify frame info line carries the nonce",
+      vf.info, " MAC Command: Verify Frame (nonce 0x0A0B0C0D)")
+check("a verify frame with an Ack MIC is not flagged", #vf.violations, 0)
+
+local vf_bare = dissect_payload("02 0C 0A0B0C0D", 2)
+check("a verify frame without an Ack MIC is flagged",
+      vf_bare.violations[1] and
+        vf_bare.violations[1]:find("Ack MIC option", 1, true) ~= nil,
+      true)
+
+local vf_short = dissect_payload("02 0C 0A0B", 2, "11223344")
+check("a short verify nonce is flagged",
+      vf_short.violations[1] and
+        vf_short.violations[1]:find("4-byte nonce", 1, true) ~= nil,
+      true)
+
+local fv = dissect_payload("02 0D 0A0B0C0D", 3)
+check("frame verified names the command", has(fv, "Command: Frame Verified (13)"), true)
+check("frame verified info line carries the nonce",
+      fv.info, " MAC Command: Frame Verified (nonce 0x0A0B0C0D)")
+check("an ack-requested frame verified is not flagged", #fv.violations, 0)
+
+local fv_unacked = dissect_payload("02 0D 0A0B0C0D", 2)
+check("a frame verified that asks for no ack is flagged",
+      fv_unacked.violations[1] and
+        fv_unacked.violations[1]:find("must request an acknowledgement", 1, true) ~= nil,
+      true)
+
+local vf_multicast = dissect_payload("02 0C 0A0B0C0D", 4, "11223344")
+check("a multicast verify frame is flagged", #vf_multicast.violations > 0, true)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Results

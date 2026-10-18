@@ -446,6 +446,25 @@ pub struct PendingAck<const FRAME: usize = MAX_RESEND_FRAME_LEN> {
     /// The attempt rode a held route and missed, so whatever acknowledges
     /// this send now came back through the flood fallback.
     pub(crate) held_route_missed: bool,
+    /// Set when this entry carries a Frame Verified on behalf of the send
+    /// it vouches for, and the Verify Frame's counter fell outside our
+    /// window for the requester: the acknowledgment that completes the
+    /// send also makes that counter the requester's baseline.
+    pub(crate) adopt_on_ack: Option<RxBaselineAdoption>,
+}
+
+/// A requester's counter to adopt once it acknowledges a Frame Verified
+/// ([Counter Resynchronization][spec]).
+///
+/// [spec]: https://darconeous.github.io/umsh/docs/protocol/security.html#counter-resynchronization
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RxBaselineAdoption {
+    /// The Verify Frame's counter.
+    pub(crate) counter: u32,
+    /// The requester's highest accepted counter when the Verify Frame
+    /// arrived. Anything accepted from the requester since moves it, and
+    /// then the window is already in step and adopting would roll it back.
+    pub(crate) seen_last_accepted: u32,
 }
 
 impl<const FRAME: usize> PendingAck<FRAME> {
@@ -466,6 +485,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             confirm_key: None,
             cached_route_revision: 0,
             held_route_missed: false,
+            adopt_on_ack: None,
         }
     }
 
@@ -486,6 +506,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             confirm_key: None,
             cached_route_revision: 0,
             held_route_missed: false,
+            adopt_on_ack: None,
         }
     }
 
@@ -507,6 +528,7 @@ impl<const FRAME: usize> PendingAck<FRAME> {
             confirm_key: None,
             cached_route_revision: 0,
             held_route_missed: false,
+            adopt_on_ack: None,
         }
     }
 
@@ -842,6 +864,26 @@ impl<const N: usize, const FRAME: usize> TxQueue<N, FRAME> {
             .enumerate()
             .find_map(|(index, entry)| predicate(entry).then_some(index))?;
         Some(self.entries.swap_remove(index))
+    }
+
+    /// Every queued frame, in no particular order.
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &QueuedTx<FRAME>> {
+        self.entries.iter()
+    }
+
+    /// Hand every frame queued under `from` over to `to`.
+    pub(crate) fn relabel_receipt(
+        &mut self,
+        identity_id: LocalIdentityId,
+        from: SendReceipt,
+        to: SendReceipt,
+    ) {
+        for entry in self.entries.iter_mut() {
+            if entry.receipt == Some(from) && entry.identity_id == Some(identity_id) {
+                entry.receipt = Some(to);
+            }
+        }
     }
 
     /// Remove every queued frame matching `predicate`, returning how many were

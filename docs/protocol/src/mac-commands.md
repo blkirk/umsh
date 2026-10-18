@@ -29,6 +29,8 @@ A node answering a command carries its response the way the request was carried,
 | 9 | No-op | Request |
 | 10 | Peer Repeaters Request | Request |
 | 11 | Peer Repeaters Response | Response |
+| 12 | Verify Frame | Request |
+| 13 | Frame Verified | Response |
 
 ## Identity Request (1)
 
@@ -262,3 +264,23 @@ The options per entry:
 | 5 | Supported Flood Regions | n × 2 bytes | Concatenated 2-byte [region codes](packet-options.md#region-code-encoding) the peer flood-forwards for. |
 
 An option whose value the responder does not know is omitted. Entries carry region codes rather than the strings the [identity option](node-identity.md#supported-regions-option-4) carries—the entry format is tighter on space, and the string form of a code, when one is wanted, is available from the peer's own identity.
+
+## Verify Frame (12)
+
+Asks the destination to vouch for a packet it sent to the requester whose frame counter the requester could not accept. See [Counter Resynchronization](security.md#counter-resynchronization) for when it is sent and what each side does with the answer.
+
+| Field | Size | Description |
+|---|---:|---|
+| Nonce | 4 bytes | Chosen by the requester; the responder echoes it in Frame Verified |
+
+The packet carrying the command MUST include an [Ack MIC option](packet-options.md#ack-mic-option-8) naming the packet to verify, and does not request an acknowledgement. A responder ignores a Verify Frame without the option.
+
+## Frame Verified (13)
+
+Answers a Verify Frame naming a packet the responder sent and is still waiting to have acknowledged.
+
+| Field | Size | Description |
+|---|---:|---|
+| Nonce | 4 bytes | Copied from the Verify Frame |
+
+The packet carrying the command MUST request an acknowledgement. Its acknowledgement acknowledges the verified packet as well.

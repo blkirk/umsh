@@ -107,6 +107,12 @@ impl ReplayWindow {
         }
     }
 
+    /// Whether a baseline is set: a first counter accepted, or a
+    /// [`reset`](Self::reset).
+    pub fn is_established(&self) -> bool {
+        self.established
+    }
+
     /// Evaluate whether `counter` and `mic` are acceptable at `now_ms`.
     pub fn check(&self, counter: u32, mic: &[u8], now_ms: u64) -> ReplayVerdict {
         if !self.established {
