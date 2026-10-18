@@ -296,6 +296,29 @@ impl SimulatedDevice {
         self.device.take_outbound()
     }
 
+    /// Give the device a settings interface of its own, as a communicator
+    /// has.
+    pub fn open_device_interface(&mut self) {
+        self.device.open_device_interface();
+    }
+
+    /// Serve one raw ULCP frame from the device's own interface.
+    pub fn device_request(&mut self, frame: &[u8], now_ms: u64) {
+        self.device.device_request(frame, now_ms);
+    }
+
+    /// The next raw frame for the device's own interface: an answer, or a
+    /// publication.
+    pub fn take_device_frame(&mut self) -> Option<Vec<u8>> {
+        self.device.take_device_frame()
+    }
+
+    /// Flip a switch at the device, as a board's own control would,
+    /// publishing the transition to everyone listening.
+    pub fn toggle_ble(&mut self) {
+        self.device.toggle_ble();
+    }
+
     /// Everything the device has transmitted since the last drain, in
     /// order. The queue grows until drained; a caller with no air to put
     /// frames on drains and discards.

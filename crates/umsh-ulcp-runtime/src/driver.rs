@@ -20,7 +20,7 @@
 //!   session's virtual [`Channels`] bundle, and an [`DeviceEnv`] implementation
 //!   wiring persistence, entropy, pairing, and indicators to its hardware.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -154,6 +154,13 @@ pub enum InEvent {
         frame: AdminFrame,
         reply_budget: usize,
     },
+    /// One ULCP frame from the device's own settings interface, answered
+    /// on [`DeviceRuntime::device`].
+    ///
+    /// A local binding: a request with a non-zero TID is answered exactly
+    /// once, so the interface never times one out. It is not an attach,
+    /// and it displaces no host.
+    Device(FrameBuf),
     /// Someone cancelled a running locate alert at the device—the
     /// button press of whoever found the radio. Ignored when no alert is
     /// running, so a board may report the press unconditionally.
@@ -236,6 +243,82 @@ impl<M: RawMutex> TransportChannels<M> {
             Transport::Usb => &self.wired,
             Transport::Ble => &self.ble,
         }
+    }
+}
+
+/// Frames held for the device's own interface until it reads them.
+pub const DEVICE_LINK_DEPTH: usize = 8;
+
+/// The return path to the device's own settings interface: the answers
+/// to its [`InEvent::Device`] requests, and everything the device
+/// publishes.
+///
+/// An answer always gets through: the driver waits for room. A
+/// publication never waits, because the interface's task may itself be
+/// waiting on the driver. One that finds the link full is dropped, and
+/// the interface hears [`DeviceFrame::Overrun`] in its place, after the
+/// frames that were queued ahead of it.
+pub struct DeviceLink<M: RawMutex> {
+    frames: Channel<M, FrameBuf, DEVICE_LINK_DEPTH>,
+    overrun: AtomicBool,
+}
+
+/// What the device's own interface reads from its [`DeviceLink`].
+pub enum DeviceFrame {
+    /// An answer or a publication, as the session emitted it.
+    Frame(FrameBuf),
+    /// Publications were dropped while the link was full, so anything the
+    /// interface holds may be out of date.
+    Overrun,
+}
+
+impl<M: RawMutex> DeviceLink<M> {
+    pub const fn new() -> Self {
+        Self {
+            frames: Channel::new(),
+            overrun: AtomicBool::new(false),
+        }
+    }
+
+    /// The next frame for the interface, if there is one.
+    pub fn try_receive(&self) -> Option<DeviceFrame> {
+        if let Ok(frame) = self.frames.try_receive() {
+            return Some(DeviceFrame::Frame(frame));
+        }
+        self.overrun
+            .swap(false, Ordering::AcqRel)
+            .then_some(DeviceFrame::Overrun)
+    }
+
+    /// Wait until [`DeviceLink::try_receive`] has something.
+    ///
+    /// An overrun is only ever recorded against a full link, so waiting
+    /// for a frame is waiting for it too.
+    pub async fn ready(&self) {
+        self.frames.ready_to_receive().await
+    }
+
+    fn publish(&self, frame: &[u8]) {
+        let Ok(copy) = FrameBuf::from_slice(frame) else {
+            debug_assert!(false, "a publication exceeds FrameBuf");
+            return;
+        };
+        if self.frames.try_send(copy).is_err() {
+            self.overrun.store(true, Ordering::Release);
+        }
+    }
+
+    async fn answer(&self, frame: &[u8]) {
+        match FrameBuf::from_slice(frame) {
+            Ok(copy) => self.frames.send(copy).await,
+            Err(()) => debug_assert!(false, "an answer exceeds FrameBuf"),
+        }
+    }
+}
+
+impl<M: RawMutex> Default for DeviceLink<M> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -903,6 +986,10 @@ pub struct DeviceRuntime<M: RawMutex + 'static, const RX: usize, const TX: usize
     /// Published session epoch, checked by each transport at framing
     /// edges (`transport_policy::generation_checked`).
     pub session_gen: &'static AtomicU32,
+    /// The return path to the device's own settings interface, on a board
+    /// that has one. With it, the session publishes whether or not a host
+    /// is attached, and every publication reaches the interface too.
+    pub device: Option<&'static DeviceLink<M>>,
 }
 
 /// Collects frames emitted synchronously by the session, then flushes
@@ -954,45 +1041,22 @@ impl Emitter {
     async fn flush<M: RawMutex>(&mut self, sink: &mut ReplySink<'_, M>) {
         for index in 0..self.count {
             let frame = &self.bufs[index][..self.lens[index]];
+            let to_host = HostFrame {
+                completion: self.completion,
+                finish_ble_wipe: self.finish_ble_wipe && index + 1 == self.count,
+            };
             match sink {
                 ReplySink::Transport {
-                    destination: Some((transport, generation)),
+                    destination,
                     out,
+                    device,
                 } => {
-                    let mut copy: FrameBuf = heapless::Vec::new();
-                    if copy.extend_from_slice(frame).is_err() {
-                        // FRAME_OUT_MAX == FrameBuf capacity, so this
-                        // cannot happen; assert in debug rather than
-                        // silently drop.
-                        debug_assert!(false, "Emitter frame copy exceeded FrameBuf capacity");
-                        continue;
+                    if let Some(link) = device
+                        && is_publication(frame)
+                    {
+                        link.publish(frame);
                     }
-                    let send = out.for_transport(*transport).send(OutFrame {
-                        completion: self.completion,
-                        finish_ble_wipe: self.finish_ble_wipe
-                            && index + 1 == self.count
-                            && *transport == Transport::Ble,
-                        generation: *generation,
-                        frame: copy,
-                    });
-                    if let Some(completion) = self.completion {
-                        if embassy_time::with_deadline(completion.deadline(), send)
-                            .await
-                            .is_err()
-                        {
-                            completion.complete(false);
-                        }
-                    } else {
-                        send.await;
-                    }
-                }
-                // Nobody attached: the response has nowhere to go.
-                ReplySink::Transport {
-                    destination: None, ..
-                } => {
-                    if let Some(completion) = self.completion {
-                        completion.complete(false);
-                    }
+                    to_host.send(*destination, out, frame).await;
                 }
                 ReplySink::Admin { reply } => {
                     // An exchange is one request and one response. A
@@ -1005,11 +1069,83 @@ impl Emitter {
                         debug_assert!(false, "admin exchange emitted more than one frame");
                     }
                 }
+                ReplySink::Device {
+                    link,
+                    destination,
+                    out,
+                } => {
+                    if is_publication(frame) {
+                        // Everyone listening hears a publication, the host
+                        // included, whoever's request it came out of.
+                        link.publish(frame);
+                        HostFrame::default().send(*destination, out, frame).await;
+                    } else {
+                        // Queued is delivered: the interface is in process.
+                        link.answer(frame).await;
+                        if let Some(completion) = self.completion {
+                            completion.complete(true);
+                        }
+                    }
+                }
             }
         }
         self.count = 0;
         self.finish_ble_wipe = false;
         self.completion = None;
+    }
+}
+
+/// Whether `frame` is one everyone listening to the device receives,
+/// rather than an answer for whoever asked.
+fn is_publication(frame: &[u8]) -> bool {
+    umsh_ulcp::Frame::parse(frame).is_ok_and(|parsed| parsed.is_publication())
+}
+
+/// How one frame goes out to the attached host.
+#[derive(Default)]
+struct HostFrame {
+    completion: Option<crate::reply_completion::ReplyCompletion>,
+    /// The final frame of a bond wipe, if it goes out over BLE.
+    finish_ble_wipe: bool,
+}
+
+impl HostFrame {
+    async fn send<M: RawMutex>(
+        self,
+        destination: Option<(Transport, u32)>,
+        out: &TransportChannels<M>,
+        frame: &[u8],
+    ) {
+        // Nobody attached: the frame has nowhere to go.
+        let Some((transport, generation)) = destination else {
+            if let Some(completion) = self.completion {
+                completion.complete(false);
+            }
+            return;
+        };
+        let mut copy: FrameBuf = heapless::Vec::new();
+        if copy.extend_from_slice(frame).is_err() {
+            // FRAME_OUT_MAX == FrameBuf capacity, so this cannot happen;
+            // assert in debug rather than silently drop.
+            debug_assert!(false, "Emitter frame copy exceeded FrameBuf capacity");
+            return;
+        }
+        let send = out.for_transport(transport).send(OutFrame {
+            completion: self.completion,
+            finish_ble_wipe: self.finish_ble_wipe && transport == Transport::Ble,
+            generation,
+            frame: copy,
+        });
+        if let Some(completion) = self.completion {
+            if embassy_time::with_deadline(completion.deadline(), send)
+                .await
+                .is_err()
+            {
+                completion.complete(false);
+            }
+        } else {
+            send.await;
+        }
     }
 }
 
@@ -1022,15 +1158,40 @@ impl Emitter {
 /// administrator across the mesh.
 enum ReplySink<'a, M: RawMutex> {
     /// The attached host's output queue, or nowhere when none is
-    /// attached.
+    /// attached. What the device publishes reaches its own interface
+    /// too, on a board that has one.
     Transport {
         destination: Option<(Transport, u32)>,
         out: &'a TransportChannels<M>,
+        device: Option<&'a DeviceLink<M>>,
     },
     /// The response frame of a Node Management exchange, staged for the
     /// responder that will envelope and transmit it. Empty when the
     /// command produced no response, which is what a reset does.
     Admin { reply: &'a mut AdminFrame },
+    /// The device's own interface. Answers go back to it alone, and what
+    /// the device publishes while serving it reaches the attached host
+    /// too.
+    Device {
+        link: &'a DeviceLink<M>,
+        destination: Option<(Transport, u32)>,
+        out: &'a TransportChannels<M>,
+    },
+}
+
+impl<M: RawMutex + 'static> ReplySink<'static, M> {
+    /// Frames for the attached host: everything the session emits outside
+    /// an exchange, and the answers to the host's own frames.
+    fn host<const RX: usize, const TX: usize>(
+        arbitration: &SessionArbitration,
+        rt: &DeviceRuntime<M, RX, TX>,
+    ) -> Self {
+        Self::Transport {
+            destination: arbitration.destination(),
+            out: rt.out,
+            device: rt.device,
+        }
+    }
 }
 
 /// Execute a radio side effect requested by the session.
@@ -1325,6 +1486,8 @@ enum Exchange<'a> {
         frame: &'a [u8],
         reply_budget: usize,
     },
+    /// A frame from the device's own settings interface.
+    Device(&'a [u8]),
 }
 
 /// Serve one ULCP frame to completion, deferred platform round trips
@@ -1365,6 +1528,9 @@ where
         } => session.handle_admin_frame(frame, now_ms, reply_budget, &mut |frame: &[u8]| {
             emitter.push(frame)
         }),
+        Exchange::Device(bytes) => {
+            session.handle_device_frame(bytes, now_ms, &mut |frame: &[u8]| emitter.push(frame))
+        }
     };
     emitter.flush(sink).await;
     while pending.is_some() {
@@ -1780,6 +1946,12 @@ where
     // loop-lifetime local it costs one future slot instead of one
     // per arm.
 
+    // A board with its own interface hears what the device publishes
+    // from the start, attached host or not.
+    if rt.device.is_some() {
+        session.open_device_interface();
+    }
+
     // The device identity is persisted independently of snapshots;
     // its post-reset value is whatever the identity journal holds.
     if let Some(public_key) = boot_identity {
@@ -1928,12 +2100,7 @@ where
                 // attached—`cancel_alert` handles that—and a press
                 // with no alert running is simply nothing.
                 let effect = session.cancel_alert(&mut |frame: &[u8]| emitter.push(frame));
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                 apply_effect(&session, effect, &rt, &mut env).await;
             }
             Either4::First(InEvent::Toggle(setting)) => {
@@ -1963,12 +2130,7 @@ where
                     }
                 };
                 if let Some(enabled) = flipped {
-                    emitter
-                        .flush(&mut ReplySink::Transport {
-                            destination: arbitration.destination(),
-                            out: rt.out,
-                        })
-                        .await;
+                    emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                     if setting == Setting::Gnss {
                         env.gnss_switched(enabled);
                     }
@@ -1987,12 +2149,7 @@ where
             Either4::First(InEvent::SelectWifiNetwork(network)) => {
                 let result = session
                     .choose_wifi_network(network.as_bytes(), &mut |frame| emitter.push(frame));
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                 if result.is_ok() {
                     persist_device_change(session, snapshot_buf, &mut env).await;
                 }
@@ -2003,12 +2160,7 @@ where
                     .force_ble_on(&mut |frame: &[u8]| emitter.push(frame))
                     .is_some()
                 {
-                    emitter
-                        .flush(&mut ReplySink::Transport {
-                            destination: arbitration.destination(),
-                            out: rt.out,
-                        })
-                        .await;
+                    emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                     // Persisted like a toggle: the gesture is the device's
                     // own control for the property, and a radio rescued by
                     // it should stay rescued across the next reboot.
@@ -2020,10 +2172,7 @@ where
             }
             Either4::First(InEvent::Frame(transport, frame_bytes)) => {
                 if arbitration.accepts_frame(transport) {
-                    let mut sink = ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    };
+                    let mut sink = ReplySink::host(&arbitration, &rt);
                     let dfu = serve_frame(
                         session,
                         Exchange::Local(&frame_bytes),
@@ -2070,6 +2219,30 @@ where
                     .await;
                 finish_dfu(&mut env, dfu).await;
             }
+            Either4::First(InEvent::Device(frame)) => {
+                // A board without a link has no interface to send this,
+                // so a request here has nowhere to be answered.
+                if let Some(link) = rt.device {
+                    let mut sink = ReplySink::Device {
+                        link,
+                        destination: arbitration.destination(),
+                        out: rt.out,
+                    };
+                    let dfu = serve_frame(
+                        session,
+                        Exchange::Device(&frame),
+                        &mut emitter,
+                        &mut sink,
+                        snapshot_buf,
+                        &rt,
+                        &mut env,
+                    )
+                    .await;
+                    finish_dfu(&mut env, dfu).await;
+                } else {
+                    debug_assert!(false, "a device request on a board with no device link");
+                }
+            }
             Either4::Second(RxFrame { data, info }) => {
                 // While detached this may stage a delegated MAC
                 // acknowledgement (Effect::StartTransmit).
@@ -2092,12 +2265,7 @@ where
                 if let Some(notice) = session.take_queued_notice() {
                     env.frame_queued(notice);
                 }
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                 apply_effect(&session, effect, &rt, &mut env).await;
             }
             Either4::Third(result) => {
@@ -2109,12 +2277,7 @@ where
                 };
                 let effect =
                     session.on_tx_result(outcome, now_ms, &mut |frame: &[u8]| emitter.push(frame));
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                 apply_effect(&session, effect, &rt, &mut env).await;
             }
             Either4::Fourth(Either::First(event)) => {
@@ -2185,12 +2348,7 @@ where
                         session.absorb_ident_fix(&location, altitude_m);
                     }
                 }
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
             }
             Either4::Fourth(Either::Second(())) => {
                 // The alert outlived its deadline: stop the indication
@@ -2199,12 +2357,7 @@ where
                     .poll_alert(Instant::now().as_millis(), &mut |frame: &[u8]| {
                         emitter.push(frame)
                     });
-                emitter
-                    .flush(&mut ReplySink::Transport {
-                        destination: arbitration.destination(),
-                        out: rt.out,
-                    })
-                    .await;
+                emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
                 apply_effect(&session, effect, &rt, &mut env).await;
             }
         }
@@ -2227,12 +2380,7 @@ where
         // still held: by now `serve_frame` has released it and the sink
         // below is the host's own transport.
         if session.take_session_reset_notice(&mut |frame: &[u8]| emitter.push(frame)) {
-            emitter
-                .flush(&mut ReplySink::Transport {
-                    destination: arbitration.destination(),
-                    out: rt.out,
-                })
-                .await;
+            emitter.flush(&mut ReplySink::host(&arbitration, &rt)).await;
         }
     }
 }
@@ -2253,6 +2401,7 @@ mod ble_reply_tests {
             let mut sink = ReplySink::Transport {
                 destination: Some((Transport::Ble, 17)),
                 out: &out,
+                device: None,
             };
             let mut emitter = Emitter::new();
             emitter.push(b"prior");
@@ -2281,6 +2430,7 @@ mod ble_reply_tests {
                 .flush(&mut ReplySink::Transport {
                     destination: Some((Transport::Usb, 1)),
                     out: &out,
+                    device: None,
                 })
                 .await;
             assert!(!out.wired.try_receive().unwrap().finish_ble_wipe);

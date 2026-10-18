@@ -903,6 +903,18 @@ pub fn admin_writable(key: u32) -> bool {
     )
 }
 
+/// Whether a property is writable through the device's own settings
+/// interface.
+///
+/// The administrator's surface, for the same reasons: the host domain and
+/// session state belong to whichever host is tethered, and an exchange
+/// that is not an attach has no session to configure. The one difference
+/// is the device identity, which whoever is holding the device may
+/// install, by the authority of physical possession.
+pub fn device_writable(key: u32) -> bool {
+    key == prop::DEV_PRIVATE_KEY || admin_writable(key)
+}
+
 /// Value used in `PROP_PHY_DUTY_LIMIT` to disable duty-cycle limiting.
 pub const DUTY_LIMIT_DISABLED: u16 = 0xFFFF;
 

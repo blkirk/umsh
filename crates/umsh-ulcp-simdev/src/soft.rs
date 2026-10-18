@@ -13,6 +13,12 @@
 //! [`SoftDevice::take_transmitted`] drains them, and receptions go in
 //! through [`SoftDevice::inject_radio_rx`]. A deterministic simulation
 //! discards or replays them; a LAN virtual radio sends them to its group.
+//!
+//! A device with a settings interface of its own—a simulated
+//! communicator—opens it with [`SoftDevice::open_device_interface`] and
+//! serves it through [`SoftDevice::device_request`], as the firmware
+//! driver serves its in-process requests. Its answers and everything the
+//! device publishes wait in [`SoftDevice::take_device_frame`].
 
 use std::collections::VecDeque;
 
@@ -20,7 +26,7 @@ use umsh_crypto::{
     CryptoEngine, NodeIdentity,
     software::{SoftwareAes, SoftwareIdentity, SoftwareSha256},
 };
-use umsh_ulcp::{Status, hdlc};
+use umsh_ulcp::{Frame, Status, hdlc};
 use umsh_ulcp_device::{
     AnnounceRequest, Effect, IdentitySource, RadioRxInfo, SNAPSHOT_MAX, Session, SessionConfig,
     TxOutcome,
@@ -88,6 +94,12 @@ pub struct SoftDevice<P: SoftPlatform> {
     platform: P,
     decoder: hdlc::Decoder<WIRE_CAPACITY>,
     outbound: VecDeque<Vec<u8>>,
+    /// Whether the device has a settings interface of its own. Survives a
+    /// reboot: it describes the device, not the session.
+    device_interface: bool,
+    /// Raw frames for that interface, oldest first: its answers, and every
+    /// publication.
+    device_out: VecDeque<Vec<u8>>,
     air: Vec<Vec<u8>>,
     /// Every `CMD_ANNOUNCE` taken, oldest first. A soft device has no
     /// node to put one on the air, so the record is the whole of what can
@@ -114,6 +126,8 @@ impl<P: SoftPlatform> SoftDevice<P> {
             platform,
             decoder: hdlc::Decoder::new(),
             outbound: VecDeque::new(),
+            device_interface: false,
+            device_out: VecDeque::new(),
             air: Vec::new(),
             announcements: Vec::new(),
             now_ms: 0,
@@ -132,6 +146,9 @@ impl<P: SoftPlatform> SoftDevice<P> {
             CryptoEngine::new(SoftwareAes, SoftwareSha256),
         );
         self.platform.on_boot(&mut self.session);
+        if self.device_interface {
+            self.session.open_device_interface();
+        }
         // The identity before the snapshot: a restore keeps the PHY off
         // unless the snapshot was taken under the live identity. A device
         // configured without one neither keeps nor makes one.
@@ -226,6 +243,57 @@ impl<P: SoftPlatform> SoftDevice<P> {
     /// The next HDLC-encoded frame for the host, if any.
     pub fn take_outbound(&mut self) -> Option<Vec<u8>> {
         self.outbound.pop_front()
+    }
+
+    /// Give the device a settings interface of its own. From here on the
+    /// device publishes whether or not a host is attached, and every
+    /// publication reaches [`SoftDevice::take_device_frame`].
+    pub fn open_device_interface(&mut self) {
+        self.device_interface = true;
+        self.session.open_device_interface();
+    }
+
+    /// Serve one raw ULCP frame from the device's own interface. Its answer
+    /// waits in [`SoftDevice::take_device_frame`]; whatever the device
+    /// publishes while serving it reaches an attached host too.
+    pub fn device_request(&mut self, frame: &[u8], now_ms: u64) {
+        debug_assert!(self.device_interface, "the device has no interface");
+        self.now_ms = now_ms;
+        let device_ms = self.device_ms();
+        let mut emitted = Vec::new();
+        let effect = self
+            .session
+            .handle_device_frame(frame, device_ms, &mut |bytes| emitted.push(bytes.to_vec()));
+        self.execute(effect, &mut emitted);
+        self.session.end_admin_exchange();
+        let mut published = Vec::new();
+        self.platform
+            .settle(&mut self.session, &mut |frame: &[u8]| {
+                published.push(frame.to_vec())
+            });
+        for frame in emitted {
+            if is_publication(&frame) {
+                self.publish(frame);
+            } else {
+                self.device_out.push_back(frame);
+            }
+        }
+        self.queue_emitted(published);
+        self.flush_session_reset_notice();
+    }
+
+    /// The next raw frame for the device's own interface, if any.
+    pub fn take_device_frame(&mut self) -> Option<Vec<u8>> {
+        self.device_out.pop_front()
+    }
+
+    /// Flip `PROP_BLE_ENABLED` as the device's own control would, the way
+    /// the firmware driver serves a toggle.
+    pub fn toggle_ble(&mut self) {
+        let mut emitted = Vec::new();
+        self.session
+            .toggle_ble(&mut |frame| emitted.push(frame.to_vec()));
+        self.queue_emitted(emitted);
     }
 
     /// Everything the device has transmitted since the last drain, in
@@ -376,13 +444,42 @@ impl<P: SoftPlatform> SoftDevice<P> {
         }
     }
 
+    /// Deliver what the session emitted outside an exchange with the
+    /// device's own interface: everything goes to the host, as it always
+    /// has, and a publication reaches the interface too.
     fn queue_emitted(&mut self, emitted: Vec<Vec<u8>>) {
         for frame in emitted {
-            let mut encoded = vec![0; hdlc::max_encoded_len(frame.len())];
-            let len = hdlc::encode_frame(&frame, &mut encoded)
-                .expect("soft device output buffer uses HDLC worst-case size");
-            encoded.truncate(len);
-            self.outbound.push_back(encoded);
+            if is_publication(&frame) {
+                self.publish(frame);
+            } else {
+                self.to_host(&frame);
+            }
         }
     }
+
+    /// Everyone listening hears a publication. With the interface open,
+    /// the session publishes whether or not a host is attached, so the
+    /// host is sent one only while it is there to receive it.
+    fn publish(&mut self, frame: Vec<u8>) {
+        if self.session.is_attached() || !self.device_interface {
+            self.to_host(&frame);
+        }
+        if self.device_interface {
+            self.device_out.push_back(frame);
+        }
+    }
+
+    fn to_host(&mut self, frame: &[u8]) {
+        let mut encoded = vec![0; hdlc::max_encoded_len(frame.len())];
+        let len = hdlc::encode_frame(frame, &mut encoded)
+            .expect("soft device output buffer uses HDLC worst-case size");
+        encoded.truncate(len);
+        self.outbound.push_back(encoded);
+    }
+}
+
+/// Whether `frame` is one everyone listening to the device receives,
+/// rather than an answer for whoever asked.
+fn is_publication(frame: &[u8]) -> bool {
+    Frame::parse(frame).is_ok_and(|parsed| parsed.is_publication())
 }

@@ -2184,6 +2184,7 @@ async fn device_task(
             ctl: &DEVICE_CTL,
             out: &OUT_CH,
             session_gen: &SESSION_GEN,
+            device: None,
         },
         BoardDeviceEnv {
             #[cfg(feature = "chip-esp32s3")]

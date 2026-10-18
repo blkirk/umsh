@@ -275,6 +275,18 @@ impl<'a> Frame<'a> {
     pub const fn command(&self) -> Option<Cmd> {
         Cmd::from_u8(self.cmd)
     }
+
+    /// Whether this is a property publication: a `CMD_PROP_IS`,
+    /// `CMD_PROP_INSERTED`, or `CMD_PROP_REMOVED` the device sent unasked,
+    /// which a local binding marks with TID 0. Everyone listening to the
+    /// device receives these, where a response goes only to whoever asked.
+    pub const fn is_publication(&self) -> bool {
+        self.header.tid() == TID_UNSOLICITED
+            && matches!(
+                self.command(),
+                Some(Cmd::PropIs | Cmd::PropInserted | Cmd::PropRemoved)
+            )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
