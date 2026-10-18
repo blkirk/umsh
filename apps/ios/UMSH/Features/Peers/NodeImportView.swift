@@ -3,8 +3,9 @@ import SwiftUI
 struct NodeImportView: View {
     let inspectPeerIdentity: (String) async -> Result<MeshNodeURIPreview, MeshEngineError>
     let save: (MeshNodeURIPreview, PeerImportDetails, Bool) async -> Void
-    // Prefilled by URL-scheme opens (Camera scan, tapped umsh: link);
-    // validation then runs immediately instead of waiting for the button.
+    // Prefilled by a URL-scheme open that did not parse, so the sheet can
+    // show it and say why; validation then runs immediately instead of
+    // waiting for the button.
     var initialInput: String? = nil
 
     @Environment(\.dismiss) private var dismiss

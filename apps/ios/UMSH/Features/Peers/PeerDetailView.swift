@@ -376,7 +376,7 @@ struct PeerDetailView: View {
                         Label("Save Peer", systemImage: "square.and.arrow.down")
                     }
                 } footer: {
-                    Text("This node was heard over the air but is not saved. Saving records it on this phone so it appears in Peers.")
+                    Text("Saving adds this node to Peers.")
                 }
             }
 

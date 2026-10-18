@@ -1351,6 +1351,41 @@ final class AppRuntime {
         }
     }
 
+    /// The stored row for the node a link names, so its peer page has a row
+    /// to act on.
+    ///
+    /// A node this phone has never come across is recorded unsaved, carrying
+    /// whatever identity the link did, the same tier a node heard over the
+    /// air lands in. Saving it stays the operator's call, made on that page.
+    /// A node already on file is returned as it stands: a link's bundle is no
+    /// fresher than what was heard. `nil` when there is nothing to record it
+    /// in, and for this phone's own address, which is not a peer.
+    func peer(forLink preview: MeshNodeURIPreview) async -> PeerSummary? {
+        let address = preview.publicIdentity.canonicalAddress
+        if let known = peers.first(where: { $0.identity.canonicalAddress == address }) {
+            return known
+        }
+        guard let applicationStore, let localIdentity,
+              address != localIdentity.publicIdentity.canonicalAddress
+        else { return nil }
+        do {
+            try await applicationStore.upsertPeer(
+                ownerIdentityID: localIdentity.id,
+                publicAddress: address,
+                alias: nil,
+                advertisedName: preview.identity?.name,
+                nodeKind: preview.identity.map { PeerRole(roleCode: $0.roleCode).rawValue },
+                advertisement: preview.identityPayload
+            )
+            // No retention pass here: a row never heard is the oldest-heard
+            // there is, so a full tier would evict it before its page opened.
+            await reloadApplicationState()
+            return peers.first { $0.identity.canonicalAddress == address }
+        } catch {
+            return nil
+        }
+    }
+
     /// Record a device the phone has been configuring as an ordinary peer.
     ///
     /// Deliberately not a chat peer: a repeater is infrastructure the operator

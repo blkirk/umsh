@@ -26,6 +26,13 @@ struct AppRootView: View {
     /// A node the Peers tab has been asked to show, from a notification about
     /// the node itself rather than anything it said.
     @State private var openedPeer: PeerSummary?
+    /// A node link, tapped or scanned, until its node has been looked up.
+    @State private var incomingPeerLink: IncomingPeerLink?
+    /// The node a link named, on its own sheet over whatever was showing.
+    @State private var linkedPeer: PeerSummary?
+    /// Discover, asked for from the linked node's sheet and opened once that
+    /// sheet is down: this view presents both, and only one at a time.
+    @State private var pendingLinkedDiscovery: PendingDiscovery?
     @State private var incomingPeerImport: IncomingPeerImport?
     @State private var pendingPeerImport: PendingPeerImport?
     @State private var incomingChannelImport: IncomingChannelImport?
@@ -300,7 +307,44 @@ struct AppRootView: View {
                 incomingChannelImport = IncomingChannelImport(uri: uri)
                 selectedTab = .settings
             } else {
-                incomingPeerImport = IncomingPeerImport(uri: uri)
+                incomingPeerLink = IncomingPeerLink(uri: uri)
+            }
+        }
+        // Held while bootstrap runs: a link that launched the app arrives
+        // before there is a store to look its node up in.
+        .task(id: isBootstrapping ? nil : incomingPeerLink?.id) {
+            await openIncomingPeerLink()
+        }
+        .sheet(item: $linkedPeer, onDismiss: openPendingLinkedDiscovery) { peer in
+            NavigationStack {
+                PeerDetailView(
+                    peer: peer,
+                    radioSnapshot: $runtime.radioSnapshot,
+                    conversations: $runtime.conversations,
+                    actions: runtime.peerActions,
+                    updateDraft: runtime.updateDraft,
+                    sendMessage: { conversation, body in
+                        await runtime.sendMessage(.direct(conversation), body)
+                    },
+                    messageActions: ChatMessageActions(
+                        edit: runtime.editMessage,
+                        delete: runtime.deleteMessage,
+                        react: runtime.reactToMessage,
+                        resend: runtime.resendMessage,
+                        resendAsNew: runtime.resendMessageAsNew,
+                        clearMessages: runtime.clearConversationMessages,
+                        countMessages: runtime.countConversationMessages
+                    )
+                )
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { linkedPeer = nil }
+                    }
+                }
+            }
+            .environment(\.askNearbyIdentities) { vantage in
+                pendingLinkedDiscovery = PendingDiscovery(vantage: vantage)
+                linkedPeer = nil
             }
         }
         .sheet(item: $incomingChannelImport) { item in
@@ -482,6 +526,41 @@ struct AppRootView: View {
         }
     }
 
+    /// Open the page for the node a link names.
+    ///
+    /// A link that does not parse goes to the import sheet instead, which
+    /// shows it and says what is wrong with it. This phone's own address
+    /// opens Settings, where its identity is.
+    @MainActor
+    private func openIncomingPeerLink() async {
+        guard let link = incomingPeerLink else { return }
+        let ownAddress = runtime.localIdentity?.publicIdentity.canonicalAddress
+        let inspected = await runtime.inspectPeerIdentity(link.uri)
+        var peer: PeerSummary?
+        if case let .success(preview) = inspected,
+           preview.publicIdentity.canonicalAddress != ownAddress {
+            peer = await runtime.peer(forLink: preview)
+        }
+        // A newer link restarted this task; that one is what was asked for.
+        guard !Task.isCancelled else { return }
+        incomingPeerLink = nil
+        switch inspected {
+        case .failure:
+            incomingPeerImport = IncomingPeerImport(uri: link.uri)
+        case let .success(preview) where preview.publicIdentity.canonicalAddress == ownAddress:
+            selectedTab = .settings
+        case .success:
+            linkedPeer = peer
+        }
+    }
+
+    @MainActor
+    private func openPendingLinkedDiscovery() {
+        guard let pending = pendingLinkedDiscovery else { return }
+        pendingLinkedDiscovery = nil
+        openDiscovery(pending.vantage)
+    }
+
     /// Open Discover Peers with its ask aimed at `vantage`—nil for this
     /// phone's own neighborhood.
     @MainActor
@@ -544,9 +623,20 @@ struct AppRootView: View {
         openedConversation = await runtime.peerActions.startConversation?(peer)
     }
 
+    private struct IncomingPeerLink: Identifiable {
+        let id = UUID()
+        let uri: String
+    }
+
     private struct IncomingPeerImport: Identifiable {
         let id = UUID()
         let uri: String
+    }
+
+    /// Where a deferred Discover is aimed—nil for this phone's own
+    /// neighborhood, which is why it needs a wrapper to be pending at all.
+    private struct PendingDiscovery {
+        let vantage: SolicitVantage?
     }
 
     private struct IncomingChannelImport: Identifiable {
