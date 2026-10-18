@@ -11,9 +11,9 @@ use buoyant::render::AnimatedJoin;
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
 
-use crate::model::{Section, State};
+use crate::model::{Ending, Section, State};
 use crate::nav::{Screen, keys};
-use crate::theme;
+use crate::{font, theme};
 
 mod add_channel;
 mod add_peer;
@@ -41,6 +41,8 @@ mod wake;
 pub const STRIP: u32 = 22;
 /// Width of the rail beside the top-level lists.
 pub const RAIL: u32 = 66;
+/// The card that says the board is shutting down.
+const SHUTTING_DOWN_WIDTH: u32 = 220;
 
 /// Readies an app over [`root_view`]: what can take focus, and where focus
 /// is kept.
@@ -96,13 +98,49 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
         .padding(Edges::Top, STRIP),
         // Over everything, and taking no input.
         state.banner.map(|banner| banner::view(state, banner.notice)),
-        // The last thing shown before power goes, over even the strip.
-        state.battery_empty.map(empty_battery),
+        // The last thing shown before power goes.
+        state.ending.map(ending),
     ))
     .with_alignment(Alignment::TopLeading)
     .flex_infinite_width(HorizontalAlignment::Leading)
     .flex_infinite_height(VerticalAlignment::Top)
     .background_color(theme::BACKGROUND, Rectangle)
+}
+
+/// What the screen says as the board turns off.
+fn ending(ending: Ending) -> impl View<Rgb565, State> + use<> {
+    match_view!(ending, {
+        Ending::ShuttingDown => shutting_down(),
+        Ending::BatteryEmpty { lit } => empty_battery(lit),
+    })
+}
+
+/// A card over the screen, as the board turns off as asked.
+fn shutting_down() -> impl View<Rgb565, State> + use<> {
+    VStack::new((
+        Image::new(&crate::icon::POWER)
+            .as_template()
+            .foreground_color(theme::TEXT_SECONDARY),
+        line("Shutting down", &font::SEMIBOLD, theme::BODY, theme::TEXT),
+    ))
+    .with_spacing(10)
+    .padding(Edges::Vertical, 20)
+    .frame()
+    .with_width(SHUTTING_DOWN_WIDTH)
+    .background(
+        Alignment::Center,
+        ZStack::new((
+            RoundedRectangle::new(12)
+                .foreground_color(Rgb565::new(0, 0, 0))
+                .offset(1, 3),
+            RoundedRectangle::new(12).foreground_color(theme::MENU),
+            RoundedRectangle::new(12)
+                .stroked(1)
+                .foreground_color(theme::MENU_LINE),
+        )),
+    )
+    .flex_infinite_width(HorizontalAlignment::Center)
+    .flex_infinite_height(VerticalAlignment::Center)
 }
 
 /// The empty battery, alone on the screen, `lit` or not as it blinks. No

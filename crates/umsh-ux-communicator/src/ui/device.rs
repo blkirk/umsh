@@ -13,12 +13,14 @@ use heapless::String;
 use super::conversation::header;
 use super::setting::{End, card, choice, row};
 use crate::model::{ChatKind, Preset, RadioSettings, State};
-use crate::nav::{DevicePage, keys};
+use crate::nav::{DevicePage, Screen, keys};
 use crate::theme;
 
 const ROW: u32 = 36;
 /// Preset's choices.
 const PICKER_WIDTH: u32 = 260;
+/// Shut down's confirmation.
+const CONFIRM_WIDTH: u32 = 220;
 
 /// The categories, beside the rail.
 pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
@@ -27,6 +29,13 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         .iter()
         .filter(|c| matches!(c.kind, ChatKind::Channel { .. }))
         .count();
+    let confirm = matches!(
+        state.screen(),
+        Screen::Chats {
+            confirm_shut_down: true,
+            ..
+        }
+    );
     let mut joined: String<24> = String::new();
     _ = core::fmt::write(&mut joined, format_args!("{channels} joined"));
     let category = |name, key, act: fn(&mut State), value: &str| {
@@ -70,6 +79,14 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                 },
             ),
             category("Maintenance", keys::MAINTENANCE, |_| {}, ""),
+            row(
+                "Shut down",
+                keys::SHUT_DOWN,
+                State::ask_shut_down,
+                End::Nothing,
+                false,
+                ROW,
+            ),
         ))
         .with_spacing(0),
     )
@@ -83,6 +100,38 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         }
         _ => KeyResponse::Ignored,
     })
+    .popover(confirm.then_some(()).as_ref(), |()| {
+        shut_down_confirmation()
+    })
+}
+
+/// Shut down, confirmed, or Cancel, which is focused.
+// Out of line, as `setting::row` is, against the Xtensa back end's failure.
+#[inline(never)]
+fn shut_down_confirmation() -> impl View<Rgb565, State> + use<> {
+    let text = |text: &str| String::try_from(text).unwrap_or_default();
+    card(
+        VStack::new((
+            choice(
+                text("Shut down"),
+                keys::SHUT_DOWN_CONFIRM,
+                State::shut_down,
+                theme::TEXT,
+                None,
+            ),
+            choice(
+                text("Cancel"),
+                keys::SHUT_DOWN_CANCEL,
+                State::cancel_shut_down,
+                theme::TEXT,
+                None,
+            ),
+        ))
+        .with_spacing(0),
+        CONFIRM_WIDTH,
+        HorizontalAlignment::Center,
+        State::cancel_shut_down,
+    )
 }
 
 /// A screen under Device.

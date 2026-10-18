@@ -33,9 +33,22 @@ pub(crate) async fn gesture(event: ButtonEvent) {
 /// Say goodbye on the panel and switch it off, dropping `Vext` where the
 /// display task owns it. Bounded, so a wedged panel cannot strand a board
 /// that is turning off.
+// The Pager begins and ends it apart.
+#[cfg_attr(feature = "board-tlora-pager", allow(dead_code))]
 pub(crate) async fn farewell(cause: ShutdownCause) {
+    begin_farewell(cause);
+    end_farewell().await;
+}
+
+/// Starts the panel's farewell, so that it says what is happening while
+/// the rest of the board shuts down.
+pub(crate) fn begin_farewell(cause: ShutdownCause) {
     DISPLAY_SHUTDOWN_DONE.reset();
     DISPLAY_SHUTDOWN.signal(cause);
+}
+
+/// Waits for the farewell begun to finish with the panel off.
+pub(crate) async fn end_farewell() {
     let _ = with_timeout(Duration::from_secs(2), DISPLAY_SHUTDOWN_DONE.wait()).await;
 }
 

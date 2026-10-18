@@ -433,6 +433,16 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             "M0.25 -5.5 L-2.75 0.5 H-0.25 L-1.75 5.5 L2.75 -1 H0.25 Z",
         )],
     ),
+    // Shutting down's.
+    (
+        "POWER",
+        40,
+        2.0,
+        &[
+            stroke("M-4.6 -5.2 A7 7 0 1 0 4.6 -5.2", 1.6),
+            stroke("M0 -8.5 V-1.5", 1.6),
+        ],
+    ),
     // A battery with only its last cell left: the banner's at 22, and the
     // screen's when it is empty at five times that.
     ("BATTERY_LOW", 22, 1.0, BATTERY),

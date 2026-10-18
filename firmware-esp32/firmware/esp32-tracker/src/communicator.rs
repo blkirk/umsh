@@ -27,9 +27,11 @@ const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
 const ARRIVAL_AFTER_ARRIVAL: Duration = Duration::from_secs(40);
 /// How long the fixture's identity takes to arrive once asked for.
 const IDENTITY_DELAY: Duration = Duration::from_secs(2);
+/// How long Shutting down shows before the panel goes dark.
+const SHUTTING_DOWN: Duration = Duration::from_millis(1500);
 /// The empty battery's blink before the power path opens: how many times,
 /// and how long it is lit and dark each time. Inside the two seconds
-/// [`ui::farewell`](crate::ui::farewell) waits.
+/// [`ui::end_farewell`](crate::ui::end_farewell) waits.
 const EMPTY_BLINKS: u8 = 3;
 const EMPTY_LIT: Duration = Duration::from_millis(300);
 const EMPTY_DARK: Duration = Duration::from_millis(200);
@@ -126,6 +128,10 @@ pub(crate) async fn task(
                 if store.identity_asked() {
                     identity = Some(Instant::now() + IDENTITY_DELAY);
                 }
+                // Shut down, confirmed.
+                if app.state().ending.is_some() {
+                    SHUTDOWN_REQUEST.signal(ShutdownCause::Asked);
+                }
                 attention.wake(now())
             }
             Either4::Second(()) => attention.wake(now()),
@@ -210,8 +216,9 @@ fn battery_charging() -> bool {
     matches!(BATTERY_CHARGE.load(Ordering::Acquire), 2 | 3)
 }
 
-/// The board is turning off. With the battery empty, its icon blinks a few
-/// times first; either way the panel ends dark, and nothing more is drawn.
+/// The board is turning off, and the panel says so: Shutting down, or with
+/// the battery empty its icon blinking a few times. Then the panel goes
+/// dark, and nothing more is drawn.
 async fn farewell<V, F>(
     display: &mut Display,
     app: &mut App<V, State, F>,
@@ -221,19 +228,28 @@ where
     V: View<embedded_graphics::pixelcolor::Rgb565, State>,
     F: Fn(&State) -> V,
 {
-    if cause == ShutdownCause::BatteryEmpty {
-        let start = Instant::now();
-        let mut costs = Costs::default();
-        for _ in 0..EMPTY_BLINKS {
-            for (lit, hold) in [(true, EMPTY_LIT), (false, EMPTY_DARK)] {
-                app.state_mut().battery_empty(lit);
-                draw(display, app, start, &mut costs).await;
-                // Lit at full brightness, whatever the panel was doing.
-                if lit {
-                    let _ = display.set_brightness(Brightness::NORMAL).await;
-                    let _ = display.set_display_on(true).await;
+    let start = Instant::now();
+    let mut costs = Costs::default();
+    // Each frame shown lit at full brightness, whatever the panel was doing.
+    match cause {
+        ShutdownCause::Asked => {
+            app.state_mut().shutting_down();
+            draw(display, app, start, &mut costs).await;
+            let _ = display.set_brightness(Brightness::NORMAL).await;
+            let _ = display.set_display_on(true).await;
+            Timer::after(SHUTTING_DOWN).await;
+        }
+        ShutdownCause::BatteryEmpty => {
+            for _ in 0..EMPTY_BLINKS {
+                for (lit, hold) in [(true, EMPTY_LIT), (false, EMPTY_DARK)] {
+                    app.state_mut().battery_empty(lit);
+                    draw(display, app, start, &mut costs).await;
+                    if lit {
+                        let _ = display.set_brightness(Brightness::NORMAL).await;
+                        let _ = display.set_display_on(true).await;
+                    }
+                    Timer::after(hold).await;
                 }
-                Timer::after(hold).await;
             }
         }
     }

@@ -97,6 +97,10 @@ pub mod keys {
     pub const DISPLAY: FocusKey = FocusKey(DEVICE | 4);
     pub const PHONE_LINK: FocusKey = FocusKey(DEVICE | 5);
     pub const MAINTENANCE: FocusKey = FocusKey(DEVICE | 6);
+    pub const SHUT_DOWN: FocusKey = FocusKey(DEVICE | 7);
+    /// Shut down's confirmation.
+    pub const SHUT_DOWN_CONFIRM: FocusKey = FocusKey(0x1600_0000);
+    pub const SHUT_DOWN_CANCEL: FocusKey = FocusKey(0x1600_0001);
     /// The Radio screen's settings and readout, in order.
     pub const REGION: FocusKey = FocusKey(0x0E00_0000);
     pub const PRESET_ROW: FocusKey = FocusKey(0x0E00_0001);
@@ -270,6 +274,8 @@ pub enum Screen {
         row: Option<FocusKey>,
         /// What the Chats list is filtered by, while Find is open.
         find: Option<FindText>,
+        /// The Device list is asking to confirm Shut down.
+        confirm_shut_down: bool,
     },
     Conversation {
         chat: ChatId,
@@ -328,6 +334,7 @@ impl Screen {
             focus: FocusState::new(),
             row: None,
             find: None,
+            confirm_shut_down: false,
         }
     }
 
@@ -942,6 +949,44 @@ impl State {
     }
 
     /// Shows the joined channels, Add channel focused.
+    /// Asks to confirm turning the board off.
+    pub fn ask_shut_down(&mut self) {
+        if let Some(Screen::Chats {
+            confirm_shut_down,
+            focus,
+            ..
+        }) = self.screens.last_mut()
+        {
+            *confirm_shut_down = true;
+            focus.request(keys::SHUT_DOWN_CANCEL);
+        }
+    }
+
+    /// Keeps the board on after all.
+    pub fn cancel_shut_down(&mut self) {
+        if let Some(Screen::Chats {
+            confirm_shut_down,
+            focus,
+            ..
+        }) = self.screens.last_mut()
+        {
+            *confirm_shut_down = false;
+            focus.request(keys::SHUT_DOWN);
+        }
+    }
+
+    /// Turns the board off, confirmed: the screen says so, and the board,
+    /// finding [`State::ending`] set by an input, does it.
+    pub fn shut_down(&mut self) {
+        if let Some(Screen::Chats {
+            confirm_shut_down, ..
+        }) = self.screens.last_mut()
+        {
+            *confirm_shut_down = false;
+        }
+        self.shutting_down();
+    }
+
     pub fn open_channels(&mut self) {
         _ = self.screens.push(Screen::Device {
             page: DevicePage::Channels,

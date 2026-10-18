@@ -690,9 +690,19 @@ pub struct State {
     /// The chats that got messages while the panel was dark, in the order
     /// they first did, for the screen the first of them woke it to.
     pub arrived: Vec<Arrived, MAX_CHATS>,
-    /// The battery is empty and power is about to go: the screen shows only
-    /// that, its icon lit or not as the board blinks it.
-    pub battery_empty: Option<bool>,
+    /// The board is turning off: shown over everything, and the end of
+    /// input.
+    pub ending: Option<Ending>,
+}
+
+/// What the screen says as the board turns off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// Turning off as asked.
+    ShuttingDown,
+    /// The battery is empty: the screen shows only that, its icon lit or
+    /// not as the board blinks it.
+    BatteryEmpty { lit: bool },
 }
 
 impl core::fmt::Debug for State {
@@ -708,7 +718,7 @@ impl core::fmt::Debug for State {
             .field("banner", &self.banner)
             .field("dark", &self.dark)
             .field("arrived", &self.arrived)
-            .field("battery_empty", &self.battery_empty)
+            .field("ending", &self.ending)
             .finish_non_exhaustive()
     }
 }
@@ -731,7 +741,7 @@ impl State {
             banner: None,
             dark: false,
             arrived: Vec::new(),
-            battery_empty: None,
+            ending: None,
         }
     }
 
@@ -954,7 +964,12 @@ impl State {
 
     /// The battery is empty: the screen shows only its icon, `lit` or not.
     pub fn battery_empty(&mut self, lit: bool) {
-        self.battery_empty = Some(lit);
+        self.ending = Some(Ending::BatteryEmpty { lit });
+    }
+
+    /// The board is turning off as asked, and says so.
+    pub fn shutting_down(&mut self) {
+        self.ending = Some(Ending::ShuttingDown);
     }
 
     /// When the screen next changes by itself, on the board's clock.

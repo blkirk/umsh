@@ -645,8 +645,8 @@ static SCREEN_FADED: AtomicBool = AtomicBool::new(false);
 /// Why the board is turning itself off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShutdownCause {
-    /// The power-off hold.
-    Hold,
+    /// The user asked: the power-off hold, or the communicator's Shut down.
+    Asked,
     /// The battery stayed below its floor, with no external power. Only the
     /// Pager watches for that.
     #[cfg(feature = "board-tlora-pager")]
@@ -2301,7 +2301,7 @@ async fn button_task(mut button: Input<'static>) {
                 Disposition::Deliver if matches!(event, ButtonEvent::VeryLong) => {
                     pressed = false;
                     fsm = ButtonFsm::new(umsh_ux_display_tracker::button_timings());
-                    SHUTDOWN_REQUEST.signal(ShutdownCause::Hold);
+                    SHUTDOWN_REQUEST.signal(ShutdownCause::Asked);
                 }
                 Disposition::Deliver => ui::gesture(event).await,
             }

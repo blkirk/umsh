@@ -36,6 +36,10 @@ where
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
+    // The board is turning off.
+    if app.state().ending.is_some() {
+        return;
+    }
     match input {
         Input::Turn(detents) => {
             for _ in 0..detents.unsigned_abs() {

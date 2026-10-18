@@ -9,7 +9,7 @@ use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, FoundKind, Notice, Preset,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Notice, Preset,
     Reaction, Section, Shareable, State,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
@@ -1358,4 +1358,24 @@ fn the_strip_counts_thirds_centered_on_their_levels() {
     assert_eq!(battery_segments(82), 2);
     assert_eq!(battery_segments(83), 3);
     assert_eq!(battery_segments(100), 3);
+}
+
+#[test]
+fn shut_down_asks_first_and_then_ends_input() {
+    let mut app = app!();
+    run(&mut app, &[Input::Backspace, Input::Turn(2), Input::Press]);
+    run(&mut app, &[Input::Turn(7)]);
+    assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
+    // Cancel is focused, and Backspace cancels too.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN_CANCEL));
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
+    assert_eq!(app.state().ending, None);
+
+    run(&mut app, &[Input::Press, Input::Turn(-1), Input::Press]);
+    assert_eq!(app.state().ending, Some(Ending::ShuttingDown));
+    // Nothing moves under the card.
+    run(&mut app, &[Input::Turn(-3), Input::Backspace]);
+    assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
 }

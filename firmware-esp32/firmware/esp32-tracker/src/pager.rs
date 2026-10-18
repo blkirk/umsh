@@ -601,6 +601,7 @@ pub async fn heartbeat_task(
         }
     };
     debug_log(format_args!("shutdown: {cause:?}"));
+    ui::begin_farewell(cause);
     alert::shutdown().await;
     input::shutdown().await;
     #[cfg(not(feature = "motion-qualification"))]
@@ -611,7 +612,7 @@ pub async fn heartbeat_task(
         rtc.rwdt.feed();
     }
     DEVICE_CTL.shutdown();
-    ui::farewell(cause).await;
+    ui::end_farewell().await;
     // Journal writes are synchronous on this executor; no flash operation can
     // be suspended halfway here. MAC counters are persisted before transmission.
     // Inputs are reborrowed only for the terminal shutdown path; never driven.
