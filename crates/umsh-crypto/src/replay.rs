@@ -9,6 +9,8 @@
 //! duplicates eligible for an idempotent re-acknowledgement. It is used
 //! by the host MAC per peer and per identity, and by the device
 //! per provisioned host peer for detached acknowledgement delegation.
+//!
+//! Counters compare modulo 2^32, so a sender's counter may wrap.
 
 use heapless::Deque;
 
@@ -16,6 +18,11 @@ use heapless::Deque;
 pub const RECENT_MIC_CAPACITY: usize = 9;
 /// Backward-window size in counter slots (spec suggested default).
 pub const REPLAY_BACKTRACK_SLOTS: u32 = 8;
+/// Forward-window size: the furthest past the highest accepted counter a
+/// received counter may be (spec suggested default).
+pub const REPLAY_FORWARD_WINDOW: u32 = 172_800;
+// The two windows must not overlap anywhere on the counter circle.
+const _: () = assert!(REPLAY_FORWARD_WINDOW < u32::MAX - REPLAY_BACKTRACK_SLOTS);
 /// Out-of-order acceptance time bound (spec: 5 minutes).
 pub const REPLAY_STALE_MS: u64 = 5 * 60 * 1000;
 // ACK offsets reserve zero for "not queued" and cover the retention window.
@@ -64,6 +71,8 @@ pub struct ReplayWindow {
     pub backward_bitmap: u8,
     /// Accepted MICs retained for duplicate late-arrival checks.
     pub recent_mics: Deque<RecentMic, RECENT_MIC_CAPACITY>,
+    /// Whether a baseline is set. Until one is, any counter is accepted.
+    established: bool,
 }
 
 /// Result of checking a packet against a replay window.
@@ -71,9 +80,10 @@ pub struct ReplayWindow {
 pub enum ReplayVerdict {
     /// The packet is acceptable.
     Accept,
-    /// The exact counter/MIC pair was already accepted.
+    /// The counter is already spent: accepted before, or behind the
+    /// baseline the window was established at.
     Replay,
-    /// The counter is too far behind the tracked window.
+    /// The counter is in neither the forward nor the backward window.
     OutOfWindow,
     /// The replay state is too stale to safely accept backward-window traffic.
     Stale,
@@ -93,26 +103,28 @@ impl ReplayWindow {
             last_accepted_time_ms: 0,
             backward_bitmap: 0,
             recent_mics: Deque::new(),
+            established: false,
         }
     }
 
     /// Evaluate whether `counter` and `mic` are acceptable at `now_ms`.
     pub fn check(&self, counter: u32, mic: &[u8], now_ms: u64) -> ReplayVerdict {
-        if self.last_accepted_time_ms == 0 && self.recent_mics.is_empty() {
+        if !self.established {
             return ReplayVerdict::Accept;
         }
 
-        if counter > self.last_accepted {
+        let ahead = counter.wrapping_sub(self.last_accepted);
+        if (1..=REPLAY_FORWARD_WINDOW).contains(&ahead) {
             return ReplayVerdict::Accept;
+        }
+
+        let delta = self.last_accepted.wrapping_sub(counter);
+        if delta > REPLAY_BACKTRACK_SLOTS {
+            return ReplayVerdict::OutOfWindow;
         }
 
         if now_ms.wrapping_sub(self.last_accepted_time_ms) > REPLAY_STALE_MS {
             return ReplayVerdict::Stale;
-        }
-
-        let delta = self.last_accepted - counter;
-        if delta > REPLAY_BACKTRACK_SLOTS {
-            return ReplayVerdict::OutOfWindow;
         }
 
         let slot_occupied = if delta == 0 {
@@ -178,15 +190,20 @@ impl ReplayWindow {
         }
     }
 
-    /// Record an accepted `counter` and `mic` at `now_ms`.
+    /// Record an accepted `counter` and `mic` at `now_ms`. The first
+    /// counter a window accepts becomes its baseline, as with
+    /// [`reset`](Self::reset).
     pub fn accept(&mut self, counter: u32, mic: &[u8], now_ms: u64) {
         self.prune_recent_mics(now_ms);
 
-        if self.last_accepted_time_ms == 0 && self.recent_mics.is_empty() {
-            self.last_accepted = counter;
+        let ahead = counter.wrapping_sub(self.last_accepted);
+        let delta = self.last_accepted.wrapping_sub(counter);
+        if !self.established {
+            self.establish(counter, now_ms);
+        } else if ahead == 0 {
             self.last_accepted_time_ms = now_ms;
-        } else if counter > self.last_accepted {
-            let shift = (counter - self.last_accepted) as usize;
+        } else if ahead <= REPLAY_FORWARD_WINDOW {
+            let shift = ahead as usize;
             self.backward_bitmap = if shift > REPLAY_BACKTRACK_SLOTS as usize {
                 0
             } else {
@@ -199,13 +216,8 @@ impl ReplayWindow {
             };
             self.last_accepted = counter;
             self.last_accepted_time_ms = now_ms;
-        } else if counter < self.last_accepted {
-            let delta = self.last_accepted - counter;
-            if (1..=REPLAY_BACKTRACK_SLOTS).contains(&delta) {
-                self.backward_bitmap |= 1u8 << (delta - 1);
-            }
-        } else {
-            self.last_accepted_time_ms = now_ms;
+        } else if delta <= REPLAY_BACKTRACK_SLOTS {
+            self.backward_bitmap |= 1u8 << (delta - 1);
         }
 
         if let Some((normalized_mic, mic_len)) = normalize_mic(mic) {
@@ -224,10 +236,18 @@ impl ReplayWindow {
 
     /// Reset the replay window to a known baseline.
     pub fn reset(&mut self, baseline: u32, now_ms: u64) {
+        self.recent_mics.clear();
+        self.establish(baseline, now_ms);
+    }
+
+    /// Make `baseline` the highest accepted counter. Every counter behind
+    /// it counts as spent, backward window included: nothing older than a
+    /// baseline is accepted.
+    fn establish(&mut self, baseline: u32, now_ms: u64) {
         self.last_accepted = baseline;
         self.last_accepted_time_ms = now_ms;
-        self.backward_bitmap = 0;
-        self.recent_mics.clear();
+        self.backward_bitmap = u8::MAX;
+        self.established = true;
     }
 
     fn has_matching_recent_mic(&self, counter: u32, mic: &[u8], now_ms: u64) -> bool {
@@ -276,6 +296,71 @@ fn normalize_mic(mic: &[u8]) -> Option<([u8; 16], u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_window_bounds_how_far_ahead_a_counter_may_be() {
+        let mut window = ReplayWindow::new();
+        window.accept(10, &[1; 8], 1);
+        assert_eq!(
+            window.check(10 + REPLAY_FORWARD_WINDOW, &[2; 8], 2),
+            ReplayVerdict::Accept
+        );
+        assert_eq!(
+            window.check(10 + REPLAY_FORWARD_WINDOW + 1, &[2; 8], 2),
+            ReplayVerdict::OutOfWindow
+        );
+        // Accepting it anyway leaves the baseline where it was.
+        window.accept(10 + REPLAY_FORWARD_WINDOW + 1, &[2; 8], 2);
+        assert_eq!(window.last_accepted, 10);
+    }
+
+    #[test]
+    fn counters_compare_across_the_wrap() {
+        let mut window = ReplayWindow::new();
+        window.accept(u32::MAX - 1, &[1; 8], 1);
+        assert_eq!(window.check(2, &[2; 8], 2), ReplayVerdict::Accept);
+        window.accept(2, &[2; 8], 2);
+        assert_eq!(window.last_accepted, 2);
+        // Behind across the wrap: never seen and after the baseline...
+        assert_eq!(window.check(u32::MAX, &[3; 8], 3), ReplayVerdict::Accept);
+        // ...the baseline itself...
+        assert_eq!(
+            window.check(u32::MAX - 1, &[1; 8], 3),
+            ReplayVerdict::Replay
+        );
+        // ...and far behind.
+        assert_eq!(
+            window.check(u32::MAX - 10, &[4; 8], 3),
+            ReplayVerdict::OutOfWindow
+        );
+    }
+
+    #[test]
+    fn nothing_behind_a_baseline_is_accepted() {
+        // The first accepted counter, at any clock reading.
+        for now_ms in [0, 1_000] {
+            let mut window = ReplayWindow::new();
+            window.accept(10, &[1; 8], now_ms);
+            assert_eq!(window.check(9, &[2; 8], now_ms), ReplayVerdict::Replay);
+            assert_eq!(window.check(2, &[2; 8], now_ms), ReplayVerdict::Replay);
+            assert_eq!(window.check(1, &[2; 8], now_ms), ReplayVerdict::OutOfWindow);
+            // Reordering after the baseline is still tolerated.
+            window.accept(13, &[3; 8], now_ms);
+            assert_eq!(window.check(11, &[4; 8], now_ms), ReplayVerdict::Accept);
+            assert_eq!(window.check(10, &[4; 8], now_ms), ReplayVerdict::Replay);
+        }
+        // A reset baseline, as after a counter resynchronization.
+        for now_ms in [0, 1_000] {
+            let mut window = ReplayWindow::new();
+            window.reset(100, now_ms);
+            assert_eq!(window.check(99, &[2; 8], now_ms), ReplayVerdict::Replay);
+            assert_eq!(
+                window.check(50, &[2; 8], now_ms),
+                ReplayVerdict::OutOfWindow
+            );
+            assert_eq!(window.check(101, &[2; 8], now_ms), ReplayVerdict::Accept);
+        }
+    }
 
     #[test]
     fn ack_tracking_stays_within_replay_storage_budget() {

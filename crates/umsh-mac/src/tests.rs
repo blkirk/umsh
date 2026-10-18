@@ -2034,6 +2034,95 @@ fn persist_all_rx_counters_flushes_sub_block_boundaries_the_cadence_would_not() 
     assert_eq!(block_on(mac.persist_all_rx_counters()).unwrap(), 0);
 }
 
+/// A boundary restored from storage is a baseline: nothing behind it is
+/// accepted, the backward window included.
+#[test]
+fn restored_rx_boundary_rejects_counters_just_below_it() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_key = *remote.public_key();
+    let keys = mac.crypto().derive_pairwise_keys(&SharedSecret([0u8; 32]));
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+    mac.counter_store()
+        .loaded
+        .borrow_mut()
+        .insert([b"mac.rx:".as_slice(), &peer_key.0].concat(), 1_000);
+    mac.add_peer(peer_key).unwrap();
+    assert_eq!(block_on(mac.load_all_persisted_rx_counters()).unwrap(), 1);
+
+    let mut delivered = std::vec::Vec::new();
+    for counter in [995u32, 1_001] {
+        mac.radio_mut().queue_received_unicast_with_counter(
+            &remote,
+            &keys,
+            &dst_hint,
+            &counter.to_be_bytes(),
+            false,
+            counter,
+        );
+        let _ = block_on(mac.receive_one(|_, event| {
+            if let Some(packet) = received_of_type(&event, PacketType::Unicast) {
+                delivered.push(packet.payload_bytes().to_vec());
+            }
+        }));
+    }
+    assert_eq!(delivered, [1_001u32.to_be_bytes().to_vec()]);
+}
+
+/// A counter further ahead than the forward window is not accepted at
+/// face value. The peer is probed for its counter instead.
+#[test]
+fn counter_past_the_forward_window_is_probed_not_delivered() {
+    let mut mac = make_mac();
+    let local_id = mac.add_identity(DummyIdentity::new([0x10; 32])).unwrap();
+    let remote = DummyIdentity::new([0xAB; 32]);
+    let peer_id = mac.add_peer(*remote.public_key()).unwrap();
+    let keys = PairwiseKeys {
+        k_enc: [1; 32],
+        k_mic: [2; 32],
+    };
+    mac.install_pairwise_keys(local_id, peer_id, keys.clone())
+        .unwrap();
+    let dst_hint = mac
+        .identity(local_id)
+        .unwrap()
+        .identity()
+        .public_key()
+        .hint();
+
+    let mut delivered = std::vec::Vec::new();
+    for counter in [10, 10 + umsh_crypto::replay::REPLAY_FORWARD_WINDOW + 1] {
+        mac.radio_mut().queue_received_unicast_with_counter(
+            &remote,
+            &keys,
+            &dst_hint,
+            &counter.to_be_bytes(),
+            false,
+            counter,
+        );
+        let _ = block_on(mac.receive_one(|_, event| {
+            if let Some(packet) = received_of_type(&event, PacketType::Unicast) {
+                delivered.push(packet.payload_bytes().to_vec());
+            }
+        }));
+    }
+    assert_eq!(delivered, [10u32.to_be_bytes().to_vec()]);
+    let probe = mac
+        .tx_queue_mut()
+        .pop_next()
+        .expect("an out-of-window counter should be probed");
+    assert!(matches!(
+        decrypt_unicast_payload(probe.frame.as_slice(), &keys).as_slice(),
+        [payload_type, 4, ..] if *payload_type == PayloadType::MacCommand as u8
+    ));
+}
+
 #[test]
 fn drain_tx_queue_transmits_all_queued_frames_in_priority_order() {
     let mut mac = make_mac();
@@ -3634,9 +3723,19 @@ fn receive_one_resynchronizes_peer_counter_after_out_of_window_restart() {
         }))
         .unwrap()
     );
-    assert_eq!(delivered.len(), 2);
-    assert_eq!(delivered[0].as_slice(), response.as_slice());
-    assert_eq!(delivered[1].as_slice(), b"hello after reboot");
+    // The frame that provoked the probe stays dropped: its counter is
+    // behind the baseline the response set, and nothing behind a baseline
+    // is accepted.
+    assert_eq!(delivered, [response.to_vec()]);
+    mac.radio_mut().queue_received_unicast_with_counter(
+        &remote,
+        &keys,
+        &dst_hint,
+        b"hello after reboot",
+        false,
+        7,
+    );
+    assert!(!block_on(mac.receive_one(|_, _| {})).unwrap());
 
     mac.radio_mut().queue_received_unicast_with_counter(
         &remote,
@@ -8875,8 +8974,8 @@ fn modeled_multihop_counter_resync_routes_echo_request_and_response() {
     // Alice and Bob first learn routes in both directions. Alice then
     // "restarts" by rewinding its local frame counter and sending another
     // multi-hop packet. Bob should respond by issuing a routed Echo Request,
-    // and Alice should answer with a routed Echo Response. The direct
-    // deferred-packet replay behavior is covered in
+    // and Alice should answer with a routed Echo Response. What becomes of
+    // the frame that provoked the probe is covered in
     // `receive_one_resynchronizes_peer_counter_after_out_of_window_restart`.
     let mut scenario = build_modeled_line_scenario(6);
     let alice = 0usize;

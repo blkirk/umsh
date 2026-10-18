@@ -1,4 +1,3 @@
-use core::num::NonZeroU8;
 use core::{future::poll_fn, task::Poll};
 
 use hamaddr::HamAddr;
@@ -11,7 +10,7 @@ use umsh_core::{
     options::{OptionEncoder, TraceSignalEntry},
 };
 use umsh_crypto::{CryptoEngine, CryptoError, DerivedChannelKeys, NodeIdentity, PairwiseKeys};
-use umsh_hal::{Clock, CounterStore, Radio, RxBuffered, RxInfo, RxOrigin, Snr, TxError, TxOptions};
+use umsh_hal::{Clock, CounterStore, Radio, RxInfo, RxOrigin, Snr, TxError, TxOptions};
 
 use crate::{
     AddPeerError, CapacityError, DEFAULT_ACKS, DEFAULT_CHANNEL_HINT_REPLAY, DEFAULT_CHANNEL_REPLAY,
@@ -106,19 +105,6 @@ struct CompletedAck {
     trailer: [u8; 8],
     peer: PublicKey,
     at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DeferredCounterResyncFrame<const FRAME: usize> {
-    local_id: LocalIdentityId,
-    peer_id: PeerId,
-    frame: Vec<u8, FRAME>,
-    rssi: i16,
-    snr: Snr,
-    lqi: Option<NonZeroU8>,
-    origin: RxOrigin,
-    buffered: Option<RxBuffered>,
-    received_at_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1007,7 +993,6 @@ pub struct Mac<
     repeater: RepeaterConfig,
     operating_policy: OperatingPolicy,
     auto_register_full_key_peers: bool,
-    deferred_counter_resync_frame: Option<DeferredCounterResyncFrame<FRAME>>,
     counters: MacCounters,
 }
 
@@ -1059,7 +1044,6 @@ impl<
             repeater,
             operating_policy,
             auto_register_full_key_peers: false,
-            deferred_counter_resync_frame: None,
             counters: MacCounters::default(),
         }
     }
@@ -1439,8 +1423,8 @@ impl<
     }
 
     /// Removes a registered peer and every piece of per-peer transport state:
-    /// pairwise crypto, replay windows, pending counter resyncs, and any
-    /// deferred inbound frame. Returns whether the peer was registered.
+    /// pairwise crypto, replay windows, and pending counter resyncs. Returns
+    /// whether the peer was registered.
     ///
     /// The peer registry is dense, so removal moves the last entry into the
     /// freed slot; state keyed by the moved peer's old identifier is re-keyed
@@ -1452,13 +1436,6 @@ impl<
             return false;
         };
         self.clear_peer_slot_state(peer_id);
-        if self
-            .deferred_counter_resync_frame
-            .as_ref()
-            .is_some_and(|deferred| deferred.peer_id == peer_id)
-        {
-            self.deferred_counter_resync_frame = None;
-        }
         let Some(removal) = self.peer_registry.remove(peer_id) else {
             return false;
         };
@@ -2743,133 +2720,87 @@ impl<
             .buffered
             .map_or(0, |b| u64::from(b.age_s).saturating_mul(1000));
         let received_at_ms = self.clock.now_ms().saturating_sub(buffered_offset_ms);
-        let mut current_len = frame_len;
-        let mut current_rx = RxInfo {
-            len: frame_len,
-            rssi: rx.rssi,
-            snr: rx.snr,
-            lqi: rx.lqi,
-            origin: rx.origin,
-            buffered: rx.buffered,
+
+        let Ok(header) = PacketHeader::parse(&buf[..frame_len]) else {
+            return false;
         };
-        let mut current_received_at_ms = received_at_ms;
-        let mut handled_any = false;
-
-        loop {
-            let Ok(header) = PacketHeader::parse(&buf[..current_len]) else {
-                return handled_any;
+        // A piggy-backed Ack MIC option is read here, before any
+        // decryption, because it is aimed at whoever happens to be
+        // carrying the acknowledged packet—not at this frame's
+        // addressee.
+        self.cancel_forwards_for_ack_mic_option(&buf[..frame_len], &header);
+        let forwarding_confirmed = if let Some((identity_id, receipt)) =
+            self.observe_forwarding_confirmation(&buf[..frame_len])
+        {
+            let hint = match header.source {
+                SourceAddrRef::Hint(h) => Some(RouterHint([h.0[0], h.0[1]])),
+                SourceAddrRef::FullKeyAt { offset } => {
+                    let mut key_bytes = [0u8; 32];
+                    key_bytes.copy_from_slice(&buf[offset..offset + 32]);
+                    let h = PublicKey(key_bytes).hint();
+                    Some(RouterHint([h.0[0], h.0[1]]))
+                }
+                _ => None,
             };
-            // A piggy-backed Ack MIC option is read here, before any
-            // decryption, because it is aimed at whoever happens to be
-            // carrying the acknowledged packet—not at this frame's
-            // addressee.
-            self.cancel_forwards_for_ack_mic_option(&buf[..current_len], &header);
-            let forwarding_confirmed = if let Some((identity_id, receipt)) =
-                self.observe_forwarding_confirmation(&buf[..current_len])
-            {
-                let hint = match header.source {
-                    SourceAddrRef::Hint(h) => Some(RouterHint([h.0[0], h.0[1]])),
-                    SourceAddrRef::FullKeyAt { offset } => {
-                        let mut key_bytes = [0u8; 32];
-                        key_bytes.copy_from_slice(&buf[offset..offset + 32]);
-                        let h = PublicKey(key_bytes).hint();
-                        Some(RouterHint([h.0[0], h.0[1]]))
-                    }
-                    _ => None,
-                };
-                on_event(
+            on_event(
+                identity_id,
+                crate::MacEventRef::Forwarded {
                     identity_id,
-                    crate::MacEventRef::Forwarded {
-                        identity_id,
-                        receipt,
-                        hint,
-                    },
-                );
-                true
-            } else {
-                false
-            };
+                    receipt,
+                    hint,
+                },
+            );
+            true
+        } else {
+            false
+        };
 
-            let (handled, replay_target) = match header.packet_type() {
-                PacketType::Broadcast => (
-                    self.process_broadcast(
-                        buf,
-                        current_len,
-                        &header,
-                        &current_rx,
-                        current_received_at_ms,
-                        &mut on_event,
-                    ),
-                    None,
-                ),
-                PacketType::MacAck => (
-                    self.process_mac_ack(
-                        buf,
-                        current_len,
-                        &header,
-                        &current_rx,
-                        forwarding_confirmed,
-                        &mut on_event,
-                    ),
-                    None,
-                ),
-                PacketType::Unicast | PacketType::UnicastAckReq => {
-                    self.process_unicast(
-                        buf,
-                        current_len,
-                        &header,
-                        &current_rx,
-                        current_received_at_ms,
-                        forwarding_confirmed,
-                        &mut on_event,
-                    )
-                    .await
-                }
-                PacketType::Multicast => (
-                    self.process_multicast(
-                        buf,
-                        current_len,
-                        &header,
-                        &current_rx,
-                        current_received_at_ms,
-                        forwarding_confirmed,
-                        &mut on_event,
-                    ),
-                    None,
-                ),
-                PacketType::BlindUnicast | PacketType::BlindUnicastAckReq => {
-                    self.process_blind_unicast(
-                        buf,
-                        current_len,
-                        &header,
-                        &current_rx,
-                        current_received_at_ms,
-                        forwarding_confirmed,
-                        &mut on_event,
-                    )
-                    .await
-                }
-                PacketType::Reserved5 => (false, None),
-            };
-            handled_any |= handled;
-
-            let Some((local_id, peer_id)) = replay_target else {
-                return handled_any;
-            };
-            let Some(deferred) = self.take_deferred_counter_resync_frame(local_id, peer_id) else {
-                return handled_any;
-            };
-            current_len = deferred.frame.len();
-            buf[..current_len].copy_from_slice(deferred.frame.as_slice());
-            current_rx = RxInfo {
-                len: current_len,
-                rssi: deferred.rssi,
-                snr: deferred.snr,
-                lqi: deferred.lqi,
-                origin: deferred.origin,
-                buffered: deferred.buffered,
-            };
-            current_received_at_ms = deferred.received_at_ms;
+        match header.packet_type() {
+            PacketType::Broadcast => {
+                self.process_broadcast(buf, frame_len, &header, rx, received_at_ms, &mut on_event)
+            }
+            PacketType::MacAck => self.process_mac_ack(
+                buf,
+                frame_len,
+                &header,
+                rx,
+                forwarding_confirmed,
+                &mut on_event,
+            ),
+            PacketType::Unicast | PacketType::UnicastAckReq => {
+                self.process_unicast(
+                    buf,
+                    frame_len,
+                    &header,
+                    rx,
+                    received_at_ms,
+                    forwarding_confirmed,
+                    &mut on_event,
+                )
+                .await
+            }
+            PacketType::Multicast => self.process_multicast(
+                buf,
+                frame_len,
+                &header,
+                rx,
+                received_at_ms,
+                forwarding_confirmed,
+                &mut on_event,
+            ),
+            PacketType::BlindUnicast | PacketType::BlindUnicastAckReq => {
+                self.process_blind_unicast(
+                    buf,
+                    frame_len,
+                    &header,
+                    rx,
+                    received_at_ms,
+                    forwarding_confirmed,
+                    &mut on_event,
+                )
+                .await
+            }
+            PacketType::Reserved5 => false,
         }
     }
 
@@ -2985,10 +2916,9 @@ impl<
         received_at_ms: u64,
         forwarding_confirmed: bool,
         mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
-    ) -> (bool, Option<(LocalIdentityId, PeerId)>) {
+    ) -> bool {
         let mut original = [0u8; FRAME];
         original[..frame_len].copy_from_slice(&buf[..frame_len]);
-        let mut replay_target = None;
         let handled = if let Some(local_id) = self.find_local_identity_for_dst(header.dst) {
             let mut handled = false;
             for (peer_id, peer_key) in
@@ -3053,21 +2983,21 @@ impl<
                         );
                     }
                     Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
-                        if self.try_accept_counter_resync_response(
+                        if !self.try_accept_counter_resync_response(
                             local_id,
                             peer_id,
                             header,
                             &buf[..frame_len],
                             payload,
                         ) {
-                            replay_target = Some((local_id, peer_id));
-                        } else {
                             // Only initiate a counter resync if the backward
                             // gap is large enough that out-of-order delivery
                             // can't explain it. Small gaps (handful of packets)
                             // are silently dropped to avoid resync churn from
                             // normal mesh reordering. See
-                            // `COUNTER_RESYNC_GAP_THRESHOLD`.
+                            // `COUNTER_RESYNC_GAP_THRESHOLD`. The frame that
+                            // provokes a probe is dropped too: it falls behind
+                            // the baseline the resync sets.
                             let counter = Self::replay_metadata(header, &buf[..frame_len])
                                 .map(|(c, _)| c)
                                 .unwrap_or(0);
@@ -3079,13 +3009,6 @@ impl<
                                 })
                                 .unwrap_or(0);
                             if gap >= COUNTER_RESYNC_GAP_THRESHOLD {
-                                self.store_deferred_counter_resync_frame(
-                                    local_id,
-                                    peer_id,
-                                    &original[..frame_len],
-                                    rx,
-                                    received_at_ms,
-                                );
                                 self.maybe_request_counter_resync(
                                     local_id,
                                     peer_id,
@@ -3179,10 +3102,7 @@ impl<
             false
         };
         let forwarded = self.maybe_forward_received(&original[..frame_len], header, rx, handled);
-        (
-            handled || forwarding_confirmed || forwarded,
-            handled.then_some(()).and(replay_target),
-        )
+        handled || forwarding_confirmed || forwarded
     }
 
     fn process_multicast(
@@ -3292,10 +3212,9 @@ impl<
         received_at_ms: u64,
         forwarding_confirmed: bool,
         mut on_event: impl FnMut(LocalIdentityId, crate::MacEventRef<'_>),
-    ) -> (bool, Option<(LocalIdentityId, PeerId)>) {
+    ) -> bool {
         let mut original = [0u8; FRAME];
         original[..frame_len].copy_from_slice(&buf[..frame_len]);
-        let mut replay_target = None;
         let handled = if let Some(channel_id) = header.channel {
             let channel_candidates: Vec<(ChannelKey, DerivedChannelKeys), CHANNELS> = self
                 .channels
@@ -3384,22 +3303,15 @@ impl<
                                 );
                             }
                             Some(ReplayVerdict::OutOfWindow | ReplayVerdict::Stale) => {
-                                if self.try_accept_counter_resync_response(
+                                if !self.try_accept_counter_resync_response(
                                     local_id,
                                     peer_id,
                                     header,
                                     &buf[..frame_len],
                                     payload,
                                 ) {
-                                    replay_target = Some((local_id, peer_id));
-                                } else {
-                                    self.store_deferred_counter_resync_frame(
-                                        local_id,
-                                        peer_id,
-                                        &original[..frame_len],
-                                        rx,
-                                        received_at_ms,
-                                    );
+                                    // Dropped: it falls behind the baseline
+                                    // the resync sets.
                                     self.maybe_request_counter_resync(
                                         local_id,
                                         peer_id,
@@ -3509,10 +3421,7 @@ impl<
             false
         };
         let forwarded = self.maybe_forward_received(&original[..frame_len], header, rx, handled);
-        (
-            handled || forwarding_confirmed || forwarded,
-            handled.then_some(()).and(replay_target),
-        )
+        handled || forwarding_confirmed || forwarded
     }
 
     /// Non-blocking receive: polls the radio once and processes a frame if available.
@@ -4734,44 +4643,6 @@ impl<
         }
     }
 
-    fn store_deferred_counter_resync_frame(
-        &mut self,
-        local_id: LocalIdentityId,
-        peer_id: PeerId,
-        frame: &[u8],
-        rx: &RxInfo,
-        received_at_ms: u64,
-    ) {
-        let mut stored = Vec::new();
-        stored
-            .extend_from_slice(frame)
-            .expect("received frame length must fit configured frame capacity");
-        self.deferred_counter_resync_frame = Some(DeferredCounterResyncFrame {
-            local_id,
-            peer_id,
-            frame: stored,
-            rssi: rx.rssi,
-            snr: rx.snr,
-            lqi: rx.lqi,
-            origin: rx.origin,
-            buffered: rx.buffered,
-            received_at_ms,
-        });
-    }
-
-    fn take_deferred_counter_resync_frame(
-        &mut self,
-        local_id: LocalIdentityId,
-        peer_id: PeerId,
-    ) -> Option<DeferredCounterResyncFrame<FRAME>> {
-        match self.deferred_counter_resync_frame.as_ref() {
-            Some(deferred) if deferred.local_id == local_id && deferred.peer_id == peer_id => {
-                self.deferred_counter_resync_frame.take()
-            }
-            _ => None,
-        }
-    }
-
     fn accept_multicast_replay(
         &mut self,
         channel_id: ChannelId,
@@ -4826,11 +4697,6 @@ impl<
         for channel in self.channels.iter_mut() {
             if let Some(window) = channel.replay.remove(&old_id) {
                 let _ = channel.replay.insert(new_id, window);
-            }
-        }
-        if let Some(deferred) = self.deferred_counter_resync_frame.as_mut() {
-            if deferred.peer_id == old_id {
-                deferred.peer_id = new_id;
             }
         }
     }
