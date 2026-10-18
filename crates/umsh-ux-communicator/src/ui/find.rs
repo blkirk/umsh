@@ -10,7 +10,6 @@ use buoyant::font::PrerenderedFont;
 use buoyant::render::AreaColors;
 use buoyant::view::TextArea;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use buoyant::view::text_field::TextFieldStatus;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
@@ -60,7 +59,7 @@ pub fn view(state: &State, text: &FindText) -> impl View<Rgb565, State> + use<> 
             .focus_key(keys::FIND_FIELD)
             .padding(Edges::Horizontal, FIELD_INSET)
             .padding(Edges::Vertical, 3),
-        ScrollView::new(
+        super::list(
             ForEach::<MAX_FOUND>::new_vertical(&INDICES[..items], move |&i| {
                 let group = match (
                     found[i].kind.clone(),
@@ -74,8 +73,7 @@ pub fn view(state: &State, text: &FindText) -> impl View<Rgb565, State> + use<> 
                 result(i, &found[i], &query, group, tint && i == 0)
             })
             .keyed(|&i| keys::found(i)),
-        )
-        .with_bar_visibility(ScrollBarVisibility::Never),
+        ),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)

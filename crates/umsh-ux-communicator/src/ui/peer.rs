@@ -5,7 +5,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
 
@@ -35,7 +34,7 @@ pub fn view(
         None => {}
     }
     let name = summary.name.clone();
-    ScrollView::new(
+    super::list(
         VStack::new((
             detail_head(&summary.avatar, &summary.name, &about),
             label::<44>(
@@ -99,7 +98,6 @@ pub fn view(
         ))
         .with_spacing(0),
     )
-    .with_bar_visibility(ScrollBarVisibility::Never)
     .with_scroll_step(ROW)
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {

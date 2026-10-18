@@ -5,7 +5,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::Vec;
 
@@ -41,7 +40,7 @@ pub fn view(state: &State, title: &'static str) -> impl View<Rgb565, State> + us
     let count = names.len();
     VStack::new((
         header(title, None, None),
-        ScrollView::new(
+        super::list(
             ForEach::<MAX_REGIONS>::new_vertical(&INDICES[..count], move |&i| {
                 row(
                     names[i],
@@ -54,7 +53,6 @@ pub fn view(state: &State, title: &'static str) -> impl View<Rgb565, State> + us
             })
             .keyed(|&i| keys::region(i)),
         )
-        .with_bar_visibility(ScrollBarVisibility::Never)
         .with_scroll_step(ROW),
     ))
     .with_spacing(0)

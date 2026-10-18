@@ -4,7 +4,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::Vec;
 
@@ -39,11 +38,10 @@ pub fn view(chats: &Vec<ChatSummary, MAX_CHATS>) -> impl View<Rgb565, State> + u
     let rows = chats.clone();
     let ids: Vec<u32, MAX_CHATS> = chats.iter().map(|c| c.id).collect();
     let count = rows.len();
-    ScrollView::new(
+    super::list(
         ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| row(&rows[i]))
             .keyed(move |&i| keys::chat(ids[i])),
     )
-    .with_bar_visibility(ScrollBarVisibility::Never)
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {
         Key::Backspace => {

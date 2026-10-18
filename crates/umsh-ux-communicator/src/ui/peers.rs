@@ -4,7 +4,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::{String, Vec};
 
@@ -42,7 +41,7 @@ pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + u
     let rows = peers.clone();
     let ids: Vec<u32, MAX_PEERS> = peers.iter().map(|p| p.id).collect();
     let count = rows.len();
-    ScrollView::new(
+    super::list(
         VStack::new((
             add_row("Add peer", State::open_add_peer, keys::ADD_PEER, LIST_WIDTH),
             ForEach::<MAX_PEERS>::new_vertical(&INDICES[..count], move |&i| row(&rows[i]))
@@ -50,7 +49,6 @@ pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + u
         ))
         .with_spacing(0),
     )
-    .with_bar_visibility(ScrollBarVisibility::Never)
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {
         Key::Backspace => {

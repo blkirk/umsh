@@ -6,7 +6,6 @@ use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::match_view;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
 
@@ -46,7 +45,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         };
         row(name, key, act, end, false, ROW)
     };
-    ScrollView::new(
+    super::list(
         VStack::new((
             category(
                 "Identity",
@@ -90,7 +89,6 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         ))
         .with_spacing(0),
     )
-    .with_bar_visibility(ScrollBarVisibility::Never)
     .with_scroll_step(ROW)
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {
@@ -155,7 +153,7 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
     let preset = settings.preset;
     VStack::new((
         header("Radio", None, None),
-        ScrollView::new(
+        super::list(
             VStack::new((
                 row(
                     "Region",
@@ -200,7 +198,6 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
             ))
             .with_spacing(0),
         )
-        .with_bar_visibility(ScrollBarVisibility::Never)
         .with_scroll_step(ROW)
         .popover(picker.then_some(preset).as_ref(), presets),
     ))

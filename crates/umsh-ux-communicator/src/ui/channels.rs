@@ -4,7 +4,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::{String, Vec};
 
@@ -58,7 +57,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
     let count = rows.len();
     VStack::new((
         header("Channels", None, None),
-        ScrollView::new(
+        super::list(
             VStack::new((
                 add_row(
                     "Add channel",
@@ -70,8 +69,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                     .keyed(move |&i| keys::chat(ids[i])),
             ))
             .with_spacing(0),
-        )
-        .with_bar_visibility(ScrollBarVisibility::Never),
+        ),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)

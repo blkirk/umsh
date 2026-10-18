@@ -5,7 +5,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::Vec;
 
@@ -57,15 +56,14 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         .flex_infinite_width(HorizontalAlignment::Leading)
         .frame()
         .with_height(HEADING),
-        ScrollView::new(
+        super::list(
             ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| {
                 let (arrived, chat) = &cards[i];
                 card(arrived, chat)
             })
             .with_spacing(GAP)
             .keyed(move |&i| keys::chat(ids[i])),
-        )
-        .with_bar_visibility(ScrollBarVisibility::Never),
+        ),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)

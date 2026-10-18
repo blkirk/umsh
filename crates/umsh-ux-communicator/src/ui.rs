@@ -8,7 +8,9 @@ use buoyant::focus::{DefaultFocus, Role};
 use buoyant::font::PrerenderedFont;
 use buoyant::match_view;
 use buoyant::render::AnimatedJoin;
+use buoyant::view::ViewMarker;
 use buoyant::view::prelude::*;
+use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 
 use crate::model::{Ending, Section, State};
@@ -41,6 +43,18 @@ mod wake;
 pub const STRIP: u32 = 22;
 /// Width of the rail beside the top-level lists.
 pub const RAIL: u32 = 66;
+/// How much of the content past the focused row a list keeps in view, so
+/// that the next row shows cut by the edge where there is one.
+const LOOK_AHEAD: u32 = 12;
+
+/// A list that scrolls with focus, with no bar: the next row showing past
+/// the focused one says there is more.
+fn list<V: ViewMarker>(content: V) -> ScrollView<V> {
+    ScrollView::new(content)
+        .with_bar_visibility(ScrollBarVisibility::Never)
+        .with_focus_margin(LOOK_AHEAD)
+}
+
 /// The card that says the board is shutting down.
 const SHUTTING_DOWN_WIDTH: u32 = 220;
 

@@ -5,7 +5,6 @@
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
 use buoyant::view::prelude::*;
-use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
 
@@ -22,12 +21,11 @@ pub fn view(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<
     let details = details.clone();
     VStack::new((
         header("Message details", None, None),
-        ScrollView::new(
+        super::list(
             // One focusable block, which the wheel scrolls a row at a time.
             Button::new(|_: &mut State| {}, move |_| rows(&details, inbound))
                 .focus_key(keys::DETAIL_LIST),
         )
-        .with_bar_visibility(ScrollBarVisibility::Never)
         .with_scroll_step(ROW),
     ))
     .with_spacing(0)
