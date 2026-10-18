@@ -1,19 +1,22 @@
 //! The communicator interface on the Pager's panel, in place of the
-//! tracker's menus. For now it shows the fixture's chats with the board's
-//! own battery, taking in what the fixture says as it would a node's
-//! events, and reports what each frame costs: layout, painting, the panel
-//! transfer, and the least stack left free.
+//! tracker's menus, over the communicator's node. The node reaches the
+//! device's settings through the session's device link; chats arrive with
+//! the chat session. The task reports what each frame costs: layout,
+//! painting, the panel transfer, and the least stack left free.
 use super::*;
 use board::display::{Brightness, Display};
+use umsh_communicator::CommunicatorNode;
+use umsh_ulcp_admin::local::driver::DriverPort;
 use umsh_ux_communicator::buoyant::app::App;
 use umsh_ux_communicator::buoyant::render_target::{
     EmbeddedGraphicsRenderTarget, RenderTarget as _,
 };
 use umsh_ux_communicator::buoyant::view::View;
+use umsh_ux_communicator::heapless::String;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::{State, brightness_level};
-use umsh_ux_communicator::{fixture, theme, ui};
+use umsh_ux_communicator::model::{Node as _, State, brightness_level};
+use umsh_ux_communicator::{theme, ui};
 use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
 use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
 
@@ -21,10 +24,12 @@ use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
 const FRAME: Duration = Duration::from_millis(16);
 /// How often the costs are reported.
 const REPORT: Duration = Duration::from_secs(1);
-/// When the fixture's next message arrives, so that arrivals can be tried
-/// before a radio feeds the interface: soon after an input, while the panel
-/// is lit, and otherwise as the fixture paces them, once it has gone dark.
-const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
+/// How long the settings are waited for before anything is shown, and how
+/// often the node asks again while the driver's input is full.
+const PRIME_WAIT: Duration = Duration::from_secs(1);
+const PRIME_RETRY: Duration = Duration::from_millis(20);
+/// When the clock is not set, how often the strip looks again.
+const CLOCK_UNSET_RETRY: Duration = Duration::from_secs(60);
 /// How long Shutting down shows before the panel goes dark.
 const SHUTTING_DOWN: Duration = Duration::from_millis(1500);
 /// The empty battery's blink before the power path opens: how many times,
@@ -33,6 +38,14 @@ const SHUTTING_DOWN: Duration = Duration::from_millis(1500);
 const EMPTY_BLINKS: u8 = 3;
 const EMPTY_LIT: Duration = Duration::from_millis(300);
 const EMPTY_DARK: Duration = Duration::from_millis(200);
+
+/// The communicator's node, over the session's device link.
+pub(crate) type Node = CommunicatorNode<DriverPort<CriticalSectionRawMutex>>;
+
+/// The port into the session for [`Node`].
+pub(crate) const fn port() -> DriverPort<CriticalSectionRawMutex> {
+    DriverPort::new(&INPUT_CH, &DEVICE_LINK)
+}
 
 #[embassy_executor::task]
 pub(crate) async fn task(
@@ -47,16 +60,15 @@ pub(crate) async fn task(
     BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
 
     let start = Instant::now();
-    let store = external::communicator_fixture();
-    // The fixture's clock runs with the board's from here.
-    store.advance(Instant::now().as_millis());
+    let node = external::communicator_node();
+    prime(node).await;
     // The interface's state and both of its render trees are plain data
     // that only this task touches, and they are the largest thing it
     // holds: kept in the task, they would come out of the main stack.
     let app = external::communicator(|slot| {
         let app = App::new_in(
             slot,
-            fixture::state(store),
+            state(node),
             embedded_graphics::prelude::Size::new(theme::WIDTH, theme::HEIGHT).into(),
             ui::root_view,
         );
@@ -70,7 +82,6 @@ pub(crate) async fn task(
     app.state_mut()
         .battery(battery_percent(), battery_charging(), 0);
     let mut costs = Costs::default();
-    let node = app.state().node;
     // The panel's brightness level and the keyboard light, as last set.
     let mut lights = (brightness_level(node.brightness()), node.keyboard().light);
     let _ = display.set_brightness(Brightness::level(lights.0)).await;
@@ -87,9 +98,9 @@ pub(crate) async fn task(
         Instant::now().as_millis(),
     );
 
-    // When the fixture's clock next turns to a new minute, which ages are
-    // counted to.
-    let mut minute = Instant::now() + Duration::from_millis(store.millis_to_next_minute());
+    // When the clock next turns to a new minute, for the strip's time and
+    // the ages counted to it.
+    let mut minute = next_minute();
 
     loop {
         SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
@@ -98,7 +109,7 @@ pub(crate) async fn task(
         let wake_at = [
             attention.next_deadline(),
             app.state().next_deadline(),
-            store.next_deadline(),
+            node.next_deadline(),
             Some(minute.as_millis()),
         ]
         .into_iter()
@@ -109,7 +120,11 @@ pub(crate) async fn task(
             UI_INPUT_CH.receive(),
             UI_WAKE.wait(),
             Timer::at(wake_at),
-            select(BATTERY_UI_CHANGED.wait(), DISPLAY_SHUTDOWN.wait()),
+            select3(
+                BATTERY_UI_CHANGED.wait(),
+                DISPLAY_SHUTDOWN.wait(),
+                DEVICE_LINK.ready(),
+            ),
         )
         .await;
         // Whatever this changes animates from now, not from the last frame.
@@ -127,7 +142,6 @@ pub(crate) async fn task(
                     next = UI_INPUT_CH.try_receive().ok();
                 }
                 costs.layout = costs.layout.max(Instant::now() - began);
-                store.pace_arrivals((Instant::now() + ARRIVAL_AFTER_INPUT).as_millis());
                 // Shut down, confirmed.
                 if app.state().ending.is_some() {
                     SHUTDOWN_REQUEST.signal(ShutdownCause::Asked);
@@ -137,20 +151,27 @@ pub(crate) async fn task(
             Either4::Second(()) => attention.wake(now()),
             Either4::Third(()) => attention.poll(now()),
             // A reading redraws the strip but never lights the panel.
-            Either4::Fourth(Either::First(())) => {
+            Either4::Fourth(Either3::First(())) => {
                 app.state_mut()
                     .battery(battery_percent(), battery_charging(), now());
                 None
             }
-            Either4::Fourth(Either::Second(cause)) => farewell(&mut display, app, cause).await,
+            Either4::Fourth(Either3::Second(cause)) => farewell(&mut display, app, cause).await,
+            // The session answered, or published: the node takes it in
+            // below.
+            Either4::Fourth(Either3::Third(())) => None,
         };
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
         }
-        store.advance(now());
+        // What an input changed goes out, and what the session sent comes
+        // in as events, taken just below.
+        node.pump(now());
         if minute <= Instant::now() {
-            app.state_mut().set_wall_time(Some(store.time()));
-            minute = Instant::now() + Duration::from_millis(store.millis_to_next_minute());
+            let mut state = app.state_mut();
+            state.set_wall_time(umsh_hal::wall_clock::now());
+            state.status.time = clock();
+            minute = next_minute();
         }
         // Taken in while the panel is still dark, so that a message
         // arriving then is listed for the screen it wakes to.
@@ -200,6 +221,50 @@ pub(crate) async fn task(
         }
         costs.report(animating);
     }
+}
+
+/// Waits for the node's first read of the settings, so the first frame
+/// shows the device's name and brightness rather than defaults. A session
+/// not serving within [`PRIME_WAIT`] is shown with defaults, which its
+/// answers replace as they come.
+async fn prime(node: &Node) {
+    let deadline = Instant::now() + PRIME_WAIT;
+    while !node.primed() && Instant::now() < deadline {
+        node.pump(Instant::now().as_millis());
+        // The driver's input may have been full: try again shortly.
+        let _ = select(DEVICE_LINK.ready(), Timer::after(PRIME_RETRY)).await;
+    }
+    node.pump(Instant::now().as_millis());
+    // The settings the interface reads in building its state.
+    while node.next_event().is_some() {}
+}
+
+/// The interface's state over `node`, on the Chats screen.
+fn state(node: &'static Node) -> State {
+    let mut state = State::new(node);
+    state.status.device_name = node.device_name();
+    state.status.time = clock();
+    state.set_wall_time(umsh_hal::wall_clock::now());
+    state.reload();
+    state.focus_list();
+    state
+}
+
+/// The strip's time, `HH:MM` in the local zone, or nothing while the clock
+/// is not set.
+fn clock() -> String<8> {
+    let mut time = String::new();
+    if let Some((hours, minutes)) = umsh_hal::wall_clock::local_hhmm() {
+        let _ = core::fmt::write(&mut time, format_args!("{hours:02}:{minutes:02}"));
+    }
+    time
+}
+
+/// When the clock next turns to a new minute.
+fn next_minute() -> Instant {
+    Instant::now()
+        + umsh_hal::wall_clock::millis_to_next_minute()
+            .map_or(CLOCK_UNSET_RETRY, |ms| Duration::from_millis(u64::from(ms)))
 }
 
 /// The charge the board last read, in percent.

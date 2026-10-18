@@ -35,12 +35,6 @@ pub fn init(peripheral: esp_hal::peripherals::PSRAM<'static>) {
     }
 }
 
-/// The heap the communicator keeps message text on: plain bytes only.
-#[cfg(feature = "communicator")]
-pub const fn text_heap() -> &'static EspHeap {
-    &EXTERNAL
-}
-
 // Private: callers cannot accidentally put synchronization/DMA objects here.
 unsafe fn storage<T>() -> *mut T {
     let ptr = unsafe { EXTERNAL.alloc_caps(MemoryCapability::External.into(), Layout::new::<T>()) }
@@ -113,15 +107,15 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
     }
 }
 
-/// The chats the communicator shows until a node backs it: plain data,
-/// cells over tables of it, and counted text on [`text_heap`], touched only
-/// by the communicator task. Never inlined, as [`communicator`] is not.
+/// The communicator's node: its handles and queues, touched only by the
+/// communicator task. The settings it caches grow on the heap. Never
+/// inlined, as [`communicator`] is not.
 #[cfg(feature = "communicator")]
 #[inline(never)]
-pub fn communicator_fixture() -> &'static umsh_ux_communicator::fixture::Store {
+pub fn communicator_node() -> &'static super::communicator::Node {
     unsafe {
-        let ptr = storage::<umsh_ux_communicator::fixture::Store>();
-        ptr.write(umsh_ux_communicator::fixture::Store::new(text_heap()));
+        let ptr = storage::<super::communicator::Node>();
+        ptr.write(super::communicator::Node::new(super::communicator::port()));
         &*ptr
     }
 }

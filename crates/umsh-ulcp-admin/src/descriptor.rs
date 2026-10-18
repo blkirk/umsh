@@ -202,6 +202,28 @@ pub const COVERED: &[Descriptor] = &[
         Access::ReadWrite,
         1,
     ),
+    // The screen and the keyboard.
+    scalar(
+        prop::DISPLAY_BRIGHTNESS,
+        PropertyType::U8,
+        Some(cap::DISPLAY_BRIGHTNESS),
+        Access::ReadWrite,
+        1,
+    ),
+    scalar(
+        prop::KEYBOARD_LIGHT,
+        PropertyType::Bool,
+        Some(cap::KEYBOARD),
+        Access::ReadWrite,
+        1,
+    ),
+    scalar(
+        prop::KEYBOARD_AIDS,
+        PropertyType::U8,
+        Some(cap::KEYBOARD),
+        Access::ReadWrite,
+        1,
+    ),
     // The device identity's tables.
     table(prop::DEV_PEERS, cap::DEV_IDENTITY, 32, 32),
     table(prop::DEV_CHANNEL_KEYS, cap::DEV_IDENTITY, 32, 16),

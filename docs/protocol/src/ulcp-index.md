@@ -135,6 +135,9 @@ Id   | Mnemonic                                                                 
 4874 | [`PROP_BLE_PAIRING`](ulcp-ble.md#prop-ble-pairing)                                    | Get, Set, Is               | `CAP_BLE`
 4875 | [`PROP_DISPLAY_MOTION_WAKE_ENABLED`](ulcp-device.md#prop-display-motion-wake-enabled) | Get, Set, Is | `CAP_DISPLAY_MOTION_WAKE`
 4876 | [`PROP_TEMPERATURE_NAMES`](ulcp-device.md#prop-temperature-names) | Get | `CAP_TEMPERATURE`
+4877 | [`PROP_DISPLAY_BRIGHTNESS`](ulcp-device.md#prop-display-brightness)                   | Get, Set, Is               | `CAP_DISPLAY_BRIGHTNESS`
+4878 | [`PROP_KEYBOARD_LIGHT`](ulcp-device.md#prop-keyboard-light)                           | Get, Set, Is               | `CAP_KEYBOARD`
+4879 | [`PROP_KEYBOARD_AIDS`](ulcp-device.md#prop-keyboard-aids)                             | Get, Set, Is               | `CAP_KEYBOARD`
 4880 | [`PROP_WIFI_ENABLED`](ulcp-wifi.md#prop-wifi-enabled)                                 | Get, Set, Is               | `CAP_WIFI`
 4881 | [`PROP_WIFI_NETWORKS`](ulcp-wifi.md#prop-wifi-networks)                               | Get, Set, Insert, Remove   | `CAP_WIFI`
 4882 | [`PROP_WIFI_NETWORK`](ulcp-wifi.md#prop-wifi-network)                                 | Get, Set, Is               | `CAP_WIFI`
@@ -226,6 +229,8 @@ Code | Name                      | Defined in
 61   | `CAP_TEMPERATURE` | [Device Domain](ulcp-device.md#capabilities)
 62   | `CAP_MESHCORE_FORWARDER`  | [Device Domain](ulcp-device.md#capabilities)
 63   | `CAP_LAN_BEARER`          | [IP Multicast](ulcp-ip-multicast.md#capabilities)
+64   | `CAP_DISPLAY_BRIGHTNESS`  | [Device Domain](ulcp-device.md#capabilities)
+65   | `CAP_KEYBOARD`            | [Device Domain](ulcp-device.md#capabilities)
 515  | `CAP_PHY_LORA`            | [Radio Control](ulcp-radio.md#capabilities)
 
 ## Status Codes
@@ -269,6 +274,7 @@ Enumeration | Values | Defined in
 Filter types | 0 `FILTER_DEST_HINT`, 1 `FILTER_CHANNEL_ID`, 2 `FILTER_PKT_TYPE` | [`PROP_HOST_RX_FILTERS`](ulcp-host.md#prop-host-rx-filters)
 Charge states | 0 discharging, 1 charging, 2 charged, 3 not charging | [`PROP_BATTERY`](ulcp-device.md#prop-battery)
 Alert states | 0 `ALERT_NONE`, 1 `ALERT_LOCATE` | [`PROP_ALERT`](ulcp-device.md#prop-alert)
+Keyboard aids | bit 0 `KEYBOARD_AID_CAPITALIZE`, bit 1 `KEYBOARD_AID_PERIOD` | [`PROP_KEYBOARD_AIDS`](ulcp-device.md#prop-keyboard-aids)
 Fix quality | 0 none, 1 two-dimensional, 2 three-dimensional | [`PROP_GNSS_FIX`](ulcp-device.md#prop-gnss-fix)
 MeshCore region policies | 0 open, 1 scoped only, 2 ignore | [`PROP_MESHCORE_REGION_POLICY`](ulcp-device.md#prop-meshcore-region-policy)
 Transmit flags | bit 0 `TX_FLAG_NOCCA`, bit 1 `TX_FLAG_NODUTY` | [`STR_PHY_RAW`](ulcp-transport.md#str-radio-raw)

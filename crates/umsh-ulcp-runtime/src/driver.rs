@@ -37,6 +37,7 @@ use umsh_radio_loraphy::{
 };
 use umsh_ulcp::Status;
 use umsh_ulcp::i2c::{ScanRequest, TransferRequest};
+use umsh_ulcp_device::listeners::{Mirrors, Writes};
 use umsh_ulcp_device::{
     Effect, I2C_DATA_MAX, IdentitySource, MAX_CHANNEL_KEYS, MAX_DEV_ADMINS, MAX_DEV_PEERS,
     MAX_REPEATER_REGIONS, NETWORK_TABLE_MAX, QueuedNotice, REGION_STRING_MAX_LEN, RadioRxInfo,
@@ -998,6 +999,9 @@ pub struct DeviceRuntime<M: RawMutex + 'static, const RX: usize, const TX: usize
 struct Emitter {
     finish_ble_wipe: bool,
     completion: Option<crate::reply_completion::ReplyCompletion>,
+    /// The request being served changes properties, so its answers are
+    /// told to the listeners that did not ask.
+    mirror: bool,
     bufs: [[u8; FRAME_OUT_MAX]; 2],
     lens: [usize; 2],
     count: usize,
@@ -1008,6 +1012,7 @@ impl Emitter {
         Self {
             finish_ble_wipe: false,
             completion: None,
+            mirror: false,
             bufs: [[0; FRAME_OUT_MAX]; 2],
             lens: [0; 2],
             count: 0,
@@ -1051,20 +1056,39 @@ impl Emitter {
                     out,
                     device,
                 } => {
-                    if let Some(link) = device
-                        && is_publication(frame)
-                    {
-                        link.publish(frame);
+                    if let Some(link) = device {
+                        if is_publication(frame) {
+                            link.publish(frame);
+                        } else if self.mirror {
+                            let mut mirrors = Mirrors::new(frame);
+                            while let Some(mirror) = mirrors.next() {
+                                link.publish(mirror);
+                            }
+                        }
                     }
                     to_host.send(*destination, out, frame).await;
                 }
-                ReplySink::Admin { reply } => {
+                ReplySink::Admin {
+                    reply,
+                    destination,
+                    out,
+                    device,
+                } => {
                     // An exchange is one request and one response. A
                     // second frame would mean the session emitted
                     // something unsolicited, which this binding does not
                     // carry, so keep the first and account for the rest.
                     if reply.is_empty() {
                         let _ = reply.extend_from_slice(frame);
+                        if self.mirror {
+                            let mut mirrors = Mirrors::new(frame);
+                            while let Some(mirror) = mirrors.next() {
+                                if let Some(link) = device {
+                                    link.publish(mirror);
+                                }
+                                HostFrame::default().send(*destination, out, mirror).await;
+                            }
+                        }
                     } else {
                         debug_assert!(false, "admin exchange emitted more than one frame");
                     }
@@ -1080,6 +1104,12 @@ impl Emitter {
                         link.publish(frame);
                         HostFrame::default().send(*destination, out, frame).await;
                     } else {
+                        if self.mirror {
+                            let mut mirrors = Mirrors::new(frame);
+                            while let Some(mirror) = mirrors.next() {
+                                HostFrame::default().send(*destination, out, mirror).await;
+                            }
+                        }
                         // Queued is delivered: the interface is in process.
                         link.answer(frame).await;
                         if let Some(completion) = self.completion {
@@ -1167,8 +1197,15 @@ enum ReplySink<'a, M: RawMutex> {
     },
     /// The response frame of a Node Management exchange, staged for the
     /// responder that will envelope and transmit it. Empty when the
-    /// command produced no response, which is what a reset does.
-    Admin { reply: &'a mut AdminFrame },
+    /// command produced no response, which is what a reset does. What
+    /// the administrator changed reaches the attached host and the
+    /// device's own interface as publications.
+    Admin {
+        reply: &'a mut AdminFrame,
+        destination: Option<(Transport, u32)>,
+        out: &'a TransportChannels<M>,
+        device: Option<&'a DeviceLink<M>>,
+    },
     /// The device's own interface. Answers go back to it alone, and what
     /// the device publishes while serving it reaches the attached host
     /// too.
@@ -1518,6 +1555,12 @@ where
 {
     let mut dfu = None;
     let now_ms = Instant::now().as_millis();
+    let request = match exchange {
+        Exchange::Local(bytes) | Exchange::Admin { frame: bytes, .. } | Exchange::Device(bytes) => {
+            bytes
+        }
+    };
+    emitter.mirror = Writes::of(request).any;
     let mut pending = match exchange {
         Exchange::Local(bytes) => {
             session.handle_frame(bytes, now_ms, &mut |frame: &[u8]| emitter.push(frame))
@@ -1873,6 +1916,7 @@ where
     if session.queued_frame_count() == 0 {
         env.queue_emptied();
     }
+    emitter.mirror = false;
     dfu
 }
 
@@ -2196,7 +2240,12 @@ where
                 // declined to respond to at all.
                 let mut reply = AdminFrame::new();
                 let dfu = {
-                    let mut sink = ReplySink::Admin { reply: &mut reply };
+                    let mut sink = ReplySink::Admin {
+                        reply: &mut reply,
+                        destination: arbitration.destination(),
+                        out: rt.out,
+                        device: rt.device,
+                    };
                     serve_frame(
                         session,
                         Exchange::Admin {
@@ -2238,6 +2287,11 @@ where
                         &mut env,
                     )
                     .await;
+                    // A change made at the device keeps an existing
+                    // snapshot in step, as a switch flipped there does.
+                    if Writes::of(&frame).saved {
+                        persist_device_change(session, snapshot_buf, &mut env).await;
+                    }
                     finish_dfu(&mut env, dfu).await;
                 } else {
                     debug_assert!(false, "a device request on a board with no device link");
@@ -2438,9 +2492,103 @@ mod ble_reply_tests {
             let mut reply = AdminFrame::new();
             emitter.push(b"clear response");
             emitter
-                .flush(&mut ReplySink::<NoopRawMutex>::Admin { reply: &mut reply })
+                .flush(&mut ReplySink::<NoopRawMutex>::Admin {
+                    reply: &mut reply,
+                    destination: None,
+                    out: &out,
+                    device: None,
+                })
                 .await;
             assert_eq!(&reply[..], b"clear response");
+        });
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use umsh_ulcp::frame::{self, Frame, PropPayload};
+    use umsh_ulcp::ids::prop;
+
+    fn told(frame: &[u8]) -> (u8, u32, std::vec::Vec<u8>) {
+        let parsed = Frame::parse(frame).unwrap();
+        assert_eq!(parsed.command(), Some(umsh_ulcp::frame::Cmd::PropIs));
+        let payload = PropPayload::parse(parsed.payload).unwrap();
+        (parsed.header.tid(), payload.key, payload.value.to_vec())
+    }
+
+    /// A multi-set's answer is told one property at a time, without the
+    /// status that closed it, and only to the listeners that did not ask.
+    #[test]
+    fn a_multi_set_is_told_property_by_property() {
+        embassy_futures::block_on(async {
+            let out = TransportChannels::<NoopRawMutex>::new();
+            let link = DeviceLink::<NoopRawMutex>::new();
+            let mut answer = [0u8; 64];
+            let mut writer = frame::prop_are(&mut answer, 3).unwrap();
+            writer.write_entry(prop::PHY_LORA_SF, &[9]).unwrap();
+            writer.write_entry(prop::PHY_TX_POWER, &[20]).unwrap();
+            writer.write_status_entry(Status::INVALID_ARGUMENT).unwrap();
+            let len = writer.finish();
+
+            let mut emitter = Emitter::new();
+            emitter.mirror = true;
+            emitter.push(&answer[..len]);
+            emitter
+                .flush(&mut ReplySink::Device {
+                    link: &link,
+                    destination: Some((Transport::Usb, 1)),
+                    out: &out,
+                })
+                .await;
+            assert_eq!(
+                told(&out.wired.try_receive().unwrap().frame),
+                (0, prop::PHY_LORA_SF, vec![9])
+            );
+            assert_eq!(
+                told(&out.wired.try_receive().unwrap().frame),
+                (0, prop::PHY_TX_POWER, vec![20])
+            );
+            assert!(out.wired.try_receive().is_err());
+            let Some(DeviceFrame::Frame(asked)) = link.try_receive() else {
+                panic!("the interface was not answered");
+            };
+            assert_eq!(&asked[..], &answer[..len]);
+            assert!(link.try_receive().is_none());
+        });
+    }
+
+    /// An administrator's change reaches the attached host and the
+    /// device's own interface; its answer goes back across the mesh alone.
+    #[test]
+    fn an_administrators_change_reaches_both_listeners() {
+        embassy_futures::block_on(async {
+            let out = TransportChannels::<NoopRawMutex>::new();
+            let link = DeviceLink::<NoopRawMutex>::new();
+            let mut answer = [0u8; 32];
+            let len = frame::prop_is(&mut answer, 0, prop::DEV_NAME, b"Relay").unwrap();
+            let mut reply = AdminFrame::new();
+            let mut emitter = Emitter::new();
+            emitter.mirror = true;
+            emitter.push(&answer[..len]);
+            emitter
+                .flush(&mut ReplySink::Admin {
+                    reply: &mut reply,
+                    destination: Some((Transport::Ble, 1)),
+                    out: &out,
+                    device: Some(&link),
+                })
+                .await;
+            assert_eq!(&reply[..], &answer[..len]);
+            assert_eq!(
+                told(&out.ble.try_receive().unwrap().frame),
+                (0, prop::DEV_NAME, b"Relay".to_vec())
+            );
+            let Some(DeviceFrame::Frame(published)) = link.try_receive() else {
+                panic!("the interface was not told");
+            };
+            assert_eq!(told(&published), (0, prop::DEV_NAME, b"Relay".to_vec()));
         });
     }
 }

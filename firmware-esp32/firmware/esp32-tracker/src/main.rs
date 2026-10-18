@@ -450,6 +450,13 @@ fn session_config() -> SessionConfig {
             feature = "board-tlora-pager",
             not(feature = "motion-qualification")
         )),
+        // The communicator owns the screen's brightness and the keyboard,
+        // and applies what these hold.
+        #[cfg(feature = "communicator")]
+        display_brightness: Some(umsh_ux_communicator::model::brightness_at(5)),
+        #[cfg(not(feature = "communicator"))]
+        display_brightness: None,
+        keyboard: cfg!(feature = "communicator"),
         illuminance: false,
         temperatures: cfg!(feature = "chip-esp32s3"),
         // The ESP32-S3 radio is always up on this board, but the
@@ -569,6 +576,11 @@ const FRAME_IN_MAX: usize = driver::FRAME_IN_MAX;
 /// Outbound frame queues: `wired` drained by output_task (UART0), `ble`
 /// by the GATT connection writer.
 static OUT_CH: TransportChannels<CriticalSectionRawMutex> = TransportChannels::new();
+
+/// The communicator's way into the session: the answers to its requests,
+/// and everything the session publishes.
+#[cfg(feature = "communicator")]
+static DEVICE_LINK: driver::DeviceLink<CriticalSectionRawMutex> = driver::DeviceLink::new();
 
 /// Published session epoch, checked by each transport at framing edges.
 static SESSION_GEN: AtomicU32 = AtomicU32::new(0);
@@ -2184,6 +2196,9 @@ async fn device_task(
             ctl: &DEVICE_CTL,
             out: &OUT_CH,
             session_gen: &SESSION_GEN,
+            #[cfg(feature = "communicator")]
+            device: Some(&DEVICE_LINK),
+            #[cfg(not(feature = "communicator"))]
             device: None,
         },
         BoardDeviceEnv {

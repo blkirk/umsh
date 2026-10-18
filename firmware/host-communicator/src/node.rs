@@ -1,0 +1,121 @@
+//! The communicator's node behind the window, as the Pager runs it: its
+//! settings served by a soft device on this host, which keeps its saved
+//! state and identity in a directory.
+
+use std::cell::RefCell;
+use std::path::Path;
+use std::rc::Rc;
+use std::time::Instant;
+
+use umsh_communicator::CommunicatorNode;
+use umsh_ulcp::profiles;
+use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
+use umsh_ulcp_simdev::host::HostPlatform;
+use umsh_ulcp_simdev::soft::SoftDevice;
+use umsh_ulcp_simdev::{DutyLedger, LanBearerRole, RadioSettings, SessionConfig};
+use umsh_ux_communicator::model::{Node as _, State, brightness_at};
+
+/// A soft device's own interface, on the host's clock.
+pub struct Port {
+    device: Rc<RefCell<SoftDevice<HostPlatform>>>,
+    start: Instant,
+}
+
+impl LocalPort for Port {
+    fn send(&mut self, frame: &[u8]) -> Result<(), PortBusy> {
+        let now = self.start.elapsed().as_millis() as u64;
+        self.device.borrow_mut().device_request(frame, now);
+        Ok(())
+    }
+
+    fn receive(&mut self, out: &mut [u8]) -> Option<PortFrame> {
+        let frame = self.device.borrow_mut().take_device_frame()?;
+        out[..frame.len()].copy_from_slice(&frame);
+        Some(PortFrame::Frame(frame.len()))
+    }
+}
+
+pub type Node = CommunicatorNode<Port>;
+
+/// The device the window stands for: a communicator with no radio yet,
+/// on the default profile.
+fn config() -> SessionConfig {
+    SessionConfig {
+        dev_version: "host-communicator",
+        dev_model: None,
+        default_device_name: "Communicator",
+        mtu: 255,
+        tx_preamble_symbols: 32,
+        sync_word: profiles::DEFAULT.sync_word,
+        min_tx_power_dbm: -9,
+        max_tx_power_dbm: 22,
+        freq_khz_min: 150_000,
+        freq_khz_max: 960_000,
+        defaults: RadioSettings {
+            enabled: false,
+            freq_khz: profiles::DEFAULT.freq_khz,
+            bw_hz: profiles::DEFAULT.bw_hz,
+            sf: profiles::DEFAULT.sf,
+            cr_denom: profiles::DEFAULT.cr_denom,
+            tx_power_dbm: profiles::DEFAULT_TX_POWER_DBM,
+        },
+        default_duty_limit: 0xFFFF,
+        duty: Box::leak(Box::new(DutyLedger::new())),
+        battery_diagnostics: Default::default(),
+        battery: None,
+        alert: None,
+        time: None,
+        gnss: None,
+        display_motion_wake: false,
+        display_brightness: Some(brightness_at(5)),
+        keyboard: true,
+        illuminance: false,
+        temperatures: false,
+        ble: false,
+        ble_pairing: false,
+        ble_pin: false,
+        // The device is part of this process; there is nothing for
+        // `CMD_REBOOT` to restart.
+        reboot: false,
+        dev_identity: true,
+        stats: None,
+        // No node behind it yet, so nothing to forward with.
+        mac_node: false,
+        meshcore_forwarder: false,
+        lan_bearer: LanBearerRole::None,
+        wifi: None,
+        ip: None,
+        bridge_client: false,
+        i2c_buses: &[],
+        i2c_devices: &[],
+    }
+}
+
+/// A node over a soft device keeping its state under `dir`, with its
+/// settings read.
+pub fn open(dir: &Path, start: Instant) -> std::io::Result<&'static Node> {
+    let mut device = SoftDevice::new(config(), HostPlatform::new(dir)?);
+    device.open_device_interface();
+    let node: &'static Node = Box::leak(Box::new(CommunicatorNode::new(Port {
+        device: Rc::new(RefCell::new(device)),
+        start,
+    })));
+    node.pump(start.elapsed().as_millis() as u64);
+    while node.next_event().is_some() {}
+    Ok(node)
+}
+
+/// The interface's state over `node`, on the Chats screen.
+pub fn state(node: &'static Node) -> State {
+    let mut state = State::new(node);
+    state.status.device_name = node.device_name();
+    state.set_wall_time(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs() as u32),
+    );
+    state.reload();
+    state.focus_list();
+    state
+}

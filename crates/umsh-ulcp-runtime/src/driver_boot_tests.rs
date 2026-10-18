@@ -41,6 +41,8 @@ fn session(name: &'static str) -> TestSession {
             time: None,
             gnss: None,
             display_motion_wake: false,
+            display_brightness: None,
+            keyboard: false,
             illuminance: false,
             temperatures: false,
             ble: true,
@@ -395,9 +397,69 @@ fn device_changes_persist_only_over_a_current_snapshot() {
     }
 }
 
+/// A change made through the device's own interface keeps a current
+/// snapshot in step, as a switch flipped at the device does. A read, or a
+/// write of something the snapshot does not hold, writes nothing.
+#[test]
+fn device_interface_writes_keep_a_current_snapshot_in_step() {
+    use umsh_ulcp::{frame, ids::prop};
+    let mut saved = [0; SNAPSHOT_MAX];
+    let len = session("Saved radio").encode_snapshot(&mut saved).unwrap();
+    let saved = &saved[..len];
+    let link: &'static DeviceLink<NoopRawMutex> = Box::leak(Box::new(DeviceLink::new()));
+    let rt = DeviceRuntime {
+        input: Box::leak(Box::new(InputChannel::<NoopRawMutex>::new())),
+        radio: Box::leak(Box::new(Channels::<NoopRawMutex, 1, 1>::new())),
+        ctl: Box::leak(Box::new(DeviceControl::new())),
+        out: Box::leak(Box::new(TransportChannels::new())),
+        session_gen: Box::leak(Box::new(AtomicU32::new(0))),
+        device: Some(link),
+    };
+    let input = rt.input;
+    let events = Rc::new(RefCell::new(std::vec::Vec::new()));
+    let env = Env {
+        events: events.clone(),
+        older: None,
+        restore_gate: Box::leak(Box::new(Signal::new())),
+        name_gate: None,
+        dfu_result: Err(Status::UNIMPLEMENTED),
+    };
+    let mut session = session("Device change");
+    let mut storage = [0; SNAPSHOT_MAX];
+    let mut run = core::pin::pin!(run_with_storage(
+        &mut session,
+        &mut storage,
+        Some(saved),
+        Some([0x55; 32]),
+        rt,
+        env
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut request = |frame: &[u8]| {
+        assert!(
+            input
+                .try_send(InEvent::Device(FrameBuf::from_slice(frame).unwrap()))
+                .is_ok()
+        );
+        assert!(run.as_mut().poll(&mut cx).is_pending());
+        while link.try_receive().is_some() {}
+        let persisted = events.borrow().contains(&Event::SnapshotPersisted);
+        events.borrow_mut().clear();
+        persisted
+    };
+    let mut buf = [0u8; 64];
+    let len = frame::prop_get(&mut buf, 1, prop::DEV_NAME).unwrap();
+    assert!(!request(&buf[..len]), "a read");
+    let len = frame::prop_set(&mut buf, 2, prop::HOST_AUTO_ACK, &[1]).unwrap();
+    assert!(!request(&buf[..len]), "a write the snapshot does not hold");
+    let len = frame::prop_set(&mut buf, 3, prop::DEV_NAME, b"Pocket").unwrap();
+    assert!(request(&buf[..len]), "a saved setting");
+}
+
 /// The device's own interface is answered on its link and nowhere else,
-/// hears every publication the host hears, and is told when it fell too
-/// far behind to hear them all.
+/// hears every publication the host hears, hears what the host changes,
+/// and is told when it fell too far behind to hear them all. What it
+/// changes reaches the host as a change the host did not make.
 #[test]
 fn the_device_interface_is_answered_on_its_link_and_hears_every_publication() {
     use umsh_ulcp::{Frame, PropPayload, frame, ids::prop};
@@ -464,6 +526,8 @@ fn the_device_interface_is_answered_on_its_link_and_hears_every_publication() {
     };
     assert_eq!(parse(&answer), (3, prop::DEV_NAME, b"Pocket".to_vec()));
     assert!(link.try_receive().is_none(), "exactly one answer");
+    let told = out.wired.try_receive().expect("the host hears the change");
+    assert_eq!(parse(&told.frame), (0, prop::DEV_NAME, b"Pocket".to_vec()));
     assert!(out.wired.try_receive().is_err(), "the host hears no answer");
 
     // The host's own frames are still the host's: the exchange was not an
@@ -479,6 +543,28 @@ fn the_device_interface_is_answered_on_its_link_and_hears_every_publication() {
         link.try_receive().is_none(),
         "the host's answer is the host's"
     );
+
+    // What the host changes, the interface hears; the status that closes
+    // a refused write is the host's alone.
+    let len = frame::prop_set(&mut buf, 4, prop::DEV_NAME, b"Mine").unwrap();
+    step(Some(InEvent::Frame(
+        Transport::Usb,
+        FrameBuf::from_slice(&buf[..len]).unwrap(),
+    )));
+    let reply = out.wired.try_receive().expect("the host is answered");
+    assert_eq!(parse(&reply.frame), (4, prop::DEV_NAME, b"Mine".to_vec()));
+    let Some(DeviceFrame::Frame(told)) = link.try_receive() else {
+        panic!("the interface was not told of the host's change");
+    };
+    assert_eq!(parse(&told), (0, prop::DEV_NAME, b"Mine".to_vec()));
+    let len = frame::prop_set(&mut buf, 5, prop::PHY_LORA_SF, &[99]).unwrap();
+    step(Some(InEvent::Frame(
+        Transport::Usb,
+        FrameBuf::from_slice(&buf[..len]).unwrap(),
+    )));
+    let reply = out.wired.try_receive().expect("the host is answered");
+    assert_eq!(parse(&reply.frame).1, prop::LAST_STATUS);
+    assert!(link.try_receive().is_none(), "a refusal is not a change");
 
     // A publication reaches both.
     step(Some(InEvent::Toggle(Setting::Bluetooth)));

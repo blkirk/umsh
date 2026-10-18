@@ -1069,6 +1069,18 @@ device state can change for reasons the host did not initiate, and
 publication of the new authoritative value is how the protocol reports
 that.
 
+A request from another binding is one such reason. Whatever a request
+changes, the device **MUST** publish to everyone else listening—an
+attached host, and the device's [own interface](#device-interface)—
+whether the request came from one of them or from a [Node
+Management](app-node-management.md) administrator. Each property the
+answer reports goes out unsolicited, one at a time, as the answer
+reported it; the status that closes the request goes to the requester
+alone. This holds for every property: a property's *Asynchronous
+Updates* entry describes the changes the device makes for its own
+reasons. A fire-and-forget request (TID 0) on a local binding is not
+answered, and what it changes need not be published.
+
 The same applies to [`CMD_SESSION_RESET`](#cmd-session-reset), which
 reports the one change no property notification can: the session itself
 starting over. A host that receives one runs this procedure again.
@@ -1094,6 +1106,34 @@ such as a Unix domain socket:
   the socket where the operating system lets only the processes entitled
   to the device reach it—a file in a directory private to those
   processes—which stands in for physical possession.
+
+## The Device's Own Interface {#device-interface}
+
+A device with a settings interface of its own—a screen and keyboard, or a
+menu—may administer its own session in process, with the commands a host
+uses. The interface is a binding of its own:
+
+* **Authority.** Whoever is holding the device has physical possession,
+  which is a serial link's security binding (see [Provisioning
+  Security](#provisioning-security)). The interface may provision key
+  material, the device identity's private key included.
+* **Reach.** The device domain. Session state, the host domain, the raw
+  PHY stream, and the receive queue belong to whichever host is tethered,
+  and the device answers the interface's writes to them with
+  `STATUS_NOT_PERMITTED`, as it answers an
+  [administrator's](app-node-management.md#authorization).
+* **A local binding.** The device answers every request that carries a
+  non-zero TID exactly once.
+* **Not an attach.** Its requests reset no session state, emit no
+  `CMD_SESSION_RESET`, and displace no attached host.
+* **Publications.** The interface hears everything the device publishes,
+  whether or not a host is attached, including what an attached host or
+  an administrator changes. What the interface changes reaches an attached
+  host the same way (see [Attach, Detach, and
+  Synchronization](#attach-sync)).
+
+What the interface changes is saved as anything set at the device is (see
+[Changes Made at the Device](ulcp-saved-state.md#changes-made-at-the-device)).
 
 ## Provisioning Security {#provisioning-security}
 
@@ -1389,6 +1429,8 @@ Code | Name                      | Requires                             | Define
 61   | `CAP_TEMPERATURE` | — | [Device Domain](ulcp-device.md#capabilities)
 62   | `CAP_MESHCORE_FORWARDER`  | `CAP_REPEATER`                       | [Device Domain](ulcp-device.md#capabilities)
 63   | `CAP_LAN_BEARER`          | —                                    | [IP Multicast](ulcp-ip-multicast.md#capabilities)
+64   | `CAP_DISPLAY_BRIGHTNESS`  | —                                    | [Device Domain](ulcp-device.md#capabilities)
+65   | `CAP_KEYBOARD`            | —                                    | [Device Domain](ulcp-device.md#capabilities)
 515  | `CAP_PHY_LORA`            | —                                    | [Radio Control](ulcp-radio.md#capabilities)
 
 A device **MUST NOT** advertise a capability without also advertising the

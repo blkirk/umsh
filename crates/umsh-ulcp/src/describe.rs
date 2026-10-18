@@ -126,6 +126,9 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::BLE_LINK => "PROP_BLE_LINK",
         prop::BLE_PAIRING => "PROP_BLE_PAIRING",
         prop::DISPLAY_MOTION_WAKE_ENABLED => "PROP_DISPLAY_MOTION_WAKE_ENABLED",
+        prop::DISPLAY_BRIGHTNESS => "PROP_DISPLAY_BRIGHTNESS",
+        prop::KEYBOARD_LIGHT => "PROP_KEYBOARD_LIGHT",
+        prop::KEYBOARD_AIDS => "PROP_KEYBOARD_AIDS",
         prop::WIFI_ENABLED => "PROP_WIFI_ENABLED",
         prop::BRIDGE_ENABLED => "PROP_BRIDGE_ENABLED",
         prop::BRIDGE_HOST => "PROP_BRIDGE_HOST",
@@ -275,6 +278,9 @@ pub const PROPERTIES: &[u32] = &[
     prop::BLE_LINK,
     prop::BLE_PAIRING,
     prop::DISPLAY_MOTION_WAKE_ENABLED,
+    prop::DISPLAY_BRIGHTNESS,
+    prop::KEYBOARD_LIGHT,
+    prop::KEYBOARD_AIDS,
     prop::WIFI_ENABLED,
     prop::WIFI_NETWORKS,
     prop::WIFI_NETWORK,
@@ -407,6 +413,10 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         // A minimal-length signed integer, which is its own encoding.
         prop::IDENT_ALTITUDE => Bytes,
         prop::GNSS_ENABLED | prop::DISPLAY_MOTION_WAKE_ENABLED => Bool,
+        prop::DISPLAY_BRIGHTNESS => U8,
+        prop::KEYBOARD_LIGHT => Bool,
+        // A bitmap, shown as its octet.
+        prop::KEYBOARD_AIDS => U8,
         prop::GNSS_ALTITUDE => I32,
         prop::GNSS_FIX => U8,
         prop::GNSS_PRECISION => U16,
@@ -518,6 +528,8 @@ pub const fn capability_name(code: u32) -> Option<&'static str> {
         cap::I2C => "I2C",
         cap::MESHCORE_FORWARDER => "MESHCORE_FORWARDER",
         cap::LAN_BEARER => "LAN_BEARER",
+        cap::DISPLAY_BRIGHTNESS => "DISPLAY_BRIGHTNESS",
+        cap::KEYBOARD => "KEYBOARD",
         _ => return None,
     })
 }
@@ -710,6 +722,18 @@ mod tests {
     }
 
     #[test]
+    fn display_and_keyboard_properties_have_names_and_types() {
+        assert_eq!(property_name(4877), Some("PROP_DISPLAY_BRIGHTNESS"));
+        assert_eq!(property_type(4877), Some(PropertyType::U8));
+        assert_eq!(property_name(4878), Some("PROP_KEYBOARD_LIGHT"));
+        assert_eq!(property_type(4878), Some(PropertyType::Bool));
+        assert_eq!(property_name(4879), Some("PROP_KEYBOARD_AIDS"));
+        assert_eq!(property_type(4879), Some(PropertyType::U8));
+        assert_eq!(capability_name(64), Some("DISPLAY_BRIGHTNESS"));
+        assert_eq!(capability_name(65), Some("KEYBOARD"));
+    }
+
+    #[test]
     fn describes_status_and_malformed_frames() {
         let mut buf = [0u8; 8];
         let len = frame::last_status(&mut buf, 4, Status::OK).unwrap();
@@ -850,7 +874,8 @@ mod tests {
             Some("MESHCORE_FORWARDER")
         );
         assert_eq!(capability_name(cap::LAN_BEARER), Some("LAN_BEARER"));
-        assert_eq!(capability_name(cap::LAN_BEARER + 1), None);
+        assert_eq!(capability_name(cap::KEYBOARD), Some("KEYBOARD"));
+        assert_eq!(capability_name(cap::KEYBOARD + 1), None);
     }
 
     #[test]

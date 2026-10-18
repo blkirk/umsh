@@ -313,6 +313,11 @@ impl SimulatedDevice {
         self.device.take_device_frame()
     }
 
+    /// The snapshot in the device's storage, if one has been saved.
+    pub fn saved_snapshot(&self) -> Option<&[u8]> {
+        self.device.platform().snapshot.as_deref()
+    }
+
     /// Flip a switch at the device, as a board's own control would,
     /// publishing the transition to everyone listening.
     pub fn toggle_ble(&mut self) {
@@ -893,6 +898,8 @@ mod tests {
             time: Some(TimeConfig),
             gnss: Some(GnssConfig::DEFAULT),
             display_motion_wake: false,
+            display_brightness: Some(128),
+            keyboard: true,
             illuminance: true,
             temperatures: true,
             ble: true,

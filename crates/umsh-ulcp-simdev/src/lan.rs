@@ -79,6 +79,8 @@ pub fn session_config(dev_version: &'static str) -> SessionConfig {
         time: None,
         gnss: None,
         display_motion_wake: false,
+        display_brightness: None,
+        keyboard: false,
         illuminance: false,
         temperatures: false,
         ble: false,

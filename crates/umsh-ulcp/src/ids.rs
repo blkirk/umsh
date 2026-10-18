@@ -447,6 +447,18 @@ pub mod prop {
 
     /// Saved orientation-qualified display wake, BOOL, default true.
     pub const DISPLAY_MOTION_WAKE_ENABLED: u32 = 4875;
+    /// The screen's brightness (`PROP_DISPLAY_BRIGHTNESS`)—UINT8, 255
+    /// the brightest. 0 is the dimmest level that is not off; an e-paper
+    /// front light is off at 0 and the screen stays readable. Saved.
+    /// Requires `CAP_DISPLAY_BRIGHTNESS`.
+    pub const DISPLAY_BRIGHTNESS: u32 = 4877;
+    /// Whether the keyboard is lit while the screen is
+    /// (`PROP_KEYBOARD_LIGHT`)—BOOL. Saved. Requires `CAP_KEYBOARD`.
+    pub const KEYBOARD_LIGHT: u32 = 4878;
+    /// The typing aids in effect (`PROP_KEYBOARD_AIDS`)—UINT8 bitmap of
+    /// [`keyboard_aids`](super::keyboard_aids) flags; the reserved bits
+    /// are zero. Saved. Requires `CAP_KEYBOARD`.
+    pub const KEYBOARD_AIDS: u32 = 4879;
 
     /// Whether the Wi-Fi station is up (`PROP_WIFI_ENABLED`), BOOL,
     /// default 0. Requires `CAP_WIFI`.
@@ -862,6 +874,22 @@ pub mod cap {
     /// [`REPEATER`] forwards between the group and its LoRa radio, and has
     /// `PROP_LAN_BEARER_ENABLED` and `PROP_LAN_BEARER_INGRESS_LIMIT` too.
     pub const LAN_BEARER: u32 = 63;
+    /// `CAP_DISPLAY_BRIGHTNESS`: the screen's brightness can be set
+    /// (`PROP_DISPLAY_BRIGHTNESS`).
+    pub const DISPLAY_BRIGHTNESS: u32 = 64;
+    /// `CAP_KEYBOARD`: the device has a keyboard of its own
+    /// (`PROP_KEYBOARD_LIGHT`, `PROP_KEYBOARD_AIDS`).
+    pub const KEYBOARD: u32 = 65;
+}
+
+/// `PROP_KEYBOARD_AIDS` flags.
+pub mod keyboard_aids {
+    /// Shift arms itself at the start of a sentence.
+    pub const CAPITALIZE: u8 = 0x01;
+    /// A double space after a word types a period.
+    pub const PERIOD: u8 = 0x02;
+    /// Every flag defined; the rest are reserved and zero.
+    pub const ALL: u8 = CAPITALIZE | PERIOD;
 }
 
 /// Whether a property is writable by a mesh administrator.

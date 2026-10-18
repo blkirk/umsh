@@ -184,9 +184,16 @@ external-rtc = []
 display-st7796 = ["display"]
 
 # The communicator interface (`umsh-ux-communicator`) in place of the
-# tracker's menus, for a board with a color screen and a keyboard. While
-# it is being brought up it shows fixture data and logs what it costs.
-communicator = ["display", "dep:umsh-ux-communicator"]
+# tracker's menus, for a board with a color screen and a keyboard, over the
+# communicator's node (`umsh-communicator`), which reaches the device's
+# settings through its own ULCP session. While it is being brought up it
+# logs what it costs.
+communicator = [
+    "display",
+    "dep:umsh-ux-communicator",
+    "dep:umsh-communicator",
+    "dep:umsh-ulcp-admin",
+]
 # Multiplex driver diagnostics as ASCII lines onto the wired output
 # stream (HDLC hosts resynchronize past them).
 debug-log = []
@@ -228,7 +235,9 @@ umsh-radio-loraphy = { path = "../../../crates/umsh-radio-loraphy", default-feat
 umsh-rtc-pcf8563 = { path = "../../../crates/umsh-rtc-pcf8563" }
 umsh-ux-tracker = { path = "../../../crates/umsh-ux-tracker" }
 umsh-ux-display-tracker = { path = "../../../crates/umsh-ux-display-tracker", features = ["screen"] }
-umsh-ux-communicator = { path = "../../../crates/umsh-ux-communicator", optional = true, features = ["fixture"] }
+umsh-ux-communicator = { path = "../../../crates/umsh-ux-communicator", optional = true }
+umsh-communicator = { path = "../../../crates/umsh-communicator", optional = true, features = ["node"] }
+umsh-ulcp-admin = { path = "../../../crates/umsh-ulcp-admin", optional = true, features = ["driver"] }
 # The device node: a full on-board MAC/node stack for the device
 # identity (device_node.rs), sharing the radio through the mux.
 umsh-core = { path = "../../../crates/umsh-core", default-features = false }

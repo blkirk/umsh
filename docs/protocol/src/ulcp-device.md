@@ -61,6 +61,8 @@ Code | Name               | Requires           | Grants
 59   | `CAP_DISPLAY_MOTION_WAKE` | — | Orientation-qualified display wake and `PROP_DISPLAY_MOTION_WAKE_ENABLED`
 61 | `CAP_TEMPERATURE` | — | `PROP_TEMPERATURES` and `PROP_TEMPERATURE_NAMES`; the inventory may initially be empty
 62 | `CAP_MESHCORE_FORWARDER` | `CAP_REPEATER` | [MeshCore forwarding](#meshcore-forwarding): `PROP_MESHCORE_FORWARDING_ENABLED`, `PROP_MESHCORE_REGION_POLICY`, `PROP_MESHCORE_REGIONS`; with `CAP_STATS`, the [MeshCore counters](ulcp-radio.md#prop-stat-meshcore-seen)
+64 | `CAP_DISPLAY_BRIGHTNESS` | — | A screen whose brightness can be set, and [`PROP_DISPLAY_BRIGHTNESS`](#prop-display-brightness)
+65 | `CAP_KEYBOARD` | — | A keyboard of the device's own: [`PROP_KEYBOARD_LIGHT`](#prop-keyboard-light), [`PROP_KEYBOARD_AIDS`](#prop-keyboard-aids)
 
 `CAP_ADVERT` requires `CAP_DEV_IDENTITY` because what an advertisement
 carries *is* the device identity, and a beacon's source address names
@@ -228,6 +230,10 @@ Id | Mnemonic                    | Commands                 | Description
 94 | `PROP_ILLUMINANCE`          | Get                      | Ambient illuminance in millilux
 95 | `PROP_TEMPERATURES` | Get | Ordered temperature readings in tenths of kelvin
 4876 | `PROP_TEMPERATURE_NAMES` | Get | Ordered temperature sensor names
+4875 | `PROP_DISPLAY_MOTION_WAKE_ENABLED` | Get, Set, Is | Whether movement wakes the display
+4877 | `PROP_DISPLAY_BRIGHTNESS` | Get, Set, Is             | Screen brightness
+4878 | `PROP_KEYBOARD_LIGHT`     | Get, Set, Is             | Whether the keyboard is lit while the screen is
+4879 | `PROP_KEYBOARD_AIDS`      | Get, Set, Is             | Typing aids in effect
 4866 | `PROP_TIME`               | Get, Set, Is             | Wall clock, or empty when unknown
 4867 | `PROP_TZ_OFFSET`          | Get, Set                 | Local time-zone offset from UTC
 4868 | `PROP_GNSS_IDENT_UPDATE`  | Get, Set                 | Whether fixes update the advertised node identity
@@ -1987,9 +1993,9 @@ accelerometer power: another consumer may still need movement detection when
 this property is false. It is included in `CMD_SAVE`, restored with the device
 configuration, and has a platform default of true after clearing saved state.
 `CMD_RST` follows the existing saved-state restore rules. A saved snapshot
-missing the property uses the platform default. A local toggle updates an
-existing saved snapshot, following the other local switches; it does not create
-a snapshot when none exists.
+missing the property uses the platform default. A local toggle is saved as
+[Changes Made at the Device](ulcp-saved-state.md#changes-made-at-the-device)
+describes.
 
 The display wakes only from its fully lapsed state. Movement while active or
 dim consumes the episode without refreshing the attention timeout. Disabling
@@ -2015,3 +2021,58 @@ samples; small oscillations do not accumulate. This check belongs to the display
 policy and does not suppress native movement observations for other consumers.
 Exceptionally slow pickups, or pickups completed before verification begins,
 may not qualify. This does not identify every kind of bed or pocket movement.
+
+## Display Brightness and Keyboard
+
+A device with a screen and keyboard of its own exposes their settings in
+the device domain, so they are saved with the rest of its configuration
+and reachable from wherever it is administered.
+
+### PROP 4877: `PROP_DISPLAY_BRIGHTNESS` {#prop-display-brightness}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: Yes
+* Required: `CAP_DISPLAY_BRIGHTNESS`
+* Value Type: UINT8
+* Post-Reset Value: device-defined, or restored from saved state
+
+The screen's brightness. 255 is the brightest the screen goes, and 0 the
+dimmest level that is not off: brightness never turns a screen dark. On a
+screen that is readable unlit, such as e-paper under a front light, 0
+turns the light off.
+
+The levels in between are the device's to map onto its screen, and it
+reports the value written.
+
+### PROP 4878: `PROP_KEYBOARD_LIGHT` {#prop-keyboard-light}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: Yes
+* Required: `CAP_KEYBOARD`
+* Value Type: BOOL
+* Post-Reset Value: 1 (true), or restored from saved state
+
+Whether the keyboard is lit while the screen is. A dark screen leaves the
+keyboard dark either way.
+
+### PROP 4879: `PROP_KEYBOARD_AIDS` {#prop-keyboard-aids}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: Yes
+* Required: `CAP_KEYBOARD`
+* Value Type: UINT8
+* Post-Reset Value: 3 (every aid), or restored from saved state
+
+The typing aids in effect, as a bitmap:
+
+Bit | Name | Aid
+---|---|---
+0 (`0x01`) | `KEYBOARD_AID_CAPITALIZE` | The first letter of a sentence is capitalized.
+1 (`0x02`) | `KEYBOARD_AID_PERIOD` | Two spaces typed after a word become a period and a space.
+
+The other bits are reserved and **MUST** be zero. A write that sets one is
+answered `STATUS_INVALID_ARGUMENT`.
+
+All three properties are included in `CMD_SAVE`, and are asynchronous
+because the device's own controls change them (see [Changes Made at the
+Device](ulcp-saved-state.md#changes-made-at-the-device)).

@@ -23,6 +23,10 @@ window = ["embedded-graphics-simulator/with-sdl"]
 
 [dependencies]
 umsh-ux-communicator = { path = "../../crates/umsh-ux-communicator", features = ["fixture"] }
+umsh-communicator = { path = "../../crates/umsh-communicator", features = ["node"] }
+umsh-ulcp-admin = { path = "../../crates/umsh-ulcp-admin" }
+umsh-ulcp = { path = "../../crates/umsh-ulcp" }
+umsh-ulcp-simdev = { path = "../../crates/umsh-ulcp-simdev", features = ["host"] }
 umsh-pager-peripherals = { path = "../../crates/umsh-pager-peripherals" }
 embedded-graphics = "0.8"
 embedded-graphics-simulator = { version = "0.8", default-features = false }

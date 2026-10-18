@@ -95,6 +95,8 @@ impl<const PAYLOAD: usize> Device<PAYLOAD> {
             time: Some(TimeConfig),
             gnss: Some(GnssConfig::DEFAULT),
             display_motion_wake: false,
+            display_brightness: None,
+            keyboard: false,
             illuminance: true,
             temperatures: true,
             ble: true,

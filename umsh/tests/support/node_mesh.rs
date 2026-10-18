@@ -117,6 +117,8 @@ impl DeviceSide {
             time: Some(TimeConfig),
             gnss: Some(GnssConfig::DEFAULT),
             display_motion_wake: false,
+            display_brightness: None,
+            keyboard: false,
             illuminance: true,
             temperatures: false,
             // The simulated board is reachable over Bluetooth, so

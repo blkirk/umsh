@@ -91,12 +91,14 @@ if it is a repeater.
   snapshot, which is not simply whether one exists—see
   [Snapshot Integrity](ulcp-saved-state.md#snapshot-integrity).
 
-Saving is explicit rather than automatic: nothing is written to
-non-volatile storage when properties change (the exceptions are the device
-identity and `PROP_BLE_PAIRING_PIN`). This gives the host control over
-flash wear and a well-defined "known good" configuration, and it means a
-radio never persists provisioning its host did not deliberately ask to
-keep.
+Saving is explicit rather than automatic: nothing a host or an
+administrator changes is written to non-volatile storage until it asks
+(the device identity and `PROP_BLE_PAIRING_PIN` are persisted as they are
+set). This gives the host control over flash wear and a well-defined
+"known good" configuration, and it means a radio never persists
+provisioning its host did not deliberately ask to keep. A change made at
+the device follows its own rules (see [Changes Made at the
+Device](#changes-made-at-the-device)).
 
 Two consequences deserve emphasis:
 
@@ -151,6 +153,28 @@ anything the older writer did not record, and **MUST** ignore content it
 does not recognize. Firmware downgrade is out of scope: an older image
 reading a newer snapshot has no defined behavior, and saving from a
 downgraded image is destructive by design.
+
+### Changes Made at the Device {#changes-made-at-the-device}
+
+A device's own controls—a switch, a menu, or a settings interface of its
+own (see [The Device's Own Interface](ulcp-core.md#device-interface))—
+change saved properties with no host asking. Such a change:
+
+* **updates an existing snapshot** that is in effect (`PROP_SAVED`
+  reports 1), so what was set at the device is still set after a reboot;
+* **never creates one.** A device with nothing saved saves nothing: a
+  snapshot made from a button press would persist every other live value
+  with it. A device that rejected its newest generation at boot
+  (`PROP_SAVED` reports 2 or 3) writes nothing either, since the write
+  would bury the condition `PROP_SAVED` reports.
+
+The change applies live in every case.
+
+A device with a full settings interface **MAY** save as a host would: a
+snapshot at first boot, so that one always exists, and `CMD_SAVE` after a
+change whose loss would matter, such as its name or radio configuration.
+Either save captures the whole device domain, including any change an
+attached host or administrator made and did not save.
 
 ## Commands
 

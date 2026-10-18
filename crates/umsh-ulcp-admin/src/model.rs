@@ -28,7 +28,7 @@ use crate::descriptor::{self, Access, COVERED, Descriptor, Kind, Value};
 use crate::exchange::{Arrival, Busy, Exchange, Request, Ticket};
 
 /// The most properties one `CMD_PROP_MULTI_GET` asks for.
-pub const BUNDLE_MAX: usize = 16;
+pub const BUNDLE_MAX: usize = 24;
 
 /// How far the cache can be trusted for one property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -851,6 +851,14 @@ impl Model {
         entry.pending.last().map(|(_, value)| value.as_slice())
     }
 
+    /// What `key` holds once its writes are answered as asked: the newest
+    /// value written and not yet answered, or else what the device last
+    /// reported. An interface shows this, so a change shows as it is made.
+    pub fn intended(&self, key: u32) -> Option<Value<'_>> {
+        let raw = self.pending(key).or_else(|| self.raw(key))?;
+        descriptor::decode(descriptor::descriptor(key)?.codec, raw)
+    }
+
     /// The device's capabilities, once read.
     pub fn caps(&self) -> Option<impl Iterator<Item = u32> + '_> {
         let mut rest = self.raw(prop::CAPS)?;
@@ -987,6 +995,34 @@ impl Model {
 
     pub fn set_share_location(&mut self, enabled: bool) -> Result<WriteId, Refusal> {
         self.set(prop::GNSS_IDENT_UPDATE, &[u8::from(enabled)])
+    }
+
+    /// `PROP_DISPLAY_BRIGHTNESS`, from 0 (the dimmest that is not off) to
+    /// 255.
+    pub fn brightness(&self) -> Option<u8> {
+        self.u8(prop::DISPLAY_BRIGHTNESS)
+    }
+
+    pub fn set_brightness(&mut self, brightness: u8) -> Result<WriteId, Refusal> {
+        self.set(prop::DISPLAY_BRIGHTNESS, &[brightness])
+    }
+
+    /// `PROP_KEYBOARD_LIGHT`.
+    pub fn keyboard_light(&self) -> Option<bool> {
+        self.bool(prop::KEYBOARD_LIGHT)
+    }
+
+    pub fn set_keyboard_light(&mut self, lit: bool) -> Result<WriteId, Refusal> {
+        self.set(prop::KEYBOARD_LIGHT, &[u8::from(lit)])
+    }
+
+    /// `PROP_KEYBOARD_AIDS`, as [`umsh_ulcp::ids::keyboard_aids`] flags.
+    pub fn keyboard_aids(&self) -> Option<u8> {
+        self.u8(prop::KEYBOARD_AIDS)
+    }
+
+    pub fn set_keyboard_aids(&mut self, aids: u8) -> Result<WriteId, Refusal> {
+        self.set(prop::KEYBOARD_AIDS, &[aids])
     }
 
     /// `PROP_DEV_PEERS`: the device identity's saved peers.

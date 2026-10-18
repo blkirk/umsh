@@ -11,17 +11,23 @@
 //!   before durable storage.
 //! - [`conformance`]: the suite every back end passes, power cut between
 //!   each step of the commit order included.
+//! - [`CommunicatorNode`] (feature `node`): the node behind the interface,
+//!   with the device's [`settings`] reached through its own ULCP session.
 //!
-//! Device settings and security state are not here: the device keeps the
-//! first, and the second stays with the MAC.
+//! Device settings and security state are not stored here: the device
+//! keeps the first, and the second stays with the MAC.
 
 extern crate alloc;
 
 mod batch;
 mod ids;
 mod memory;
+#[cfg(feature = "node")]
+mod node;
 mod reaction;
 mod record;
+#[cfg(feature = "node")]
+pub mod settings;
 mod store;
 mod wire;
 
@@ -38,3 +44,6 @@ pub use record::{
     PeerFilter, PeerRecord, ROUTE_MAX, StoreError, Usage, WireAlias,
 };
 pub use store::ChatStore;
+
+#[cfg(feature = "node")]
+pub use node::CommunicatorNode;

@@ -27,9 +27,10 @@ use umsh_crypto::{
     software::{SoftwareAes, SoftwareIdentity, SoftwareSha256},
 };
 use umsh_ulcp::{Frame, Status, hdlc};
+use umsh_ulcp_device::listeners::{Mirrors, Writes};
 use umsh_ulcp_device::{
-    AnnounceRequest, Effect, IdentitySource, RadioRxInfo, SNAPSHOT_MAX, Session, SessionConfig,
-    TxOutcome,
+    AnnounceRequest, Effect, IdentitySource, RadioRxInfo, SNAPSHOT_MAX, SavedStatus, Session,
+    SessionConfig, TxOutcome,
 };
 
 pub(crate) const WIRE_CAPACITY: usize = umsh_ulcp::gatt::MAX_FRAME;
@@ -255,10 +256,13 @@ impl<P: SoftPlatform> SoftDevice<P> {
 
     /// Serve one raw ULCP frame from the device's own interface. Its answer
     /// waits in [`SoftDevice::take_device_frame`]; whatever the device
-    /// publishes while serving it reaches an attached host too.
+    /// publishes while serving it, and whatever it changes, reaches an
+    /// attached host too. A change to a saved setting keeps an existing
+    /// snapshot in step.
     pub fn device_request(&mut self, frame: &[u8], now_ms: u64) {
         debug_assert!(self.device_interface, "the device has no interface");
         self.now_ms = now_ms;
+        let writes = Writes::of(frame);
         let device_ms = self.device_ms();
         let mut emitted = Vec::new();
         let effect = self
@@ -275,11 +279,20 @@ impl<P: SoftPlatform> SoftDevice<P> {
             if is_publication(&frame) {
                 self.publish(frame);
             } else {
+                if writes.any && self.session.is_attached() {
+                    let mut mirrors = Mirrors::new(&frame);
+                    while let Some(mirror) = mirrors.next() {
+                        self.to_host(mirror);
+                    }
+                }
                 self.device_out.push_back(frame);
             }
         }
         self.queue_emitted(published);
         self.flush_session_reset_notice();
+        if writes.saved {
+            self.keep_snapshot_in_step();
+        }
     }
 
     /// The next raw frame for the device's own interface, if any.
@@ -294,6 +307,22 @@ impl<P: SoftPlatform> SoftDevice<P> {
         self.session
             .toggle_ble(&mut |frame| emitted.push(frame.to_vec()));
         self.queue_emitted(emitted);
+        self.keep_snapshot_in_step();
+    }
+
+    /// Keep an existing snapshot in step with a change made at the device,
+    /// as the firmware driver does: never make one, and never write over a
+    /// generation boot rejected.
+    fn keep_snapshot_in_step(&mut self) {
+        if self.session.saved_status() != SavedStatus::Current {
+            return;
+        }
+        let mut buf = [0u8; SNAPSHOT_MAX];
+        if let Some(len) = self.session.encode_snapshot(&mut buf)
+            && self.platform.store_snapshot(Some(&buf[..len])).is_ok()
+        {
+            self.session.note_snapshot_saved();
+        }
     }
 
     /// Everything the device has transmitted since the last drain, in
@@ -342,6 +371,15 @@ impl<P: SoftPlatform> SoftDevice<P> {
             .session
             .handle_frame(frame, device_ms, &mut |bytes| emitted.push(bytes.to_vec()));
         self.execute(effect, &mut emitted);
+        // What the host changed, the device's own interface hears.
+        if self.device_interface && Writes::of(frame).any {
+            for answer in emitted.iter().filter(|frame| !is_publication(frame)) {
+                let mut mirrors = Mirrors::new(answer);
+                while let Some(mirror) = mirrors.next() {
+                    self.device_out.push_back(mirror.to_vec());
+                }
+            }
+        }
         self.platform
             .settle(&mut self.session, &mut |frame: &[u8]| {
                 emitted.push(frame.to_vec())

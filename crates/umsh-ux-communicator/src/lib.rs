@@ -17,9 +17,11 @@
 //! - [`fixture`]: stand-in content (the `fixture` feature).
 //!
 //! [`buoyant`] is re-exported so a device drives the interface with the
-//! same version it was built against.
+//! same version it was built against, and [`heapless`] so a node trades in
+//! the strings and vectors [`model::Node`] names.
 
 pub use buoyant;
+pub use heapless;
 
 pub mod avatar;
 #[cfg(feature = "fixture")]

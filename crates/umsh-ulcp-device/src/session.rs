@@ -27,8 +27,8 @@ use umsh_ulcp::gnss::{self, GnssSnapshot};
 use umsh_ulcp::i2c::{self, BusInfo, DeviceInfo, ScanRequest, TransferRequest};
 use umsh_ulcp::ids::{
     self, DEFAULT_ADVERT_INTERVAL_S, DEFAULT_BEACON_INTERVAL_S, MAX_AUTO_ANNOUNCE_INTERVAL_S,
-    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, device_writable, meshcore_region_policy,
-    prop, stream,
+    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, device_writable, keyboard_aids,
+    meshcore_region_policy, prop, stream,
 };
 use umsh_ulcp::ip;
 use umsh_ulcp::items::{self, Filter, ItemError, REGION_CODE_LEN};
@@ -256,6 +256,16 @@ pub struct SessionConfig {
     pub temperatures: bool,
     /// Orientation-qualified display wake; enabled by default when supported.
     pub display_motion_wake: bool,
+    /// `None`: the screen's brightness is not adjustable;
+    /// `CAP_DISPLAY_BRIGHTNESS` is absent and `PROP_DISPLAY_BRIGHTNESS`
+    /// is unknown. `Some`: the capability is advertised, and the value is
+    /// the brightness after a reset.
+    pub display_brightness: Option<u8>,
+    /// Whether the device has a keyboard of its own. When set,
+    /// `CAP_KEYBOARD` is advertised and `PROP_KEYBOARD_LIGHT` and
+    /// `PROP_KEYBOARD_AIDS` exist, lit and with every aid on after a
+    /// reset; otherwise both are unknown.
+    pub keyboard: bool,
     /// Whether the device has a Bluetooth transport it can make
     /// unreachable on demand. When set, `CAP_BLE` is advertised and
     /// `PROP_BLE_ENABLED` and `PROP_BLE_LINK` exist; otherwise both
@@ -1058,6 +1068,13 @@ struct DeviceDomain {
     /// [`GnssConfig::default_enabled`].
     gnss_enabled: bool,
     display_motion_wake_enabled: bool,
+    /// `PROP_DISPLAY_BRIGHTNESS`. Meaningful only under
+    /// [`Config::display_brightness`].
+    display_brightness: u8,
+    /// `PROP_KEYBOARD_LIGHT`. Meaningful only under [`Config::keyboard`].
+    keyboard_light: bool,
+    /// `PROP_KEYBOARD_AIDS`, holding only defined flags.
+    keyboard_aids: u8,
     /// `PROP_GNSS_IDENT_UPDATE`: whether fixes refresh the advertised node
     /// identity's location. Off by default: broadcasting where you are is
     /// a decision, not a default.
@@ -1142,6 +1159,9 @@ impl DeviceDomain {
             tz_offset_min: 0,
             gnss_enabled: config.gnss.is_some_and(|gnss| gnss.default_enabled),
             display_motion_wake_enabled: config.display_motion_wake,
+            display_brightness: config.display_brightness.unwrap_or(u8::MAX),
+            keyboard_light: true,
+            keyboard_aids: keyboard_aids::ALL,
             gnss_ident_update: false,
             gnss_ident_precision: DEFAULT_IDENT_PRECISION,
             gnss_time_trust: true,
@@ -2337,6 +2357,9 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     saved(prop::GNSS_TIME_TRUST, ApplyPhase::Config, false),
     saved(prop::BLE_ENABLED, ApplyPhase::Config, false),
     saved(prop::DISPLAY_MOTION_WAKE_ENABLED, ApplyPhase::Config, false),
+    saved(prop::DISPLAY_BRIGHTNESS, ApplyPhase::Config, false),
+    saved(prop::KEYBOARD_LIGHT, ApplyPhase::Config, false),
+    saved(prop::KEYBOARD_AIDS, ApplyPhase::Config, false),
     // The station's configuration and none of its behavior: which
     // network to use, not the credential for it, and not what the
     // driver made of either. The table those names index is the
@@ -2363,6 +2386,14 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     saved(prop::LAN_BEARER_GROUP, ApplyPhase::Config, false),
     saved(prop::LAN_BEARER_INGRESS_LIMIT, ApplyPhase::Config, false),
 ];
+
+/// Whether `key` is part of the saved snapshot: what `CMD_SAVE` persists
+/// and a restore brings back.
+pub fn is_saved(key: u32) -> bool {
+    SAVED_SCHEMA
+        .iter()
+        .any(|property| u32::from(property.number) == key)
+}
 
 /// [`SavedState::decode`] tracks which single-valued properties it has
 /// already seen in one `u64` of schema-index bits, so the schema cannot
@@ -2482,6 +2513,9 @@ struct SavedState {
     tz_offset_min: i16,
     gnss_enabled: bool,
     display_motion_wake_enabled: bool,
+    display_brightness: u8,
+    keyboard_light: bool,
+    keyboard_aids: u8,
     gnss_ident_update: bool,
     gnss_ident_precision: u8,
     gnss_time_trust: bool,
@@ -2533,6 +2567,9 @@ impl SavedState {
             tz_offset_min: device.tz_offset_min,
             gnss_enabled: device.gnss_enabled,
             display_motion_wake_enabled: device.display_motion_wake_enabled,
+            display_brightness: device.display_brightness,
+            keyboard_light: device.keyboard_light,
+            keyboard_aids: device.keyboard_aids,
             gnss_ident_update: device.gnss_ident_update,
             gnss_ident_precision: device.gnss_ident_precision,
             gnss_time_trust: device.gnss_time_trust,
@@ -2592,6 +2629,9 @@ impl SavedState {
             // snapshot saved while it was on would restore it off.
             gnss_enabled: config.gnss.is_some_and(|gnss| gnss.default_enabled),
             display_motion_wake_enabled: config.display_motion_wake,
+            display_brightness: config.display_brightness.unwrap_or(u8::MAX),
+            keyboard_light: true,
+            keyboard_aids: keyboard_aids::ALL,
             gnss_ident_update: false,
             gnss_ident_precision: DEFAULT_IDENT_PRECISION,
             gnss_time_trust: true,
@@ -2733,6 +2773,9 @@ impl SavedState {
             prop::DISPLAY_MOTION_WAKE_ENABLED => {
                 encoder.put(number, &[self.display_motion_wake_enabled as u8])
             }
+            prop::DISPLAY_BRIGHTNESS => encoder.put(number, &[self.display_brightness]),
+            prop::KEYBOARD_LIGHT => encoder.put(number, &[self.keyboard_light as u8]),
+            prop::KEYBOARD_AIDS => encoder.put(number, &[self.keyboard_aids]),
             prop::PHY_DUTY_LIMIT => encoder.put(number, &self.duty_limit.to_le_bytes()),
             prop::DEV_ADMINS => {
                 for public_key in self.dev_admins.iter() {
@@ -2959,6 +3002,14 @@ impl SavedState {
             prop::GNSS_ENABLED => self.gnss_enabled = parse_bool(value).map_err(invalid)?,
             prop::DISPLAY_MOTION_WAKE_ENABLED => {
                 self.display_motion_wake_enabled = parse_bool(value).map_err(invalid)?
+            }
+            prop::DISPLAY_BRIGHTNESS => {
+                self.display_brightness = parse_u8(value).map_err(invalid)?
+            }
+            prop::KEYBOARD_LIGHT => self.keyboard_light = parse_bool(value).map_err(invalid)?,
+            // Aids a newer firmware saved are dropped, not the snapshot.
+            prop::KEYBOARD_AIDS => {
+                self.keyboard_aids = parse_u8(value).map_err(invalid)? & keyboard_aids::ALL
             }
             prop::PHY_DUTY_LIMIT => self.duty_limit = parse_u16(value).map_err(invalid)?,
             prop::DEV_ADMINS => {
@@ -3882,6 +3933,11 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     prop::DISPLAY_MOTION_WAKE_ENABLED => {
                         self.device.display_motion_wake_enabled = saved.display_motion_wake_enabled
                     }
+                    prop::DISPLAY_BRIGHTNESS => {
+                        self.device.display_brightness = saved.display_brightness
+                    }
+                    prop::KEYBOARD_LIGHT => self.device.keyboard_light = saved.keyboard_light,
+                    prop::KEYBOARD_AIDS => self.device.keyboard_aids = saved.keyboard_aids,
                     prop::PHY_DUTY_LIMIT => self.config.duty.set_limit(saved.duty_limit),
                     prop::TZ_OFFSET => self.device.tz_offset_min = saved.tz_offset_min,
                     prop::GNSS_IDENT_UPDATE => {
@@ -5204,6 +5260,29 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// Display policy enable; false on unsupported boards.
     pub fn display_motion_wake_enabled(&self) -> bool {
         self.config.display_motion_wake && self.device.display_motion_wake_enabled
+    }
+
+    /// `PROP_DISPLAY_BRIGHTNESS`, from 0 to 255; `None` on a board whose
+    /// brightness is not adjustable.
+    pub fn display_brightness(&self) -> Option<u8> {
+        self.config
+            .display_brightness
+            .map(|_| self.device.display_brightness)
+    }
+
+    /// `PROP_KEYBOARD_LIGHT`; false on a board without a keyboard.
+    pub fn keyboard_light(&self) -> bool {
+        self.config.keyboard && self.device.keyboard_light
+    }
+
+    /// `PROP_KEYBOARD_AIDS`, as [`keyboard_aids`] flags; none on a board
+    /// without a keyboard.
+    pub fn keyboard_aids(&self) -> u8 {
+        if self.config.keyboard {
+            self.device.keyboard_aids
+        } else {
+            0
+        }
     }
 
     pub fn toggle_display_motion_wake(&mut self, emit: &mut impl FnMut(&[u8])) -> Option<bool> {
@@ -7142,6 +7221,21 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 self.bump_dev_domain();
                 Ok(false)
             }
+            prop::DISPLAY_BRIGHTNESS if self.config.display_brightness.is_some() => {
+                self.device.display_brightness = parse_u8(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
+            prop::KEYBOARD_LIGHT if self.config.keyboard => {
+                self.device.keyboard_light = parse_bool(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
+            prop::KEYBOARD_AIDS if self.config.keyboard => {
+                self.device.keyboard_aids = parse_keyboard_aids(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
             prop::GNSS_ENABLED if self.config.gnss.is_some() => {
                 self.device.gnss_enabled = parse_bool(value)?;
                 self.bump_dev_domain();
@@ -7983,6 +8077,12 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if key == prop::DISPLAY_MOTION_WAKE_ENABLED {
             return self.config.display_motion_wake;
         }
+        if key == prop::DISPLAY_BRIGHTNESS {
+            return self.config.display_brightness.is_some();
+        }
+        if matches!(key, prop::KEYBOARD_LIGHT | prop::KEYBOARD_AIDS) {
+            return self.config.keyboard;
+        }
         if matches!(key, prop::TEMPERATURES | prop::TEMPERATURE_NAMES) {
             return self.config.temperatures;
         }
@@ -8161,6 +8261,12 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 }
                 if self.config.display_motion_wake {
                     len += pui::encode(cap::DISPLAY_MOTION_WAKE, &mut out[len..]).unwrap_or(0);
+                }
+                if self.config.display_brightness.is_some() {
+                    len += pui::encode(cap::DISPLAY_BRIGHTNESS, &mut out[len..]).unwrap_or(0);
+                }
+                if self.config.keyboard {
+                    len += pui::encode(cap::KEYBOARD, &mut out[len..]).unwrap_or(0);
                 }
                 if self.config.temperatures {
                     len += pui::encode(cap::TEMPERATURE, &mut out[len..]).unwrap_or(0);
@@ -8349,6 +8455,18 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     return PropValue::Unimplemented;
                 }
                 out[0] = self.device.display_motion_wake_enabled as u8;
+                1
+            }
+            prop::DISPLAY_BRIGHTNESS if self.config.display_brightness.is_some() => {
+                out[0] = self.device.display_brightness;
+                1
+            }
+            prop::KEYBOARD_LIGHT if self.config.keyboard => {
+                out[0] = self.device.keyboard_light as u8;
+                1
+            }
+            prop::KEYBOARD_AIDS if self.config.keyboard => {
+                out[0] = self.device.keyboard_aids;
                 1
             }
             prop::GNSS_ENABLED if self.config.gnss.is_some() => {
@@ -8853,6 +8971,14 @@ fn parse_u8(value: &[u8]) -> Result<u8, Status> {
     }
 }
 
+/// A `PROP_KEYBOARD_AIDS` write: one octet whose reserved bits are zero.
+fn parse_keyboard_aids(value: &[u8]) -> Result<u8, Status> {
+    match parse_u8(value)? {
+        aids if aids & !keyboard_aids::ALL == 0 => Ok(aids),
+        _ => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
 fn parse_i8(value: &[u8]) -> Result<i8, Status> {
     parse_u8(value).map(|byte| byte as i8)
 }
@@ -9072,6 +9198,8 @@ mod tests {
             time: Some(TimeConfig),
             gnss: Some(GnssConfig::DEFAULT),
             display_motion_wake: false,
+            display_brightness: None,
+            keyboard: false,
             illuminance: true,
             temperatures: false,
             ble: true,
@@ -9171,6 +9299,78 @@ mod tests {
             None
         );
         assert!(!get(&mut unsupported, prop::CAPS).contains(&(cap::DISPLAY_MOTION_WAKE as u8)));
+    }
+
+    #[test]
+    fn display_and_keyboard_settings_are_saved_device_settings() {
+        let config = SessionConfig {
+            display_brightness: Some(113),
+            keyboard: true,
+            ..test_config()
+        };
+        let mut session = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        session.attach(true);
+        let caps = get(&mut session, prop::CAPS);
+        assert!(caps.contains(&(cap::DISPLAY_BRIGHTNESS as u8)));
+        assert!(caps.contains(&(cap::KEYBOARD as u8)));
+        assert_eq!(get(&mut session, prop::DISPLAY_BRIGHTNESS), [113]);
+        assert_eq!(get(&mut session, prop::KEYBOARD_LIGHT), [1]);
+        assert_eq!(get(&mut session, prop::KEYBOARD_AIDS), [keyboard_aids::ALL]);
+
+        set(&mut session, prop::DISPLAY_BRIGHTNESS, &[0]);
+        set(&mut session, prop::KEYBOARD_LIGHT, &[0]);
+        set(&mut session, prop::KEYBOARD_AIDS, &[keyboard_aids::PERIOD]);
+        assert_eq!(session.display_brightness(), Some(0));
+        assert!(!session.keyboard_light());
+        assert_eq!(session.keyboard_aids(), keyboard_aids::PERIOD);
+
+        // A reserved aid is refused, and the aids in force stay.
+        let (emitted, _) = set(&mut session, prop::KEYBOARD_AIDS, &[0x04]);
+        let (_, _, value) = parse_prop_is(&emitted[0]);
+        assert_eq!(pui::decode(&value).unwrap().0, Status::INVALID_ARGUMENT.0);
+        assert_eq!(session.keyboard_aids(), keyboard_aids::PERIOD);
+
+        save(&mut session);
+        let mut bytes = [0; SNAPSHOT_MAX];
+        let len = session.encode_snapshot(&mut bytes).unwrap();
+        let mut booted: TestSession = Session::new(config, Status::RESET_POWER_ON, test_engine());
+        booted.restore_at_boot(&bytes[..len]).unwrap();
+        assert_eq!(booted.display_brightness(), Some(0));
+        assert!(!booted.keyboard_light());
+        assert_eq!(booted.keyboard_aids(), keyboard_aids::PERIOD);
+        booted.reset(Status::RESET_SOFTWARE, &mut |_| {});
+        assert_eq!(booted.display_brightness(), Some(0));
+
+        // A snapshot from before these existed restores the defaults.
+        let old = strip_snapshot_options(
+            &bytes[..len],
+            &[
+                prop::DISPLAY_BRIGHTNESS,
+                prop::KEYBOARD_LIGHT,
+                prop::KEYBOARD_AIDS,
+            ],
+        );
+        booted.restore_at_boot(&old).unwrap();
+        assert_eq!(booted.display_brightness(), Some(113));
+        assert!(booted.keyboard_light());
+        assert_eq!(booted.keyboard_aids(), keyboard_aids::ALL);
+
+        let mut bare = test_session();
+        assert_eq!(bare.display_brightness(), None);
+        assert!(!bare.keyboard_light());
+        assert_eq!(bare.keyboard_aids(), 0);
+        let caps = get(&mut bare, prop::CAPS);
+        assert!(!caps.contains(&(cap::DISPLAY_BRIGHTNESS as u8)));
+        assert!(!caps.contains(&(cap::KEYBOARD as u8)));
+        for key in [
+            prop::DISPLAY_BRIGHTNESS,
+            prop::KEYBOARD_LIGHT,
+            prop::KEYBOARD_AIDS,
+        ] {
+            let (emitted, _) = set(&mut bare, key, &[1]);
+            let (_, _, value) = parse_prop_is(&emitted[0]);
+            assert_eq!(pui::decode(&value).unwrap().0, Status::PROP_NOT_FOUND.0);
+        }
     }
 
     /// A board with neither a clock nor a receiver, for the tests that

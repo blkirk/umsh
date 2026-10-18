@@ -32,6 +32,7 @@
 pub mod bridge;
 pub mod duty;
 pub mod lan_bearer;
+pub mod listeners;
 pub mod net;
 pub mod session;
 
@@ -48,5 +49,5 @@ pub use session::{
     MULTI_MAX, NETWORK_TABLE_MAX, PRIVATE_KEY_LEN, QueuedClass, QueuedNotice,
     REGION_STRING_MAX_LEN, RadioRxInfo, RadioSettings, SNAPSHOT_MAX, SavedStatus, Session,
     SessionConfig, SnapshotError, TEMPERATURE_NAMES_MAX, TimeConfig, TxOutcome, TxPower,
-    assert_i2c_tables_fit,
+    assert_i2c_tables_fit, is_saved,
 };

@@ -107,7 +107,7 @@ crates/
   umsh-ux-<class>/          (UX mechanism for one device class)
   umsh-ulcp-runtime/        (board-agnostic ULCP device runtime)
   umsh-ulcp-admin/          (ULCP property client: a cached model of a device's settings)
-  umsh-communicator/        (a communicator's durable chat state)
+  umsh-communicator/        (a communicator's node and durable chat state)
   umsh-app-ulcp-cli/        (console-harness app)
 firmware/
   nrf52-tracker/src/        (shipping sources shared by all four nRF52840 boards)
@@ -144,6 +144,9 @@ firmware/
 - **`umsh-communicator`** holds a communicator's chats, messages, resend
   archive, checkpoints, peers, and channels behind the `ChatStore` trait,
   with `MemoryStore` and the conformance suite every back end passes.
+  Behind its `node` feature, `CommunicatorNode` is the node the
+  communicator's interface runs on, with the device's settings reached
+  through `umsh-ulcp-admin`'s `LocalExchange`.
 - **Shipping sources** live in `firmware/nrf52-tracker/src/`, a directory with
   no manifest of its own. All four nRF52840 board packages point their
   `[[bin]]` at `../nrf52-tracker/src/main.rs`.
@@ -270,7 +273,7 @@ background temperature polling or persisted sensor inventory.
 | `crates/umsh-ux-<class>/` | UX-class mechanism. Pure-logic engines shared by every image on every board of that device class. | `umsh-ux-tracker` (button + LED + buzzer + USB-CDC), `umsh-ux-display-tracker` (adds a small display and D-pad) |
 | `crates/umsh-ulcp-runtime/` | Board-agnostic ULCP device runtime consumed by every shipping image. | — |
 | `crates/umsh-ulcp-admin/` | ULCP property client: a device's settings, cached, over a local or mesh exchange. | — |
-| `crates/umsh-communicator/` | A communicator's durable chat state: the `ChatStore` trait and its back ends. | `MemoryStore` |
+| `crates/umsh-communicator/` | A communicator's node and durable chat state: `CommunicatorNode`, the `ChatStore` trait, and its back ends. | `MemoryStore` |
 | `crates/umsh-app-<firmware>/` | App policy for a non-shipping image, hardware-agnostic. | `umsh-app-ulcp-cli` |
 | `firmware/<board>/` | Shipping board package. Thin manifest, no source. | `firmware/t1000e`, `firmware/techo` |
 | `firmware/<board>-console/` | Console harness binary. Own `main.rs`. | `firmware/t1000e-console` |

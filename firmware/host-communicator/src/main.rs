@@ -4,17 +4,22 @@
 //! Interactive (needs the `window` feature):
 //!
 //!     host-communicator
+//!     host-communicator --node DIR
+//!
+//! The first shows the fixture's chats. The second runs the communicator's
+//! node, as the Pager does, with its settings served by a soft device that
+//! keeps its saved state and identity under DIR.
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
 //! a click presses it. Return, Backspace, Space, and the letters are the
 //! Pager's; Shift is CAP, and Alt the orange key.
-//! Tab brings the fixture's next message in, as if it arrived. An
+//! With the fixture, Tab brings its next message in, as if it arrived. An
 //! identity asked for arrives two seconds later, as the fixture's own
 //! clock has it.
 //!
 //! Headless, for scripted runs and comparisons with the mockup:
 //!
-//!     host-communicator --script steps.txt --out shots/
+//!     host-communicator [--node DIR] --script steps.txt --out shots/
 //!
 //! Each script line is one step: `turn N` (negative is up), `press`,
 //! `enter`, `backspace`, `type TEXT` (typed as it is), `keys TEXT` (pressed
@@ -40,6 +45,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+mod node;
 
 use umsh_ux_communicator::buoyant;
 
@@ -97,14 +104,66 @@ where
     }
 }
 
+/// What the window shows: the fixture's chats, or the communicator's node.
+#[derive(Clone, Copy)]
+enum Backend {
+    Fixture(&'static fixture::Store),
+    Node(&'static node::Node),
+}
+
+impl Backend {
+    fn state(self) -> State {
+        match self {
+            Self::Fixture(store) => fixture::state(store),
+            Self::Node(node) => node::state(node),
+        }
+    }
+
+    /// Moves the backend on to `now` and takes in what it has to say.
+    fn advance<V, F>(self, app: &mut App<V, State, F>, now: u64)
+    where
+        V: ViewLayout<State>,
+        V::FocusTree: DefaultFocus,
+        V::Renderables: AnimatedJoin,
+        F: Fn(&State) -> V,
+    {
+        match self {
+            Self::Fixture(store) => advance(app, store, now),
+            Self::Node(node) => {
+                node.pump(now);
+                input::events(app, now);
+            }
+        }
+    }
+
+    /// Tab: the fixture's next message arrives. The node has none to give.
+    fn tab(self) {
+        if let Self::Fixture(store) = self {
+            store.arrive();
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => window(),
+    let (backend, args) = match args.as_slice() {
+        [node_flag, dir, rest @ ..] if node_flag == "--node" => {
+            match node::open(Path::new(dir), std::time::Instant::now()) {
+                Ok(node) => (Backend::Node(node), rest),
+                Err(e) => {
+                    eprintln!("host-communicator: {dir}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        rest => (Backend::Fixture(store()), rest),
+    };
+    match args {
+        [] => window(backend),
         [script_flag, script, out_flag, out]
             if script_flag == "--script" && out_flag == "--out" =>
         {
-            match headless(Path::new(script), &PathBuf::from(out)) {
+            match headless(Path::new(script), &PathBuf::from(out), backend) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("host-communicator: {e}");
@@ -123,7 +182,9 @@ fn main() -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: host-communicator [--script FILE --out DIR | --bench N]");
+            eprintln!(
+                "usage: host-communicator [--node DIR] [--script FILE --out DIR | --bench N]"
+            );
             ExitCode::from(2)
         }
     }
@@ -156,13 +217,12 @@ fn bench(count: u32) {
     );
 }
 
-fn headless(script: &Path, out: &Path) -> Result<(), String> {
+fn headless(script: &Path, out: &Path, backend: Backend) -> Result<(), String> {
     let steps =
         std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut display: SimulatorDisplay<Rgb565> = SimulatorDisplay::new(SIZE);
-    let store = store();
-    let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
+    let mut app = App::new(backend.state(), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
     // The board's clock: each input takes a moment, and `wait` moves it on.
     let mut clock = 0;
@@ -196,12 +256,15 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
                 app.finalize_view();
                 vec![]
             }
-            "arrive" => {
-                store.arrive();
-                vec![]
-            }
-            "identify" => {
-                store.answer_identity();
+            "arrive" | "identify" => {
+                let Backend::Fixture(store) = backend else {
+                    return Err(format!("line {}: {word} needs the fixture", number + 1));
+                };
+                if word == "arrive" {
+                    store.arrive();
+                } else {
+                    store.answer_identity();
+                }
                 vec![]
             }
             "wait" => {
@@ -274,9 +337,9 @@ fn headless(script: &Path, out: &Path) -> Result<(), String> {
         for input in inputs {
             clock += INPUT_MS;
             input::apply(&mut app, input, clock);
-            advance(&mut app, store, clock);
+            backend.advance(&mut app, clock);
         }
-        advance(&mut app, store, clock);
+        backend.advance(&mut app, clock);
     }
     Ok(())
 }
@@ -302,7 +365,7 @@ fn tap(modifier: Modifier) -> [Input; 2] {
 }
 
 #[cfg(feature = "window")]
-fn window() -> ExitCode {
+fn window(backend: Backend) -> ExitCode {
     use embedded_graphics_simulator::sdl2::{Keycode, MouseButton};
     use embedded_graphics_simulator::{SimulatorEvent, Window};
 
@@ -326,8 +389,7 @@ fn window() -> ExitCode {
     let mut target = EmbeddedGraphicsRenderTarget::new_hinted(&mut display, theme::BACKGROUND);
     window.update(target.display());
     let start = std::time::Instant::now();
-    let store = store();
-    let mut app = App::new(fixture::state(store), SIZE.into(), ui::root_view);
+    let mut app = App::new(backend.state(), SIZE.into(), ui::root_view);
     ui::bind(&mut app);
     loop {
         app.set_time(start.elapsed());
@@ -346,7 +408,7 @@ fn window() -> ExitCode {
                     Keycode::Backspace => Some(Input::Backspace),
                     Keycode::Space => Some(Input::Space),
                     Keycode::Tab => {
-                        store.arrive();
+                        backend.tab();
                         None
                     }
                     // The Pager's keyboard does not repeat.
@@ -385,7 +447,7 @@ fn window() -> ExitCode {
                 input::apply(&mut app, input, now);
             }
         }
-        advance(&mut app, store, now);
+        backend.advance(&mut app, now);
         if app.should_redraw() || target.clear_animation_status() {
             target.clear(theme::BACKGROUND);
             app.render_animated(&mut target, &theme::TEXT);
@@ -396,7 +458,7 @@ fn window() -> ExitCode {
 }
 
 #[cfg(not(feature = "window"))]
-fn window() -> ExitCode {
+fn window(_backend: Backend) -> ExitCode {
     eprintln!("host-communicator: built without the window feature; use --script");
     ExitCode::from(2)
 }

@@ -45,6 +45,8 @@ fn config() -> SessionConfig {
         time: Some(TimeConfig),
         gnss: Some(GnssConfig::DEFAULT),
         display_motion_wake: false,
+        display_brightness: None,
+        keyboard: false,
         illuminance: false,
         temperatures: false,
         ble: true,

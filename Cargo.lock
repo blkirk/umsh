@@ -1589,7 +1589,11 @@ dependencies = [
  "embedded-graphics",
  "embedded-graphics-simulator",
  "heapless 0.9.3",
+ "umsh-communicator",
  "umsh-pager-peripherals",
+ "umsh-ulcp",
+ "umsh-ulcp-admin",
+ "umsh-ulcp-simdev",
  "umsh-ux-communicator",
 ]
 
@@ -4626,8 +4630,14 @@ name = "umsh-communicator"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "umsh-communicator",
  "umsh-core",
  "umsh-text",
+ "umsh-ulcp",
+ "umsh-ulcp-admin",
+ "umsh-ulcp-device",
+ "umsh-ulcp-simdev",
+ "umsh-ux-communicator",
 ]
 
 [[package]]
