@@ -145,8 +145,17 @@ firmware/
   archive, checkpoints, peers, and channels behind the `ChatStore` trait,
   with `MemoryStore` and the conformance suite every back end passes.
   Behind its `node` feature, `CommunicatorNode` is the node the
-  communicator's interface runs on, with the device's settings reached
-  through `umsh-ulcp-admin`'s `LocalExchange`.
+  communicator's interface runs on. Its settings are the device's own,
+  reached through `umsh-ulcp-admin`'s `LocalExchange`. Its chats are
+  `umsh-text`'s chat facade over the store, on the channels the settings
+  hold, and its peers are the device's `PROP_DEV_PEERS`. Its `task` module
+  joins them to the device node: receive taps copy text frames, identities,
+  and ping answers into an inbox, and a chat task feeds them in, keeps the
+  chats' timers, and sends what they queue through the device node. With
+  the `umsh-ulcp-runtime/communicator` feature, the device node is sized
+  for that traffic and advertises the device identity as a chat node. On
+  the Pager both of the node's tasks allocate from PSRAM, through the
+  image's global allocator (`heap.rs`).
 - **Shipping sources** live in `firmware/nrf52-tracker/src/`, a directory with
   no manifest of its own. All four nRF52840 board packages point their
   `[[bin]]` at `../nrf52-tracker/src/main.rs`.

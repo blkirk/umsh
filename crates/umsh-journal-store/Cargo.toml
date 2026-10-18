@@ -18,5 +18,9 @@ repository.workspace = true
 # umsh-flash-store for the sibling sequential-storage engine this crate's
 # extraction mirrors.
 
+[features]
+# Room in the frame-counter map for the peers a chat device talks with.
+chat-peers = []
+
 [dependencies]
 heapless = { workspace = true }

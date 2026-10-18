@@ -22,6 +22,14 @@ and (in future revisions) periodic advertisement behavior. Its Ed25519
 private key is held by the device and is never readable through this
 protocol.
 
+On a device with a messaging interface of its own (see [The Device's Own
+Interface](ulcp-core.md#device-interface)), the device identity is also
+the messaging identity of whoever carries the device: its conversations
+are held under it, and its peers address it. Such a device advertises
+the `TXT` capability bit (see [Capability
+Bitmap](node-identity.md#capability-bitmap)) and derives its role as
+`Chat` (see [`PROP_IDENT_ROLE`](#prop-ident-role)).
+
 **A device identity always exists.** A device advertising
 `CAP_DEV_IDENTITY` that finds no stored keypair at power-on **MUST**
 generate one from a cryptographic random source and persist it before
@@ -1020,8 +1028,10 @@ Primary Role](node-identity.md#node-primary-role)).
 
 An **empty** value—the factory default—means the device derives the
 role from what it is actually doing: `Repeater` while
-`PROP_MAC_REPEATER_ENABLED` is set, `Tracker` otherwise. Any other value
-is advertised verbatim.
+`PROP_MAC_REPEATER_ENABLED` is set, `Tracker` otherwise. On a device
+whose device identity is a messaging identity (see [The Device
+Identity](#device-identity)), it derives `Chat` whether or not the device
+forwards. Any other value is advertised verbatim.
 
 Role and forwarding are deliberately separate. Forwarding is a fact,
 reported through the repeater capability bit; the role is how the device

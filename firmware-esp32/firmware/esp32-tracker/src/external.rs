@@ -1,10 +1,23 @@
 //! Explicit external storage for single-task, non-atomic protocol data.
 //! The global heap, radio buffers, stacks, and executor stay internal.
+//! The communicator's tasks are the exception: what they allocate comes
+//! from here (see [`crate::heap`]).
+#[cfg(feature = "communicator")]
+use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
+#[cfg(feature = "communicator")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use esp_alloc::{EspHeap, HeapRegion, MemoryCapability};
 use esp_hal::psram::{Psram, PsramConfig};
 
 static EXTERNAL: EspHeap = EspHeap::empty();
+
+/// Where PSRAM lies, so that a freed allocation is returned to the heap it
+/// came from. Empty until [`init`].
+#[cfg(feature = "communicator")]
+static START: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "communicator")]
+static END: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "bridge-client")]
 pub fn used() -> usize {
@@ -33,6 +46,28 @@ pub fn init(peripheral: esp_hal::peripherals::PSRAM<'static>) {
             MemoryCapability::External.into(),
         ));
     }
+    #[cfg(feature = "communicator")]
+    {
+        START.store(base as usize, Ordering::Relaxed);
+        END.store(base as usize + size, Ordering::Relaxed);
+    }
+}
+
+/// An allocation for a communicator task.
+#[cfg(feature = "communicator")]
+pub(crate) unsafe fn alloc(layout: Layout) -> *mut u8 {
+    unsafe { EXTERNAL.alloc_caps(MemoryCapability::External.into(), layout) }
+}
+
+/// Whether `ptr` was allocated here.
+#[cfg(feature = "communicator")]
+pub(crate) fn holds(ptr: *mut u8) -> bool {
+    (START.load(Ordering::Relaxed)..END.load(Ordering::Relaxed)).contains(&(ptr as usize))
+}
+
+#[cfg(feature = "communicator")]
+pub(crate) unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
+    unsafe { GlobalAlloc::dealloc(&EXTERNAL, ptr, layout) }
 }
 
 // Private: callers cannot accidentally put synchronization/DMA objects here.
@@ -108,14 +143,23 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
 }
 
 /// The communicator's node: its handles and queues, touched only by the
-/// communicator task. The settings it caches grow on the heap. Never
-/// inlined, as [`communicator`] is not.
+/// communicator's tasks. The settings it caches and its chats grow on the
+/// heap, and its messages' text is kept here. Never inlined, as
+/// [`communicator`] is not.
 #[cfg(feature = "communicator")]
 #[inline(never)]
-pub fn communicator_node() -> &'static super::communicator::Node {
+pub fn communicator_node(seeds: umsh_communicator::Seeds) -> &'static super::communicator::Node {
+    use super::communicator::{CLOCK, Node, port};
     unsafe {
-        let ptr = storage::<super::communicator::Node>();
-        ptr.write(super::communicator::Node::new(super::communicator::port()));
+        let ptr = storage::<Node>();
+        ptr.write(Node::new(
+            port(),
+            umsh_communicator::MemoryStore::new(),
+            umsh_communicator::ChannelCrypto::software(),
+            &EXTERNAL,
+            &CLOCK,
+            seeds,
+        ));
         &*ptr
     }
 }

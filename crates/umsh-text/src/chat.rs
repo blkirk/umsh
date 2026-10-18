@@ -29,9 +29,9 @@ use umsh_core::{ChannelKey, ChannelTag, NodeHint, PublicKey};
 
 use crate::engine::sequence::MessageHandle;
 use crate::engine::{
-    ArchiveKey, ArchiveResult, CompletionStatus, ComposeError, ComposeIntent, DeliveryState,
-    Diagnostic, Direction, Engine, EngineConfig, Event, MessageMutation, MutationKind, Output,
-    Presence, ReceiveError, ResolvedRef, StreamCheckpoint, Transmission,
+    ArchiveKey, ArchiveResult, BodyRef, CompletionStatus, ComposeError, ComposeIntent,
+    DeliveryState, Diagnostic, Direction, Engine, EngineConfig, Event, MessageMutation,
+    MutationKind, Output, Presence, ReceiveError, ResolvedRef, StreamCheckpoint, Transmission,
 };
 use crate::model::{ConversationKey, MessageType, SenderScope};
 use crate::validate::{DeliveryPath, DirectChannelProfile, Envelope, TextProfile};
@@ -195,6 +195,87 @@ pub struct Mutation {
 }
 
 impl Mutation {
+    /// The owned form of one of the engine's mutations, read while it is
+    /// fresh: `body` is [`Engine::body`] until the engine's queue empties.
+    /// `sender_key` gives the full key behind a sender scope, where one is
+    /// known.
+    pub fn from_engine<'e>(
+        mutation: MessageMutation,
+        body: impl Fn(&BodyRef) -> &'e str,
+        sender_key: impl FnOnce(ConversationKey, SenderScope) -> Option<PublicKey>,
+    ) -> Self {
+        let change = match mutation.kind {
+            MutationKind::Insert {
+                conversation,
+                sender,
+                direction,
+                message_type,
+                wire_id,
+                epoch,
+                client_token,
+                sender_handle,
+                regarding,
+                bg_color,
+                text_color,
+                body: text,
+                status,
+                presence,
+                late,
+                notify,
+            } => Change::Insert(Insert {
+                conversation,
+                sender,
+                sender_key: sender_key(conversation, sender),
+                direction,
+                message_type,
+                wire_id,
+                epoch,
+                client_token,
+                sender_handle: sender_handle.map(|value| String::from(body(&value))),
+                regarding,
+                bg_color,
+                text_color,
+                body: String::from(body(&text)),
+                status,
+                presence,
+                late,
+                notify,
+            }),
+            MutationKind::UpdateBody {
+                body: text,
+                status,
+                late,
+                notify,
+            } => Change::UpdateBody {
+                body: String::from(body(&text)),
+                status,
+                late,
+                notify,
+            },
+            MutationKind::Edit {
+                conversation,
+                original,
+                body: text,
+            } => Change::Edit {
+                conversation,
+                original,
+                body: String::from(body(&text)),
+            },
+            MutationKind::Delete {
+                conversation,
+                original,
+            } => Change::Delete {
+                conversation,
+                original,
+            },
+        };
+        Self {
+            handle: mutation.handle,
+            revision: mutation.revision,
+            change,
+        }
+    }
+
     /// Whether this record describes content that arrived in the frame that
     /// produced it, as opposed to an outbound echo, a gap placeholder, or a
     /// change to an earlier message. Radio metadata belongs only on these.
@@ -689,6 +770,15 @@ impl<P: TextProfile + Clone, const SLOTS: usize, const PAGES: usize> ChatFacade<
         self.stage();
     }
 
+    /// Send one of the message `handle`'s frames again, as the archive
+    /// keeps it under `key` (see [`Engine::retransmit`]). Returns whether it
+    /// was queued.
+    pub fn retransmit(&mut self, key: &ArchiveKey, handle: MessageHandle, payload: &[u8]) -> bool {
+        let queued = self.engine.retransmit(key, handle, payload);
+        self.stage();
+        queued
+    }
+
     /// Advance timers: reassembly expiry, notify deadlines, repair.
     pub fn tick(&mut self, now_ms: u64) {
         self.engine.tick(now_ms);
@@ -861,76 +951,11 @@ impl<P: TextProfile + Clone, const SLOTS: usize, const PAGES: usize> ChatFacade<
     }
 
     fn owned_mutation(&self, mutation: MessageMutation) -> Mutation {
-        let change = match mutation.kind {
-            MutationKind::Insert {
-                conversation,
-                sender,
-                direction,
-                message_type,
-                wire_id,
-                epoch,
-                client_token,
-                sender_handle,
-                regarding,
-                bg_color,
-                text_color,
-                body,
-                status,
-                presence,
-                late,
-                notify,
-            } => Change::Insert(Insert {
-                conversation,
-                sender,
-                sender_key: self.sender_key(conversation, sender),
-                direction,
-                message_type,
-                wire_id,
-                epoch,
-                client_token,
-                sender_handle: sender_handle.map(|value| String::from(self.engine.body(&value))),
-                regarding,
-                bg_color,
-                text_color,
-                body: String::from(self.engine.body(&body)),
-                status,
-                presence,
-                late,
-                notify,
-            }),
-            MutationKind::UpdateBody {
-                body,
-                status,
-                late,
-                notify,
-            } => Change::UpdateBody {
-                body: String::from(self.engine.body(&body)),
-                status,
-                late,
-                notify,
-            },
-            MutationKind::Edit {
-                conversation,
-                original,
-                body,
-            } => Change::Edit {
-                conversation,
-                original,
-                body: String::from(self.engine.body(&body)),
-            },
-            MutationKind::Delete {
-                conversation,
-                original,
-            } => Change::Delete {
-                conversation,
-                original,
-            },
-        };
-        Mutation {
-            handle: mutation.handle,
-            revision: mutation.revision,
-            change,
-        }
+        Mutation::from_engine(
+            mutation,
+            |body| self.engine.body(body),
+            |conversation, sender| self.sender_key(conversation, sender),
+        )
     }
 
     /// The sender's full key when one is known. A multicast member claims

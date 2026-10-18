@@ -190,6 +190,7 @@ mod device_node;
 mod entropy;
 #[cfg(feature = "psram")]
 mod external;
+mod heap;
 #[cfg(feature = "wifi")]
 mod ip;
 mod journals;
@@ -207,6 +208,8 @@ mod temperature;
 mod communicator;
 #[cfg(all(feature = "communicator", not(feature = "board-tlora-pager")))]
 compile_error!("The communicator interface runs only on the T-LoRa Pager");
+#[cfg(all(feature = "communicator", not(feature = "psram")))]
+compile_error!("The communicator keeps its chats in PSRAM");
 #[cfg(all(feature = "debug-log", any(feature = "wifi", feature = "communicator")))]
 mod memory_probe;
 #[cfg_attr(not(feature = "display"), path = "ui_headless.rs")]
@@ -3062,6 +3065,18 @@ async fn main(spawner: Spawner) {
     let identity_rng = IdentityRng::new(identity_seed, &entropy::SESSION_RESEED);
     let mut node_seed = [0u8; 32];
     pool_draw(b"node-rng", &mut node_seed);
+    // The chats' engine instance, and their repair jitter.
+    #[cfg(feature = "communicator")]
+    let chat_seeds = {
+        let mut session = [0u8; 8];
+        let mut jitter = [0u8; 8];
+        pool_draw(b"chat-session", &mut session);
+        pool_draw(b"chat-jitter", &mut jitter);
+        umsh_communicator::Seeds {
+            session_id: u64::from_be_bytes(session),
+            jitter_seed: u64::from_be_bytes(jitter),
+        }
+    };
     // The Node Management cursor nonce, from the same cryptographic
     // source: it is what keeps a cursor issued before a reboot from being
     // honored after one.
@@ -3422,6 +3437,10 @@ async fn main(spawner: Spawner) {
         umsh_radio_loraphy::MAX_PAYLOAD,
         TX_PREAMBLE_SYMBOLS,
     );
+    // The communicator's node, made here for the chat task the device
+    // node's bring-up starts, and for the interface below.
+    #[cfg(feature = "communicator")]
+    let chat_node = heap::in_psram(|| external::communicator_node(chat_seeds));
     spawner.spawn(
         device_node::bring_up(
             spawner,
@@ -3431,6 +3450,8 @@ async fn main(spawner: Spawner) {
             node_counters,
             &INPUT_CH,
             admin_nonce,
+            #[cfg(feature = "communicator")]
+            chat_node,
             #[cfg(feature = "lan-bearer")]
             network_stack,
         )
@@ -3481,7 +3502,7 @@ async fn main(spawner: Spawner) {
             #[cfg(not(feature = "communicator"))]
             spawner.spawn(ui::display_task(panel, splash).unwrap());
             #[cfg(feature = "communicator")]
-            spawner.spawn(communicator::task(panel, splash).unwrap());
+            spawner.spawn(communicator::task(panel, splash, chat_node).unwrap());
         }
     }
 

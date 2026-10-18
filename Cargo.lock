@@ -1586,11 +1586,16 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "firmware-host-communicator"
 version = "0.1.0"
 dependencies = [
+ "embassy-sync",
  "embedded-graphics",
  "embedded-graphics-simulator",
  "heapless 0.9.3",
+ "rand 0.10.1",
+ "tokio",
+ "umsh",
  "umsh-communicator",
  "umsh-pager-peripherals",
+ "umsh-sync",
  "umsh-ulcp",
  "umsh-ulcp-admin",
  "umsh-ulcp-simdev",
@@ -4629,14 +4634,24 @@ dependencies = [
 name = "umsh-communicator"
 version = "0.1.0"
 dependencies = [
+ "embassy-futures",
+ "embassy-sync",
  "heapless 0.8.0",
+ "rand 0.10.1",
+ "tokio",
+ "umsh",
  "umsh-communicator",
  "umsh-core",
+ "umsh-crypto",
+ "umsh-mac",
+ "umsh-node",
+ "umsh-sync",
  "umsh-text",
  "umsh-ulcp",
  "umsh-ulcp-admin",
  "umsh-ulcp-device",
  "umsh-ulcp-simdev",
+ "umsh-uri",
  "umsh-ux-communicator",
 ]
 

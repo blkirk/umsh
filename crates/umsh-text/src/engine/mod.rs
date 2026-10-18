@@ -974,21 +974,11 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
             ArchiveResult::Found { payload } if payload.len() <= MAX_FRAME => {
                 let mut frame = heapless::Vec::new();
                 let _ = frame.extend_from_slice(payload);
-                // Track the re-transmission against the *original* outbound
-                // message's handle so its ack flips the original row from
-                // "Not Delivered" back to "Delivered", rather than dangling a
-                // throwaway handle. Falls back to untracked when the original
-                // ref has aged out of the outbound window.
-                let track = self
-                    .outbound
-                    .get(&lookup.conversation)
-                    .and_then(|stream| stream.refs.lookup(lookup.sequence.message_id))
-                    .map(|handle| {
-                        (
-                            handle,
-                            lookup.sequence.fragment.map(|fragment| fragment.index),
-                        )
-                    });
+                let track = self.outbound_track(
+                    &lookup.conversation,
+                    lookup.sequence.message_id,
+                    lookup.sequence.fragment.map(|fragment| fragment.index),
+                );
                 self.queue_transmit(destination, None, frame, track);
             }
             _ => {
@@ -1009,6 +999,48 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
         }
         self.coalesce
             .record(lookup.conversation, &lookup.sequence, now_ms);
+    }
+
+    /// Send one of our frames again, as the archive keeps it under `key`:
+    /// a manual retry, where a resend request is a peer's. `handle` is the
+    /// message it belongs to, which must still hold the key's wire ID in
+    /// the outbound window: then the archived frame is that message's, and
+    /// word of it settles what an earlier failure left open. Returns
+    /// whether the frame was queued.
+    pub fn retransmit(&mut self, key: &ArchiveKey, handle: MessageHandle, payload: &[u8]) -> bool {
+        let holder = self
+            .outbound
+            .get(&key.conversation)
+            .and_then(|stream| stream.refs.lookup(key.message_id));
+        if holder != Some(handle) || payload.len() > MAX_FRAME {
+            return false;
+        }
+        let mut frame = heapless::Vec::new();
+        let _ = frame.extend_from_slice(payload);
+        // Already archived, so not offered for archiving again.
+        self.queue_transmit(
+            destination_for(&key.conversation),
+            None,
+            frame,
+            Some((handle, key.fragment)),
+        );
+        true
+    }
+
+    /// What a re-sent frame is tracked against: the original outbound
+    /// message's handle, so its acknowledgment reaches the original rather
+    /// than a throwaway handle. Nothing once the message has aged out of
+    /// the outbound window.
+    fn outbound_track(
+        &self,
+        conversation: &ConversationKey,
+        message_id: u8,
+        fragment: Option<u8>,
+    ) -> Option<(MessageHandle, Option<u8>)> {
+        self.outbound
+            .get(conversation)
+            .and_then(|stream| stream.refs.lookup(message_id))
+            .map(|handle| (handle, fragment))
     }
 
     /// Advance timers: reassembly expiry, notify deadlines, repair scheduling.

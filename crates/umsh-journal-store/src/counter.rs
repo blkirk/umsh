@@ -23,7 +23,14 @@ pub const MAX_KEY_LEN: usize = 40;
 /// `MAX_DEV_PEERS` (8) peers, with slack for a stale generation of
 /// entries surviving until the next journal clear (identity
 /// provisioning and CMD_CLEAR both clear the journal).
+#[cfg(not(feature = "chat-peers"))]
 pub const MAX_ENTRIES: usize = 12;
+
+/// One TX boundary plus RX boundaries for the 32 peers a chat device's
+/// node holds, with the same slack. Still one record: 40 entries encode
+/// to 1800 octets, inside a journal record's payload.
+#[cfg(feature = "chat-peers")]
+pub const MAX_ENTRIES: usize = 40;
 
 /// Upper bound of [`CounterMap::encode`]'s output.
 pub const ENCODED_MAX: usize = MAX_ENTRIES * (1 + MAX_KEY_LEN + 4);

@@ -3,23 +3,23 @@
 //! - [`inbound_text`] classifies a received frame for a chat session, with
 //!   the display rules of the well-known channels, and copies a text frame
 //!   out of the receive callback for the [`ChatFacade`](crate::chat::ChatFacade).
-//! - [`TransmitQueue`] (feature `software-crypto`) carries the facade's
-//!   transmissions to `LocalNode` sends, and maps acknowledgments and
-//!   timeouts back onto the engine.
+//! - [`TransmitQueue`] carries the facade's transmissions to `LocalNode`
+//!   sends, and maps acknowledgments and timeouts back onto the engine.
+//!   Channel sends need the `software-crypto` feature.
 //! - Thin wrappers for applications that send and receive text directly on
 //!   a peer connection or a bound channel.
 
 use alloc::vec::Vec;
 
 mod inbound;
-#[cfg(feature = "software-crypto")]
 mod transmit;
 
 pub use inbound::{Inbound, InboundText, Refusal, RxSummary, WellKnownChannels, inbound_text};
 #[cfg(feature = "software-crypto")]
+pub use transmit::bound_channel;
 pub use transmit::{
-    Stall, TRANSMISSION_STALL_MS, TransmitPolicy, TransmitQueue, WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS,
-    bound_channel, channel_reach, with_flood_reach,
+    Departed, Departure, Sent, Stall, TRANSMISSION_STALL_MS, TransmitPolicy, TransmitQueue,
+    Undeliverable, WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS, channel_reach, transmit, with_flood_reach,
 };
 
 use umsh_core::{PacketType, PayloadType};

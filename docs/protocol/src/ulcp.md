@@ -68,6 +68,8 @@ node exists even when no phone is attached and can be used for:
 - diagnostics
 - repeater or bridge behavior
 - announcing the presence or capabilities of the device
+- on a device with a messaging interface of its own, the messaging
+  identity of whoever carries it
 
 By default, such a node need not advertise itself with ordinary beacons. Its
 private key is either generated on the device itself (preferred) or installed

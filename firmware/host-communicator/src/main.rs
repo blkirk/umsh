@@ -8,7 +8,8 @@
 //!
 //! The first shows the fixture's chats. The second runs the communicator's
 //! node, as the Pager does, with its settings served by a soft device that
-//! keeps its saved state and identity under DIR.
+//! keeps its saved state and identity under DIR, and a device node on the
+//! LAN bearer.
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
 //! a click presses it. Return, Backspace, Space, and the letters are the
@@ -46,6 +47,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod mesh;
 mod node;
 
 use umsh_ux_communicator::buoyant;
@@ -130,7 +132,7 @@ impl Backend {
         match self {
             Self::Fixture(store) => advance(app, store, now),
             Self::Node(node) => {
-                node.pump(now);
+                node.pump();
                 input::events(app, now);
             }
         }
@@ -146,20 +148,34 @@ impl Backend {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (backend, args) = match args.as_slice() {
+    let (backend, dir, args) = match args.as_slice() {
         [node_flag, dir, rest @ ..] if node_flag == "--node" => {
             match node::open(Path::new(dir), std::time::Instant::now()) {
-                Ok(node) => (Backend::Node(node), rest),
+                Ok(node) => (Backend::Node(node), Some(dir), rest),
                 Err(e) => {
                     eprintln!("host-communicator: {dir}: {e}");
                     return ExitCode::FAILURE;
                 }
             }
         }
-        rest => (Backend::Fixture(store()), rest),
+        rest => (Backend::Fixture(store()), None, rest),
     };
     match args {
-        [] => window(backend),
+        [] => {
+            // Interactive, the node has a radio. A script runs without one,
+            // so that what it shows is only what it did.
+            let mesh = match (backend, dir) {
+                (Backend::Node(node), Some(dir)) => match mesh::Mesh::start(Path::new(dir), node) {
+                    Ok(mesh) => Some(mesh),
+                    Err(e) => {
+                        eprintln!("host-communicator: the device node: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                _ => None,
+            };
+            window(backend, mesh)
+        }
         [script_flag, script, out_flag, out]
             if script_flag == "--script" && out_flag == "--out" =>
         {
@@ -365,7 +381,7 @@ fn tap(modifier: Modifier) -> [Input; 2] {
 }
 
 #[cfg(feature = "window")]
-fn window(backend: Backend) -> ExitCode {
+fn window(backend: Backend, mesh: Option<mesh::Mesh>) -> ExitCode {
     use embedded_graphics_simulator::sdl2::{Keycode, MouseButton};
     use embedded_graphics_simulator::{SimulatorEvent, Window};
 
@@ -453,12 +469,16 @@ fn window(backend: Backend) -> ExitCode {
             app.render_animated(&mut target, &theme::TEXT);
             window.update(target.display());
         }
-        std::thread::sleep(std::time::Duration::from_millis(8));
+        let frame = std::time::Duration::from_millis(8);
+        match &mesh {
+            Some(mesh) => mesh.run_for(frame),
+            None => std::thread::sleep(frame),
+        }
     }
 }
 
 #[cfg(not(feature = "window"))]
-fn window(_backend: Backend) -> ExitCode {
+fn window(_backend: Backend, _mesh: Option<mesh::Mesh>) -> ExitCode {
     eprintln!("host-communicator: built without the window feature; use --script");
     ExitCode::from(2)
 }

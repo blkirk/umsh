@@ -3,14 +3,14 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::ops::Range;
 
 use umsh_text::ConversationKey;
+use umsh_text::chat::{self, ChatOutput, Mutation, PendingBatch};
 use umsh_text::engine::sequence::MessageHandle;
 use umsh_text::engine::{
-    ArchiveKey, BodyRef, DeliveryState, Event, MAX_FRAME, MessageMutation, MutationKind, Output,
-    StreamCheckpoint,
+    ArchiveKey, BodyRef, DeliveryState, Event, MAX_FRAME, Output, StreamCheckpoint,
 };
+use umsh_text::model::SenderScope;
 
 use crate::ids::{ChatId, MessageId};
 use crate::record::{BODY_MAX, LinkInfo, NAME_MAX, clip};
@@ -45,11 +45,9 @@ impl CommitStep {
 #[derive(Clone, Copy, Debug)]
 pub enum Change<'b> {
     /// One of the engine's transcript mutations, its body and Sender
-    /// Handle resolved to text.
+    /// Handle already cut to what the store keeps.
     Message {
-        mutation: &'b MessageMutation,
-        body: &'b str,
-        sender_handle: Option<&'b str>,
+        mutation: &'b Mutation,
         /// What the radio said about the frame behind it, for a mutation
         /// a received frame produced.
         link: Option<LinkInfo>,
@@ -67,9 +65,7 @@ pub enum Change<'b> {
 #[allow(clippy::large_enum_variant)]
 enum Entry {
     Message {
-        mutation: MessageMutation,
-        body: Range<usize>,
-        sender_handle: Option<Range<usize>>,
+        mutation: Mutation,
         link: Option<LinkInfo>,
     },
     Delivery {
@@ -82,13 +78,13 @@ enum Entry {
 /// What one commit writes: the outbound checkpoints, then the archive
 /// deletes, then the archives, then the transcript.
 ///
-/// A batch is filled from the engine's outputs as they are drained,
-/// [`Batch::push`] taking each in turn. It copies what it keeps—bodies
-/// out of the engine's render arena, which is reused once the queue is
-/// empty, and payloads out of the outputs—so it outlives both. What it
-/// borrows is the caller's map from the engine's message handles to the
-/// store's message IDs, for mutations of messages kept by an earlier
-/// commit.
+/// A batch is filled from what the chat facade drains, [`Batch::push_chat`]
+/// taking each output in turn, or from the engine's own outputs through
+/// [`Batch::push`]. It keeps its own copies—bodies out of the engine's
+/// render arena, which is reused once the queue is empty, and payloads out
+/// of the outputs—so it outlives both. What it borrows is the caller's map
+/// from the engine's message handles to the store's message IDs, for
+/// mutations of messages kept by an earlier commit.
 pub struct Batch<'a> {
     time: Option<u32>,
     handles: &'a dyn Fn(MessageHandle) -> Option<MessageId>,
@@ -96,7 +92,6 @@ pub struct Batch<'a> {
     archive_deletes: Vec<(ConversationKey, u8)>,
     archives: Vec<(ArchiveKey, heapless::Vec<u8, MAX_FRAME>)>,
     entries: Vec<Entry>,
-    text: String,
 }
 
 impl<'a> Batch<'a> {
@@ -111,7 +106,6 @@ impl<'a> Batch<'a> {
             archive_deletes: Vec::new(),
             archives: Vec::new(),
             entries: Vec::new(),
-            text: String::new(),
         }
     }
 
@@ -136,21 +130,11 @@ impl<'a> Batch<'a> {
                 conversation,
                 next_id,
                 epoch,
-            } => {
-                let checkpoint = StreamCheckpoint {
-                    conversation: *conversation,
-                    next_id: *next_id,
-                    epoch: *epoch,
-                };
-                match self
-                    .checkpoints
-                    .iter_mut()
-                    .find(|kept| kept.conversation == *conversation)
-                {
-                    Some(kept) => *kept = checkpoint,
-                    None => self.checkpoints.push(checkpoint),
-                }
-            }
+            } => self.checkpoint(StreamCheckpoint {
+                conversation: *conversation,
+                next_id: *next_id,
+                epoch: *epoch,
+            }),
             Output::DeleteArchive {
                 conversation,
                 message_id,
@@ -163,34 +147,17 @@ impl<'a> Batch<'a> {
                 self.archives.push((key, transmission.payload.clone()));
             }
             Output::StoreMessage(mutation) => {
-                let (text, handle) = match &mutation.kind {
-                    MutationKind::Insert {
-                        body: text,
-                        sender_handle,
-                        ..
-                    } => (Some(body(text)), sender_handle.map(|handle| body(&handle))),
-                    MutationKind::UpdateBody { body: text, .. }
-                    | MutationKind::Edit { body: text, .. } => (Some(body(text)), None),
-                    MutationKind::Delete { .. } => (None, None),
-                };
-                let body = self.keep(text.unwrap_or(""), BODY_MAX);
-                let sender_handle = handle.map(|handle| self.keep(handle, NAME_MAX));
-                self.entries.push(Entry::Message {
-                    mutation: *mutation,
-                    body,
-                    sender_handle,
-                    link,
+                let mutation = Mutation::from_engine(*mutation, body, |_, sender| match sender {
+                    SenderScope::Peer(key) => Some(key),
+                    SenderScope::Local | SenderScope::ClaimedMember(_) => None,
                 });
+                self.message(mutation, link);
             }
             Output::Event(Event::DeliveryStateChanged {
                 handle,
                 fragment,
                 state,
-            }) => self.entries.push(Entry::Delivery {
-                handle: *handle,
-                fragment: *fragment,
-                state: *state,
-            }),
+            }) => self.delivery(*handle, *fragment, *state),
             Output::Event(_) | Output::LookupOutbound { .. } | Output::Diagnostic(_) => {
                 return false;
             }
@@ -198,10 +165,95 @@ impl<'a> Batch<'a> {
         true
     }
 
-    fn keep(&mut self, text: &str, max: usize) -> Range<usize> {
-        let start = self.text.len();
-        self.text.push_str(clip(text, max));
-        start..self.text.len()
+    /// Take one output the chat facade drained. `link` is what the radio
+    /// said about the frame that produced it, for an output that
+    /// [describes its receipt](Mutation::describes_receipt). Returns whether
+    /// the output was the store's.
+    pub fn push_chat(&mut self, output: &ChatOutput, link: Option<LinkInfo>) -> bool {
+        match output {
+            ChatOutput::Mutation(mutation) => {
+                let link = link.filter(|_| mutation.describes_receipt());
+                self.message(mutation.clone(), link);
+            }
+            ChatOutput::Delivery(delivery) => {
+                self.delivery(delivery.handle, delivery.fragment, delivery.state);
+            }
+            ChatOutput::StoreArchive(archive) => {
+                let Ok(payload) = heapless::Vec::from_slice(&archive.payload) else {
+                    return false;
+                };
+                self.archives.push((archive.key, payload));
+            }
+            ChatOutput::DeleteArchive(delete) => {
+                self.archive_deletes
+                    .push((delete.conversation, delete.message_id));
+            }
+            ChatOutput::Lookup(_)
+            | ChatOutput::SenderResolved(_)
+            | ChatOutput::Event(_)
+            | ChatOutput::Diagnostic(_) => return false,
+        }
+        true
+    }
+
+    /// Take a composed message: its checkpoint, archive deletes, archives,
+    /// and transcript, and the deliveries among the rest of what composing
+    /// it produced. Its frames are the facade's to release once the batch
+    /// is committed.
+    pub fn push_composed(&mut self, composed: &PendingBatch) {
+        self.checkpoint(composed.checkpoint);
+        for delete in &composed.archive_deletes {
+            self.archive_deletes
+                .push((delete.conversation, delete.message_id));
+        }
+        for archive in &composed.archives {
+            if let Ok(payload) = heapless::Vec::from_slice(&archive.payload) {
+                self.archives.push((archive.key, payload));
+            }
+        }
+        for mutation in &composed.mutations {
+            self.message(mutation.clone(), None);
+        }
+        for output in &composed.outputs {
+            if let ChatOutput::Delivery(delivery) = output {
+                self.delivery(delivery.handle, delivery.fragment, delivery.state);
+            }
+        }
+    }
+
+    fn checkpoint(&mut self, checkpoint: StreamCheckpoint) {
+        match self
+            .checkpoints
+            .iter_mut()
+            .find(|kept| kept.conversation == checkpoint.conversation)
+        {
+            Some(kept) => *kept = checkpoint,
+            None => self.checkpoints.push(checkpoint),
+        }
+    }
+
+    fn message(&mut self, mut mutation: Mutation, link: Option<LinkInfo>) {
+        match &mut mutation.change {
+            chat::Change::Insert(insert) => {
+                cut(&mut insert.body, BODY_MAX);
+                if let Some(handle) = &mut insert.sender_handle {
+                    cut(handle, NAME_MAX);
+                }
+            }
+            chat::Change::UpdateBody { body, .. } | chat::Change::Edit { body, .. } => {
+                cut(body, BODY_MAX);
+            }
+            chat::Change::Delete { .. } => {}
+        }
+        self.entries.push(Entry::Message { mutation, link });
+    }
+
+    fn delivery(&mut self, handle: MessageHandle, fragment: Option<u8>, state: DeliveryState) {
+        self.entries.push(Entry::Delivery {
+            handle,
+            fragment,
+            state,
+        });
     }
 
     /// When the batch's messages were kept.
@@ -232,15 +284,8 @@ impl<'a> Batch<'a> {
 
     pub fn changes(&self) -> impl Iterator<Item = Change<'_>> + '_ {
         self.entries.iter().map(|entry| match entry {
-            Entry::Message {
+            Entry::Message { mutation, link } => Change::Message {
                 mutation,
-                body,
-                sender_handle,
-                link,
-            } => Change::Message {
-                mutation,
-                body: &self.text[body.clone()],
-                sender_handle: sender_handle.clone().map(|range| &self.text[range]),
                 link: *link,
             },
             Entry::Delivery {
@@ -295,4 +340,10 @@ impl Committed {
             .find(|(inserted, _)| *inserted == handle)
             .map(|(_, id)| *id)
     }
+}
+
+/// Cuts `text` to at most `max` bytes, at a character boundary.
+fn cut(text: &mut String, max: usize) {
+    let len = clip(text, max).len();
+    text.truncate(len);
 }

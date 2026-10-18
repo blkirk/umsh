@@ -280,6 +280,7 @@ pub enum PfsStatus {
     },
 }
 
+#[cfg(feature = "software-crypto")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PfsLifecycle {
     Established(PublicKey),
@@ -353,6 +354,7 @@ impl<M: MacBackend> NodeError<M> {
     /// Coarse classification of this error for surfacing PFS failures to
     /// applications (the concrete error type is generic over `M`, so callers
     /// that just want to report a failure use this instead).
+    #[cfg(feature = "software-crypto")]
     pub(crate) fn pfs_failure(&self) -> PfsFailure {
         use crate::mac::MacBackendError;
         match self {
@@ -1627,6 +1629,7 @@ impl<M: MacBackend> LocalNode<M> {
             .for_each_mut(|handler| handler(peer, token));
     }
 
+    #[cfg(feature = "software-crypto")]
     pub(crate) fn dispatch_pfs_established(&self, peer: PublicKey) {
         let mut state = self.state.borrow_mut();
         let peer = canonical_peer(&state, peer);
@@ -1644,6 +1647,7 @@ impl<M: MacBackend> LocalNode<M> {
             .for_each_mut(|handler| handler(peer));
     }
 
+    #[cfg(feature = "software-crypto")]
     pub(crate) fn dispatch_pfs_ended(&self, peer: PublicKey) {
         let mut state = self.state.borrow_mut();
         let peer = canonical_peer(&state, peer);
@@ -1659,6 +1663,7 @@ impl<M: MacBackend> LocalNode<M> {
             .for_each_mut(|handler| handler(peer));
     }
 
+    #[cfg(feature = "software-crypto")]
     pub(crate) fn dispatch_pfs_failed(&self, peer: PublicKey, reason: PfsFailure) {
         let mut state = self.state.borrow_mut();
         let peer = canonical_peer(&state, peer);
@@ -1667,21 +1672,14 @@ impl<M: MacBackend> LocalNode<M> {
             .for_each_mut(|handler| handler(peer, reason));
     }
 
+    #[cfg(feature = "software-crypto")]
     pub(crate) async fn expire_pfs_sessions(&self) -> Result<Vec<PublicKey>, NodeError<M>> {
-        #[cfg(feature = "software-crypto")]
-        {
-            let now_ms = self.mac.now_ms().await;
-            return self
-                .state
-                .borrow_mut()
-                .pfs
-                .expire_sessions(&self.mac, now_ms)
-                .await;
-        }
-        #[cfg(not(feature = "software-crypto"))]
-        {
-            Ok(Vec::new())
-        }
+        let now_ms = self.mac.now_ms().await;
+        self.state
+            .borrow_mut()
+            .pfs
+            .expire_sessions(&self.mac, now_ms)
+            .await
     }
 
     /// Drop any sent PFS requests that were not answered before their deadline,
@@ -1692,6 +1690,7 @@ impl<M: MacBackend> LocalNode<M> {
     }
 }
 
+#[cfg_attr(not(feature = "software-crypto"), allow(unused_variables))]
 fn canonical_peer(state: &LocalNodeState, peer: PublicKey) -> PublicKey {
     #[cfg(feature = "software-crypto")]
     {
@@ -1814,6 +1813,37 @@ impl<M: MacBackend> BoundChannel<M> {
     /// Return the owning local node for this bound channel.
     pub fn node(&self) -> &LocalNode<M> {
         &self.node
+    }
+}
+
+#[cfg(feature = "software-crypto")]
+impl<M: MacBackend> BoundChannel<M> {
+    /// Ask the channel for the identity of the member whose hint is
+    /// `hint`: an Identity Request (command 1) filtered by the hint, as one
+    /// multicast, with a random NONCE for the member to echo.
+    ///
+    /// The response arrives asynchronously as a `PayloadType::NodeIdentity`
+    /// frame on the normal receive path, not as the return value here.
+    /// `options` should carry the full source key, so the member can answer
+    /// with a unicast.
+    pub async fn request_identity(
+        &self,
+        hint: &NodeHint,
+        options: &SendOptions,
+    ) -> Result<SendProgressTicket, NodeError<M>> {
+        let mut nonce_bytes = [0u8; 4];
+        self.node.fill_random(&mut nonce_bytes).await;
+        let opts_block = crate::mac_command::IdentityRequestBuilder::new()
+            .nonce(u32::from_be_bytes(nonce_bytes))?
+            .filter_hint(hint)?
+            .build();
+        let cmd = crate::mac_command::MacCommand::IdentityRequest {
+            options: &opts_block,
+        };
+        let mut buf = [0u8; 128];
+        buf[0] = umsh_core::PayloadType::MacCommand as u8;
+        let n = crate::mac_command::encode(&cmd, &mut buf[1..])? + 1;
+        self.send_all(&buf[..n], options).await
     }
 }
 

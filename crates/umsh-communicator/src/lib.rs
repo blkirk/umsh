@@ -12,7 +12,8 @@
 //! - [`conformance`]: the suite every back end passes, power cut between
 //!   each step of the commit order included.
 //! - [`CommunicatorNode`] (feature `node`): the node behind the interface,
-//!   with the device's [`settings`] reached through its own ULCP session.
+//!   with the device's [`settings`] reached through its own ULCP session
+//!   and its chats fed by the device node through [`task`].
 //!
 //! Device settings and security state are not stored here: the device
 //! keeps the first, and the second stays with the MAC.
@@ -20,6 +21,8 @@
 extern crate alloc;
 
 mod batch;
+#[cfg(feature = "node")]
+mod chat;
 mod ids;
 mod memory;
 #[cfg(feature = "node")]
@@ -29,6 +32,8 @@ mod record;
 #[cfg(feature = "node")]
 pub mod settings;
 mod store;
+#[cfg(feature = "node")]
+pub mod task;
 mod wire;
 
 #[cfg(any(test, feature = "conformance"))]
@@ -46,4 +51,10 @@ pub use record::{
 pub use store::ChatStore;
 
 #[cfg(feature = "node")]
-pub use node::CommunicatorNode;
+pub use chat::ChannelCrypto;
+#[cfg(feature = "node")]
+pub use node::{Clock, CommunicatorNode};
+#[cfg(feature = "node")]
+pub use umsh_text::chat::Seeds;
+#[cfg(feature = "node")]
+pub use umsh_text::node_adapter::WellKnownChannels;

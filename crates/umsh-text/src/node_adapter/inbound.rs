@@ -118,6 +118,17 @@ enum Origin {
 }
 
 impl InboundText {
+    /// The key of the channel it came on, for a channel frame: one the node
+    /// holds, since the key authenticated the frame.
+    pub fn channel_key(&self) -> Option<ChannelKey> {
+        match self.origin {
+            Origin::Direct { .. } => None,
+            Origin::ChannelGroup { channel, .. } | Origin::ChannelDirect { channel, .. } => {
+                Some(channel)
+            }
+        }
+    }
+
     /// Who sent it, with its channel named by tag. `None` when `channels`
     /// does not hold the channel—one the session has left.
     pub fn source(&self, channels: &ChannelRegistry) -> Option<TextSource> {

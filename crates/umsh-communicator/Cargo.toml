@@ -10,20 +10,55 @@ description = "A communicator's durable chat state: the ChatStore interface and 
 # The conformance suite, for a back end in another crate to run against
 # itself. This crate's own tests always have it.
 conformance = []
-# The node behind the communicator's interface, with the device's settings
-# reached through its own ULCP session.
-node = ["dep:umsh-ux-communicator", "dep:umsh-ulcp", "dep:umsh-ulcp-admin"]
+# The node behind the communicator's interface: the device's settings
+# reached through its own ULCP session, and its chats fed by the device
+# node.
+node = [
+    "dep:umsh-ux-communicator",
+    "dep:umsh-ulcp",
+    "dep:umsh-ulcp-admin",
+    "dep:umsh-node",
+    "dep:umsh-mac",
+    "dep:umsh-uri",
+    "dep:embassy-sync",
+    "dep:embassy-futures",
+    "umsh-text/node",
+]
+# `ChannelCrypto::software`: the node's channel derivations on the software
+# crypto back end.
+software-crypto = [
+    "node",
+    "dep:umsh-crypto",
+    "umsh-crypto/software-crypto",
+    "umsh-text/software-crypto",
+]
 
 [dependencies]
-umsh-text = { path = "../umsh-text", default-features = false }
+umsh-text = { path = "../umsh-text", default-features = false, features = ["alloc"] }
 umsh-core = { path = "../umsh-core", default-features = false }
 heapless = { workspace = true }
 umsh-ux-communicator = { path = "../umsh-ux-communicator", optional = true }
 umsh-ulcp = { path = "../umsh-ulcp", optional = true }
 umsh-ulcp-admin = { path = "../umsh-ulcp-admin", optional = true }
+umsh-node = { path = "../umsh-node", default-features = false, optional = true }
+umsh-mac = { path = "../umsh-mac", default-features = false, optional = true }
+umsh-uri = { path = "../umsh-uri", default-features = false, features = ["alloc"], optional = true }
+embassy-sync = { version = "0.8", default-features = false, optional = true }
+embassy-futures = { version = "0.1", default-features = false, optional = true }
+umsh-crypto = { path = "../umsh-crypto", default-features = false, optional = true }
 
 [dev-dependencies]
-umsh-communicator = { path = ".", features = ["node"] }
+umsh-communicator = { path = ".", features = ["software-crypto"] }
 # The node's settings are tried against the soft device's real session.
 umsh-ulcp-device = { path = "../umsh-ulcp-device" }
 umsh-ulcp-simdev = { path = "../umsh-ulcp-simdev" }
+# A channel's frames are built as the MAC hands them over, from what a
+# peer's own chat session composes.
+umsh-text = { path = "../umsh-text" }
+umsh-crypto = { path = "../umsh-crypto" }
+umsh-mac = { path = "../umsh-mac" }
+# Two communicators over a real MAC on a simulated link.
+umsh = { path = "../../umsh", default-features = false, features = ["std", "software-crypto", "tokio-support"] }
+umsh-sync = { path = "../umsh-sync" }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+rand = { workspace = true, features = ["std", "thread_rng"] }

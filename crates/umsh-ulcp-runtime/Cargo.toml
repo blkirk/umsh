@@ -40,6 +40,10 @@ radio = [
 # The persisted frame-counter map, the two-page journal handles, and the
 # device node's counter store—over `umsh-journal-store`.
 counters = ["dep:umsh-journal-store", "dep:umsh-hal", "dep:heapless"]
+# A device with its own messaging interface: its device identity is its
+# person's messaging identity, advertised as a chat node, and its device
+# node is sized for chat traffic and the peers it talks with.
+communicator = ["umsh-journal-store?/chat-peers"]
 # The board-agnostic session driver: the device run loop, effect dispatch,
 # and frame staging, parameterized over the `DeviceEnv` board couplings.
 # Also carries `duty_gate`, the shared duty-ledger radio decorator the

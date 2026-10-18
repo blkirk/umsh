@@ -17,8 +17,12 @@
 //! loss would matter—the name, the radio—is followed by a save when the
 //! device has none in effect. Brightness and the keyboard never ask for
 //! one.
+//!
+//! **Channels.** A communicator starts out on `public` and `EMERGENCY`:
+//! the first boot joins both before it saves.
 
-use umsh_core::base58;
+use umsh_core::ChannelTag;
+use umsh_text::node_adapter::WellKnownChannels;
 use umsh_ulcp::ids::{keyboard_aids, prop, saved};
 use umsh_ulcp::profiles::VETTED;
 use umsh_ulcp_admin::descriptor::Value;
@@ -30,6 +34,8 @@ use umsh_ux_communicator::heapless::{Deque, String};
 use umsh_ux_communicator::model::{
     KeyboardSettings, NodeEvent, Profile, RadioSettings, Setting, ShareUri, brightness_at,
 };
+
+use crate::chat::address;
 
 /// How long after a change worth saving the device is asked to save it, so
 /// that a burst of changes is saved once.
@@ -47,12 +53,21 @@ pub const DEFAULT_BRIGHTNESS: u8 = brightness_at(5);
 /// can be made.
 const WRITES_KEPT: usize = 16;
 
+/// How many saves and forgets of peers are remembered until the device
+/// answers them.
+const PEER_WRITES_KEPT: usize = 8;
+
 /// The settings half of the communicator's node.
 pub struct Settings<P> {
     model: Model,
     exchange: LocalExchange<P>,
+    /// The channels the first boot joins.
+    well_known: WellKnownChannels,
     /// The setting each recent write changed, oldest first.
     writes: Deque<(WriteId, Setting), WRITES_KEPT>,
+    /// Peers saved, or with `false` forgotten, that the device has yet to
+    /// answer for, oldest first.
+    peer_writes: Deque<(WriteId, [u8; 32], bool), PEER_WRITES_KEPT>,
     /// When to ask the device to save.
     save_at: Option<u64>,
     /// Whether the device's saved state at boot has been looked at.
@@ -65,13 +80,15 @@ pub struct Settings<P> {
 impl<P: LocalPort> Settings<P> {
     /// Settings read over `port`. Nothing is known until the first
     /// [`Settings::pump`] has asked and the device has answered.
-    pub fn new(port: P) -> Self {
+    pub fn new(port: P, well_known: WellKnownChannels) -> Self {
         let mut model = Model::new();
         model.refresh();
         Self {
             model,
             exchange: LocalExchange::new(port),
+            well_known,
             writes: Deque::new(),
+            peer_writes: Deque::new(),
             save_at: None,
             boot_checked: false,
             airtime_at: AIRTIME_READ_MS,
@@ -132,6 +149,14 @@ impl<P: LocalPort> Settings<P> {
         match event {
             Event::Changed(_) | Event::Resync => events(NodeEvent::SettingsChanged),
             Event::Written { id, outcome, .. } => {
+                if self.peer_writes.iter().any(|(write, ..)| *write == id) {
+                    self.peer_writes.retain(|(write, ..)| *write != id);
+                    if matches!(outcome, WriteOutcome::Applied | WriteOutcome::Adjusted) {
+                        self.save_if_unsaved();
+                    }
+                    events(NodeEvent::SettingsChanged);
+                    return;
+                }
                 let Some(setting) = self
                     .writes
                     .iter()
@@ -157,9 +182,9 @@ impl<P: LocalPort> Settings<P> {
         }
     }
 
-    /// At first boot nothing is saved: save what the device starts with,
-    /// so that a snapshot is in effect from then on. Returns whether a save
-    /// was asked for.
+    /// At first boot nothing is saved: join the channels a communicator
+    /// starts out on, and save, so that a snapshot is in effect from then
+    /// on. Returns whether a save was asked for.
     fn check_boot(&mut self) -> bool {
         if self.boot_checked
             || !matches!(self.model.freshness(prop::SAVED), Freshness::Fresh { .. })
@@ -167,7 +192,14 @@ impl<P: LocalPort> Settings<P> {
             return false;
         }
         self.boot_checked = true;
-        self.model.saved() == Some(saved::NONE) && self.model.save().is_ok()
+        if self.model.saved() != Some(saved::NONE) {
+            return false;
+        }
+        for key in [self.well_known.public, self.well_known.emergency] {
+            // Refused only where the device has no identity to join with.
+            _ = self.model.join_channel(&key.0);
+        }
+        self.model.save().is_ok()
     }
 
     /// A change that would matter if it were lost is saved, unless the
@@ -233,6 +265,34 @@ impl<P: LocalPort> Settings<P> {
         self.written(Setting::Brightness, write)
     }
 
+    /// Keeps `key` among the device's peers.
+    pub fn save_peer(&mut self, key: &[u8; 32]) -> bool {
+        let write = self.model.save_peer(key);
+        self.peer_written(key, true, write)
+    }
+
+    /// No longer keeps `key` among the device's peers.
+    pub fn forget_peer(&mut self, key: &[u8; 32]) -> bool {
+        let write = self.model.forget_peer(key);
+        self.peer_written(key, false, write)
+    }
+
+    fn peer_written(
+        &mut self,
+        key: &[u8; 32],
+        saved: bool,
+        write: Result<WriteId, Refusal>,
+    ) -> bool {
+        let Ok(id) = write else {
+            return false;
+        };
+        if self.peer_writes.is_full() {
+            self.peer_writes.pop_front();
+        }
+        let _ = self.peer_writes.push_back((id, *key, saved));
+        true
+    }
+
     fn written(&mut self, setting: Setting, write: Result<WriteId, Refusal>) -> bool {
         let Ok(id) = write else {
             return false;
@@ -253,14 +313,25 @@ impl<P: LocalPort> Settings<P> {
 
     /// The device identity's address.
     pub fn address(&self) -> String<44> {
-        let mut address = String::new();
-        if let Some(key) = self.key() {
-            let encoded = base58::encode(key);
-            for &digit in &encoded {
-                let _ = address.push(char::from(digit));
+        self.key().map(address).unwrap_or_default()
+    }
+
+    /// The device identity's peers: what `PROP_DEV_PEERS` holds once the
+    /// device has answered every save and forget asked of it.
+    pub fn peers(&self) -> alloc::vec::Vec<[u8; 32]> {
+        let mut peers: alloc::vec::Vec<[u8; 32]> = self.model.peers().copied().collect();
+        for (_, key, saved) in &self.peer_writes {
+            peers.retain(|peer| peer != key);
+            if *saved {
+                peers.push(*key);
             }
         }
-        address
+        peers
+    }
+
+    /// The channels the device identity holds, by tag.
+    pub fn channels(&self) -> impl Iterator<Item = ChannelTag> + '_ {
+        self.model.channels().map(|tag| ChannelTag(*tag))
     }
 
     /// How the device identity is drawn: its key's leading octets as the

@@ -163,7 +163,7 @@ pub use app_payload::{
 };
 #[cfg(feature = "software-crypto")]
 pub use channel::Channel;
-pub use host::{Host, HostError};
+pub use host::{Host, HostError, identity_is_trustworthy};
 pub use identity::{IdentitySignature, NodeCapabilities, NodeIdentityPayload, NodeRole};
 pub use identity_responder::{
     IdentityRequestContext, NodeIdentityProfile, RespondDecision, default_respond_policy,

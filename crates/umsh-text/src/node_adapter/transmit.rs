@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 
 use umsh_core::{ChannelKey, ChannelTag, PayloadType, PublicKey};
 use umsh_mac::{SendOptions, SendReceipt};
-use umsh_node::{BoundChannel, LocalNode, MacBackend, SendProgressTicket, Transport};
+#[cfg(feature = "software-crypto")]
+use umsh_node::{BoundChannel, Transport};
+use umsh_node::{LocalNode, MacBackend, SendProgressTicket};
 
 use crate::chat::{ChannelRegistry, ChatFacade, Outbound, TransmitUpdate};
 use crate::engine::{Destination, Transmission};
@@ -60,6 +62,7 @@ pub fn channel_reach(
 ///
 /// Looked up per send rather than cached: leaving and rejoining a channel
 /// invalidates the binding, and the registry is the one place that knows.
+#[cfg(feature = "software-crypto")]
 pub fn bound_channel<M: MacBackend>(
     node: &LocalNode<M>,
     channels: &ChannelRegistry,
@@ -91,7 +94,8 @@ pub struct TransmitQueue {
     window: usize,
     pending: VecDeque<Queued>,
     in_flight: Vec<InFlight>,
-    /// Peers whose first frame has been acknowledged.
+    /// Peers that have acknowledged a frame since the last one failed:
+    /// they know our key.
     pipeline_ready: BTreeSet<[u8; 32]>,
 }
 
@@ -159,21 +163,9 @@ impl TransmitQueue {
 
     /// Hand waiting frames to the node while the window has room. Returns
     /// how many were sent: each is an authenticated send that advanced the
-    /// frame counter.
-    ///
-    /// - A unicast asks for an acknowledgment, and a peer gets one frame in
-    ///   flight until its first is acknowledged: first contact may need
-    ///   counter synchronization.
-    /// - A channel multicast carries the full source key, so a member who
-    ///   misses a fragment can address a resend request to us.
-    /// - A channel-direct frame is a blind unicast, registering the peer on
-    ///   the way out.
-    /// - `EMERGENCY` goes out unencrypted, so any node in range can read it.
-    ///
-    /// A frame that cannot be sent—an unregistrable peer, a channel no longer
-    /// held—fails at once. One the node refuses for now, which with a
-    /// registered peer and an engine-bounded payload means its queues are
-    /// full, waits for tickets to advance.
+    /// frame counter. It is [`TransmitQueue::depart`], [`transmit`], and
+    /// [`TransmitQueue::departed`] in a loop, for a caller that holds the
+    /// facade across the sends.
     pub async fn pump<M, P, const SLOTS: usize, const PAGES: usize>(
         &mut self,
         node: &LocalNode<M>,
@@ -186,57 +178,127 @@ impl TransmitQueue {
         P: TextProfile + Clone,
     {
         let mut sent_count = 0;
-        while self.in_flight.len() < self.window {
-            let Some(queued) = self.pending.pop_front() else {
-                break;
-            };
-            let transmission = &queued.transmission;
-            let gate_peer = match transmission.destination {
-                Destination::Peer(peer) => Some(peer),
-                Destination::Channel(_) | Destination::ChannelPeer { .. } => None,
-            };
-            if let Some(peer) = gate_peer
-                && !self.pipeline_ready.contains(&peer.0)
-                && self
-                    .in_flight
-                    .iter()
-                    .any(|entry| entry.gate_peer == Some(peer))
-            {
-                self.pending.push_front(queued);
-                break;
-            }
-            let mut payload = Vec::with_capacity(transmission.payload.len() + 1);
-            payload.push(PayloadType::TextMessage as u8);
-            payload.extend_from_slice(transmission.payload.as_slice());
-            let sent = match send(node, chat.channels(), policy, transmission, &payload).await {
-                Sent::Ticket(ticket) => ticket,
-                Sent::Unsendable => {
-                    chat.transmit_update(
-                        queued.session_id,
-                        transmission.transmission_id,
-                        TransmitUpdate::Failed,
-                        now_ms,
-                    );
+        while let Some(next) = self.depart(chat.channels(), policy) {
+            let departure = match next {
+                Ok(departure) => departure,
+                Err(undeliverable) => {
+                    undeliverable.fail(chat, now_ms);
                     continue;
                 }
-                Sent::Busy => {
-                    self.pending.push_front(queued);
-                    break;
-                }
             };
-            self.in_flight.push(InFlight {
-                session_id: queued.session_id,
-                transmission_id: transmission.transmission_id,
-                gate_peer,
-                ticket: sent,
-                sent_reported: false,
-                non_ack: gate_peer.is_none(),
-                queued_at_ms: now_ms,
-                stall_reported: false,
-            });
-            sent_count += 1;
+            let sent = transmit(node, &departure).await;
+            match self.departed(departure, sent, now_ms) {
+                Departed::Sent => sent_count += 1,
+                Departed::Failed(undeliverable) => undeliverable.fail(chat, now_ms),
+                Departed::Busy => break,
+            }
         }
         sent_count
+    }
+
+    /// The next frame the window has room for, with where it goes resolved
+    /// against `channels`. `None` when nothing may leave now.
+    ///
+    /// - A unicast asks for an acknowledgment, and a peer gets one frame in
+    ///   flight until its first is acknowledged: first contact may need
+    ///   counter synchronization. Until then it names us by full key, since
+    ///   a peer that has not registered us cannot read a frame that names
+    ///   us by hint.
+    /// - A channel multicast carries the full source key, so a member who
+    ///   misses a fragment can address a resend request to us.
+    /// - A channel-direct frame is a blind unicast, registering the peer on
+    ///   the way out.
+    /// - `EMERGENCY` goes out unencrypted, so any node in range can read it.
+    ///
+    /// A frame on a channel no longer held comes back undeliverable.
+    pub fn depart(
+        &mut self,
+        channels: &ChannelRegistry,
+        policy: &TransmitPolicy,
+    ) -> Option<Result<Departure, Undeliverable>> {
+        if self.in_flight.len() >= self.window {
+            return None;
+        }
+        let queued = self.pending.pop_front()?;
+        let transmission = &queued.transmission;
+        let gate_peer = match transmission.destination {
+            Destination::Peer(peer) => Some(peer),
+            Destination::Channel(_) | Destination::ChannelPeer { .. } => None,
+        };
+        if let Some(peer) = gate_peer
+            && !self.pipeline_ready.contains(&peer.0)
+            && self
+                .in_flight
+                .iter()
+                .any(|entry| entry.gate_peer == Some(peer))
+        {
+            self.pending.push_front(queued);
+            return None;
+        }
+        let route = match transmission.destination {
+            Destination::Peer(peer) => {
+                let options = with_flood_reach(SendOptions::default(), policy.default_flood_hops)
+                    .with_ack_requested(true);
+                let options = if self.pipeline_ready.contains(&peer.0) {
+                    options
+                } else {
+                    options.with_full_source()
+                };
+                Route::Peer { peer, options }
+            }
+            Destination::Channel(channel) => {
+                let Some(key) = channels.key(&channel) else {
+                    return Some(Err(Undeliverable::of(&queued)));
+                };
+                let options = channel_options(channels, policy, &channel, &key);
+                Route::Channel { key, options }
+            }
+            // A repair request; the engine owns retrying it, so no
+            // acknowledgment is asked for. Repairs carry the same message
+            // the multicast did, so they are held to the same rules.
+            Destination::ChannelPeer { channel, peer } => {
+                let Some(key) = channels.key(&channel) else {
+                    return Some(Err(Undeliverable::of(&queued)));
+                };
+                let options = channel_options(channels, policy, &channel, &key);
+                Route::ChannelPeer { key, peer, options }
+            }
+        };
+        let mut payload = Vec::with_capacity(transmission.payload.len() + 1);
+        payload.push(PayloadType::TextMessage as u8);
+        payload.extend_from_slice(transmission.payload.as_slice());
+        Some(Ok(Departure {
+            queued,
+            gate_peer,
+            route,
+            payload,
+        }))
+    }
+
+    /// What became of a departure's send. A frame the node refused for
+    /// now—with a registered peer and an engine-bounded payload, its queues
+    /// are full—goes back to the head of the queue, to wait for tickets to
+    /// advance.
+    pub fn departed(&mut self, departure: Departure, sent: Sent, now_ms: u64) -> Departed {
+        let ticket = match sent {
+            Sent::Ticket(ticket) => ticket,
+            Sent::Unsendable => return Departed::Failed(Undeliverable::of(&departure.queued)),
+            Sent::Busy => {
+                self.pending.push_front(departure.queued);
+                return Departed::Busy;
+            }
+        };
+        self.in_flight.push(InFlight {
+            session_id: departure.queued.session_id,
+            transmission_id: departure.queued.transmission.transmission_id,
+            gate_peer: departure.gate_peer,
+            ticket,
+            sent_reported: false,
+            non_ack: departure.gate_peer.is_none(),
+            queued_at_ms: now_ms,
+            stall_reported: false,
+        });
+        Departed::Sent
     }
 
     /// Report what the tickets say to the engine: transmitted, acknowledged,
@@ -299,6 +361,11 @@ impl TransmitQueue {
                 );
                 self.in_flight.swap_remove(index);
             } else if entry.ticket.has_failed() {
+                // Perhaps it no longer knows us: the next frame introduces
+                // us again.
+                if let Some(peer) = entry.gate_peer {
+                    self.pipeline_ready.remove(&peer.0);
+                }
                 chat.transmit_update(
                     entry.session_id,
                     entry.transmission_id,
@@ -348,7 +415,34 @@ impl TransmitQueue {
     }
 }
 
-enum Sent {
+/// A frame let go by [`TransmitQueue::depart`], with where it goes, until
+/// [`TransmitQueue::departed`] is told how its send went.
+pub struct Departure {
+    queued: Queued,
+    gate_peer: Option<PublicKey>,
+    route: Route,
+    /// The frame, with its payload-type byte.
+    payload: Vec<u8>,
+}
+
+enum Route {
+    Peer {
+        peer: PublicKey,
+        options: SendOptions,
+    },
+    Channel {
+        key: ChannelKey,
+        options: SendOptions,
+    },
+    ChannelPeer {
+        key: ChannelKey,
+        peer: PublicKey,
+        options: SendOptions,
+    },
+}
+
+/// How a send went.
+pub enum Sent {
     Ticket(SendProgressTicket),
     /// Nothing will make this frame sendable; fail it.
     Unsendable,
@@ -356,56 +450,113 @@ enum Sent {
     Busy,
 }
 
-async fn send<M: MacBackend>(
+/// What [`TransmitQueue::departed`] made of a send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Departed {
+    /// It is in flight.
+    Sent,
+    /// It will never go: fail it.
+    Failed(Undeliverable),
+    /// The node is full for now: send nothing more until a ticket
+    /// advances.
+    Busy,
+}
+
+/// A frame that will not go out: an unregistrable peer, a channel no
+/// longer held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Undeliverable {
+    pub session_id: u64,
+    pub transmission_id: u32,
+}
+
+impl Undeliverable {
+    fn of(queued: &Queued) -> Self {
+        Self {
+            session_id: queued.session_id,
+            transmission_id: queued.transmission.transmission_id,
+        }
+    }
+
+    /// Tells the facade the frame failed.
+    pub fn fail<P, const SLOTS: usize, const PAGES: usize>(
+        self,
+        chat: &mut ChatFacade<P, SLOTS, PAGES>,
+        now_ms: u64,
+    ) where
+        P: TextProfile + Clone,
+    {
+        chat.transmit_update(
+            self.session_id,
+            self.transmission_id,
+            TransmitUpdate::Failed,
+            now_ms,
+        );
+    }
+}
+
+/// Sends a departed frame. Needs only the node, so a caller may hold
+/// nothing else across it.
+pub async fn transmit<M: MacBackend>(node: &LocalNode<M>, departure: &Departure) -> Sent {
+    let payload = &departure.payload[..];
+    match &departure.route {
+        Route::Peer { peer, options } => {
+            let Ok(connection) = node.peer(*peer).await else {
+                return Sent::Unsendable;
+            };
+            connection.send(payload, options).await.into()
+        }
+        Route::Channel { key, options } => send_on_channel(node, key, None, payload, options).await,
+        Route::ChannelPeer { key, peer, options } => {
+            send_on_channel(node, key, Some(peer), payload, options).await
+        }
+    }
+}
+
+/// A multicast on the channel `key` names, or with `peer` a blind unicast
+/// to one member.
+#[cfg(feature = "software-crypto")]
+async fn send_on_channel<M: MacBackend>(
     node: &LocalNode<M>,
-    channels: &ChannelRegistry,
-    policy: &TransmitPolicy,
-    transmission: &Transmission,
+    key: &ChannelKey,
+    peer: Option<&PublicKey>,
     payload: &[u8],
+    options: &SendOptions,
 ) -> Sent {
-    let result = match transmission.destination {
-        Destination::Peer(peer) => {
-            let Ok(connection) = node.peer(peer).await else {
-                return Sent::Unsendable;
-            };
-            let options = with_flood_reach(SendOptions::default(), policy.default_flood_hops)
-                .with_ack_requested(true);
-            connection.send(payload, &options).await.map_err(|_| ())
-        }
-        Destination::Channel(channel) => {
-            let (Some(key), Some(bound)) = (
-                channels.key(&channel),
-                bound_channel(node, channels, &channel),
-            ) else {
-                return Sent::Unsendable;
-            };
-            let options = channel_options(channels, policy, &channel, &key);
-            bound.send_all(payload, &options).await.map_err(|_| ())
-        }
-        Destination::ChannelPeer { channel, peer } => {
-            let (Some(key), Some(bound)) = (
-                channels.key(&channel),
-                bound_channel(node, channels, &channel),
-            ) else {
-                return Sent::Unsendable;
-            };
-            // The MAC will only address a registered peer, and a channel
-            // member is not one: nothing about being in a channel together
-            // registers anybody. Registering on the way out spends a peer
-            // slot only on the members we have to ask something of.
-            if node.peer(peer).await.is_err() {
-                return Sent::Unsendable;
-            }
-            // A repair request; the engine owns retrying it, so no
-            // acknowledgment is asked for. Repairs carry the same message the
-            // multicast did, so they are held to the same rules.
-            let options = channel_options(channels, policy, &channel, &key);
-            bound.send(&peer, payload, &options).await.map_err(|_| ())
-        }
+    let Some(bound) = node.bound_channel(&umsh_node::Channel::private(*key, "")) else {
+        return Sent::Unsendable;
     };
-    match result {
-        Ok(ticket) => Sent::Ticket(ticket),
-        Err(()) => Sent::Busy,
+    let Some(peer) = peer else {
+        return bound.send_all(payload, options).await.into();
+    };
+    // The MAC will only address a registered peer, and a channel member is
+    // not one: nothing about being in a channel together registers anybody.
+    // Registering on the way out spends a peer slot only on the members we
+    // have to ask something of.
+    if node.peer(*peer).await.is_err() {
+        return Sent::Unsendable;
+    }
+    bound.send(peer, payload, options).await.into()
+}
+
+/// Channels are sealed by the software crypto back end alone.
+#[cfg(not(feature = "software-crypto"))]
+async fn send_on_channel<M: MacBackend>(
+    _node: &LocalNode<M>,
+    _key: &ChannelKey,
+    _peer: Option<&PublicKey>,
+    _payload: &[u8],
+    _options: &SendOptions,
+) -> Sent {
+    Sent::Unsendable
+}
+
+impl<E> From<Result<SendProgressTicket, E>> for Sent {
+    fn from(result: Result<SendProgressTicket, E>) -> Self {
+        match result {
+            Ok(ticket) => Sent::Ticket(ticket),
+            Err(_) => Sent::Busy,
+        }
     }
 }
 

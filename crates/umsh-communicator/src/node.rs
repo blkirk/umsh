@@ -1,12 +1,18 @@
 //! The node behind a communicator's interface.
 //!
-//! The settings half is here: the device's settings through its own ULCP
-//! session ([`Settings`]). The chats half arrives with the chat session,
-//! and until then the node has no chats, peers, or messages, and takes
-//! none.
+//! Two halves: the device's settings through its own ULCP session
+//! ([`Settings`]), and the chats, which the device node's received frames
+//! feed and whose frames it sends (see [`crate::task`]).
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+
+use umsh_core::PublicKey;
+use umsh_text::chat::Seeds;
+use umsh_text::node_adapter::{Departure, Sent};
 use umsh_ulcp::profiles::VETTED;
 use umsh_ulcp_admin::LocalPort;
 use umsh_ux_communicator::avatar::AvatarStyle;
@@ -16,40 +22,184 @@ use umsh_ux_communicator::model::{
     MAX_HEARD, Member, Message, MessageId, Messages, Node, NodeEvent, PeerDetail, PeerEntry,
     PeerId, PeerSummary, Peers, RadioSettings, Reaction, Setting, ShareUri, Shareable,
 };
+use umsh_ux_communicator::text::TextHeap;
 
+use crate::chat::{ChannelCrypto, Chats as ChatHalf};
+use crate::memory::MemoryStore;
 use crate::settings::Settings;
+use crate::store::ChatStore;
+use crate::task::{Arrival, Command};
 
 /// How many events wait for the interface before they collapse into a
 /// resync.
 const EVENTS: usize = 16;
 
-/// A communicator's node, over the device's own ULCP session reached
-/// through `P`.
-///
-/// Every method borrows the node for the length of the call and no
-/// longer, so the interface and the board's task can share it on one
-/// executor.
-pub struct CommunicatorNode<P> {
-    settings: RefCell<Settings<P>>,
-    events: RefCell<EventQueue<EVENTS>>,
+/// The board's clocks, as the node reads them.
+pub trait Clock {
+    /// Milliseconds on the board's monotonic clock.
+    fn now_ms(&self) -> u64;
+    /// The time in Unix seconds, once it is known.
+    fn wall(&self) -> Option<u32>;
+    /// Local time's offset from UTC, in minutes.
+    fn utc_offset_min(&self) -> i16;
 }
 
-impl<P: LocalPort> CommunicatorNode<P> {
-    pub fn new(port: P) -> Self {
+/// A communicator's node, over the device's own ULCP session reached
+/// through `P`, keeping its chats in `S`.
+///
+/// Every method borrows the node for the length of the call and no
+/// longer, so the interface and the board's tasks can share it on one
+/// executor.
+pub struct CommunicatorNode<P, S = MemoryStore> {
+    settings: RefCell<Settings<P>>,
+    chats: RefCell<ChatHalf<S>>,
+    events: RefCell<EventQueue<EVENTS>>,
+    clock: &'static dyn Clock,
+    /// What the chats start with, once the device identity is known.
+    seeds: Seeds,
+    /// The chats have frames for the device node.
+    work: Cell<bool>,
+    worker: RefCell<WakerRegistration>,
+}
+
+impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
+    /// A node whose messages' text is kept on `heap`. Its chats start as
+    /// the device identity once the device reports it, from `seeds`, which
+    /// are random.
+    pub fn new(
+        port: P,
+        store: S,
+        crypto: ChannelCrypto,
+        heap: TextHeap,
+        clock: &'static dyn Clock,
+        seeds: Seeds,
+    ) -> Self {
         Self {
-            settings: RefCell::new(Settings::new(port)),
+            settings: RefCell::new(Settings::new(port, crypto.well_known)),
+            chats: RefCell::new(ChatHalf::new(store, crypto, heap)),
             events: RefCell::new(EventQueue::new()),
+            clock,
+            seeds,
+            work: Cell::new(false),
+            worker: RefCell::new(WakerRegistration::new()),
         }
+    }
+
+    pub fn clock(&self) -> &'static dyn Clock {
+        self.clock
+    }
+
+    /// Whether the chats have started.
+    pub fn started(&self) -> bool {
+        self.chats.borrow().started()
     }
 
     /// Hands the device what is waiting and takes in what it sent. The
     /// board calls this after the interface has taken an input, whenever
     /// the port has something, and at [`CommunicatorNode::next_deadline`].
-    pub fn pump(&self, now_ms: u64) {
+    ///
+    /// The chats start here, as the device identity, as soon as the
+    /// device has reported it, and hold the device's channels from then
+    /// on.
+    pub fn pump(&self) {
+        let now_ms = self.clock.now_ms();
         let mut events = self.events.borrow_mut();
-        self.settings
-            .borrow_mut()
-            .pump(now_ms, &mut |event| events.push(event));
+        let mut push = |event| events.push(event);
+        let mut settings = self.settings.borrow_mut();
+        settings.pump(now_ms, &mut push);
+        if !settings.primed() {
+            return;
+        }
+        let mut chats = self.chats.borrow_mut();
+        if !chats.started()
+            && let Some(key) = settings.key()
+        {
+            chats.start(PublicKey(*key), self.seeds, now_ms, &mut push);
+        }
+        chats.hold(settings.channels(), &mut push);
+        chats.hold_peers(&settings.peers(), &mut push);
+        chats.set_handle(&settings.device_name());
+    }
+
+    /// Takes what the device node received for the chats.
+    pub fn arrive(&self, arrival: Arrival) {
+        self.with_chats(|chats, now_ms, time, events| match arrival {
+            Arrival::Text(inbound) => chats.receive(inbound, now_ms, time, events),
+            Arrival::Identity { key, identity, rx } => {
+                chats.identify(key, &identity, &rx, now_ms, time, events);
+            }
+            Arrival::Pong {
+                peer,
+                round_trip_ms,
+                rx,
+            } => chats.pong(peer, round_trip_ms, &rx, now_ms, events),
+        });
+    }
+
+    /// What the chats ask of the device node next, besides sending frames.
+    pub fn command(&self) -> Option<Command> {
+        self.chats.borrow_mut().command()
+    }
+
+    /// Advances the chats' timers.
+    pub fn tick(&self) {
+        self.with_chats(|chats, now_ms, time, events| chats.tick(now_ms, time, events));
+    }
+
+    /// Takes the word on the chats' frames in flight.
+    pub fn service(&self) {
+        self.with_chats(|chats, now_ms, time, events| chats.service(now_ms, time, events));
+    }
+
+    /// The chats' next frame for the device node, or `None` while nothing
+    /// may go. Send it with [`umsh_text::node_adapter::transmit`], then
+    /// hand back how that went to [`CommunicatorNode::departed`].
+    pub fn depart(&self) -> Option<Departure> {
+        self.with_chats(|chats, now_ms, time, events| chats.depart(now_ms, time, events))
+    }
+
+    /// Takes how the device node took a frame. Returns whether it has room
+    /// for more.
+    pub fn departed(&self, departure: Departure, sent: Sent) -> bool {
+        self.with_chats(|chats, now_ms, time, events| {
+            chats.departed(departure, sent, now_ms, time, events)
+        })
+    }
+
+    /// Waits until the interface has given the chats something to send.
+    pub async fn work(&self) {
+        poll_fn(|cx| {
+            if self.work.take() {
+                return Poll::Ready(());
+            }
+            self.worker.borrow_mut().register(cx.waker());
+            Poll::Pending
+        })
+        .await;
+    }
+
+    fn wake(&self) {
+        self.work.set(true);
+        self.worker.borrow_mut().wake();
+    }
+
+    /// Runs `f` with the chats, the time, and the event queue.
+    fn with_chats<R>(
+        &self,
+        f: impl FnOnce(&mut ChatHalf<S>, u64, Option<u32>, &mut dyn FnMut(NodeEvent)) -> R,
+    ) -> R {
+        let mut events = self.events.borrow_mut();
+        f(
+            &mut self.chats.borrow_mut(),
+            self.clock.now_ms(),
+            self.clock.wall(),
+            &mut |event| events.push(event),
+        )
+    }
+
+    /// Whether events wait for the interface.
+    pub fn has_events(&self) -> bool {
+        !self.events.borrow().is_empty()
     }
 
     /// When [`CommunicatorNode::pump`] next has work of its own.
@@ -76,84 +226,132 @@ impl<P: LocalPort> CommunicatorNode<P> {
     }
 }
 
-impl<P: LocalPort> Node for CommunicatorNode<P> {
+impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
     fn next_event(&self) -> Option<NodeEvent> {
         self.events.borrow_mut().pop()
     }
 
-    // ─── Chats, peers, and channels: none yet ────────────────────────
+    // ─── Chats ───────────────────────────────────────────────────────
 
-    fn chats(&self, _chats: &mut Chats) {}
-
-    fn chat(&self, _chat: ChatId) -> Option<ChatSummary> {
-        None
+    fn chats(&self, chats: &mut Chats) {
+        self.chats.borrow().chats(chats);
     }
 
-    fn peers(&self, _peers: &mut Peers) {}
-
-    fn load(&self, _chat: ChatId, _messages: &mut Messages) {}
-
-    fn message(&self, _chat: ChatId, _message: MessageId) -> Option<Message> {
-        None
+    fn chat(&self, chat: ChatId) -> Option<ChatSummary> {
+        self.chats.borrow().chat(chat)
     }
 
-    fn opened(&self, _chat: ChatId) {}
-
-    fn save_draft(&self, _chat: ChatId, _text: &str) {}
-
-    fn send(&self, _chat: ChatId, _text: &str, _reply_to: Option<MessageId>) -> Option<Message> {
-        None
+    fn peers(&self, peers: &mut Peers) {
+        self.chats
+            .borrow()
+            .peers(peers, self.clock.now_ms(), self.clock.wall());
     }
 
-    fn react(&self, _chat: ChatId, _message: MessageId, _reaction: Option<Reaction>) {}
-
-    fn details(&self, _chat: ChatId, _message: MessageId) -> Option<Details> {
-        None
+    fn load(&self, chat: ChatId, messages: &mut Messages) {
+        self.chats.borrow().load(chat, messages);
     }
 
-    fn member(&self, _chat: ChatId, _message: MessageId) -> Option<Member> {
-        None
+    fn message(&self, chat: ChatId, message: MessageId) -> Option<Message> {
+        self.chats.borrow().message(chat, message)
     }
 
-    fn request_identity(&self, _chat: ChatId, _message: MessageId) {}
+    fn opened(&self, chat: ChatId) {
+        self.chats.borrow_mut().opened(chat);
+    }
 
-    fn direct_chat(
-        &self,
-        _address: &str,
-        _name: &str,
-        _avatar: &AvatarStyle,
-    ) -> Option<ChatSummary> {
-        None
+    fn save_draft(&self, chat: ChatId, text: &str) {
+        self.chats.borrow_mut().save_draft(chat, text);
+    }
+
+    fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
+        self.chats
+            .borrow()
+            .details(chat, message, self.clock.utc_offset_min())
+    }
+
+    fn member(&self, chat: ChatId, message: MessageId) -> Option<Member> {
+        self.chats
+            .borrow()
+            .member(chat, message, self.clock.now_ms(), self.clock.wall())
+    }
+
+    // ─── Sending ─────────────────────────────────────────────────────
+
+    fn send(&self, chat: ChatId, text: &str, reply_to: Option<MessageId>) -> Option<Message> {
+        let message = self.with_chats(|chats, now_ms, time, events| {
+            chats.send(chat, text, reply_to, now_ms, time, events)
+        });
+        self.wake();
+        message
+    }
+
+    fn react(&self, chat: ChatId, message: MessageId, reaction: Option<Reaction>) {
+        self.with_chats(|chats, now_ms, time, events| {
+            chats.react(chat, message, reaction, now_ms, time, events);
+        });
+        self.wake();
+    }
+
+    fn retry(&self, chat: ChatId, message: MessageId) -> bool {
+        let queued = self.with_chats(|chats, now_ms, time, events| {
+            chats.retry(chat, message, now_ms, time, events)
+        });
+        self.wake();
+        queued
+    }
+
+    // ─── Peers ───────────────────────────────────────────────────────
+
+    fn request_identity(&self, chat: ChatId, message: MessageId) {
+        self.chats.borrow_mut().request_identity(chat, message);
+        self.wake();
+    }
+
+    /// A new chat is drawn as the node it is with, whatever `avatar` says.
+    fn direct_chat(&self, address: &str, name: &str, _avatar: &AvatarStyle) -> Option<ChatSummary> {
+        self.with_chats(|chats, _, _, events| chats.direct_chat(address, name, events))
     }
 
     fn inspect_peer(&self, text: &str) -> PeerEntry {
-        if text.trim().is_empty() {
-            PeerEntry::Empty
-        } else {
-            PeerEntry::Invalid
+        self.chats.borrow().inspect_peer(text)
+    }
+
+    fn peer_detail(&self, peer: PeerId) -> Option<PeerDetail> {
+        self.chats
+            .borrow()
+            .peer_detail(peer, self.clock.now_ms(), self.clock.wall())
+    }
+
+    /// Only the preference is kept: sessions with forward secrecy are not
+    /// started yet.
+    fn set_forward_secrecy(&self, peer: PeerId, on: bool) {
+        self.with_chats(|chats, _, _, events| chats.set_forward_secrecy(peer, on, events));
+    }
+
+    fn ping(&self, peer: PeerId) {
+        self.chats.borrow_mut().ping(peer);
+        self.wake();
+    }
+
+    fn forget_peer(&self, peer: PeerId) {
+        let key = self.with_chats(|chats, _, _, events| chats.forget_peer(peer, events));
+        if let Some(key) = key {
+            self.settings.borrow_mut().forget_peer(&key.0);
         }
     }
 
-    fn peer_detail(&self, _peer: PeerId) -> Option<PeerDetail> {
-        None
+    fn save_peer(&self, member: &Member) -> Option<PeerSummary> {
+        let (key, summary) = self.with_chats(|chats, now_ms, _, events| {
+            chats.save_peer(member, now_ms, self.clock.wall(), events)
+        })?;
+        self.settings.borrow_mut().save_peer(&key.0);
+        Some(summary)
     }
 
-    fn set_forward_secrecy(&self, _peer: PeerId, _on: bool) {}
-
-    fn ping(&self, _peer: PeerId) {}
-
-    fn forget_peer(&self, _peer: PeerId) {}
-
-    fn save_peer(&self, _member: &Member) -> Option<PeerSummary> {
-        None
-    }
+    // ─── Joining: not yet ────────────────────────────────────────────
 
     fn join(&self, _invite: &Invite, _name: &str) -> Option<ChatSummary> {
         None
-    }
-
-    fn retry(&self, _chat: ChatId, _message: MessageId) -> bool {
-        false
     }
 
     fn inspect_channel(&self, text: &str) -> ChannelEntry {
@@ -168,8 +366,10 @@ impl<P: LocalPort> Node for CommunicatorNode<P> {
         None
     }
 
-    fn find_heard(&self, _query: &str) -> Vec<Heard, MAX_HEARD> {
-        Vec::new()
+    fn find_heard(&self, query: &str) -> Vec<Heard, MAX_HEARD> {
+        self.chats
+            .borrow()
+            .find_heard(query, self.clock.now_ms(), self.clock.wall())
     }
 
     // ─── The device ──────────────────────────────────────────────────

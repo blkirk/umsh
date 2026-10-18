@@ -7,7 +7,9 @@ use umsh_mac::{LocalIdentityId, SendOptions};
 use crate::dispatch::EventDispatcher;
 use crate::identity_responder::IdentityResponsePlan;
 use crate::mac::MacBackend;
-use crate::node::{LocalNode, LocalNodeState, NodeMembership, PfsLifecycle};
+#[cfg(feature = "software-crypto")]
+use crate::node::PfsLifecycle;
+use crate::node::{LocalNode, LocalNodeState, NodeMembership};
 use crate::receive::ReceivedPacketRef;
 use crate::{NodeIdentityPayload, OwnedMacCommand, mac_command};
 use umsh_core::PayloadType;
@@ -104,24 +106,15 @@ impl<M: MacBackend> Host<M> {
             .map(|(_, node)| node.clone())
     }
 
+    #[cfg(feature = "software-crypto")]
     fn route_node(&self, identity_id: LocalIdentityId) -> Option<LocalNode<M>> {
         if let Some(node) = self.node(identity_id) {
             return Some(node);
         }
-
-        #[cfg(feature = "software-crypto")]
-        {
-            return self
-                .nodes
-                .iter()
-                .find(|(_, node)| node.owns_ephemeral_identity(identity_id))
-                .map(|(_, node)| node.clone());
-        }
-
-        #[cfg(not(feature = "software-crypto"))]
-        {
-            None
-        }
+        self.nodes
+            .iter()
+            .find(|(_, node)| node.owns_ephemeral_identity(identity_id))
+            .map(|(_, node)| node.clone())
     }
 
     /// Drive the shared MAC until one wake cycle completes.
@@ -217,10 +210,15 @@ impl<M: MacBackend> Host<M> {
             Option<umsh_core::ChannelId>,
             OwnedMacCommand,
         )> = pending_pfs.borrow_mut().drain(..).collect();
+        // Forward secrecy needs the software crypto back end; without it, a
+        // peer's request goes unanswered.
+        #[cfg(feature = "software-crypto")]
         for (identity_id, from, channel, command) in queued {
             self.handle_pfs_command(identity_id, from, channel, command)
                 .await;
         }
+        #[cfg(not(feature = "software-crypto"))]
+        drop(queued);
 
         let identity_replies: Vec<(LocalNode<M>, IdentityResponsePlan)> =
             pending_identity.borrow_mut().drain(..).collect();
@@ -290,6 +288,7 @@ impl<M: MacBackend> Host<M> {
         }
     }
 
+    #[cfg(feature = "software-crypto")]
     async fn handle_pfs_command(
         &mut self,
         identity_id: LocalIdentityId,
@@ -358,22 +357,25 @@ fn route_node<M: MacBackend>(
     nodes: &[(LocalIdentityId, LocalNode<M>)],
     identity_id: LocalIdentityId,
 ) -> Option<LocalNode<M>> {
-    nodes
+    let node = nodes
         .iter()
         .find(|(id, _)| *id == identity_id)
-        .map(|(_, node)| node.clone())
-        .or_else(|| {
-            nodes
-                .iter()
-                .find(|(_, node)| node.owns_ephemeral_identity(identity_id))
-                .map(|(_, node)| node.clone())
-        })
+        .map(|(_, node)| node.clone());
+    // An ephemeral identity answers for the node that made it.
+    #[cfg(feature = "software-crypto")]
+    let node = node.or_else(|| {
+        nodes
+            .iter()
+            .find(|(_, node)| node.owns_ephemeral_identity(identity_id))
+            .map(|(_, node)| node.clone())
+    });
+    node
 }
 
 /// Whether an identity payload's claims are its sender's own: a signature
 /// that verifies, or none on a frame whose source authenticated.
 #[cfg(feature = "software-crypto")]
-fn identity_is_trustworthy(
+pub fn identity_is_trustworthy(
     packet: &ReceivedPacketRef<'_>,
     from: &umsh_core::PublicKey,
     identity: &NodeIdentityPayload,
@@ -388,7 +390,7 @@ fn identity_is_trustworthy(
 /// Without the crypto to check a signature, only an unsigned payload on a
 /// frame whose source authenticated can be trusted.
 #[cfg(not(feature = "software-crypto"))]
-fn identity_is_trustworthy(
+pub fn identity_is_trustworthy(
     packet: &ReceivedPacketRef<'_>,
     _from: &umsh_core::PublicKey,
     identity: &NodeIdentityPayload,

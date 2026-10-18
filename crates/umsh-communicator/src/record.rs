@@ -94,15 +94,16 @@ pub struct Delivery {
 }
 
 impl Delivery {
+    /// Takes the latest word on one fragment. A failed fragment that is
+    /// sent again, or acknowledged after all, has not failed.
     pub fn set(&mut self, fragment: Option<u8>, state: DeliveryState) {
         let bit = 1u16 << fragment.unwrap_or(0).min(15);
-        let (set, clear) = match state {
-            DeliveryState::Sent => (&mut self.sent, None),
-            DeliveryState::Acked => (&mut self.acked, Some(bit)),
-            DeliveryState::Failed => (&mut self.failed, None),
-        };
-        *set |= bit;
-        if let Some(bit) = clear {
+        match state {
+            DeliveryState::Sent => self.sent |= bit,
+            DeliveryState::Acked => self.acked |= bit,
+            DeliveryState::Failed => self.failed |= bit,
+        }
+        if state != DeliveryState::Failed {
             self.failed &= !bit;
         }
     }

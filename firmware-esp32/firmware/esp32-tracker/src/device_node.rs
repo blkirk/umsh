@@ -25,7 +25,7 @@ pub use umsh_ulcp_runtime::device_node::{
 /// The node's platform binding: everything generic resolved against this
 /// board's counter store.
 type CounterStore = crate::NodeCounterStore;
-type DeviceNode = node::DeviceNode<CounterStore>;
+pub(crate) type DeviceNode = node::DeviceNode<CounterStore>;
 pub(crate) type DeviceNodeHandle = node::DeviceNodeHandle<CounterStore>;
 type DeviceNodeHost = node::DeviceNodeHost<CounterStore>;
 
@@ -169,6 +169,7 @@ pub async fn bring_up(
     counters: &'static crate::NodeCountersMutex,
     input: &'static SessionInput,
     admin_nonce: u16,
+    #[cfg(feature = "communicator")] chats: &'static crate::communicator::Node,
     #[cfg(feature = "lan-bearer")] stack: embassy_net::Stack<'static>,
 ) {
     // Seed the node's copy of the device name before bring-up, so the
@@ -192,6 +193,19 @@ pub async fn bring_up(
         hooks,
     )
     .await;
+    // The communicator's chats: what the node hears for them, copied out
+    // for their task, which sends through the node too. The taps live as
+    // long as the node.
+    #[cfg(feature = "communicator")]
+    {
+        core::mem::forget(umsh_communicator::task::listen(
+            &parts.node,
+            &crate::communicator::INBOX,
+            umsh_core::PublicKey(parts.node_key),
+            umsh_communicator::WellKnownChannels::derive(),
+        ));
+        spawner.spawn(crate::communicator::chats(chats, parts.node.clone()).unwrap());
+    }
     spawner.spawn(node_pump_task(parts.host, parts.mac).unwrap());
     spawner.spawn(
         node_identity_blob_task(

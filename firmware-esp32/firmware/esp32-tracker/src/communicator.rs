@@ -1,11 +1,16 @@
 //! The communicator interface on the Pager's panel, in place of the
 //! tracker's menus, over the communicator's node. The node reaches the
-//! device's settings through the session's device link; chats arrive with
-//! the chat session. The task reports what each frame costs: layout,
-//! painting, the panel transfer, and the least stack left free.
+//! device's settings through the session's device link, and its chats are
+//! fed what the device node receives. The interface task reports what each
+//! frame costs: layout, painting, the panel transfer, and the least stack
+//! left free.
+//!
+//! Both of the node's tasks keep what they allocate in PSRAM.
 use super::*;
 use board::display::{Brightness, Display};
-use umsh_communicator::CommunicatorNode;
+use heap::InPsram;
+use umsh_communicator::task::Inbox;
+use umsh_communicator::{Clock, CommunicatorNode};
 use umsh_ulcp_admin::local::driver::DriverPort;
 use umsh_ux_communicator::buoyant::app::App;
 use umsh_ux_communicator::buoyant::render_target::{
@@ -47,10 +52,58 @@ pub(crate) const fn port() -> DriverPort<CriticalSectionRawMutex> {
     DriverPort::new(&INPUT_CH, &DEVICE_LINK)
 }
 
+/// The board's clocks, as the node reads them.
+pub(crate) struct Clocks;
+
+impl Clock for Clocks {
+    fn now_ms(&self) -> u64 {
+        Instant::now().as_millis()
+    }
+
+    fn wall(&self) -> Option<u32> {
+        umsh_hal::wall_clock::now()
+    }
+
+    fn utc_offset_min(&self) -> i16 {
+        umsh_hal::wall_clock::tz_offset_min()
+    }
+}
+
+pub(crate) static CLOCK: Clocks = Clocks;
+
+/// What the device node received for the chats.
+pub(crate) static INBOX: Inbox<CriticalSectionRawMutex> = Inbox::new();
+
+/// The chats have changed, and the node holds events for the interface.
+static CHATS_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// The chats: what reaches [`INBOX`], fed to the node, the node's timers,
+/// and what it sends through the device node.
+#[embassy_executor::task]
+pub(crate) async fn chats(node: &'static Node, mesh: crate::device_node::DeviceNode) {
+    InPsram(umsh_communicator::task::run(
+        node,
+        &mesh,
+        &INBOX,
+        |at| Timer::at(Instant::from_millis(at)),
+        || CHATS_CHANGED.signal(()),
+    ))
+    .await
+}
+
 #[embassy_executor::task]
 pub(crate) async fn task(
+    display: Display,
+    splash: umsh_ux_display_tracker::boot::BootSplash,
+    node: &'static Node,
+) {
+    InPsram(interface(display, splash, node)).await
+}
+
+async fn interface(
     mut display: Display,
     mut splash: umsh_ux_display_tracker::boot::BootSplash,
+    node: &'static Node,
 ) {
     let epoch = pager::input::interactive().await;
     if let Some(deadline) = splash.next_deadline() {
@@ -60,7 +113,6 @@ pub(crate) async fn task(
     BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
 
     let start = Instant::now();
-    let node = external::communicator_node();
     prime(node).await;
     // The interface's state and both of its render trees are plain data
     // that only this task touches, and they are the largest thing it
@@ -120,10 +172,11 @@ pub(crate) async fn task(
             UI_INPUT_CH.receive(),
             UI_WAKE.wait(),
             Timer::at(wake_at),
-            select3(
+            select4(
                 BATTERY_UI_CHANGED.wait(),
                 DISPLAY_SHUTDOWN.wait(),
                 DEVICE_LINK.ready(),
+                CHATS_CHANGED.wait(),
             ),
         )
         .await;
@@ -151,22 +204,24 @@ pub(crate) async fn task(
             Either4::Second(()) => attention.wake(now()),
             Either4::Third(()) => attention.poll(now()),
             // A reading redraws the strip but never lights the panel.
-            Either4::Fourth(Either3::First(())) => {
+            Either4::Fourth(Either4::First(())) => {
                 app.state_mut()
                     .battery(battery_percent(), battery_charging(), now());
                 None
             }
-            Either4::Fourth(Either3::Second(cause)) => farewell(&mut display, app, cause).await,
+            Either4::Fourth(Either4::Second(cause)) => farewell(&mut display, app, cause).await,
             // The session answered, or published: the node takes it in
             // below.
-            Either4::Fourth(Either3::Third(())) => None,
+            Either4::Fourth(Either4::Third(())) => None,
+            // The chats changed: their events are taken below.
+            Either4::Fourth(Either4::Fourth(())) => None,
         };
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
         }
         // What an input changed goes out, and what the session sent comes
         // in as events, taken just below.
-        node.pump(now());
+        node.pump();
         if minute <= Instant::now() {
             let mut state = app.state_mut();
             state.set_wall_time(umsh_hal::wall_clock::now());
@@ -230,11 +285,11 @@ pub(crate) async fn task(
 async fn prime(node: &Node) {
     let deadline = Instant::now() + PRIME_WAIT;
     while !node.primed() && Instant::now() < deadline {
-        node.pump(Instant::now().as_millis());
+        node.pump();
         // The driver's input may have been full: try again shortly.
         let _ = select(DEVICE_LINK.ready(), Timer::after(PRIME_RETRY)).await;
     }
-    node.pump(Instant::now().as_millis());
+    node.pump();
     // The settings the interface reads in building its state.
     while node.next_event().is_some() {}
 }

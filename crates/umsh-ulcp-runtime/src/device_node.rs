@@ -164,24 +164,43 @@ impl<CS: CounterStore + 'static> umsh_mac::Platform for DeviceNodePlatform<CS> {
 /// provisioned at once, and each needs a pairwise session.
 pub const MAX_NODE_PEERS: usize = MAX_DEV_PEERS + MAX_DEV_ADMINS;
 
+/// The MAC peer table. A communicator also talks with nodes it has not
+/// saved—whoever it chats with directly, and channel members it asks
+/// something of—so it holds twice what the device domain names.
+#[cfg(not(feature = "communicator"))]
+pub const NODE_PEERS: usize = MAX_NODE_PEERS;
+#[cfg(feature = "communicator")]
+pub const NODE_PEERS: usize = 2 * MAX_NODE_PEERS;
+
+/// Pending acknowledgments and transmit slots: beacons and answers alone,
+/// or on a communicator its chats' frames as well.
+#[cfg(not(feature = "communicator"))]
+pub const NODE_ACKS: usize = 4;
+#[cfg(feature = "communicator")]
+pub const NODE_ACKS: usize = 8;
+#[cfg(not(feature = "communicator"))]
+pub const NODE_TX: usize = 4;
+#[cfg(feature = "communicator")]
+pub const NODE_TX: usize = 8;
+
 /// Device-node MAC sized to the session's device-domain tables, which are
 /// the only provisioning source it has: 1 identity (the device identity;
-/// no PFS ephemerals on the device node), `MAX_NODE_PEERS` peers,
+/// no PFS ephemerals on the device node), [`NODE_PEERS`] peers,
 /// `MAX_CHANNEL_KEYS` channels (a smaller MAC table would refuse channels
-/// the property surface accepted), 4 pending ACKs, 4 TX slots (beacons
-/// and future acks—no application traffic), 255-byte frames, 32-entry
-/// dup cache. The per-channel replay maps are the RAM hot spot (~330
-/// bytes per tracked sender): 4 full-key + 2 hint-only senders per
-/// channel keeps the whole table ~2 KiB/channel; extra concurrent senders
-/// on one channel fail closed (dropped, never accepted unchecked).
-/// No route holds (a device has no person choosing paths).
+/// the property surface accepted), [`NODE_ACKS`] pending ACKs,
+/// [`NODE_TX`] TX slots, 255-byte frames, 32-entry dup cache. The
+/// per-channel replay maps are the RAM hot spot (~330 bytes per tracked
+/// sender): 4 full-key + 2 hint-only senders per channel keeps the whole
+/// table ~2 KiB/channel; extra concurrent senders on one channel fail
+/// closed (dropped, never accepted unchecked). No route holds (a device
+/// has no person choosing paths).
 pub type DeviceNodeMac<CS> = umsh_mac::Mac<
     DeviceNodePlatform<CS>,
     1,
-    MAX_NODE_PEERS,
+    NODE_PEERS,
     MAX_CHANNEL_KEYS,
-    4,
-    4,
+    NODE_ACKS,
+    NODE_TX,
     255,
     32,
     4,
@@ -192,10 +211,10 @@ pub type DeviceNodeHandle<CS> = MacHandle<
     'static,
     DeviceNodePlatform<CS>,
     1,
-    MAX_NODE_PEERS,
+    NODE_PEERS,
     MAX_CHANNEL_KEYS,
-    4,
-    4,
+    NODE_ACKS,
+    NODE_TX,
     255,
     32,
     4,
@@ -444,20 +463,25 @@ fn truncate_utf8(text: &str, max: usize) -> &str {
 ///
 /// With no role configured the device derives one, which is what makes
 /// the default sensible rather than a lie: a forwarding node is a
-/// repeater, and anything else is a tracker.
+/// repeater, and anything else is a tracker. A communicator, whose device
+/// identity is its person's messaging identity, is a chat node either
+/// way, takes text messages, and says it forwards by `REP` alone.
 fn advertised_identity(
     is_repeater: bool,
     is_mobile: bool,
     configured_role: Option<u8>,
 ) -> (NodeRole, NodeCapabilities) {
+    let messaging = cfg!(feature = "communicator");
     let role = match configured_role {
         Some(byte) => NodeRole::from_byte(byte),
+        None if messaging => NodeRole::Chat,
         None if is_repeater => NodeRole::Repeater,
         None => NodeRole::Tracker,
     };
     let mut capabilities = NodeCapabilities::empty();
     capabilities.set(NodeCapabilities::REPEATER, is_repeater);
     capabilities.set(NodeCapabilities::MOBILE, is_mobile);
+    capabilities.set(NodeCapabilities::TEXT_MESSAGES, messaging);
     (role, capabilities)
 }
 
@@ -502,10 +526,8 @@ fn stamp_position(profile: &mut NodeIdentityProfile, snapshot: &DevDomainSnapsho
 
 /// Reconciles the node's MAC against each [`DevDomainSnapshot`]: joins
 /// newly provisioned channels, removes de-provisioned ones (dropping
-/// their replay state), and registers peers. Peer *removal* is not
-/// propagated—MAC registry entries carry no key material, so a stale
-/// entry is inert, and the registry is rebuilt from the live table at the
-/// next boot.
+/// their replay state), registers peers and administrators, and removes
+/// the ones no longer listed.
 pub async fn dev_sync_loop<CS: CounterStore + 'static>(
     node: DeviceNode<CS>,
     mac: DeviceNodeHandle<CS>,
@@ -514,6 +536,8 @@ pub async fn dev_sync_loop<CS: CounterStore + 'static>(
     // Channel keys currently applied to the MAC. Starts empty: the MAC is
     // built bare at bring-up and every channel arrives through here.
     let mut applied: heapless::Vec<[u8; 32], MAX_CHANNEL_KEYS> = heapless::Vec::new();
+    // Peers and administrators registered from a snapshot, likewise.
+    let mut registered: heapless::Vec<[u8; 32], MAX_NODE_PEERS> = heapless::Vec::new();
     loop {
         let snapshot = DEV_SYNC.wait().await;
         // Published first: the administrator list gates whether an
@@ -624,6 +648,23 @@ pub async fn dev_sync_loop<CS: CounterStore + 'static>(
                 )),
             }
         }
+        // A node no longer listed loses its registration, and with it
+        // its pairwise state; one still in touch registers again as any
+        // stranger does, by sending its full key.
+        let listed = |key: &[u8; 32]| snapshot.peers.contains(key) || snapshot.admins.contains(key);
+        let mut index = 0;
+        while index < registered.len() {
+            if listed(&registered[index]) {
+                index += 1;
+                continue;
+            }
+            let key = registered.swap_remove(index);
+            node.remove_peer(&PublicKey(key)).await;
+            debug_log(format_args!(
+                "node dev-sync: peer {:02x}{:02x}.. removed",
+                key[0], key[1]
+            ));
+        }
         // Registration is add-or-refresh; repeats are harmless. An
         // administrator is registered alongside the peers: it is by
         // definition a node this device must be able to unseal a request
@@ -635,6 +676,8 @@ pub async fn dev_sync_loop<CS: CounterStore + 'static>(
                     "node dev-sync: peer {:02x}{:02x}.. register FAILED",
                     public_key[0], public_key[1]
                 ));
+            } else if !registered.contains(public_key) {
+                let _ = registered.push(*public_key);
             }
         }
         // Seed persisted RX replay boundaries for the registered peers (a
@@ -1473,8 +1516,8 @@ pub async fn bring_up<CS: CounterStore + 'static>(
     {
         use umsh_crypto::NodeIdentity as _;
         let public_key = *SoftwareIdentity::from_secret_bytes(identity_secret).public_key();
-        let mut profile =
-            NodeIdentityProfile::new(public_key, NodeRole::Tracker, NodeCapabilities::empty());
+        let (role, capabilities) = advertised_identity(false, false, None);
+        let mut profile = NodeIdentityProfile::new(public_key, role, capabilities);
         profile.name = profile_name();
         node.enable_identity_responder_default(profile);
     }
@@ -1499,6 +1542,54 @@ pub async fn bring_up<CS: CounterStore + 'static>(
 mod tests {
     use super::*;
     use umsh_ulcp::ids::{MAX_AUTO_ANNOUNCE_INTERVAL_S, MIN_AUTO_ANNOUNCE_INTERVAL_S};
+
+    /// With no role configured, a forwarding device is a repeater and any
+    /// other a tracker; a configured role is advertised as configured.
+    #[cfg(not(feature = "communicator"))]
+    #[test]
+    fn the_role_follows_forwarding_unless_configured() {
+        let caps = |repeater: bool| {
+            let mut caps = NodeCapabilities::empty();
+            caps.set(NodeCapabilities::REPEATER, repeater);
+            caps
+        };
+        assert_eq!(
+            advertised_identity(true, false, None),
+            (NodeRole::Repeater, caps(true))
+        );
+        assert_eq!(
+            advertised_identity(false, false, None),
+            (NodeRole::Tracker, caps(false))
+        );
+        assert_eq!(
+            advertised_identity(true, false, Some(NodeRole::Sensor.as_byte())),
+            (NodeRole::Sensor, caps(true))
+        );
+    }
+
+    /// A communicator is a chat node that takes text messages, forwarding
+    /// or not; forwarding shows in `REP` alone.
+    #[cfg(feature = "communicator")]
+    #[test]
+    fn a_communicator_chats_whether_or_not_it_forwards() {
+        let caps = |repeater: bool| {
+            let mut caps = NodeCapabilities::TEXT_MESSAGES;
+            caps.set(NodeCapabilities::REPEATER, repeater);
+            caps
+        };
+        assert_eq!(
+            advertised_identity(true, false, None),
+            (NodeRole::Chat, caps(true))
+        );
+        assert_eq!(
+            advertised_identity(false, false, None),
+            (NodeRole::Chat, caps(false))
+        );
+        assert_eq!(
+            advertised_identity(false, false, Some(NodeRole::Tracker.as_byte())),
+            (NodeRole::Tracker, caps(false))
+        );
+    }
 
     /// The property the whole scheme rests on: scatter delays a period and
     /// never brings it forward, so a configured interval is the shortest

@@ -5,9 +5,9 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use umsh_communicator::CommunicatorNode;
+use umsh_communicator::{ChannelCrypto, Clock, CommunicatorNode, MemoryStore, Seeds};
 use umsh_ulcp::profiles;
 use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
 use umsh_ulcp_simdev::host::HostPlatform;
@@ -19,6 +19,13 @@ use umsh_ux_communicator::model::{Node as _, State, brightness_at};
 pub struct Port {
     device: Rc<RefCell<SoftDevice<HostPlatform>>>,
     start: Instant,
+}
+
+impl Port {
+    /// The device behind it.
+    pub fn device(&self) -> &Rc<RefCell<SoftDevice<HostPlatform>>> {
+        &self.device
+    }
 }
 
 impl LocalPort for Port {
@@ -37,8 +44,28 @@ impl LocalPort for Port {
 
 pub type Node = CommunicatorNode<Port>;
 
-/// The device the window stands for: a communicator with no radio yet,
-/// on the default profile.
+/// The host's clocks. Local time is UTC.
+struct HostClock(Instant);
+
+impl Clock for HostClock {
+    fn now_ms(&self) -> u64 {
+        self.0.elapsed().as_millis() as u64
+    }
+
+    fn wall(&self) -> Option<u32> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs() as u32)
+    }
+
+    fn utc_offset_min(&self) -> i16 {
+        0
+    }
+}
+
+/// The device the window stands for: a communicator on the default
+/// profile, with no LoRa radio.
 fn config() -> SessionConfig {
     SessionConfig {
         dev_version: "host-communicator",
@@ -79,7 +106,7 @@ fn config() -> SessionConfig {
         reboot: false,
         dev_identity: true,
         stats: None,
-        // No node behind it yet, so nothing to forward with.
+        // Its node does not forward, so there is no repeater to switch on.
         mac_node: false,
         meshcore_forwarder: false,
         lan_bearer: LanBearerRole::None,
@@ -96,11 +123,21 @@ fn config() -> SessionConfig {
 pub fn open(dir: &Path, start: Instant) -> std::io::Result<&'static Node> {
     let mut device = SoftDevice::new(config(), HostPlatform::new(dir)?);
     device.open_device_interface();
-    let node: &'static Node = Box::leak(Box::new(CommunicatorNode::new(Port {
-        device: Rc::new(RefCell::new(device)),
-        start,
-    })));
-    node.pump(start.elapsed().as_millis() as u64);
+    let node: &'static Node = Box::leak(Box::new(CommunicatorNode::new(
+        Port {
+            device: Rc::new(RefCell::new(device)),
+            start,
+        },
+        MemoryStore::new(),
+        ChannelCrypto::software(),
+        &std::alloc::System,
+        Box::leak(Box::new(HostClock(start))),
+        Seeds {
+            session_id: rand::random(),
+            jitter_seed: rand::random(),
+        },
+    )));
+    node.pump();
     while node.next_event().is_some() {}
     Ok(node)
 }

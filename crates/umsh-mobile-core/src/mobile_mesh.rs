@@ -3697,8 +3697,6 @@ async fn run_worker(
                             let result = match channel {
                                 Some(channel) => {
                                     let route = member_routes.get(&(channel, hint.0)).cloned();
-                                    let mut nonce_bytes = [0u8; 4];
-                                    handle.fill_random(&mut nonce_bytes).await;
                                     let reach = node_adapter::channel_reach(
                                         chat.channels(),
                                         &well_known,
@@ -3710,7 +3708,6 @@ async fn run_worker(
                                         chat.channels(),
                                         channel,
                                         hint,
-                                        u32::from_be_bytes(nonce_bytes),
                                         route,
                                         reach,
                                     )
@@ -4210,29 +4207,15 @@ async fn request_identity_over_channel<M: MacBackend>(
     channels: &ChannelRegistry,
     channel: ChannelTag,
     hint: NodeHint,
-    nonce: u32,
     route: Option<MemberRoute>,
     flood_hops: u8,
 ) -> Result<(), MobileMeshError> {
     let Some(bound) = node_adapter::bound_channel(node, channels, &channel) else {
         return Err(MobileMeshError::UnknownConversation);
     };
-    let options_block = umsh_node::mac_command::IdentityRequestBuilder::new()
-        .nonce(nonce)
-        .and_then(|builder| builder.filter_hint(&hint))
-        .map_err(|_| MobileMeshError::SendFailed)?
-        .build();
-    let cmd = umsh_node::MacCommand::IdentityRequest {
-        options: &options_block,
-    };
-    let mut frame = [0u8; 128];
-    frame[0] = PayloadType::MacCommand as u8;
-    let length = umsh_node::mac_command::encode(&cmd, &mut frame[1..])
-        .map_err(|_| MobileMeshError::SendFailed)?
-        + 1;
     let options = channel_identity_request_options(route.as_ref(), flood_hops);
     bound
-        .send_all(&frame[..length], &options)
+        .request_identity(&hint, &options)
         .await
         .map(|_| ())
         .map_err(|_| MobileMeshError::SendFailed)

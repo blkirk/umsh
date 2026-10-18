@@ -6,8 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# A communicator-class device whose screen is a window and whose radio will
-# be the LAN bearer. It runs the same umsh-ux-communicator code as the
+# A communicator-class device whose screen is a window and whose radio is
+# the LAN bearer. It runs the same umsh-ux-communicator code as the
 # T-LoRa Pager, at the Pager's 480x222.
 #
 # Without the `window` feature it needs no SDL and runs only headless:
@@ -23,7 +23,7 @@ window = ["embedded-graphics-simulator/with-sdl"]
 
 [dependencies]
 umsh-ux-communicator = { path = "../../crates/umsh-ux-communicator", features = ["fixture"] }
-umsh-communicator = { path = "../../crates/umsh-communicator", features = ["node"] }
+umsh-communicator = { path = "../../crates/umsh-communicator", features = ["software-crypto"] }
 umsh-ulcp-admin = { path = "../../crates/umsh-ulcp-admin" }
 umsh-ulcp = { path = "../../crates/umsh-ulcp" }
 umsh-ulcp-simdev = { path = "../../crates/umsh-ulcp-simdev", features = ["host"] }
@@ -31,3 +31,9 @@ umsh-pager-peripherals = { path = "../../crates/umsh-pager-peripherals" }
 embedded-graphics = "0.8"
 embedded-graphics-simulator = { version = "0.8", default-features = false }
 heapless = "0.9"
+# The device node: a MAC on the LAN bearer, on a runtime the window drives.
+umsh = { path = "../../umsh", default-features = false, features = ["std", "software-crypto", "tokio-support"] }
+umsh-sync = { path = "../../crates/umsh-sync" }
+embassy-sync = "0.8"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+rand = { workspace = true, features = ["std", "thread_rng"] }

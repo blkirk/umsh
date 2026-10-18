@@ -14,9 +14,8 @@ use alloc::vec::Vec;
 use core::ops::Bound;
 
 use umsh_core::{ChannelTag, NodeHint, PublicKey};
-use umsh_text::engine::{
-    ArchiveKey, Direction, MessageMutation, MutationKind, Presence, ResolvedRef, StreamCheckpoint,
-};
+use umsh_text::chat::{self, Insert, Mutation};
+use umsh_text::engine::{ArchiveKey, Direction, Presence, ResolvedRef, StreamCheckpoint};
 use umsh_text::{ConversationKey, MessageType, SenderScope, WireRef};
 
 use crate::batch::{Batch, Change, CommitStep, Committed};
@@ -503,12 +502,9 @@ impl MemoryStore {
         let mut committed = Committed::default();
         for change in batch.changes() {
             match change {
-                Change::Message {
-                    mutation,
-                    body,
-                    sender_handle,
-                    link,
-                } => self.mutate(batch, &mut committed, mutation, body, sender_handle, link),
+                Change::Message { mutation, link } => {
+                    self.mutate(batch, &mut committed, mutation, link);
+                }
                 Change::Delivery {
                     handle,
                     fragment,
@@ -530,29 +526,30 @@ impl MemoryStore {
         &mut self,
         batch: &Batch<'_>,
         committed: &mut Committed,
-        mutation: &MessageMutation,
-        body: &str,
-        sender_handle: Option<&str>,
+        mutation: &Mutation,
         link: Option<LinkInfo>,
     ) {
         let revision = mutation.revision;
-        match mutation.kind {
-            MutationKind::Insert {
+        match mutation.change {
+            chat::Change::Insert(Insert {
                 conversation,
                 sender,
                 direction,
                 message_type,
                 wire_id,
                 epoch,
+                ref sender_handle,
                 regarding,
                 bg_color,
                 text_color,
+                ref body,
                 status,
                 presence,
                 late,
                 notify,
                 ..
-            } => {
+            }) => {
+                let sender_handle = sender_handle.as_deref();
                 let regarding_id = regarding.and_then(|reference| {
                     self.resolve_ref(batch, committed, &reference, &conversation, true)
                 });
@@ -661,11 +658,11 @@ impl MemoryStore {
                 committed.touch_message(MessageId(id));
                 committed.touch_chat(ChatId(chat));
             }
-            MutationKind::UpdateBody {
+            chat::Change::UpdateBody {
+                ref body,
                 status,
                 late,
                 notify,
-                ..
             } => {
                 let Some(id) = self.resolve(batch, committed, mutation.handle) else {
                     return;
@@ -692,10 +689,10 @@ impl MemoryStore {
                 }
                 committed.touch_message(MessageId(id));
             }
-            MutationKind::Edit {
+            chat::Change::Edit {
                 conversation,
                 original,
-                ..
+                ref body,
             } => {
                 let Some(id) = self.resolve_ref(batch, committed, &original, &conversation, false)
                 else {
@@ -708,7 +705,7 @@ impl MemoryStore {
                 });
                 committed.touch_message(MessageId(id));
             }
-            MutationKind::Delete {
+            chat::Change::Delete {
                 conversation,
                 original,
             } => {
