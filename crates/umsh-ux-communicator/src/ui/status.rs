@@ -6,7 +6,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 
 use super::{STRIP, label};
 use crate::keyboard::Latch;
-use crate::model::{State, StatusStrip};
+use crate::model::{Bluetooth, Gnss, State, StatusStrip, Wifi};
 use crate::{font, icon, theme};
 
 /// The strip; on first run, the battery alone, there being no name or
@@ -33,8 +33,20 @@ pub fn view(
             modifier(alt, &icon::ALT_ONCE, &icon::ALT_LOCK, theme::ALT),
             modifier(shift, &icon::SHIFT_ONCE, &icon::SHIFT_LOCK, theme::TEXT),
             (shown && s.silent).then(|| indicator(&icon::BELL_SLASH)),
-            (shown && s.phone_linked).then(|| indicator(&icon::BLUETOOTH)),
-            (shown && s.gnss).then(|| indicator(&icon::GNSS)),
+            s.wifi.filter(|_| shown).map(|wifi| {
+                indicator(match wifi {
+                    Wifi::Disconnected => &icon::WIFI_LOST,
+                    Wifi::Joining => &icon::WIFI_JOINING,
+                    Wifi::Connected => &icon::WIFI,
+                })
+            }),
+            s.bluetooth.filter(|_| shown).map(bluetooth),
+            s.gnss.filter(|_| shown).map(|gnss| {
+                indicator(match gnss {
+                    Gnss::Searching => &icon::GNSS_SEARCHING,
+                    Gnss::Fixed => &icon::GNSS,
+                })
+            }),
             s.charging.then(|| indicator(&icon::BOLT)),
             battery(s.battery_segments, s.battery_low),
         ))
@@ -64,15 +76,21 @@ fn modifier(
     Some(Image::new(image).as_template().foreground_color(color))
 }
 
-fn indicator(
-    image: &'static embedded_graphics::image::ImageRaw<
-        'static,
-        embedded_graphics::pixelcolor::Gray4,
-    >,
-) -> impl View<Rgb565, State> + use<> {
+fn indicator(image: &'static Mask) -> impl View<Rgb565, State> + use<> {
     Image::new(image)
         .as_template()
         .foreground_color(theme::TEXT_SECONDARY)
+}
+
+/// The rune, flanked while a phone is connected, and in the accent color
+/// while a pairing window is open.
+fn bluetooth(state: Bluetooth) -> impl View<Rgb565, State> + use<> {
+    let (image, color) = match state {
+        Bluetooth::Waiting => (&icon::BLUETOOTH, theme::TEXT_SECONDARY),
+        Bluetooth::Connected => (&icon::BLUETOOTH_LINKED, theme::TEXT_SECONDARY),
+        Bluetooth::Pairing => (&icon::BLUETOOTH, theme::ACCENT),
+    };
+    Image::new(image).as_template().foreground_color(color)
 }
 
 /// A battery outline with up to three charge segments, and its terminal,

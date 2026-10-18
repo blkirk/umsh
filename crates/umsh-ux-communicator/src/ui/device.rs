@@ -11,7 +11,7 @@ use heapless::String;
 
 use super::conversation::header;
 use super::setting::{End, card, choice, row};
-use crate::model::{ChatKind, RadioSettings, State};
+use crate::model::{Bluetooth, ChatKind, RadioSettings, State};
 use crate::nav::{DevicePage, Screen, keys};
 use crate::theme;
 
@@ -70,8 +70,8 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                 "Phone link",
                 keys::PHONE_LINK,
                 |_| {},
-                if state.status.phone_linked {
-                    "Paired"
+                if state.status.bluetooth == Some(Bluetooth::Connected) {
+                    "Connected"
                 } else {
                     ""
                 },

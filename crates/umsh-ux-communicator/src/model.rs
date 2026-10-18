@@ -73,14 +73,46 @@ pub struct StatusStrip {
     pub battery_segments: u8,
     /// External power is charging the battery, or has charged it.
     pub charging: bool,
-    /// A phone is connected.
-    pub phone_linked: bool,
-    /// GNSS is on; whether it has a fix is not shown here.
-    pub gnss: bool,
+    /// Bluetooth, while it is on.
+    pub bluetooth: Option<Bluetooth>,
+    /// Wi-Fi, while it is on.
+    pub wifi: Option<Wifi>,
+    /// GNSS, while it is on.
+    pub gnss: Option<Gnss>,
     /// Optional sounds are silenced.
     pub silent: bool,
     /// The charge is low enough to say so.
     pub battery_low: bool,
+}
+
+/// Bluetooth, while it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bluetooth {
+    /// Nothing is connected.
+    Waiting,
+    /// A phone is connected.
+    Connected,
+    /// A pairing window is open.
+    Pairing,
+}
+
+/// Wi-Fi, while it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wifi {
+    /// No network is joined.
+    Disconnected,
+    /// A network is being joined.
+    Joining,
+    Connected,
+}
+
+/// GNSS, while it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gnss {
+    /// No position yet.
+    Searching,
+    /// A position is held.
+    Fixed,
 }
 
 /// A chat as the list knows it, whether or not it is open.

@@ -20,7 +20,7 @@ use umsh_ux_communicator::buoyant::view::View;
 use umsh_ux_communicator::heapless::String;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::{Node as _, State, brightness_level};
+use umsh_ux_communicator::model::{Bluetooth, Gnss, Node as _, State, Wifi, brightness_level};
 use umsh_ux_communicator::{theme, ui};
 use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
 use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
@@ -228,6 +228,14 @@ async fn interface(
             state.status.time = clock();
             minute = next_minute();
         }
+        // The links are read on every pass, which is at least once a
+        // second, and redraw the strip only when one has changed.
+        let read = links();
+        let status = &app.state().status;
+        if (status.bluetooth, status.wifi, status.gnss) != read {
+            let mut state = app.state_mut();
+            (state.status.bluetooth, state.status.wifi, state.status.gnss) = read;
+        }
         // Taken in while the panel is still dark, so that a message
         // arriving then is listed for the screen it wakes to.
         if input::events(app, now()) {
@@ -299,6 +307,7 @@ fn state(node: &'static Node) -> State {
     let mut state = State::new(node);
     state.status.device_name = node.device_name();
     state.status.time = clock();
+    (state.status.bluetooth, state.status.wifi, state.status.gnss) = links();
     state.set_wall_time(umsh_hal::wall_clock::now());
     state.reload();
     state.focus_list();
@@ -313,6 +322,46 @@ fn clock() -> String<8> {
         let _ = core::fmt::write(&mut time, format_args!("{hours:02}:{minutes:02}"));
     }
     time
+}
+
+/// Bluetooth, Wi-Fi, and GNSS, as the strip shows them: each only while it
+/// is on, as the tracker's header shows them. Bluetooth is hidden while a
+/// wired host has it off.
+fn links() -> (Option<Bluetooth>, Option<Wifi>, Option<Gnss>) {
+    use umsh_ux_display_tracker::screen::{LinkState, PairingState};
+    let ble = ble::panel();
+    let bluetooth = (ble.enabled == Some(true)
+        && !matches!(ble.link, LinkState::Disabled | LinkState::OffWired))
+    .then(|| match (ble.pairing, ble.link) {
+        (PairingState::Open { .. }, _) => Bluetooth::Pairing,
+        (_, LinkState::Connected | LinkState::Attached) => Bluetooth::Connected,
+        _ => Bluetooth::Waiting,
+    });
+    #[cfg(feature = "wifi")]
+    let wifi = {
+        use umsh_ux_display_tracker::wifi::WifiState;
+        let menu = wifi::ui_snapshot();
+        match menu.state {
+            _ if !menu.enabled => None,
+            WifiState::Off => None,
+            WifiState::Disconnected => Some(Wifi::Disconnected),
+            WifiState::Connecting => Some(Wifi::Joining),
+            WifiState::Connected => Some(Wifi::Connected),
+        }
+    };
+    #[cfg(not(feature = "wifi"))]
+    let wifi = None;
+    #[cfg(feature = "gnss")]
+    let gnss = umsh_ulcp_runtime::gnss::enabled().then(|| {
+        if umsh_ulcp_runtime::gnss::has_fix() {
+            Gnss::Fixed
+        } else {
+            Gnss::Searching
+        }
+    });
+    #[cfg(not(feature = "gnss"))]
+    let gnss = None;
+    (bluetooth, wifi, gnss)
 }
 
 /// When the clock next turns to a new minute.

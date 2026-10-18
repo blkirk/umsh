@@ -7,12 +7,12 @@ use core::cell::{Cell, RefCell, RefMut};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Chats, Delivery, Details,
-    Direction, EventQueue, Heard, Invite, KeyboardSettings, MAX_CHATS, MAX_HEARD, MAX_PEERS,
-    MESSAGE_LEN, Member, Message, MessageId, Messages, Node, NodeEvent, PeerDetail, PeerEntry,
-    PeerId, PeerSummary, Peers, Presence, Profile, RadioSettings, Reacted, Reaction, Reactions,
-    Sender, Setting, ShareUri, Shareable, State, StatusStrip, TRANSMIT_POWER, brightness_at,
-    push_newest, word_match,
+    Bluetooth, ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Chats, Delivery,
+    Details, Direction, EventQueue, Gnss, Heard, Invite, KeyboardSettings, MAX_CHATS, MAX_HEARD,
+    MAX_PEERS, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, NodeEvent, PeerDetail,
+    PeerEntry, PeerId, PeerSummary, Peers, Presence, Profile, RadioSettings, Reacted, Reaction,
+    Reactions, Sender, Setting, ShareUri, Shareable, State, StatusStrip, TRANSMIT_POWER,
+    brightness_at, push_newest, word_match,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -1519,8 +1519,9 @@ pub fn state(store: &'static Store) -> State {
         time: s("14:32"),
         battery_segments: 3,
         charging: false,
-        phone_linked: true,
-        gnss: true,
+        bluetooth: Some(Bluetooth::Connected),
+        wifi: None,
+        gnss: Some(Gnss::Fixed),
         silent: false,
         battery_low: false,
     };

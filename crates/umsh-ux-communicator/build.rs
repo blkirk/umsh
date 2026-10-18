@@ -378,20 +378,66 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             ),
         ],
     ),
+    // The strip's links: Bluetooth's rune, flanked while a phone is
+    // connected; GNSS's crosshairs, closed on a center once there is a
+    // fix; and Wi-Fi's fan, full when joined, its inner arcs while
+    // joining, and its outer arcs over a cross while no network is.
+    ("BLUETOOTH", 18, 1.3, &[stroke(BLUETOOTH, 1.1)]),
     (
-        "BLUETOOTH",
+        "BLUETOOTH_LINKED",
         18,
         1.3,
-        &[stroke("M-3 -3 L3 3 L0 6 V-6 L3 -3 L-3 3", 1.1)],
+        &[
+            stroke(BLUETOOTH, 1.1),
+            fill("M-6.6 0 A1 1 0 1 0 -4.6 0 A1 1 0 1 0 -6.6 0 Z"),
+            fill("M4.6 0 A1 1 0 1 0 6.6 0 A1 1 0 1 0 4.6 0 Z"),
+        ],
     ),
     (
         "GNSS",
         18,
         1.3,
         &[
-            stroke("M-3.6 0 A3.6 3.6 0 1 0 3.6 0 A3.6 3.6 0 1 0 -3.6 0 Z", 1.1),
+            stroke(GNSS_RING, 1.1),
             fill("M-1.1 0 A1.1 1.1 0 1 0 1.1 0 A1.1 1.1 0 1 0 -1.1 0 Z"),
-            stroke("M0 -6 V-4 M0 4 V6 M-6 0 H-4 M4 0 H6", 1.1),
+            stroke(GNSS_TICKS, 1.1),
+        ],
+    ),
+    (
+        "GNSS_SEARCHING",
+        18,
+        1.3,
+        &[stroke(GNSS_RING, 1.1), stroke(GNSS_TICKS, 1.1)],
+    ),
+    (
+        "WIFI",
+        18,
+        1.3,
+        &[
+            fill(WIFI_DOT),
+            stroke(WIFI_INNER, 1.1),
+            stroke(WIFI_MIDDLE, 1.1),
+            stroke(WIFI_OUTER, 1.1),
+        ],
+    ),
+    (
+        "WIFI_JOINING",
+        18,
+        1.3,
+        &[
+            fill(WIFI_DOT),
+            stroke(WIFI_INNER, 1.1),
+            stroke(WIFI_MIDDLE, 1.1),
+        ],
+    ),
+    (
+        "WIFI_LOST",
+        18,
+        1.3,
+        &[
+            stroke(WIFI_MIDDLE, 1.1),
+            stroke(WIFI_OUTER, 1.1),
+            stroke("M-1.5 2.2 L1.5 5.2 M1.5 2.2 L-1.5 5.2", 1.1),
         ],
     ),
     (
@@ -526,6 +572,16 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
         ],
     ),
 ];
+
+/// The strip's link glyphs, in parts. Wi-Fi's arcs span 45 degrees either
+/// side of upright, about the dot.
+const BLUETOOTH: &str = "M-3 -3 L3 3 L0 6 V-6 L3 -3 L-3 3";
+const GNSS_RING: &str = "M-3.6 0 A3.6 3.6 0 1 0 3.6 0 A3.6 3.6 0 1 0 -3.6 0 Z";
+const GNSS_TICKS: &str = "M0 -6 V-4 M0 4 V6 M-6 0 H-4 M4 0 H6";
+const WIFI_DOT: &str = "M-1.1 3.7 A1.1 1.1 0 1 0 1.1 3.7 A1.1 1.1 0 1 0 -1.1 3.7 Z";
+const WIFI_INNER: &str = "M-1.98 1.72 A2.8 2.8 0 0 1 1.98 1.72";
+const WIFI_MIDDLE: &str = "M-3.96 -0.26 A5.6 5.6 0 0 1 3.96 -0.26";
+const WIFI_OUTER: &str = "M-5.94 -2.24 A8.4 8.4 0 0 1 5.94 -2.24";
 
 /// Shift's arrow, and the bar under a locked modifier.
 const SHIFT: &str = "M0 -7.5 L7 -0.5 H3.2 V3.5 H-3.2 V-0.5 H-7 Z";
