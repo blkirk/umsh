@@ -89,6 +89,10 @@ transmission on a durable checkpoint/archive commit, typed transcript effects
 are replayed until acknowledged, and the SwiftUI transcript sends and receives
 real messages. Its current boundary and follow-ups are explicit:
 
+- The facade's platform-neutral half is `umsh_text::chat` (feature `alloc`),
+  and the worker's transmit queue and receive classification are
+  `umsh_text::node_adapter` (feature `node`). `umsh-mobile-core`'s
+  `mobile_chat.rs` is UniFFI records and an address codec over them.
 - The facade accepts only `ConversationKey::Direct`. Channel and room
   destinations are not silently reimplemented in Swift; exporting those
   profiles belongs with their later mobile integration.

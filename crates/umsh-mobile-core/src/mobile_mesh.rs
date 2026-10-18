@@ -11,7 +11,7 @@ use core::{
     task::{Context, Poll},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fmt,
     rc::Rc,
     sync::{
@@ -36,17 +36,21 @@ use umsh_hal::{
 use umsh_mac::{Mac, MacHandle, OperatingPolicy, RepeaterConfig, SendOptions};
 use umsh_node::{
     Host, LocalNode, MacBackend, NodeCapabilities, NodeIdentityPayload, NodeIdentityProfile,
-    NodeRole, PacketFamily, SendProgressTicket, Transport,
+    NodeRole, Transport,
     location::{MAX_PRECISION, NodeLocation},
 };
 use umsh_sync::AsyncRefCell;
-use umsh_text::engine::{ArchiveResult, DeliveryState, Destination};
-use umsh_text::model::{ConversationKey, SenderScope};
-use umsh_text::validate::{DeliveryPath, Envelope};
+use umsh_text::chat::{ChannelRegistry, Seeds, TextSource};
+use umsh_text::engine::ArchiveResult;
+use umsh_text::model::ConversationKey;
+use umsh_text::node_adapter::{
+    self, Inbound, InboundText, Refusal, RxSummary, TransmitPolicy, TransmitQueue,
+    WellKnownChannels,
+};
 use umsh_ulcp::{frame, ids::prop, items};
 
 use crate::mobile_chat::{
-    ChannelRegistry, MobileChatArchiveLookupRecord, MobileChatArchiveResultKind,
+    ChatDrain, ComposeFailure, MobileChatArchiveLookupRecord, MobileChatArchiveResultKind,
     MobileChatCheckpointRecord, MobileChatComposeBatchRecord, MobileChatDeliveryRecord,
     MobileChatDirection, MobileChatMutationKind, MobileChatMutationRecord, MobileChatOriginalRef,
     MobileChatPresence, MobileChatRegardingRef, MobileChatRxMetadataRecord,
@@ -948,55 +952,6 @@ enum ChatComposeRequest {
 struct InboundFrame {
     record: MobileMeshRxRecord,
 }
-
-/// Who a received text frame came from, and over what.
-enum InboundTextSource {
-    /// Authenticated unicast from a known peer.
-    Direct { peer: PublicKey },
-    /// Multicast to a channel. The sender claims a hint; the full key is
-    /// present only when they addressed the frame with it.
-    ChannelGroup {
-        channel: ChannelTag,
-        hint: NodeHint,
-        full_key: Option<PublicKey>,
-    },
-    /// Blind unicast to us over a channel key, from an addressable peer.
-    ChannelDirect {
-        channel: ChannelTag,
-        peer: PublicKey,
-    },
-}
-
-struct InboundText {
-    source: InboundTextSource,
-    payload: Vec<u8>,
-    received_at_ms: Option<u64>,
-    rx: MobileChatRxMetadataRecord,
-}
-
-struct InFlightChatTransmission {
-    transmission_id: u32,
-    /// The peer whose first-contact pipeline this send gates on. Channel
-    /// sends have no such peer: multicast is unaddressed and blind unicast
-    /// carries no ACK to confirm with.
-    gate_peer: Option<PublicKey>,
-    ticket: SendProgressTicket,
-    sent_reported: bool,
-    /// No acknowledgement will ever arrive, so transmission is the terminal
-    /// success state rather than a step toward one.
-    non_ack: bool,
-    /// When this entry entered the window, and whether it has already been
-    /// reported as overdue. A frame that never resolves holds a slot in a
-    /// window of eight; eight of them stop chat entirely, and from the outside
-    /// that looks like messages hanging on "Sending" for no reason.
-    queued_at_ms: u64,
-    stall_reported: bool,
-}
-
-/// How long an in-flight transmission may go unresolved before it is called
-/// out. Longer than any ordinary ACK wait, so this fires on trouble rather
-/// than on a slow link.
-const CHAT_TRANSMISSION_STALL_MS: u64 = 60_000;
 
 #[derive(Clone)]
 enum MobileChatWorkerEvent {
@@ -3289,10 +3244,8 @@ async fn run_worker(
         responder_name.as_deref(),
         advertised_location,
     ));
-    // Held outside the chat state: rejecting a batch rebuilds the reducer,
-    // and the channels the platform registered must outlive that.
-    let channel_registry = Rc::new(RefCell::new(ChannelRegistry::default()));
-    let mut chat = MobileChatState::new(local_key, channel_registry.clone());
+    let mut chat = MobileChatState::new(local_key, chat_seeds());
+    let well_known = WellKnownChannels::derive();
     // Registered before every other receive handler: dispatch stops at the
     // first handler that claims a packet, and presence is true of packets
     // that something else goes on to claim. It never claims one itself.
@@ -3307,116 +3260,42 @@ async fn run_worker(
     });
     let inbound_text = Rc::new(RefCell::new(Vec::<InboundText>::new()));
     let inbound_text_callback = inbound_text.clone();
-    let text_channels = channel_registry.clone();
     let echo_events = chat_events.clone();
     let text_subscription = node.on_receive(move |packet| {
-        if packet.payload_type() != PayloadType::TextMessage {
-            return false;
+        match node_adapter::inbound_text(packet, &local_key, &well_known) {
+            None => false,
+            // Claimed so nothing else interprets it, and reported for how
+            // far it traveled.
+            Some(Inbound::Echo { hop_count }) => {
+                let distance = match hop_count {
+                    Some(hops) => format!("after {hops} hop(s)"),
+                    None => "over a source route".to_string(),
+                };
+                let _ = echo_events.send(MobileChatWorkerEvent::Diagnostic(format!(
+                    "own multicast relayed back {distance}"
+                )));
+                true
+            }
+            Some(Inbound::Refused(refusal)) => {
+                let reason = match refusal {
+                    Refusal::EncryptedEmergency => "an emergency-channel text frame: encrypted",
+                    Refusal::AnonymousEmergency => {
+                        "an emergency-channel text frame: missing its full source key"
+                    }
+                    Refusal::AnonymousPublic => {
+                        "a public-channel text frame: missing its full source key"
+                    }
+                };
+                let _ = echo_events.send(MobileChatWorkerEvent::Diagnostic(format!(
+                    "dropped {reason}"
+                )));
+                false
+            }
+            Some(Inbound::Text(text)) => {
+                inbound_text_callback.borrow_mut().push(text);
+                true
+            }
         }
-        // Our own multicast, relayed back to us. Every group send carries our
-        // full source address, so a repeater's copy arrives naming us—but
-        // it is the message we already have, not a second one, and the
-        // transcript must not show it twice.
-        //
-        // It is still evidence: something out there received our frame and
-        // forwarded it, which is the only reachability signal a multicast
-        // ever produces. Claim it so nothing else interprets it, and report
-        // how far it travelled.
-        //
-        // Scoped to multicast, because a directed frame naming us is not an
-        // echo. A unicast reaches this handler only when it also named a
-        // local identity as its destination, which makes it a message we
-        // addressed to ourselves; that belongs in the transcript like any
-        // other. It takes a neighbor willing to repeat it to arrive at all,
-        // since a radio never hears its own transmission.
-        if packet.packet_family() == PacketFamily::Multicast && packet.from_key() == Some(local_key)
-        {
-            let distance = match packet.hop_count() {
-                Some(hops) => format!("after {hops} hop(s)"),
-                None => "over a source route".to_string(),
-            };
-            let _ = echo_events.send(MobileChatWorkerEvent::Diagnostic(format!(
-                "own multicast relayed back {distance}"
-            )));
-            return true;
-        }
-        // A channel frame names its channel by the key that authenticated it,
-        // so the tag is derived from that key rather than looked up by the
-        // two-byte identifier the frame carried—distinct keys may share an
-        // identifier, and only the key that decrypted the frame is the truth.
-        let channel_tag = packet.channel().map(|channel| {
-            (
-                crate::channel_tag(channel.key()),
-                text_channels
-                    .borrow()
-                    .contains(&crate::channel_tag(channel.key())),
-            )
-        });
-        // The same rule read from the receiving end: emergency traffic that is
-        // not readable by every node in range, or that does not name its
-        // sender outright, is not accepted at all. A frame that fails either
-        // test is dropped rather than shown unmarked—a message the reader
-        // would act on in an emergency must not arrive with its origin or its
-        // reach in question.
-        //
-        // Both checks live here, at the chat layer, rather than under the MAC:
-        // the requirement the spec states is about chat messages, and the MAC
-        // is deliberately incurious about what it carries.
-        if let Some((tag, _)) = channel_tag
-            && tag == crate::emergency_channel_tag()
-            && (packet.encrypted() || packet.from_key().is_none())
-        {
-            let reason = if packet.encrypted() {
-                "encrypted"
-            } else {
-                "missing its full source key"
-            };
-            let _ = echo_events.send(MobileChatWorkerEvent::Diagnostic(format!(
-                "dropped an emergency-channel text frame: {reason}"
-            )));
-            return false;
-        }
-        let source = match (packet.packet_family(), channel_tag) {
-            (PacketFamily::Unicast, _) => match packet.from_key() {
-                Some(peer) => InboundTextSource::Direct { peer },
-                None => return false,
-            },
-            // Membership is what the channel MIC authenticates; the hint is
-            // the only sender identity a multicast frame must carry.
-            (PacketFamily::Multicast, Some((channel, true))) => match packet.from_hint() {
-                Some(hint) => InboundTextSource::ChannelGroup {
-                    channel,
-                    hint,
-                    full_key: packet.from_key(),
-                },
-                None => return false,
-            },
-            // Without a full key there is nobody to attribute the message to,
-            // and nobody to answer a repair request to.
-            (PacketFamily::BlindUnicast, Some((channel, true))) => match packet.from_key() {
-                Some(peer) => InboundTextSource::ChannelDirect { channel, peer },
-                None => return false,
-            },
-            _ => return false,
-        };
-        inbound_text_callback.borrow_mut().push(InboundText {
-            source,
-            payload: packet.payload().to_vec(),
-            received_at_ms: packet.received_at_ms(),
-            rx: MobileChatRxMetadataRecord {
-                rssi_dbm: packet.rssi(),
-                snr_centibels: packet.snr().map(|snr| snr.as_centibels()),
-                lqi: packet.lqi().map(|lqi| lqi.get()),
-                hop_count: packet.hop_count(),
-                route_hints: packet
-                    .trace_route_hints()
-                    .map(|hint| hint.0.to_vec())
-                    .collect(),
-                source_authenticated: packet.source_authenticated(),
-                buffered_age_seconds: packet.rx().buffered_age_s(),
-            },
-        });
-        true
     });
     let advertisement_events = advertisements.clone();
     let advertisement_subscription = node.on_receive(move |packet| {
@@ -3446,12 +3325,10 @@ async fn run_worker(
     // so a fresh session cannot land on tokens a device still retains
     // from the previous one.
     let mut management_token: u16 = rand::random();
-    let mut in_flight_chat = Vec::<InFlightChatTransmission>::new();
+    let mut chat_queue = TransmitQueue::new(MOBILE_CHAT_TRANSMIT_WINDOW);
     // How each channel member was last reached, so an identity request can be
     // routed by evidence rather than flooded at the default budget.
     let mut member_routes = BTreeMap::<(ChannelTag, [u8; 3]), MemberRoute>::new();
-    let mut chat_pipeline_ready = BTreeSet::<[u8; 32]>::new();
-    let mut pending_chat_transmissions = VecDeque::<umsh_text::engine::Transmission>::new();
     let pending = Rc::new(RefCell::new(BTreeMap::<[u8; 32], u64>::new()));
     let pong_pending = pending.clone();
     let pong_events = events.clone();
@@ -3602,7 +3479,7 @@ async fn run_worker(
                                     result = Err(MobileMeshError::ChannelCapacity);
                                     break;
                                 }
-                                channel_registry.borrow_mut().register(
+                                chat.facade.channels_mut().register(
                                     crate::channel_tag(&key),
                                     key,
                                     max_flood_hops,
@@ -3614,8 +3491,8 @@ async fn run_worker(
                             for key in keys {
                                 // Not-joined is success, as for peers.
                                 let _ = node.leave(&umsh_node::Channel::private(key, "")).await;
-                                channel_registry
-                                    .borrow_mut()
+                                chat.facade
+                                    .channels_mut()
                                     .remove(&crate::channel_tag(&key));
                             }
                             let _ = response.send(Ok(()));
@@ -3822,11 +3699,15 @@ async fn run_worker(
                                     let route = member_routes.get(&(channel, hint.0)).cloned();
                                     let mut nonce_bytes = [0u8; 4];
                                     handle.fill_random(&mut nonce_bytes).await;
-                                    let reach =
-                                        channel_reach(&channel_registry, &channel, flood_hops);
+                                    let reach = node_adapter::channel_reach(
+                                        chat.channels(),
+                                        &well_known,
+                                        &channel,
+                                        flood_hops.default_hops,
+                                    );
                                     request_identity_over_channel(
                                         &node,
-                                        &channel_registry,
+                                        chat.channels(),
                                         channel,
                                         hint,
                                         u32::from_be_bytes(nonce_bytes),
@@ -3909,7 +3790,7 @@ async fn run_worker(
                             }
                         }
                         Some(WorkerCommand::SetChatDisplayName { name, response }) => {
-                            chat.engine.set_local_handle(&name);
+                            chat.facade.set_local_handle(&name);
                             let _ = response.send(());
                         }
                         Some(WorkerCommand::SetFloodHops { settings, response }) => {
@@ -4069,7 +3950,7 @@ async fn run_worker(
                             // unambiguous by allowing only one uncommitted compose.
                             let conversation =
                                 chat.parse_conversation_address(&conversation_address);
-                            let result = if !chat.pending_batches.is_empty() {
+                            let result = if chat.has_pending_batch() {
                                 Err(MobileMeshError::OperationInProgress)
                             } else if let Some(conversation) = conversation {
                                 let now_ms = handle.now_ms().await;
@@ -4113,7 +3994,12 @@ async fn run_worker(
                                         }
                                         Ok(composed.record)
                                     }
-                                    Err(()) => Err(MobileMeshError::ChatComposeFailed),
+                                    Err(ComposeFailure::Pending) => {
+                                        Err(MobileMeshError::OperationInProgress)
+                                    }
+                                    Err(ComposeFailure::Refused) => {
+                                        Err(MobileMeshError::ChatComposeFailed)
+                                    }
                                 }
                             } else {
                                 // Either the address is malformed, or it names
@@ -4124,22 +4010,19 @@ async fn run_worker(
                             let _ = response.send(result);
                         }
                         Some(WorkerCommand::CommitChatBatch { batch_id, response }) => {
-                            let result = match chat.pending_batches.remove(&batch_id) {
-                                Some(batch) => {
+                            let result = match chat.commit(batch_id) {
+                                Some(outbound) => {
                                     let now_ms = handle.now_ms().await;
-                                    let sent = queue_chat_transmissions(
+                                    chat_queue.enqueue(outbound);
+                                    let sent = pump_chat(
                                         &node,
-                                        batch.transmissions,
-                                        &mut pending_chat_transmissions,
-                                        &mut in_flight_chat,
-                                        &chat_pipeline_ready,
-                                        &channel_registry,
                                         &mut chat,
+                                        &mut chat_queue,
+                                        &chat_policy(flood_hops, well_known),
+                                        &chat_events,
                                         now_ms,
-                                        flood_hops,
                                     )
                                     .await;
-                                    publish_chat_drain(chat.drain(), &chat_events);
                                     if sent > 0
                                         && handle.service_counter_persistence().await.is_err()
                                     {
@@ -4161,31 +4044,20 @@ async fn run_worker(
                             checkpoints,
                             response,
                         }) => {
-                            let result = match chat.pending_batches.remove(&batch_id) {
-                                Some(batch) => {
-                                    for transmission in batch.transmissions {
-                                        chat.engine.transmit_update(
-                                            transmission.transmission_id,
-                                            DeliveryState::Failed,
-                                            handle.now_ms().await,
-                                        );
+                            let now_ms = handle.now_ms().await;
+                            let result =
+                                match chat.reject(batch_id, &checkpoints, chat_seeds(), now_ms) {
+                                    Some((drain, diagnostics)) => {
+                                        publish_chat_drain(drain, &mut chat_queue, &chat_events);
+                                        for diagnostic in diagnostics {
+                                            let _ = chat_events.send(
+                                                MobileChatWorkerEvent::Diagnostic(diagnostic),
+                                            );
+                                        }
+                                        Ok(())
                                     }
-                                    publish_chat_drain(chat.drain(), &chat_events);
-                                    chat = MobileChatState::new(
-                                        local_key,
-                                        channel_registry.clone(),
-                                    );
-                                    for diagnostic in
-                                        chat.restore(&checkpoints, handle.now_ms().await)
-                                    {
-                                        let _ = chat_events.send(
-                                            MobileChatWorkerEvent::Diagnostic(diagnostic),
-                                        );
-                                    }
-                                    Ok(())
-                                }
-                                None => Err(MobileMeshError::ChatBatchMissing),
-                            };
+                                    None => Err(MobileMeshError::ChatBatchMissing),
+                                };
                             let _ = response.send(result);
                         }
                         Some(WorkerCommand::ChatArchiveResult {
@@ -4194,70 +4066,35 @@ async fn run_worker(
                             payload,
                         }) => {
                             let now_ms = handle.now_ms().await;
-                            match kind {
-                                MobileChatArchiveResultKind::Found => chat.engine.archive_result(
-                                    request_id,
-                                    ArchiveResult::Found { payload: &payload },
-                                    now_ms,
-                                ),
-                                MobileChatArchiveResultKind::Deleted => chat.engine.archive_result(
-                                    request_id,
-                                    ArchiveResult::Deleted,
-                                    now_ms,
-                                ),
-                                MobileChatArchiveResultKind::Evicted => chat.engine.archive_result(
-                                    request_id,
-                                    ArchiveResult::Evicted,
-                                    now_ms,
-                                ),
-                                MobileChatArchiveResultKind::Unknown => chat.engine.archive_result(
-                                    request_id,
-                                    ArchiveResult::Unknown,
-                                    now_ms,
-                                ),
-                            }
-                            let drain = chat.drain();
-                            let transmissions = drain.transmissions.clone();
-                            publish_chat_drain(drain, &chat_events);
-                            if !transmissions.is_empty() || !pending_chat_transmissions.is_empty() {
-                                let sent = queue_chat_transmissions(
-                                    &node,
-                                    transmissions,
-                                    &mut pending_chat_transmissions,
-                                    &mut in_flight_chat,
-                                    &chat_pipeline_ready,
-                                    &channel_registry,
-                                    &mut chat,
-                                    now_ms,
-                                    flood_hops,
-                                )
-                                .await;
-                                publish_chat_drain(chat.drain(), &chat_events);
-                                if sent > 0 && handle.service_counter_persistence().await.is_err() {
-                                    return;
+                            let result = match kind {
+                                MobileChatArchiveResultKind::Found => {
+                                    ArchiveResult::Found { payload: &payload }
                                 }
+                                MobileChatArchiveResultKind::Deleted => ArchiveResult::Deleted,
+                                MobileChatArchiveResultKind::Evicted => ArchiveResult::Evicted,
+                                MobileChatArchiveResultKind::Unknown => ArchiveResult::Unknown,
+                            };
+                            chat.facade.archive_result(request_id, result, now_ms);
+                            publish_chat_drain(chat.drain(), &mut chat_queue, &chat_events);
+                            let sent = pump_chat(
+                                &node,
+                                &mut chat,
+                                &mut chat_queue,
+                                &chat_policy(flood_hops, well_known),
+                                &chat_events,
+                                now_ms,
+                            )
+                            .await;
+                            if sent > 0 && handle.service_counter_persistence().await.is_err() {
+                                return;
                             }
                         }
                         Some(WorkerCommand::FailOutboundTransmissions) => {
                             let now_ms = handle.now_ms().await;
-                            for transmission in pending_chat_transmissions.drain(..) {
-                                chat.engine.transmit_update(
-                                    transmission.transmission_id,
-                                    DeliveryState::Failed,
-                                    now_ms,
-                                );
+                            for receipt in chat_queue.fail_all(&mut chat.facade, now_ms) {
+                                let _ = handle.cancel_pending_ack(identity_id, receipt).await;
                             }
-                            for transmission in in_flight_chat.drain(..) {
-                                if let Some(receipt) = transmission.ticket.receipt() {
-                                    let _ = handle.cancel_pending_ack(identity_id, receipt).await;
-                                }
-                                chat.engine.transmit_update(
-                                    transmission.transmission_id,
-                                    DeliveryState::Failed,
-                                    now_ms,
-                                );
-                            }
-                            publish_chat_drain(chat.drain(), &chat_events);
+                            publish_chat_drain(chat.drain(), &mut chat_queue, &chat_events);
                             // Every frame the failure covered is now cancelled;
                             // new transmissions may reach the platform again.
                             worker_completions.clear_poison();
@@ -4275,87 +4112,32 @@ async fn run_worker(
                             Some(value) => value,
                             None => handle.now_ms().await,
                         };
-                        // The envelope's sender is what the engine keys a
-                        // stream by. A multicast member is always the claimed
-                        // hint, with the full key passed alongside: naming the
-                        // key here instead would split one member into two
-                        // streams the moment a frame omitted it.
-                        let (envelope, sender_full_key) = match text.source {
-                            InboundTextSource::Direct { peer } => (
-                                Envelope {
-                                    path: DeliveryPath::Unicast,
-                                    conversation: ConversationKey::Direct { peer },
-                                    sender: SenderScope::Peer(peer),
-                                },
-                                Some(peer),
-                            ),
-                            InboundTextSource::ChannelGroup {
-                                channel,
-                                hint,
-                                full_key,
-                            } => {
-                                if let Some(peer) = full_key {
-                                    if let Some(resolution) =
-                                        chat.resolve_member(channel, hint, peer)
-                                    {
-                                        let _ = chat_events.send(
-                                            MobileChatWorkerEvent::SenderResolution(resolution),
-                                        );
-                                    }
-                                }
-                                remember_member_route(
-                                    &mut member_routes,
-                                    channel,
-                                    hint,
-                                    &text.rx,
-                                );
-                                (
-                                    Envelope {
-                                        path: DeliveryPath::Multicast,
-                                        conversation: ConversationKey::ChannelGroup { channel },
-                                        sender: SenderScope::ClaimedMember(hint),
-                                    },
-                                    full_key,
-                                )
-                            }
-                            InboundTextSource::ChannelDirect { channel, peer } => (
-                                Envelope {
-                                    path: DeliveryPath::BlindUnicast,
-                                    conversation: ConversationKey::ChannelDirect { channel, peer },
-                                    sender: SenderScope::Peer(peer),
-                                },
-                                Some(peer),
-                            ),
+                        // A channel left since the frame was copied out
+                        // takes no more traffic.
+                        let Some(source) = text.source(chat.channels()) else {
+                            continue;
                         };
-                        let _ = chat.engine.receive(
-                            &envelope,
-                            sender_full_key,
-                            &text.payload,
-                            received_at_ms,
-                        );
+                        let rx = rx_record(&text.rx);
+                        if let TextSource::ChannelGroup { channel, hint, .. } = source {
+                            remember_member_route(&mut member_routes, channel, hint, &rx);
+                        }
+                        let _ = chat.facade.receive(source, &text.payload, received_at_ms);
                         let mut drain = chat.drain();
                         // This drain belongs to exactly one frame, so the
                         // records it produced are the ones that frame caused.
-                        attach_rx_metadata(&mut drain.mutations, &text.rx);
-                        let transmissions = drain.transmissions.clone();
-                        publish_chat_drain(drain, &chat_events);
-                        if !transmissions.is_empty() || !pending_chat_transmissions.is_empty() {
-                            let sent = queue_chat_transmissions(
-                                &node,
-                                transmissions,
-                                &mut pending_chat_transmissions,
-                                &mut in_flight_chat,
-                                &chat_pipeline_ready,
-                                &channel_registry,
-                                &mut chat,
-                                received_at_ms,
-                                flood_hops,
-                            )
-                            .await;
-                            publish_chat_drain(chat.drain(), &chat_events);
-                            if sent > 0 && handle.service_counter_persistence().await.is_err() {
-                                return;
-                            }
+                        attach_rx_metadata(&mut drain.mutations, &rx);
+                        publish_chat_drain(drain, &mut chat_queue, &chat_events);
+                        let sent = pump_chat(
+                            &node,
+                            &mut chat,
+                            &mut chat_queue,
+                            &chat_policy(flood_hops, well_known),
+                            &chat_events,
+                            received_at_ms,
+                        )
+                        .await;
+                        if sent > 0 && handle.service_counter_persistence().await.is_err() {
+                            return;
                         }
                     }
                 }
@@ -4379,35 +4161,30 @@ async fn run_worker(
                             return;
                         }
                     }
-                    chat.engine.tick(now_ms);
-                    service_chat_tickets(
+                    chat.facade.tick(now_ms);
+                    for stall in chat_queue.service(&mut chat.facade, now_ms) {
+                        let _ = chat_events.send(MobileChatWorkerEvent::Diagnostic(format!(
+                            "transmission {} has not left the radio after {}s \
+                             ({}/{} window slots used, {} more waiting)",
+                            stall.transmission_id,
+                            stall.waited_ms / 1000,
+                            stall.occupied,
+                            stall.window,
+                            stall.pending,
+                        )));
+                    }
+                    publish_chat_drain(chat.drain(), &mut chat_queue, &chat_events);
+                    let sent = pump_chat(
+                        &node,
                         &mut chat,
-                        &mut in_flight_chat,
-                        &mut chat_pipeline_ready,
+                        &mut chat_queue,
+                        &chat_policy(flood_hops, well_known),
                         &chat_events,
-                        pending_chat_transmissions.len(),
                         now_ms,
-                    );
-                    let drain = chat.drain();
-                    let transmissions = drain.transmissions.clone();
-                    publish_chat_drain(drain, &chat_events);
-                    if !transmissions.is_empty() || !pending_chat_transmissions.is_empty() {
-                        let sent = queue_chat_transmissions(
-                            &node,
-                            transmissions,
-                            &mut pending_chat_transmissions,
-                            &mut in_flight_chat,
-                            &chat_pipeline_ready,
-                            &channel_registry,
-                            &mut chat,
-                            now_ms,
-                            flood_hops,
-                        )
-                        .await;
-                        publish_chat_drain(chat.drain(), &chat_events);
-                        if sent > 0 && handle.service_counter_persistence().await.is_err() {
-                            return;
-                        }
+                    )
+                    .await;
+                    if sent > 0 && handle.service_counter_persistence().await.is_err() {
+                        return;
                     }
                 }
             }
@@ -4422,164 +4199,6 @@ async fn run_worker(
     }
 }
 
-async fn queue_chat_transmissions<M: MacBackend>(
-    node: &LocalNode<M>,
-    transmissions: Vec<umsh_text::engine::Transmission>,
-    pending: &mut VecDeque<umsh_text::engine::Transmission>,
-    in_flight: &mut Vec<InFlightChatTransmission>,
-    pipeline_ready: &BTreeSet<[u8; 32]>,
-    channels: &Rc<RefCell<ChannelRegistry>>,
-    chat: &mut MobileChatState,
-    now_ms: u64,
-    flood_hops: FloodHopSettings,
-) -> usize {
-    pending.extend(transmissions);
-    // Keep a bounded pipeline aligned with the device's target-selected
-    // TX queue. The durable pending queue below handles messages larger than
-    // this window without imposing the mobile RAM choice on embedded MACs.
-    if in_flight.len() >= MOBILE_CHAT_TRANSMIT_WINDOW {
-        return 0;
-    }
-    let mut queued = 0;
-    while let Some(transmission) = pending.pop_front() {
-        let gate_peer = match transmission.destination {
-            Destination::Peer(peer) => Some(peer),
-            // Multicast is unaddressed and blind unicast carries no ACK, so
-            // neither has a peer whose pipeline could be confirmed.
-            Destination::Channel(_) | Destination::ChannelPeer { .. } => None,
-        };
-        if let Some(peer) = gate_peer {
-            if !pipeline_ready.contains(&peer.0)
-                && in_flight.iter().any(|entry| entry.gate_peer == Some(peer))
-            {
-                // First contact may require counter synchronization. Confirm
-                // one authenticated frame before opening this peer's full
-                // pipeline.
-                pending.push_front(transmission);
-                break;
-            }
-        }
-        let mut payload = Vec::with_capacity(transmission.payload.len() + 1);
-        payload.push(PayloadType::TextMessage as u8);
-        payload.extend_from_slice(transmission.payload.as_slice());
-        let sent = match transmission.destination {
-            Destination::Peer(peer) => match node.peer(peer).await {
-                Ok(connection) => {
-                    connection
-                        .send(
-                            &payload,
-                            &with_flood_reach(SendOptions::default(), flood_hops.default_hops)
-                                .with_ack_requested(true),
-                        )
-                        .await
-                }
-                Err(_) => {
-                    chat.engine.transmit_update(
-                        transmission.transmission_id,
-                        DeliveryState::Failed,
-                        now_ms,
-                    );
-                    continue;
-                }
-            },
-            Destination::Channel(channel) => {
-                let Some(bound) = bound_channel(node, channels, &channel) else {
-                    chat.engine.transmit_update(
-                        transmission.transmission_id,
-                        DeliveryState::Failed,
-                        now_ms,
-                    );
-                    continue;
-                };
-                // Carry the full source address: a member who misses a
-                // fragment can only ask us to resend it if our frames name
-                // the key to address that request to.
-                let mut options = with_flood_reach(
-                    SendOptions::default(),
-                    channel_reach(channels, &channel, flood_hops),
-                )
-                .with_full_source();
-                // An emergency message that only channel members can read is
-                // not an emergency message. The spec forbids encrypting chat
-                // on `EMERGENCY` so anyone in range can act on it, whether or
-                // not they hold the key; the full source key it already
-                // carries is what keeps it attributable without it.
-                if channel == crate::emergency_channel_tag() {
-                    options = options.unencrypted();
-                }
-                bound.send_all(&payload, &options).await
-            }
-            Destination::ChannelPeer { channel, peer } => {
-                let Some(bound) = bound_channel(node, channels, &channel) else {
-                    chat.engine.transmit_update(
-                        transmission.transmission_id,
-                        DeliveryState::Failed,
-                        now_ms,
-                    );
-                    continue;
-                };
-                // The MAC will only address a registered peer, and a channel
-                // member is not one—nothing about being in a channel
-                // together registers anybody. Register on the way out rather
-                // than on sight: only the members we actually have to ask
-                // something of spend a peer slot, and this is the only place
-                // we ever ask.
-                if node.peer(peer).await.is_err() {
-                    chat.engine.transmit_update(
-                        transmission.transmission_id,
-                        DeliveryState::Failed,
-                        now_ms,
-                    );
-                    continue;
-                }
-                // A repair request; the engine owns retrying it, so no ACK is
-                // asked for here. It travels as far as the channel does.
-                let mut options = with_flood_reach(
-                    SendOptions::default(),
-                    channel_reach(channels, &channel, flood_hops),
-                )
-                .with_full_source();
-                // Repairs carry the same message the multicast did, so they
-                // are held to the same rule—and have to be, since the
-                // receiving side refuses encrypted emergency text whatever
-                // family it arrives in. It stays blind unicast even so: what
-                // an unencrypted blind unicast still carries over a plain one
-                // is the channel it names, which is what a repeater decides
-                // to forward on.
-                if channel == crate::emergency_channel_tag() {
-                    options = options.unencrypted();
-                }
-                let r = bound.send(&peer, &payload, &options).await;
-                r
-            }
-        };
-        let ticket = match sent {
-            Ok(ticket) => ticket,
-            Err(_) => {
-                // With a registered peer and an engine-bounded payload, the
-                // expected failure here is temporary MAC queue / pending-ACK
-                // capacity. Preserve ordering and retry after tickets advance.
-                pending.push_front(transmission);
-                break;
-            }
-        };
-        in_flight.push(InFlightChatTransmission {
-            transmission_id: transmission.transmission_id,
-            gate_peer,
-            ticket,
-            sent_reported: false,
-            non_ack: gate_peer.is_none(),
-            queued_at_ms: now_ms,
-            stall_reported: false,
-        });
-        queued += 1;
-        if in_flight.len() >= MOBILE_CHAT_TRANSMIT_WINDOW {
-            break;
-        }
-    }
-    queued
-}
-
 /// Solicit one channel member's identity over the channel they were heard on.
 ///
 /// The request is a multicast every member receives but only the filtered hint
@@ -4588,14 +4207,14 @@ async fn queue_chat_transmissions<M: MacBackend>(
 /// the distance they were last heard from.
 async fn request_identity_over_channel<M: MacBackend>(
     node: &LocalNode<M>,
-    channels: &Rc<RefCell<ChannelRegistry>>,
+    channels: &ChannelRegistry,
     channel: ChannelTag,
     hint: NodeHint,
     nonce: u32,
     route: Option<MemberRoute>,
     flood_hops: u8,
 ) -> Result<(), MobileMeshError> {
-    let Some(bound) = bound_channel(node, channels, &channel) else {
+    let Some(bound) = node_adapter::bound_channel(node, channels, &channel) else {
         return Err(MobileMeshError::UnknownConversation);
     };
     let options_block = umsh_node::mac_command::IdentityRequestBuilder::new()
@@ -4735,80 +4354,52 @@ fn peer_repeater_record(
     }
 }
 
-/// Bind the channel a transmission names, so it can be sent over.
-fn bound_channel<M: MacBackend>(
-    node: &LocalNode<M>,
-    channels: &Rc<RefCell<ChannelRegistry>>,
-    channel: &ChannelTag,
-) -> Option<umsh_node::BoundChannel<M>> {
-    let key = channels.borrow().key(channel)?;
-    // Looked up per send rather than cached: leaving and rejoining a channel
-    // invalidates the binding, and the registry is the one place that knows.
-    node.bound_channel(&umsh_node::Channel::private(key, ""))
-}
+/// Seeds for a new chat engine session. The session identifier must not
+/// repeat: the platform holds handles from earlier sessions, and a new engine
+/// reissues them from the start.
+fn chat_seeds() -> Seeds {
+    use rand::Rng;
 
-fn service_chat_tickets(
-    chat: &mut MobileChatState,
-    in_flight: &mut Vec<InFlightChatTransmission>,
-    pipeline_ready: &mut BTreeSet<[u8; 32]>,
-    events: &NotifyingSender<MobileChatWorkerEvent>,
-    pending_depth: usize,
-    now_ms: u64,
-) {
-    let occupied = in_flight.len();
-    let mut index = 0;
-    while index < in_flight.len() {
-        let entry = &mut in_flight[index];
-        // Checked before the state transitions below, so an entry that is
-        // about to retire this pass is not accused on its way out.
-        if !entry.stall_reported
-            && !entry.ticket.was_transmitted()
-            && now_ms.saturating_sub(entry.queued_at_ms) >= CHAT_TRANSMISSION_STALL_MS
-        {
-            entry.stall_reported = true;
-            let waited = now_ms.saturating_sub(entry.queued_at_ms) / 1000;
-            let transmission_id = entry.transmission_id;
-            let _ = events.send(MobileChatWorkerEvent::Diagnostic(format!(
-                "transmission {transmission_id} has not left the radio after {waited}s \
-                 ({occupied}/{MOBILE_CHAT_TRANSMIT_WINDOW} window slots used, \
-                 {pending_depth} more waiting)"
-            )));
-        }
-        let entry = &mut in_flight[index];
-        if entry.ticket.was_transmitted() && !entry.sent_reported {
-            chat.engine
-                .transmit_update(entry.transmission_id, DeliveryState::Sent, now_ms);
-            entry.sent_reported = true;
-        }
-        if entry.non_ack && entry.sent_reported {
-            // Nothing further can happen to this one: no acknowledgement is
-            // coming, so transmission is where it ends. Retiring it here is
-            // what keeps channel sends from accumulating in flight forever.
-            in_flight.swap_remove(index);
-        } else if entry.ticket.was_acked() {
-            if let Some(peer) = entry.gate_peer {
-                pipeline_ready.insert(peer.0);
-            }
-            if entry.ticket.was_acked_via_route_retry() {
-                chat.note_acked_via_flood(entry.transmission_id);
-            }
-            chat.engine
-                .transmit_update(entry.transmission_id, DeliveryState::Acked, now_ms);
-            in_flight.swap_remove(index);
-        } else if entry.ticket.has_failed() {
-            chat.engine
-                .transmit_update(entry.transmission_id, DeliveryState::Failed, now_ms);
-            in_flight.swap_remove(index);
-        } else {
-            index += 1;
-        }
+    let mut rng = rand::rng();
+    Seeds {
+        session_id: rng.next_u64().max(1),
+        jitter_seed: rng.next_u64(),
     }
 }
 
+fn chat_policy(flood_hops: FloodHopSettings, well_known: WellKnownChannels) -> TransmitPolicy {
+    TransmitPolicy {
+        default_flood_hops: flood_hops.default_hops,
+        well_known,
+    }
+}
+
+/// Send what the chat queue holds while its window has room, and publish
+/// what the engine made of any frame that could not be sent. Returns how
+/// many frames were sent.
+async fn pump_chat<M: MacBackend>(
+    node: &LocalNode<M>,
+    chat: &mut MobileChatState,
+    queue: &mut TransmitQueue,
+    policy: &TransmitPolicy,
+    events: &NotifyingSender<MobileChatWorkerEvent>,
+    now_ms: u64,
+) -> usize {
+    if !queue.has_pending() {
+        return 0;
+    }
+    let sent = queue.pump(node, &mut chat.facade, policy, now_ms).await;
+    publish_chat_drain(chat.drain(), queue, events);
+    sent
+}
+
+/// Publish a drain's records, and queue its frames for the radio.
 fn publish_chat_drain(
-    drain: crate::mobile_chat::ChatDrain,
+    drain: ChatDrain,
+    queue: &mut TransmitQueue,
     events: &NotifyingSender<MobileChatWorkerEvent>,
 ) {
+    queue.enqueue(drain.outbound);
     for mutation in drain.mutations {
         let _ = events.send(MobileChatWorkerEvent::Mutation(mutation));
     }
@@ -4823,6 +4414,18 @@ fn publish_chat_drain(
     }
     for diagnostic in drain.diagnostics {
         let _ = events.send(MobileChatWorkerEvent::Diagnostic(diagnostic));
+    }
+}
+
+fn rx_record(rx: &RxSummary) -> MobileChatRxMetadataRecord {
+    MobileChatRxMetadataRecord {
+        rssi_dbm: rx.rssi_dbm,
+        snr_centibels: rx.snr_centibels,
+        lqi: rx.lqi,
+        hop_count: rx.hop_count,
+        route_hints: rx.route_hints.iter().map(|hint| hint.0.to_vec()).collect(),
+        source_authenticated: rx.source_authenticated,
+        buffered_age_seconds: rx.buffered_age_s,
     }
 }
 
@@ -4874,28 +4477,6 @@ fn flood_budget(hop_count: Option<u8>, default: u8) -> u8 {
         .map(|hops| hops.saturating_sub(1).max(1))
         .unwrap_or(default)
 }
-
-/// How far traffic on a channel may travel: the ceiling the user registered
-/// for it, otherwise the session-wide default—and never past the ceiling
-/// the protocol fixes for the well-known `public` and `EMERGENCY` channels.
-fn channel_reach(
-    channels: &Rc<RefCell<ChannelRegistry>>,
-    channel: &ChannelTag,
-    settings: FloodHopSettings,
-) -> u8 {
-    let asked = channels
-        .borrow()
-        .max_flood_hops(channel)
-        .unwrap_or(settings.default_hops);
-    if *channel == crate::public_channel_tag() || *channel == crate::emergency_channel_tag() {
-        asked.min(WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS)
-    } else {
-        asked
-    }
-}
-
-/// The flood-hop ceiling the protocol fixes for `public` and `EMERGENCY`.
-const WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS: u8 = 10;
 
 /// What the last frame from a channel member showed about reaching them.
 #[derive(Clone)]
@@ -5359,45 +4940,40 @@ mod tests {
         };
         let private_key = ChannelKey([0x11; 32]);
         let private_tag = crate::channel_tag(&private_key);
-        let public_key = *umsh_node::Channel::named(crate::PUBLIC_CHANNEL_NAME)
+        let public_key = *umsh_node::Channel::named(WellKnownChannels::PUBLIC_NAME)
             .unwrap()
             .key();
         let public_tag = crate::channel_tag(&public_key);
-        let emergency_key = *umsh_node::Channel::named(crate::EMERGENCY_CHANNEL_NAME)
+        let emergency_key = *umsh_node::Channel::named(WellKnownChannels::EMERGENCY_NAME)
             .unwrap()
             .key();
         let emergency_tag = crate::channel_tag(&emergency_key);
 
-        let registry = Rc::new(RefCell::new(ChannelRegistry::default()));
-        registry
-            .borrow_mut()
-            .register(private_tag, private_key, None);
-        registry
-            .borrow_mut()
-            .register(public_tag, public_key, Some(12));
-        registry
-            .borrow_mut()
-            .register(emergency_tag, emergency_key, None);
+        let well_known = WellKnownChannels::derive();
+        let reach = |registry: &ChannelRegistry, tag: &ChannelTag| {
+            node_adapter::channel_reach(registry, &well_known, tag, settings.default_hops)
+        };
 
-        assert_eq!(channel_reach(&registry, &private_tag, settings), 10);
+        let mut registry = ChannelRegistry::default();
+        registry.register(private_tag, private_key, None);
+        registry.register(public_tag, public_key, Some(12));
+        registry.register(emergency_tag, emergency_key, None);
+
+        assert_eq!(reach(&registry, &private_tag), 10);
         assert_eq!(
-            channel_reach(&registry, &public_tag, settings),
-            WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS
+            reach(&registry, &public_tag),
+            node_adapter::WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS
         );
         assert_eq!(
-            channel_reach(&registry, &emergency_tag, settings),
-            WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS
+            reach(&registry, &emergency_tag),
+            node_adapter::WELL_KNOWN_CHANNEL_MAX_FLOOD_HOPS
         );
 
-        registry
-            .borrow_mut()
-            .register(private_tag, private_key, Some(3));
-        assert_eq!(channel_reach(&registry, &private_tag, settings), 3);
+        registry.register(private_tag, private_key, Some(3));
+        assert_eq!(reach(&registry, &private_tag), 3);
         // Below the protocol ceiling, the user's own choice stands.
-        registry
-            .borrow_mut()
-            .register(public_tag, public_key, Some(2));
-        assert_eq!(channel_reach(&registry, &public_tag, settings), 2);
+        registry.register(public_tag, public_key, Some(2));
+        assert_eq!(reach(&registry, &public_tag), 2);
     }
 
     #[test]
@@ -7509,7 +7085,7 @@ mod tests {
         .await
         .unwrap();
 
-        let key = crate::inspect_channel_name(crate::EMERGENCY_CHANNEL_NAME.to_owned())
+        let key = crate::inspect_channel_name(WellKnownChannels::EMERGENCY_NAME.to_owned())
             .unwrap()
             .key;
         let conversation = crate::channel_conversation_address(key.clone()).unwrap();
@@ -7673,6 +7249,160 @@ mod tests {
         }
     }
 
+    /// `public` chat is shown only with its sender's full key.
+    ///
+    /// The channel key is public knowledge, so membership proves nothing
+    /// about who wrote a message; the full key is what lets the reader check.
+    /// The refused frame is the payload the accepted one carries, sealed under
+    /// the same key by the same sender, naming them only by hint.
+    #[tokio::test]
+    async fn public_chat_without_the_full_source_key_is_refused() {
+        use umsh_core::{MicSize, NodeHint, PacketBuilder, PacketHeader};
+        use umsh_crypto::{
+            CryptoEngine, PairwiseKeys,
+            software::{SoftwareAes, SoftwareSha256},
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let alice_identity = identity(73);
+        let alice = MobileMeshSession::new(
+            alice_identity.clone(),
+            MobileCounterStore::new(directory.path().join("pub-alice").display().to_string())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let bob = MobileMeshSession::new(
+            identity(74),
+            MobileCounterStore::new(directory.path().join("pub-bob").display().to_string())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let key = crate::inspect_channel_name(WellKnownChannels::PUBLIC_NAME.to_owned())
+            .unwrap()
+            .key;
+        let conversation = crate::channel_conversation_address(key.clone()).unwrap();
+        alice
+            .register_channels(channel_registrations(vec![key.clone()]))
+            .await
+            .unwrap();
+        bob.register_channels(channel_registrations(vec![key.clone()]))
+            .await
+            .unwrap();
+
+        let body = "anyone near the trailhead?";
+        let batch = alice
+            .compose_text(conversation.clone(), 1, body.to_owned())
+            .await
+            .unwrap();
+        alice.commit_chat_batch(batch.batch_id).await.unwrap();
+
+        let engine = CryptoEngine::new(SoftwareAes, SoftwareSha256);
+        let channel_keys =
+            engine.derive_channel_keys(&crate::channel_key_from_bytes(&key).unwrap());
+        let pairwise = PairwiseKeys {
+            k_enc: channel_keys.k_enc,
+            k_mic: channel_keys.k_mic,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frame = None;
+        while frame.is_none() {
+            for outbound in alice.poll_update().outbound_frames {
+                alice.complete_outbound_frame(outbound.id, true).unwrap();
+                let header = match PacketHeader::parse(&outbound.data) {
+                    Ok(header) => header,
+                    Err(_) => continue,
+                };
+                if header.channel == Some(channel_keys.channel_id)
+                    && header.packet_type() == umsh_core::PacketType::Multicast
+                {
+                    frame = Some((outbound.data, header));
+                }
+            }
+            assert!(Instant::now() < deadline, "no public frame was sent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (frame, header) = frame.unwrap();
+        assert!(
+            header.fcf.full_source(),
+            "public chat must name its sender outright"
+        );
+        let sec_info = header.sec_info.expect("a multicast frame carries SECINFO");
+        let payload = {
+            let mut opened = frame.clone();
+            let range = engine.open_packet(&mut opened, &header, &pairwise).unwrap();
+            opened[range].to_vec()
+        };
+
+        let alice_key = decode_peer(&address(&alice_identity)).unwrap();
+        let hint = NodeHint([alice_key.0[0], alice_key.0[1], alice_key.0[2]]);
+        let mut buf = [0u8; 256];
+        let mut forged = PacketBuilder::new(&mut buf)
+            .multicast(channel_keys.channel_id)
+            .source_hint(hint)
+            .frame_counter(sec_info.frame_counter)
+            .encrypted()
+            .mic_size(MicSize::Mic16)
+            .payload(&payload)
+            .build()
+            .unwrap();
+        engine.seal_packet(&mut forged, &pairwise).unwrap();
+        let rx = |data: Vec<u8>| MobileMeshRxRecord {
+            data,
+            rssi_dbm: Some(-70),
+            lqi: None,
+            snr_cb: Some(60),
+            was_buffered: false,
+            was_acknowledged: false,
+            age_seconds: 0,
+        };
+        bob.receive(rx(forged.as_bytes().to_vec())).unwrap();
+
+        let mut refusal = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while refusal.is_none() {
+            let update = bob.poll_update();
+            assert!(
+                !update
+                    .chat_mutations
+                    .iter()
+                    .any(|mutation| mutation.body.as_deref() == Some(body)),
+                "a hint-only public frame reached the transcript"
+            );
+            refusal = update
+                .chat_diagnostics
+                .iter()
+                .find(|line| line.contains("public-channel"))
+                .cloned();
+            if let Some(batch_id) = update.chat_batch_id {
+                bob.acknowledge_chat_batch(batch_id).unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the hint-only copy was not refused"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        bob.receive(rx(frame)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut received = false;
+        while !received {
+            let update = bob.poll_update();
+            received = update
+                .chat_mutations
+                .iter()
+                .any(|mutation| mutation.body.as_deref() == Some(body));
+            if let Some(batch_id) = update.chat_batch_id {
+                bob.acknowledge_chat_batch(batch_id).unwrap();
+            }
+            assert!(Instant::now() < deadline, "the full-key copy never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Repair still works once emergency traffic stops being encrypted.
     ///
     /// A resend request goes out channel-addressed and, on `EMERGENCY`, in
@@ -7711,7 +7441,7 @@ mod tests {
         .await
         .unwrap();
 
-        let key = crate::inspect_channel_name(crate::EMERGENCY_CHANNEL_NAME.to_owned())
+        let key = crate::inspect_channel_name(WellKnownChannels::EMERGENCY_NAME.to_owned())
             .unwrap()
             .key;
         let conversation = crate::channel_conversation_address(key.clone()).unwrap();

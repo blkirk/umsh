@@ -15,8 +15,12 @@
 //!   allocation, deduplication, fragmentation, reassembly, and bounded
 //!   repair. It receives commands and emits effects and events; platform
 //!   code owns presentation, storage, and transports.
-//! - Node-layer convenience wrappers (feature `node`) for chat-style
-//!   applications built directly on `umsh-node`.
+//! - [`chat`] (feature `alloc`): the allocated chat facade around the
+//!   engine—typed conversations, the channel registry, sender resolution,
+//!   and compose batches whose frames wait on storage.
+//! - [`node_adapter`] (feature `node`): received frames to facade sources,
+//!   the facade's transmissions to `umsh-node` sends, and convenience
+//!   wrappers for chat-style applications built directly on `umsh-node`.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -32,10 +36,12 @@ pub mod validate;
 pub mod engine;
 
 #[cfg(feature = "alloc")]
+pub mod chat;
+#[cfg(feature = "alloc")]
 mod owned;
 
 #[cfg(feature = "node")]
-mod node_adapter;
+pub mod node_adapter;
 
 pub use error::{EncodeError, ParseError, TextSendError};
 pub use model::{

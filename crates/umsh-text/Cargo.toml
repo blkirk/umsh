@@ -10,7 +10,7 @@ documentation = "https://darconeous.github.io/umsh/docs/rust/umsh_text/"
 default = ["std", "software-crypto"]
 std = ["alloc", "node", "umsh-core/std", "umsh-mac/std", "umsh-node/std"]
 alloc = []
-node = ["dep:umsh-mac", "dep:umsh-node", "alloc"]
+node = ["dep:umsh-mac", "dep:umsh-node", "alloc", "umsh-node/alloc"]
 software-crypto = ["node", "umsh-node/software-crypto"]
 
 [dependencies]
