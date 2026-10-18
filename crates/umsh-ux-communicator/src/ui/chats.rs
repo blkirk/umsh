@@ -8,7 +8,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use heapless::Vec;
 
 use super::{RAIL, label};
-use crate::model::{ChatSummary, MAX_CHATS, State};
+use crate::model::{Age, ChatSummary, Chats, MAX_CHATS, State, age};
 use crate::nav::keys;
 use crate::{font, icon, theme};
 
@@ -32,15 +32,18 @@ static INDICES: [usize; MAX_CHATS] = {
     a
 };
 
-/// The list. Backspace moves to the rail, Enter opens the focused chat, as a
-/// press does, and a letter starts Find with it.
-pub fn view(chats: &Vec<ChatSummary, MAX_CHATS>) -> impl View<Rgb565, State> + use<> {
+/// The list, with each chat's age counted to `now`. Backspace moves to the
+/// rail, Enter opens the focused chat, as a press does, and a letter starts
+/// Find with it.
+pub fn view(chats: &Chats, now: Option<u32>) -> impl View<Rgb565, State> + use<> {
     let rows = chats.clone();
     let ids: Vec<u32, MAX_CHATS> = chats.iter().map(|c| c.id).collect();
     let count = rows.len();
     super::list(
-        ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| row(&rows[i]))
-            .keyed(move |&i| keys::chat(ids[i])),
+        ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| {
+            row(&rows[i], age(rows[i].last_activity, now))
+        })
+        .keyed(move |&i| keys::chat(ids[i])),
     )
     .bound_focus(BoundaryBehavior::Stop)
     .on_key(|key, s: &mut State| match key {
@@ -64,7 +67,7 @@ pub fn view(chats: &Vec<ChatSummary, MAX_CHATS>) -> impl View<Rgb565, State> + u
     })
 }
 
-fn row(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
+fn row(chat: &ChatSummary, age: Age) -> impl View<Rgb565, State> + use<> {
     let chat = chat.clone();
     let id = chat.id;
     Button::new(
@@ -80,7 +83,7 @@ fn row(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
             // no stack nests in another: every size a stack probes a line
             // with is the same, and its text is measured once.
             VStack::new((
-                name_line(&chat).frame().with_height(NAME_LINE),
+                name_line(&chat, &age).frame().with_height(NAME_LINE),
                 preview_line(&chat).frame().with_height(PREVIEW_LINE),
             ))
             .with_spacing(0)
@@ -125,7 +128,7 @@ fn row(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
 }
 
 /// The chat's name, then its age at the trailing edge.
-fn name_line(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
+fn name_line(chat: &ChatSummary, age: &str) -> impl View<Rgb565, State> + use<> {
     let age_color = if chat.unread {
         theme::ACCENT
     } else {
@@ -149,7 +152,7 @@ fn name_line(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
                 .as_template()
                 .foreground_color(theme::TEXT_TERTIARY)
         }),
-        label::<6>(&chat.age, &font::SEMIBOLD, theme::SMALL, age_color).fixed_size(true, false),
+        label::<6>(age, &font::SEMIBOLD, theme::SMALL, age_color).fixed_size(true, false),
     ))
     .with_spacing(4)
     .padding(Edges::Trailing, 10)

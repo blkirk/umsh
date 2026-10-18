@@ -9,7 +9,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use heapless::Vec;
 
 use super::label;
-use crate::model::{Arrived, ChatSummary, MAX_CHATS, State};
+use crate::model::{Age, Arrived, ChatSummary, MAX_CHATS, State};
 use crate::nav::keys;
 use crate::{font, theme};
 
@@ -38,12 +38,15 @@ static INDICES: [usize; MAX_CHATS] = {
 };
 
 pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
-    let cards: Vec<(Arrived, ChatSummary), MAX_CHATS> = state
+    let cards: Vec<(Arrived, ChatSummary, Age), MAX_CHATS> = state
         .arrived
         .iter()
-        .filter_map(|arrived| Some((arrived.clone(), state.chat(arrived.chat)?.clone())))
+        .filter_map(|arrived| {
+            let chat = state.chat(arrived.chat)?;
+            Some((arrived.clone(), chat.clone(), state.age(chat)))
+        })
         .collect();
-    let ids: Vec<u32, MAX_CHATS> = cards.iter().map(|(a, _)| a.chat).collect();
+    let ids: Vec<u32, MAX_CHATS> = cards.iter().map(|(a, ..)| a.chat).collect();
     let count = cards.len();
     VStack::new((
         label::<32>(
@@ -58,8 +61,8 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
         .with_height(HEADING),
         super::list(
             ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| {
-                let (arrived, chat) = &cards[i];
-                card(arrived, chat)
+                let (arrived, chat, age) = &cards[i];
+                card(arrived, chat, age)
             })
             .with_spacing(GAP)
             .keyed(move |&i| keys::chat(ids[i])),
@@ -89,9 +92,10 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
 }
 
 /// A chat, its age, and its newest message in up to two lines.
-fn card(arrived: &Arrived, chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
+fn card(arrived: &Arrived, chat: &ChatSummary, age: &Age) -> impl View<Rgb565, State> + use<> {
     let text = arrived.text.clone();
     let chat = chat.clone();
+    let age = age.clone();
     let id = chat.id;
     Button::new(
         move |s: &mut State| s.open_arrival(id),
@@ -106,12 +110,7 @@ fn card(arrived: &Arrived, chat: &ChatSummary) -> impl View<Rgb565, State> + use
                 HStack::new((
                     label::<32>(&chat.name, &font::BOLD, theme::BODY, theme::TEXT),
                     Spacer::default(),
-                    label::<6>(
-                        &chat.age,
-                        &font::SEMIBOLD,
-                        theme::SMALL,
-                        theme::TEXT_TERTIARY,
-                    ),
+                    label::<6>(&age, &font::SEMIBOLD, theme::SMALL, theme::TEXT_TERTIARY),
                 ))
                 .with_spacing(8)
                 .frame()

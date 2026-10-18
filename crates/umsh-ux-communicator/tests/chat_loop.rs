@@ -10,8 +10,8 @@ use umsh_ux_communicator::buoyant;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::{Latch, Modifier, PICKER};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Glance, Notice,
-    Preset, Reaction, Section, Shareable, State,
+    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Glance,
+    Node as _, NodeEvent, Notice, Profile, Reaction, Section, Shareable, State, brightness_level,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui};
@@ -41,6 +41,7 @@ macro_rules! app {
     }};
 }
 
+/// Each input, then what the node says of it, as a board takes them.
 fn run<V, F>(app: &mut App<V, State, F>, inputs: &[Input])
 where
     V: ViewLayout<State>,
@@ -50,7 +51,9 @@ where
 {
     // A second apart: never quick enough to be a double tap.
     for &input in inputs {
-        input::apply(app, input, tick(1000));
+        let now = tick(1000);
+        input::apply(app, input, now);
+        input::events(app, now);
     }
 }
 
@@ -63,7 +66,9 @@ where
     F: Fn(&State) -> V,
 {
     for &input in inputs {
-        input::apply(app, input, tick(100));
+        let now = tick(100);
+        input::apply(app, input, now);
+        input::events(app, now);
     }
 }
 
@@ -431,7 +436,7 @@ where
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
-    app.state_mut().airtime_wait = wait;
+    app.state_mut().apply(NodeEvent::Airtime { wait }, 0);
     app.finalize_view();
 }
 
@@ -489,10 +494,27 @@ where
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
-    let (chat, message) = store.arrive().expect("an arrival left");
-    let noticed = app.state_mut().receive(chat, message, now);
-    app.finalize_view();
-    noticed
+    assert!(store.arrive(), "an arrival left");
+    input::events(app, now)
+}
+
+/// Takes in a message saying `text` that arrives in `chat` at `now`.
+/// Returns whether it calls for attention.
+fn arrive_in<V, F>(
+    app: &mut App<V, State, F>,
+    store: &fixture::Store,
+    chat: u32,
+    text: &str,
+    now: u64,
+) -> bool
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    store.arrive_in(chat, text);
+    input::events(app, now)
 }
 
 #[test]
@@ -557,8 +579,7 @@ fn a_muted_chat_does_not_call_for_attention() {
     let mut app = app!(store);
     run(&mut app, &[Input::Press]);
     // The public channel is muted.
-    let (_, message) = store.arrive().expect("an arrival");
-    assert!(!app.state_mut().receive(4, message, 0));
+    assert!(!arrive_in(&mut app, store, 4, "Mill Creek is clear", 0));
     assert_eq!(app.state().banner, None);
     assert_eq!(app.state().chats[0].id, 4);
 }
@@ -638,9 +659,7 @@ fn backspace_on_the_wake_screen_returns_to_where_it_went_dark() {
     // wakes it: dark, nothing was being read.
     run(&mut app, &[Input::Press, Input::Turn(-1)]);
     set_dark(&mut app, true);
-    let (_, message) = store.arrive().expect("an arrival");
-    assert!(app.state_mut().receive(RIDGE, message, 0));
-    app.finalize_view();
+    assert!(arrive_in(&mut app, store, RIDGE, "Coffee's on", 0));
     set_dark(&mut app, false);
     assert!(matches!(app.state().screen(), Screen::Wake { .. }));
     assert!(app.state().chats[0].unread);
@@ -658,8 +677,7 @@ fn a_muted_chat_does_not_wake_the_panel() {
     let store = store();
     let mut app = app!(store);
     set_dark(&mut app, true);
-    let (_, message) = store.arrive().expect("an arrival");
-    assert!(!app.state_mut().receive(4, message, 0));
+    assert!(!arrive_in(&mut app, store, 4, "Mill Creek is clear", 0));
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
     assert!(app.state().arrived.is_empty());
 }
@@ -783,8 +801,7 @@ fn an_identity_that_arrives_names_the_member_everywhere() {
     run(&mut app, &[Input::Press]);
     assert!(shown_member(app.state()).1, "requested");
     assert!(store.answer_identity());
-    app.state_mut().identities_arrived();
-    app.finalize_view();
+    input::events(&mut app, 0);
 
     let (member, _) = shown_member(app.state());
     assert_eq!(member.sender.name.as_str(), "Robin Hale");
@@ -1095,12 +1112,12 @@ fn forget_asks_first_and_cancel_keeps_the_peer() {
     assert_eq!(focus(app.state()), next);
 }
 
-fn radio(state: &State) -> (&umsh_ux_communicator::model::RadioSettings, bool) {
+fn radio(state: &State) -> &umsh_ux_communicator::model::RadioSettings {
     match state.screen() {
         Screen::Device {
-            page: DevicePage::Radio { settings, picker },
+            page: DevicePage::Radio { settings },
             ..
-        } => (settings, *picker),
+        } => settings,
         other => panic!("expected Radio, got {other:?}"),
     }
 }
@@ -1117,25 +1134,38 @@ where
     assert_eq!(app.state().section, Section::Device);
     assert_eq!(focus(app.state()), Some(keys::IDENTITY));
     run(app, &[Input::Turn(2), Input::Press]);
-    assert_eq!(focus(app.state()), Some(keys::REGION));
+    assert_eq!(focus(app.state()), Some(keys::PROFILE));
+}
+
+fn on_profiles(state: &State) -> bool {
+    matches!(
+        state.screen(),
+        Screen::Device {
+            page: DevicePage::Profiles,
+            ..
+        }
+    )
 }
 
 #[test]
-fn a_preset_is_chosen_from_its_choices_and_backspace_cancels() {
+fn a_profile_is_chosen_from_the_list_and_backspace_cancels() {
     let mut app = app!();
     open_radio(&mut app);
-    run(&mut app, &[Input::Turn(1), Input::Press]);
-    assert!(radio(app.state()).1);
-    assert_eq!(focus(app.state()), Some(keys::preset(Preset::LongRange)));
+    assert_eq!(radio(app.state()).profile, Profile::Vetted(0));
+    run(&mut app, &[Input::Press]);
+    assert!(on_profiles(app.state()));
+    assert_eq!(focus(app.state()), Some(keys::profile(0)));
     run(&mut app, &[Input::Turn(1), Input::Backspace]);
-    assert!(!radio(app.state()).1);
-    assert_eq!(radio(app.state()).0.preset, Preset::LongRange);
-    assert_eq!(focus(app.state()), Some(keys::PRESET_ROW));
+    assert_eq!(radio(app.state()).profile, Profile::Vetted(0));
+    assert_eq!(focus(app.state()), Some(keys::PROFILE));
 
-    run(&mut app, &[Input::Press, Input::Turn(1), Input::Press]);
-    assert_eq!(radio(app.state()).0.preset, Preset::MediumRange);
-    assert!(!radio(app.state()).1);
-    assert_eq!(focus(app.state()), Some(keys::PRESET_ROW));
+    run(&mut app, &[Input::Press, Input::Turn(2), Input::Press]);
+    assert_eq!(radio(app.state()).profile, Profile::Vetted(2));
+    assert_eq!(focus(app.state()), Some(keys::PROFILE));
+    // Opened again, the list starts at the profile chosen.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::profile(2)));
+    run(&mut app, &[Input::Backspace]);
 
     // Back returns to Radio's category, and again to the rail.
     run(&mut app, &[Input::Backspace]);
@@ -1145,16 +1175,55 @@ fn a_preset_is_chosen_from_its_choices_and_backspace_cancels() {
 }
 
 #[test]
+fn every_profile_of_a_long_list_can_be_reached() {
+    let mut app = app!();
+    let count = app.state().node.profile_count();
+    assert!(count > 12, "the list is longer than its window");
+    open_radio(&mut app);
+    run(&mut app, &[Input::Press]);
+    // One detent at a time down the whole list, and past its end.
+    for _ in 0..count {
+        run(&mut app, &[Input::Turn(1)]);
+    }
+    assert_eq!(focus(app.state()), Some(keys::profile(count - 1)));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(radio(app.state()).profile, Profile::Vetted(count - 1));
+    // And from there back to the top, opened at the last.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::profile(count - 1)));
+    for _ in 0..count {
+        run(&mut app, &[Input::Turn(-1)]);
+    }
+    assert_eq!(focus(app.state()), Some(keys::profile(0)));
+}
+
+#[test]
+fn settings_no_profile_has_read_as_custom() {
+    let store = store();
+    let mut app = app!(store);
+    open_radio(&mut app);
+    store.set_custom_radio();
+    input::events(&mut app, 0);
+    assert_eq!(radio(app.state()).profile, Profile::Custom);
+    assert_eq!(app.state().profile_name(radio(app.state())), "Custom");
+    // The list has no Custom to choose: it opens at its first.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::profile(0)));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(radio(app.state()).profile, Profile::Vetted(1));
+}
+
+#[test]
 fn a_switch_flips_on_press() {
     let mut app = app!();
     open_radio(&mut app);
-    run(&mut app, &[Input::Turn(4)]);
+    run(&mut app, &[Input::Turn(3)]);
     assert_eq!(focus(app.state()), Some(keys::SHARE_LOCATION));
-    assert!(!radio(app.state()).0.share_location);
+    assert!(!radio(app.state()).share_location);
     run(&mut app, &[Input::Press]);
-    assert!(radio(app.state()).0.share_location);
+    assert!(radio(app.state()).share_location);
     run(&mut app, &[Input::Turn(-1), Input::Press]);
-    assert!(!radio(app.state()).0.forwarding);
+    assert!(!radio(app.state()).forwarding);
 }
 
 #[test]
@@ -1295,7 +1364,7 @@ fn low_battery_while_dark_marks_only_the_strip() {
 }
 
 #[test]
-fn first_run_takes_a_name_then_a_region_and_ends_on_the_chats() {
+fn first_run_takes_a_name_then_a_profile_and_ends_on_the_chats() {
     let mut app = app!();
     app.state_mut().start_setup();
     app.finalize_view();
@@ -1307,27 +1376,17 @@ fn first_run_takes_a_name_then_a_region_and_ends_on_the_chats() {
     run(&mut app, &typed("Wren"));
     run(&mut app, &[Input::Enter]);
     assert_eq!(app.state().status.device_name.as_str(), "Wren");
-    assert_eq!(focus(app.state()), Some(keys::region(0)));
+    assert_eq!(app.state().node.device_name().as_str(), "Wren");
+    assert_eq!(focus(app.state()), Some(keys::profile(0)));
     // Back to the name, and on again.
     run(&mut app, &[Input::Backspace]);
     assert_eq!(focus(app.state()), Some(keys::NAME_FIELD));
     run(&mut app, &[Input::Turn(1), Input::Press]);
-    assert_eq!(focus(app.state()), Some(keys::region(0)));
+    assert_eq!(focus(app.state()), Some(keys::profile(0)));
     run(&mut app, &[Input::Turn(1), Input::Press]);
     assert!(!app.state().in_setup());
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
-    assert_eq!(app.state().node.radio().region.as_str(), "Canada");
-}
-
-#[test]
-fn the_region_is_chosen_from_radio_too() {
-    let mut app = app!();
-    open_radio(&mut app);
-    run(&mut app, &[Input::Press]);
-    assert_eq!(focus(app.state()), Some(keys::region(0)));
-    run(&mut app, &[Input::Turn(2), Input::Press]);
-    assert_eq!(radio(app.state()).0.region.as_str(), "European Union");
-    assert_eq!(focus(app.state()), Some(keys::REGION));
+    assert_eq!(app.state().node.radio().profile, Profile::Vetted(1));
 }
 
 #[test]
@@ -1557,7 +1616,8 @@ fn alt_and_two_quick_spaces_switch_the_keyboard_light_anywhere() {
 #[test]
 fn turning_with_alt_held_sets_brightness() {
     let mut app = app!();
-    let before = app.state().node.brightness();
+    let level = || brightness_level(app.state().node.brightness());
+    let before = level();
     run(
         &mut app,
         &[
@@ -1572,7 +1632,7 @@ fn turning_with_alt_held_sets_brightness() {
             },
         ],
     );
-    assert_eq!(app.state().node.brightness(), before + 2);
+    assert_eq!(brightness_level(app.state().node.brightness()), before + 2);
     assert!(
         matches!(app.state().glance, Some(Glance::Brightness { level, .. }) if level == before + 2)
     );
@@ -1585,7 +1645,7 @@ fn turning_with_alt_held_sets_brightness() {
 fn transmit_power_is_typed_in_symbol_lock() {
     let mut app = app!();
     open_radio(&mut app);
-    run(&mut app, &[Input::Turn(2), Input::Press]);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
     assert_eq!(focus(app.state()), Some(keys::POWER_FIELD));
     assert_eq!(app.state().keyboard.latches(), (Latch::Off, Latch::Locked));
     // The field holds 22; a key types its digit.
@@ -1609,6 +1669,224 @@ fn transmit_power_is_typed_in_symbol_lock() {
         ],
     );
     run(&mut app, &[key('r'), Input::Enter]);
-    assert_eq!(radio(app.state()).0.transmit_power, 4);
+    assert_eq!(radio(app.state()).transmit_power, 4);
     assert_eq!(focus(app.state()), Some(keys::TRANSMIT_POWER));
+}
+
+#[test]
+fn ages_count_to_the_wall_clock() {
+    use umsh_ux_communicator::model::age;
+    let at = Some(1_000_000);
+    assert_eq!(age(at, Some(1_000_059)).as_str(), "now");
+    assert_eq!(age(at, Some(1_000_060)).as_str(), "1m");
+    assert_eq!(age(at, Some(1_000_000 + 3 * 3600 + 5)).as_str(), "3h");
+    assert_eq!(age(at, Some(1_000_000 + 2 * 86_400)).as_str(), "2d");
+    assert_eq!(age(at, Some(1_000_000 + 21 * 86_400)).as_str(), "3w");
+    assert_eq!(age(at, Some(1_000_000 + 800 * 86_400)).as_str(), "2y");
+    // A clock set back is not a time to come.
+    assert_eq!(age(at, Some(999_000)).as_str(), "now");
+    assert_eq!(age(None, Some(1_000_000)).as_str(), "");
+    assert_eq!(age(at, None).as_str(), "");
+
+    // The list's ages move on with the clock.
+    let mut app = app!();
+    let ridge = app.state().chat(RIDGE).expect("listed").clone();
+    assert_eq!(app.state().age(&ridge).as_str(), "2m");
+    let later = app.state().wall_time.map(|t| t + 60);
+    app.state_mut().set_wall_time(later);
+    assert_eq!(app.state().age(&ridge).as_str(), "3m");
+}
+
+#[test]
+fn brightness_levels_cover_the_whole_range() {
+    use umsh_ux_communicator::model::{BRIGHTNESS_LEVELS, brightness_at};
+    assert_eq!(brightness_at(1), 0);
+    assert_eq!(brightness_at(BRIGHTNESS_LEVELS), 255);
+    for level in 1..=BRIGHTNESS_LEVELS {
+        assert_eq!(brightness_level(brightness_at(level)), level);
+    }
+    assert_eq!(brightness_level(0), 1);
+    assert_eq!(brightness_level(255), BRIGHTNESS_LEVELS);
+}
+
+#[test]
+fn events_keep_one_of_each_and_overflow_to_a_resync() {
+    use umsh_ux_communicator::model::EventQueue;
+    let mut queue: EventQueue<4> = EventQueue::new();
+    queue.push(NodeEvent::ChatChanged(1));
+    queue.push(NodeEvent::Airtime { wait: Some(30) });
+    queue.push(NodeEvent::ChatChanged(2));
+    // The same again moves to the back, carrying what it says now.
+    queue.push(NodeEvent::ChatChanged(1));
+    queue.push(NodeEvent::Airtime { wait: None });
+    assert_eq!(queue.pop(), Some(NodeEvent::ChatChanged(2)));
+    assert_eq!(queue.pop(), Some(NodeEvent::ChatChanged(1)));
+    assert_eq!(queue.pop(), Some(NodeEvent::Airtime { wait: None }));
+    assert_eq!(queue.pop(), None);
+
+    for chat in 0..5 {
+        queue.push(NodeEvent::ChatChanged(chat));
+    }
+    assert_eq!(queue.pop(), Some(NodeEvent::Resync));
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn a_resync_reads_everything_again_and_keeps_the_draft_being_written() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    // Typing, the cursor two back from the end.
+    run(&mut app, &typed("Bring"));
+    run(&mut app, &[Input::Turn(-2)]);
+    let before = app.state().conversation.as_ref().map(|c| c.messages.len());
+    let chats = app.state().chats.len();
+    app.state_mut().apply(NodeEvent::Resync, 0);
+    app.finalize_view();
+    assert_in_conversation(app.state(), PAT);
+    assert_eq!(draft(app.state(), PAT), "Bring");
+    assert_eq!(
+        app.state().conversation.as_ref().map(|c| c.messages.len()),
+        before
+    );
+    assert_eq!(app.state().chats.len(), chats);
+    assert_eq!(draft(app.state(), RIDGE), RIDGE_DRAFT);
+    // Typing goes on where it was.
+    run(&mut app, &typed("i"));
+    assert_eq!(draft(app.state(), PAT), "Briing");
+}
+
+#[test]
+fn a_draft_left_unsent_is_kept_by_the_node() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    run(&mut app, &typed("Back by six"));
+    run(&mut app, &[Input::Press, Input::Backspace]);
+    let kept = app.state().node.chat(PAT).expect("the chat");
+    assert_eq!(kept.draft.text(), "Back by six");
+
+    // Erased to nothing but a space, it is no draft.
+    run(&mut app, &[Input::Press, Input::Enter]);
+    run(&mut app, &[Input::Backspace; 11]);
+    run(&mut app, &typed(" "));
+    run(&mut app, &[Input::Press, Input::Backspace]);
+    let kept = app.state().node.chat(PAT).expect("the chat");
+    assert_eq!(kept.draft.text(), "");
+}
+
+#[test]
+fn opening_a_chat_marks_it_read_in_the_node() {
+    let mut app = app!();
+    assert!(app.state().node.chat(TRAIL_CREW).expect("the chat").unread);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert!(!app.state().node.chat(TRAIL_CREW).expect("the chat").unread);
+}
+
+#[test]
+fn a_message_arriving_in_the_chat_being_read_is_read() {
+    let store = store();
+    let mut app = app!(store);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert!(!arrive(&mut app, store, 0));
+    assert!(!store.chat(TRAIL_CREW).expect("the chat").unread);
+    // Taken in twice, it is shown once.
+    let conversation = app.state().conversation.as_ref().expect("a chat is open");
+    let (count, newest) = (
+        conversation.messages.len(),
+        conversation.messages.last().unwrap().id,
+    );
+    app.state_mut().apply(
+        NodeEvent::Arrived {
+            chat: TRAIL_CREW,
+            message: newest,
+        },
+        0,
+    );
+    assert_eq!(
+        app.state().conversation.as_ref().map(|c| c.messages.len()),
+        Some(count)
+    );
+}
+
+#[test]
+fn a_chat_gone_from_the_node_closes_and_its_row_gives_way() {
+    let mut app = app!();
+    run(&mut app, &[Input::Press, Input::Turn(-1)]);
+    app.state_mut().apply(NodeEvent::ChatRemoved(RIDGE), 0);
+    app.finalize_view();
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert!(app.state().conversation.is_none());
+    assert!(app.state().chat(RIDGE).is_none());
+    assert_eq!(focus(app.state()), Some(keys::chat(TRAIL_CREW)));
+}
+
+#[test]
+fn a_peer_forgotten_elsewhere_leaves_its_screen() {
+    let store = store();
+    let mut app = app!(store);
+    open_pat(&mut app);
+    let pat = app.state().peers[0].id;
+    store.forget_peer(pat);
+    input::events(&mut app, 0);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert!(app.state().peer(pat).is_none());
+    let next = app.state().peers.first().map(|p| keys::peer(p.id));
+    assert_eq!(focus(app.state()), next);
+}
+
+#[test]
+fn a_setting_refused_reads_back_as_it_stands() {
+    let store = store();
+    let mut app = app!(store);
+    open_radio(&mut app);
+    store.set_transmit_power(99);
+    assert_eq!(
+        store.next_event(),
+        Some(NodeEvent::SettingRefused(
+            umsh_ux_communicator::model::Setting::TransmitPower
+        ))
+    );
+    assert_eq!(radio(app.state()).transmit_power, 22);
+    // A setting applied elsewhere shows as it is applied.
+    store.set_forwarding(false);
+    input::events(&mut app, 0);
+    assert!(!radio(app.state()).forwarding);
+}
+
+#[test]
+fn an_invitation_is_its_channel_link_alone() {
+    let store = store();
+    let invite = store.message(JO, INVITE).expect("the invitation");
+    assert!(invite.text.as_str().starts_with("umsh:ck:"));
+    let mut summary = store.chat(JO).expect("the chat");
+    summary.preview(&invite);
+    assert_eq!(summary.preview.as_str(), "Channel invite: Base Camp");
+}
+
+#[test]
+fn the_fixture_brings_arrivals_and_identities_on_its_own_clock() {
+    let store = store();
+    let mut app = app!(store);
+    store.pace_arrivals(5000);
+    store.advance(4999);
+    assert!(!input::events(&mut app, 4999));
+    store.advance(5000);
+    assert!(input::events(&mut app, 5000));
+    assert_eq!(app.state().chats[0].id, TRAIL_CREW);
+    // The next comes a while after, by itself.
+    assert!(store.next_deadline().is_some_and(|at| at > 5000));
+
+    // An identity asked for arrives a moment after it is asked.
+    let store = self::store();
+    let mut app = app!(store);
+    view_member(&mut app, 2);
+    run(&mut app, &[Input::Press]);
+    assert!(store.identity_asked());
+    store.advance(6000);
+    let at = store.next_deadline().expect("the identity is due");
+    store.advance(at);
+    input::events(&mut app, at);
+    assert_eq!(
+        shown_member(app.state()).0.sender.name.as_str(),
+        "Robin Hale"
+    );
 }

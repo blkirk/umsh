@@ -11,13 +11,11 @@ use heapless::String;
 
 use super::conversation::header;
 use super::setting::{End, card, choice, row};
-use crate::model::{ChatKind, Preset, RadioSettings, State};
+use crate::model::{ChatKind, RadioSettings, State};
 use crate::nav::{DevicePage, Screen, keys};
 use crate::theme;
 
 const ROW: u32 = 36;
-/// Preset's choices.
-const PICKER_WIDTH: u32 = 260;
 /// Shut down's confirmation.
 const CONFIRM_WIDTH: u32 = 220;
 
@@ -58,7 +56,7 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
                 "Radio",
                 keys::RADIO,
                 State::open_radio,
-                state.node.radio().preset.name(),
+                state.profile_name(&state.node.radio()),
             ),
             category(
                 "Alerts",
@@ -136,24 +134,23 @@ fn shut_down_confirmation() -> impl View<Rgb565, State> + use<> {
 /// A screen under Device.
 pub fn page(state: &State, page: &DevicePage) -> impl View<Rgb565, State> + use<> {
     match_view!(page, {
-        DevicePage::Radio { settings, picker } => radio(settings, *picker),
+        DevicePage::Radio { settings } => radio(settings, state.profile_name(settings)),
         DevicePage::Share => super::share::view(state),
         DevicePage::Channels => super::channels::view(state),
         DevicePage::AddChannel { text } => super::add_channel::view(state, text),
-        DevicePage::Region => super::region::view(state, "Region"),
+        DevicePage::Profiles => super::profile::view(state, "Profile"),
         DevicePage::Keyboard { settings } => super::typing::settings(settings),
         DevicePage::TransmitPower { text } => super::typing::transmit_power(text),
     })
 }
 
-/// The radio's settings, and Preset's choices while they are open.
-fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + use<> {
+/// The radio's settings, on the radio profile called `profile`.
+fn radio(settings: &RadioSettings, profile: &str) -> impl View<Rgb565, State> + use<> {
     let mut airtime: String<24> = String::new();
     _ = core::fmt::write(
         &mut airtime,
         format_args!("{}% this hour", settings.airtime),
     );
-    let preset = settings.preset;
     let mut power: String<24> = String::new();
     _ = core::fmt::write(&mut power, format_args!("{} dBm", settings.transmit_power));
     VStack::new((
@@ -161,18 +158,10 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
         super::list(
             VStack::new((
                 row(
-                    "Region",
-                    keys::REGION,
-                    State::open_regions,
-                    End::value_chevron(&settings.region),
-                    false,
-                    ROW,
-                ),
-                row(
-                    "Preset",
-                    keys::PRESET_ROW,
-                    State::open_presets,
-                    End::value_chevron(preset.name()),
+                    "Profile",
+                    keys::PROFILE,
+                    State::open_profiles,
+                    End::value_chevron(profile),
                     false,
                     ROW,
                 ),
@@ -211,8 +200,7 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
             ))
             .with_spacing(0),
         )
-        .with_scroll_step(ROW)
-        .popover(picker.then_some(preset).as_ref(), presets),
+        .with_scroll_step(ROW),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
@@ -223,30 +211,4 @@ fn radio(settings: &RadioSettings, picker: bool) -> impl View<Rgb565, State> + u
         }
         _ => KeyResponse::Ignored,
     })
-}
-
-/// Preset's choices, the current one checked.
-fn presets(current: &Preset) -> impl View<Rgb565, State> + use<> {
-    let option = |preset: Preset, act: fn(&mut State)| {
-        choice(
-            String::try_from(preset.name()).unwrap_or_default(),
-            keys::preset(preset),
-            act,
-            theme::TEXT,
-            Some(preset == *current),
-        )
-    };
-    card(
-        VStack::new((
-            option(Preset::LongRange, |s| s.choose_preset(Preset::LongRange)),
-            option(Preset::MediumRange, |s| {
-                s.choose_preset(Preset::MediumRange)
-            }),
-            option(Preset::ShortRange, |s| s.choose_preset(Preset::ShortRange)),
-        ))
-        .with_spacing(0),
-        PICKER_WIDTH,
-        HorizontalAlignment::Trailing,
-        State::close_presets,
-    )
 }

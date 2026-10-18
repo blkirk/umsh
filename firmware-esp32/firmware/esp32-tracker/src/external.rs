@@ -113,6 +113,19 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
     }
 }
 
+/// The chats the communicator shows until a node backs it: plain data,
+/// cells over tables of it, and counted text on [`text_heap`], touched only
+/// by the communicator task. Never inlined, as [`communicator`] is not.
+#[cfg(feature = "communicator")]
+#[inline(never)]
+pub fn communicator_fixture() -> &'static umsh_ux_communicator::fixture::Store {
+    unsafe {
+        let ptr = storage::<umsh_ux_communicator::fixture::Store>();
+        ptr.write(umsh_ux_communicator::fixture::Store::new(text_heap()));
+        &*ptr
+    }
+}
+
 /// The communicator's Buoyant app: its state, view, and render trees.
 /// Plain data, touched only by the communicator task. Generic only because
 /// the view type cannot be named.

@@ -352,8 +352,9 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
         },
         move |button: ButtonState| {
             VStack::new((
-                // An invitation alone is only its card.
-                (!text.is_empty() || invite.is_none()).then(|| {
+                // An invitation is its card alone: its text is only the
+                // channel's link.
+                invite.is_none().then(|| {
                     Text::new(text.clone(), &font::REGULAR)
                         .with_font_size(theme::BODY)
                         .foreground_color(color)

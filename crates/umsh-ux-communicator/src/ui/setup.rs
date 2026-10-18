@@ -1,5 +1,5 @@
-//! First run: what to call this node, then its region. The name may be
-//! left empty, and peers then see the bare hint; the region is needed
+//! First run: what to call this node, then its radio profile. The name may
+//! be left empty, and peers then see the bare hint; the profile is needed
 //! before the radio sends.
 
 use buoyant::focus::BoundaryBehavior;
@@ -28,7 +28,7 @@ const ROW: u32 = 36;
 pub fn view(state: &State, page: &SetupPage) -> impl View<Rgb565, State> + use<> {
     match_view!(page, {
         SetupPage::Name { text } => name(state, text),
-        SetupPage::Region => super::region::view(state, "What region are you in?"),
+        SetupPage::Profile => super::profile::view(state, "Radio profile"),
     })
 }
 

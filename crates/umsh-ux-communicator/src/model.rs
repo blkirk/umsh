@@ -6,7 +6,7 @@ use heapless::{String, Vec};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel};
 use crate::keyboard::{Aids, Keyboard};
-use crate::nav::Screen;
+use crate::nav::{Screen, keys};
 use crate::text::{DraftText, SharedText, TextHeap};
 
 /// The most chats the list holds at once.
@@ -21,10 +21,47 @@ pub const MESSAGE_LEN: usize = 1600;
 
 /// Identifies a chat for as long as it exists, wherever it sits in the list.
 pub type ChatId = u32;
-/// Identifies a message within the interface.
+/// Identifies a message for as long as the node keeps it: given by the
+/// node, and never given to another.
 pub type MessageId = u32;
 /// An unsent message and the cursor in it, up to a message long.
 pub type Draft = EditBuffer<DraftText>;
+/// The chats the list holds, newest first.
+pub type Chats = Vec<ChatSummary, MAX_CHATS>;
+/// The saved peers the Peers list holds, most recently heard first.
+pub type Peers = Vec<PeerSummary, MAX_PEERS>;
+/// How long ago something happened, already formatted, such as `2m`.
+pub type Age = String<6>;
+
+/// How long ago `since` was at `now`, both in Unix seconds, as a list says
+/// it: `now`, then minutes, hours, days, weeks, and years, such as `5m`.
+/// Empty when either is not known.
+#[must_use]
+pub fn age(since: Option<u32>, now: Option<u32>) -> Age {
+    const MINUTE: u32 = 60;
+    const HOUR: u32 = 60 * MINUTE;
+    const DAY: u32 = 24 * HOUR;
+    const WEEK: u32 = 7 * DAY;
+    const YEAR: u32 = 365 * DAY;
+    let mut age = Age::new();
+    let (Some(since), Some(now)) = (since, now) else {
+        return age;
+    };
+    let seconds = now.saturating_sub(since);
+    let (count, unit) = match seconds {
+        0..MINUTE => {
+            _ = age.push_str("now");
+            return age;
+        }
+        MINUTE..HOUR => (seconds / MINUTE, 'm'),
+        HOUR..DAY => (seconds / HOUR, 'h'),
+        DAY..WEEK => (seconds / DAY, 'd'),
+        WEEK..YEAR => (seconds / WEEK, 'w'),
+        _ => (seconds / YEAR, 'y'),
+    };
+    _ = core::fmt::write(&mut age, format_args!("{count}{unit}"));
+    age
+}
 
 /// The always-visible strip along the top of the screen.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -54,8 +91,8 @@ pub struct ChatSummary {
     pub name: String<32>,
     /// The last message.
     pub preview: String<64>,
-    /// How long ago the last message arrived, such as `2m`.
-    pub age: String<6>,
+    /// When it was last active, in Unix seconds, when the clock was known.
+    pub last_activity: Option<u32>,
     pub unread: bool,
     pub muted: bool,
     pub kind: ChatKind,
@@ -72,7 +109,7 @@ impl ChatSummary {
             avatar,
             name: String::new(),
             preview: String::new(),
-            age: String::new(),
+            last_activity: None,
             unread: false,
             muted: false,
             kind: ChatKind::Peer { hops: None },
@@ -94,11 +131,11 @@ impl ChatSummary {
             (Direction::Inbound, None) => {}
         }
         match &message.invite {
-            Some(invite) if message.text.is_empty() => {
+            Some(invite) => {
                 push_cut(&mut self.preview, "Channel invite: ");
                 push_cut(&mut self.preview, &invite.name);
             }
-            _ => push_cut(&mut self.preview, &message.text),
+            None => push_cut(&mut self.preview, &message.text),
         }
     }
 }
@@ -201,33 +238,21 @@ pub enum Shareable {
 /// A link that shares a node or a channel, such as `umsh:n:…`.
 pub type ShareUri = String<96>;
 
-/// How the radio trades reach for speed, farthest reaching first.
+/// Which of the node's radio profiles the radio is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preset {
-    LongRange,
-    MediumRange,
-    ShortRange,
-}
-
-impl Preset {
-    pub const ALL: [Self; 3] = [Self::LongRange, Self::MediumRange, Self::ShortRange];
-
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::LongRange => "Long range",
-            Self::MediumRange => "Medium range",
-            Self::ShortRange => "Short range",
-        }
-    }
+pub enum Profile {
+    /// The profile at this index, below [`Node::profile_count`].
+    Vetted(usize),
+    /// Settings no profile has, made by other means.
+    Custom,
 }
 
 /// The radio's settings, and how much of its airtime it has spent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadioSettings {
-    /// Where the radio is, which sets what it may use.
-    pub region: String<24>,
-    pub preset: Preset,
+    /// What it sends and listens on, which nodes must share to hear one
+    /// another.
+    pub profile: Profile,
     /// Repeats what it hears for others.
     pub forwarding: bool,
     pub share_location: bool,
@@ -263,6 +288,28 @@ impl KeyboardSettings {
 
 /// The screen's brightness levels, from 1 to this.
 pub const BRIGHTNESS_LEVELS: u8 = 10;
+
+/// The level a brightness of `brightness`, from 0 to 255, is nearest.
+#[must_use]
+pub const fn brightness_level(brightness: u8) -> u8 {
+    let steps = BRIGHTNESS_LEVELS as u16 - 1;
+    ((brightness as u16 * steps + 127) / 255) as u8 + 1
+}
+
+/// The brightness, from 0 to 255, of `level`, from 1 to
+/// [`BRIGHTNESS_LEVELS`].
+#[must_use]
+pub const fn brightness_at(level: u8) -> u8 {
+    let steps = BRIGHTNESS_LEVELS as u16 - 1;
+    let level = if level < 1 {
+        1
+    } else if level > BRIGHTNESS_LEVELS {
+        BRIGHTNESS_LEVELS
+    } else {
+        level
+    };
+    (((level as u16 - 1) * 255 + steps / 2) / steps) as u8
+}
 
 /// What the text typed into Add peer names, as far as it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,14 +420,29 @@ pub enum Direction {
     Outbound,
 }
 
-/// How far an outgoing message has got.
+/// How far an outgoing message has got, from what became of each of its
+/// fragments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
+    /// Not every fragment has been sent yet.
     Sending,
+    /// Every fragment has been sent: as far as a channel's message goes.
     Sent,
+    /// The peer's radio acknowledged every fragment. That says it arrived,
+    /// never that it was read.
     Delivered,
-    /// No acknowledgment came back: it may not have arrived.
+    /// A fragment was not acknowledged: it may not have arrived.
     Unconfirmed,
+}
+
+/// Whether a message's place in its conversation holds the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    Present,
+    /// A message is missing here, and has been asked for again.
+    PendingRepair,
+    /// A message is missing here, and will not come.
+    Unavailable,
 }
 
 /// A reaction to a message: one of UMSH's emote tokens.
@@ -442,9 +504,19 @@ pub struct Message {
     pub text: SharedText,
     pub delivery: Delivery,
     pub reactions: Reactions,
-    /// The channel it invites to, when it carries an invitation. Its text is
-    /// what it says besides.
+    /// The channel it invites to, when its whole text is the channel's
+    /// link: an invitation says nothing besides.
     pub invite: Option<Invite>,
+    /// The message it replies to.
+    pub reply_to: Option<MessageId>,
+    /// When it was sent or received, in Unix seconds, when the clock was
+    /// known.
+    pub time: Option<u32>,
+    pub presence: Presence,
+    /// Its sender changed it after sending it.
+    pub edited: bool,
+    /// Its sender took it back: what it said is gone.
+    pub deleted: bool,
 }
 
 /// An invitation to a channel. Every message carries room for one, so it
@@ -546,12 +618,160 @@ pub fn push_newest(messages: &mut Messages, message: Message) {
     _ = messages.push(message);
 }
 
-/// The node behind the interface: where every chat's messages are kept, and
-/// what it knows of peers and channels. The interface holds only the open
-/// chat's newest messages, and reads them from here when it opens.
+/// A setting the node can refuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting {
+    Name,
+    Profile,
+    TransmitPower,
+    Forwarding,
+    ShareLocation,
+    Keyboard,
+    Brightness,
+}
+
+/// What changed in the node without the interface asking. An event names
+/// what changed, and the interface reads it from the node again: an event
+/// carries no text, and one taken in twice does no harm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeEvent {
+    /// `message` arrived in `chat`, which is now its most recently active.
+    Arrived {
+        chat: ChatId,
+        message: MessageId,
+    },
+    /// `message` in `chat` changed: its delivery, its reactions, its text,
+    /// or its sender. When that changes how its chat is listed,
+    /// [`NodeEvent::ChatChanged`] says so too.
+    MessageChanged {
+        chat: ChatId,
+        message: MessageId,
+    },
+    /// How `chat` is listed changed, or it is new.
+    ChatChanged(ChatId),
+    ChatRemoved(ChatId),
+    /// Identities arrived: members known by their hints may now be known by
+    /// name and address.
+    IdentitiesLearned,
+    /// A saved peer changed, or is newly saved.
+    PeerChanged(PeerId),
+    PeerRemoved(PeerId),
+    /// The peer answered a ping.
+    PingAnswered(PeerId),
+    /// Settings were applied, as set or adjusted.
+    SettingsChanged,
+    /// A setting was refused, and stays as it was.
+    SettingRefused(Setting),
+    /// How long until sending is allowed again, while the airtime it may
+    /// use is spent; `None` once it is allowed.
+    Airtime {
+        wait: Option<u16>,
+    },
+    /// Events were lost: everything shown is to be read again.
+    Resync,
+}
+
+impl NodeEvent {
+    /// What the event is about: two events with the same subject say the
+    /// same thing, and the later one is the one to keep.
+    fn subject(&self) -> (u8, u32) {
+        match *self {
+            Self::Arrived { message, .. } => (0, message),
+            Self::MessageChanged { message, .. } => (1, message),
+            Self::ChatChanged(chat) => (2, chat),
+            Self::ChatRemoved(chat) => (3, chat),
+            Self::IdentitiesLearned => (4, 0),
+            Self::PeerChanged(peer) => (5, peer),
+            Self::PeerRemoved(peer) => (6, peer),
+            Self::PingAnswered(peer) => (7, peer),
+            Self::SettingsChanged => (8, 0),
+            Self::SettingRefused(setting) => (9, setting as u32),
+            Self::Airtime { .. } => (10, 0),
+            Self::Resync => (11, 0),
+        }
+    }
+}
+
+/// The events a node holds until the interface takes them, oldest first:
+/// one for each kind and subject, and when they overflow, a
+/// [`NodeEvent::Resync`] in place of them all.
+#[derive(Clone, Debug, Default)]
+pub struct EventQueue<const N: usize> {
+    events: Vec<NodeEvent, N>,
+}
+
+impl<const N: usize> EventQueue<N> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    /// Queues `event`, in place of an earlier one about the same thing:
+    /// what it names is read when the interface takes it, so it moves to
+    /// the back as though it were the only one.
+    pub fn push(&mut self, event: NodeEvent) {
+        let subject = event.subject();
+        if let Some(index) = self.events.iter().position(|e| e.subject() == subject) {
+            self.events.remove(index);
+        }
+        if self.events.push(event).is_err() {
+            self.events.clear();
+            _ = self.events.push(NodeEvent::Resync);
+        }
+    }
+
+    /// The oldest event, taken off the queue.
+    pub fn pop(&mut self) -> Option<NodeEvent> {
+        (!self.events.is_empty()).then(|| self.events.remove(0))
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+/// The node behind the interface: where every chat's messages are kept,
+/// what it knows of peers and channels, and the device's settings. The
+/// interface holds only the chats and peers it lists and the open chat's
+/// newest messages, and reads them from here.
+///
+/// Reads are answered at once. What changes in the node by itself is
+/// announced by the [`NodeEvent`]s [`Node::next_event`] hands out, which the
+/// interface takes in through [`State::apply`]. How the node lets the board
+/// know events are waiting is the node's own, and stays out of this trait.
+///
+/// A setting's setter changes what its read reports at once. Its outcome
+/// follows as an event: [`NodeEvent::SettingsChanged`] once it is applied,
+/// perhaps adjusted, or [`NodeEvent::SettingRefused`], after which the read
+/// reports the value in force.
 pub trait Node {
+    /// The oldest event waiting, taken off the node's queue.
+    fn next_event(&self) -> Option<NodeEvent>;
+
+    /// Fills `chats`, which is empty, with the most recently active chats,
+    /// newest first, as many as it holds.
+    fn chats(&self, chats: &mut Chats);
+
+    /// The chat `chat`, as the list shows it. `None` once it is gone.
+    fn chat(&self, chat: ChatId) -> Option<ChatSummary>;
+
+    /// Fills `peers`, which is empty, with the saved peers, most recently
+    /// heard first, as many as it holds.
+    fn peers(&self, peers: &mut Peers);
+
     /// Fills `messages`, which is empty, with the newest messages of `chat`.
     fn load(&self, chat: ChatId, messages: &mut Messages);
+
+    /// The message `message` of `chat`. `None` once it is gone.
+    fn message(&self, chat: ChatId, message: MessageId) -> Option<Message>;
+
+    /// `chat` has been read: none of its messages are unread.
+    fn opened(&self, chat: ChatId);
+
+    /// Keeps `text` as the draft of `chat`, which was left unsent. A draft
+    /// of nothing but whitespace is no draft, and clears the one kept.
+    fn save_draft(&self, chat: ChatId, text: &str);
 
     /// Keeps `text`, sent now in reply to `reply_to` if it is a reply, as the
     /// newest message of `chat`, and returns the message as kept, or `None`
@@ -622,22 +842,27 @@ pub trait Node {
     /// How this node is drawn.
     fn avatar(&self) -> AvatarStyle;
 
+    /// What this node is called, which may be nothing.
+    fn device_name(&self) -> String<24>;
+
     /// Calls this node `name`, which may be empty.
     fn set_name(&self, name: &str);
-
-    /// The regions the radio can be set for, by name.
-    fn regions(&self) -> &[&'static str];
-
-    /// Sets the radio for the region at `index` in `regions`.
-    fn set_region(&self, index: usize);
 
     /// The link that shares `what`. `None` when it cannot be shared.
     fn share_uri(&self, what: Shareable) -> Option<ShareUri>;
 
+    /// How many radio profiles the radio can be set to.
+    fn profile_count(&self) -> usize;
+
+    /// The name of the radio profile at `index`, below
+    /// [`Node::profile_count`].
+    fn profile(&self, index: usize) -> Option<&'static str>;
+
+    /// Sets the radio to the profile at `index`.
+    fn set_profile(&self, index: usize);
+
     /// The radio's settings as they stand.
     fn radio(&self) -> RadioSettings;
-
-    fn set_preset(&self, preset: Preset);
 
     fn set_forwarding(&self, on: bool);
 
@@ -650,10 +875,11 @@ pub trait Node {
 
     fn set_keyboard(&self, settings: KeyboardSettings);
 
-    /// The screen's brightness, from 1 to [`BRIGHTNESS_LEVELS`].
+    /// The screen's brightness: 0 is the dimmest that is not dark, and 255
+    /// the brightest.
     fn brightness(&self) -> u8;
 
-    fn set_brightness(&self, level: u8);
+    fn set_brightness(&self, brightness: u8);
 }
 
 /// At or below this charge, in percent, the battery is low.
@@ -717,9 +943,12 @@ pub struct State {
     pub status: StatusStrip,
     pub section: Section,
     /// Newest first.
-    pub chats: Vec<ChatSummary, MAX_CHATS>,
+    pub chats: Chats,
     /// Saved peers, most recently heard first.
-    pub peers: Vec<PeerSummary, MAX_PEERS>,
+    pub peers: Peers,
+    /// The time, in Unix seconds, as the board last read its clock, when
+    /// it is known. Ages are counted to it.
+    pub wall_time: Option<u32>,
     /// The open chat's messages, while one is open.
     pub conversation: Option<Conversation>,
     /// The screens, the one shown last. The Chats screen is always first.
@@ -792,6 +1021,7 @@ impl core::fmt::Debug for State {
             .field("section", &self.section)
             .field("chats", &self.chats)
             .field("peers", &self.peers)
+            .field("wall_time", &self.wall_time)
             .field("conversation", &self.conversation)
             .field("screens", &self.screens)
             .field("airtime_wait", &self.airtime_wait)
@@ -808,6 +1038,7 @@ impl core::fmt::Debug for State {
 
 impl State {
     /// No chats, on the Chats screen, with chats' messages kept in `node`.
+    /// [`State::reload`] reads them.
     #[must_use]
     pub fn new(node: &'static dyn Node) -> Self {
         let mut screens = Vec::new();
@@ -817,6 +1048,7 @@ impl State {
             section: Section::default(),
             chats: Vec::new(),
             peers: Vec::new(),
+            wall_time: None,
             conversation: None,
             screens,
             node,
@@ -908,13 +1140,181 @@ impl State {
         let mut summary = self.chats.remove(index);
         summary.draft.clear();
         summary.preview(&message);
-        summary.age.clear();
-        push_cut(&mut summary.age, "now");
+        summary.last_activity = message.time;
         _ = self.chats.insert(0, summary);
         if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
             conversation.push(message);
             conversation.sent = conversation.sent.wrapping_add(1);
         }
+    }
+
+    /// How long ago `chat` was last active, as its row says it.
+    #[must_use]
+    pub fn age(&self, chat: &ChatSummary) -> Age {
+        age(chat.last_activity, self.wall_time)
+    }
+
+    /// The board read its clock: `time`, in Unix seconds, or not known.
+    /// Ages are counted to it, so a board sets it each minute.
+    pub fn set_wall_time(&mut self, time: Option<u32>) {
+        self.wall_time = time;
+    }
+
+    /// Reads the chats and saved peers from the node, and the open chat's
+    /// messages, as when the interface starts. The open chat keeps the
+    /// draft being written in it.
+    pub fn reload(&mut self) {
+        let open = self.conversation.as_ref().map(|c| c.chat);
+        let writing = open
+            .and_then(|chat| self.chat(chat))
+            .map(|c| c.draft.clone());
+        self.chats.clear();
+        self.node.chats(&mut self.chats);
+        if let Some((chat, draft)) = open.zip(writing)
+            && let Some(summary) = self.chat_mut(chat)
+        {
+            summary.draft = draft;
+        }
+        self.peers.clear();
+        self.node.peers(&mut self.peers);
+        match open {
+            Some(chat) if self.chat(chat).is_some() => self.load_conversation(chat),
+            Some(_) => self.leave_chats(),
+            None => {}
+        }
+        self.refresh_settings();
+        self.refresh_peer();
+        self.refresh_members();
+    }
+
+    /// Takes in `event`, from the node, at `now` on the board's clock.
+    /// Returns whether it calls for attention, as only a message arriving
+    /// can: see [`NodeEvent::Arrived`].
+    // Kept out of line, so that what it reads from the node is in a frame of
+    // its own, gone once it returns, rather than widening the frame of the
+    // board's task on every poll.
+    #[inline(never)]
+    pub fn apply(&mut self, event: NodeEvent, now: u64) -> bool {
+        match event {
+            NodeEvent::Arrived { chat, message } => return self.receive(chat, message, now),
+            NodeEvent::MessageChanged { chat, message } => self.refresh_message(chat, message),
+            NodeEvent::ChatChanged(chat) => self.refresh_chat(chat),
+            NodeEvent::ChatRemoved(chat) => self.remove_chat(chat),
+            NodeEvent::IdentitiesLearned => self.identities_learned(),
+            NodeEvent::PeerChanged(_) => {
+                self.peers.clear();
+                self.node.peers(&mut self.peers);
+                self.refresh_peer();
+            }
+            NodeEvent::PeerRemoved(peer) => self.remove_peer(peer),
+            NodeEvent::PingAnswered(_) => self.refresh_peer(),
+            NodeEvent::SettingsChanged | NodeEvent::SettingRefused(_) => self.refresh_settings(),
+            NodeEvent::Airtime { wait } => self.airtime_wait = wait,
+            NodeEvent::Resync => self.reload(),
+        }
+        false
+    }
+
+    /// Whether `chat` is being read: open, on a lit panel.
+    fn reading(&self, chat: ChatId) -> bool {
+        !self.dark
+            && matches!(
+                self.screen(),
+                Screen::Conversation { chat: shown, .. } if *shown == chat
+            )
+    }
+
+    /// Lists `fresh` in place of the chat it is, keeping the draft the
+    /// interface holds, or first when it is not listed. Returns where it is
+    /// listed.
+    fn place(&mut self, mut fresh: ChatSummary) -> usize {
+        if self.reading(fresh.id) {
+            fresh.unread = false;
+        }
+        match self.chats.iter_mut().position(|c| c.id == fresh.id) {
+            Some(index) => {
+                let old = &mut self.chats[index];
+                core::mem::swap(&mut fresh.draft, &mut old.draft);
+                *old = fresh;
+                index
+            }
+            None => {
+                if self.chats.is_full() {
+                    self.chats.pop();
+                }
+                _ = self.chats.insert(0, fresh);
+                0
+            }
+        }
+    }
+
+    /// Reads how `chat` is listed from the node again.
+    fn refresh_chat(&mut self, chat: ChatId) {
+        match self.node.chat(chat) {
+            Some(fresh) => _ = self.place(fresh),
+            None => self.remove_chat(chat),
+        }
+    }
+
+    /// Reads `message` of the open chat from the node again.
+    fn refresh_message(&mut self, chat: ChatId, message: MessageId) {
+        let node = self.node;
+        let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) else {
+            return;
+        };
+        let Some(index) = conversation.messages.iter().position(|m| m.id == message) else {
+            return;
+        };
+        match node.message(chat, message) {
+            Some(fresh) => conversation.messages[index] = fresh,
+            None => _ = conversation.messages.remove(index),
+        }
+    }
+
+    /// Lets go of `chat`, which the node no longer has: its row, what was
+    /// shown of it, and its conversation, which returns to the list.
+    fn remove_chat(&mut self, chat: ChatId) {
+        let Some(index) = self.chats.iter().position(|c| c.id == chat) else {
+            return;
+        };
+        self.chats.remove(index);
+        self.arrived.retain(|a| a.chat != chat);
+        if self
+            .banner
+            .is_some_and(|b| b.notice == Notice::Message(chat))
+        {
+            self.banner = None;
+        }
+        if self.conversation.as_ref().is_some_and(|c| c.chat == chat) {
+            self.leave_chats();
+        } else if matches!(self.screen(), Screen::Wake { .. }) && self.arrived.is_empty() {
+            self.back();
+        }
+        // The row that took its place is focused instead.
+        let next = self
+            .chats
+            .get(index)
+            .or_else(|| self.chats.last())
+            .map(|c| keys::chat(c.id));
+        if let Some(Screen::Chats { focus, row, .. }) = self.screens.first_mut() {
+            if *row == Some(keys::chat(chat)) {
+                *row = next;
+            }
+            if focus.current() == Some(keys::chat(chat)) {
+                match next {
+                    Some(next) => focus.request(next),
+                    None => focus.request(keys::rail(Section::Chats)),
+                }
+            }
+        }
+    }
+
+    /// Closes everything over the list, the open chat with it, as when what
+    /// they showed is gone.
+    fn leave_chats(&mut self) {
+        self.screens.truncate(1);
+        self.conversation = None;
+        self.arrived.clear();
     }
 }
 
@@ -968,23 +1368,26 @@ impl State {
     /// the list. Returns whether the message calls for attention: it does
     /// not while its chat is being read, or when the chat is muted. One that
     /// does while the panel is dark is listed for the screen it wakes to.
-    pub fn receive(&mut self, chat: ChatId, message: Message, now: u64) -> bool {
-        let Some(index) = self.chats.iter().position(|c| c.id == chat) else {
+    fn receive(&mut self, chat: ChatId, message: MessageId, now: u64) -> bool {
+        let Some(fresh) = self.node.chat(chat) else {
             return false;
         };
-        let reading = !self.dark
-            && matches!(
-                self.screen(),
-                Screen::Conversation { chat: shown, .. } if *shown == chat
-            );
+        let Some(message) = self.node.message(chat, message) else {
+            self.refresh_chat(chat);
+            return false;
+        };
+        let reading = self.reading(chat);
+        if reading {
+            self.node.opened(chat);
+        }
+        let index = self.place(fresh);
         let mut summary = self.chats.remove(index);
-        summary.preview(&message);
-        summary.age.clear();
-        push_cut(&mut summary.age, "now");
-        summary.unread |= !reading;
+        summary.unread = !reading;
         let muted = summary.muted;
         _ = self.chats.insert(0, summary);
-        if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
+        if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat)
+            && !conversation.messages.iter().any(|m| m.id == message.id)
+        {
             conversation.push(message.clone());
         }
         if reading || muted {
@@ -1094,9 +1497,9 @@ impl State {
     /// Turns the screen's brightness by `detents` levels, and shows it:
     /// turned up, it brightens, and turned down, it dims.
     pub fn adjust_brightness(&mut self, detents: i8, now: u64) {
-        let level = (i16::from(self.node.brightness()) - i16::from(detents))
+        let level = (i16::from(brightness_level(self.node.brightness())) - i16::from(detents))
             .clamp(1, i16::from(BRIGHTNESS_LEVELS)) as u8;
-        self.node.set_brightness(level);
+        self.node.set_brightness(brightness_at(level));
         self.glance = Some(Glance::Brightness {
             level,
             until: now + GLANCE_MS,

@@ -1,10 +1,10 @@
 //! The communicator interface on the Pager's panel, in place of the
 //! tracker's menus. For now it shows the fixture's chats with the board's
-//! own battery, and reports what each frame costs: layout, painting, the
-//! panel transfer, and the least stack left free.
+//! own battery, taking in what the fixture says as it would a node's
+//! events, and reports what each frame costs: layout, painting, the panel
+//! transfer, and the least stack left free.
 use super::*;
 use board::display::{Brightness, Display};
-use static_cell::ConstStaticCell;
 use umsh_ux_communicator::buoyant::app::App;
 use umsh_ux_communicator::buoyant::render_target::{
     EmbeddedGraphicsRenderTarget, RenderTarget as _,
@@ -12,7 +12,7 @@ use umsh_ux_communicator::buoyant::render_target::{
 use umsh_ux_communicator::buoyant::view::View;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::State;
+use umsh_ux_communicator::model::{State, brightness_level};
 use umsh_ux_communicator::{fixture, theme, ui};
 use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
 use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
@@ -23,11 +23,8 @@ const FRAME: Duration = Duration::from_millis(16);
 const REPORT: Duration = Duration::from_secs(1);
 /// When the fixture's next message arrives, so that arrivals can be tried
 /// before a radio feeds the interface: soon after an input, while the panel
-/// is lit, and otherwise long after the last arrival, once it has gone dark.
+/// is lit, and otherwise as the fixture paces them, once it has gone dark.
 const ARRIVAL_AFTER_INPUT: Duration = Duration::from_secs(8);
-const ARRIVAL_AFTER_ARRIVAL: Duration = Duration::from_secs(40);
-/// How long the fixture's identity takes to arrive once asked for.
-const IDENTITY_DELAY: Duration = Duration::from_secs(2);
 /// How long Shutting down shows before the panel goes dark.
 const SHUTTING_DOWN: Duration = Duration::from_millis(1500);
 /// The empty battery's blink before the power path opens: how many times,
@@ -50,12 +47,12 @@ pub(crate) async fn task(
     BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
 
     let start = Instant::now();
+    let store = external::communicator_fixture();
+    // The fixture's clock runs with the board's from here.
+    store.advance(Instant::now().as_millis());
     // The interface's state and both of its render trees are plain data
     // that only this task touches, and they are the largest thing it
     // holds: kept in the task, they would come out of the main stack.
-    static STORE: ConstStaticCell<fixture::Store> =
-        ConstStaticCell::new(fixture::Store::new(external::text_heap()));
-    let store: &'static fixture::Store = STORE.take();
     let app = external::communicator(|slot| {
         let app = App::new_in(
             slot,
@@ -73,11 +70,9 @@ pub(crate) async fn task(
     app.state_mut()
         .battery(battery_percent(), battery_charging(), 0);
     let mut costs = Costs::default();
+    let node = app.state().node;
     // The panel's brightness level and the keyboard light, as last set.
-    let mut lights = (
-        app.state().node.brightness(),
-        app.state().node.keyboard().light,
-    );
+    let mut lights = (brightness_level(node.brightness()), node.keyboard().light);
     let _ = display.set_brightness(Brightness::level(lights.0)).await;
     display.set_keyboard_light(lights.1);
     let mut animating = draw(&mut display, app, start, &mut costs).await;
@@ -92,11 +87,9 @@ pub(crate) async fn task(
         Instant::now().as_millis(),
     );
 
-    // When the fixture's next message arrives, while it has any left.
-    let mut arrivals_left = true;
-    let mut arrival: Option<Instant> = None;
-    // When the identity asked for arrives.
-    let mut identity: Option<Instant> = None;
+    // When the fixture's clock next turns to a new minute, which ages are
+    // counted to.
+    let mut minute = Instant::now() + Duration::from_millis(store.millis_to_next_minute());
 
     loop {
         SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
@@ -105,8 +98,8 @@ pub(crate) async fn task(
         let wake_at = [
             attention.next_deadline(),
             app.state().next_deadline(),
-            arrival.map(|at| at.as_millis()),
-            identity.map(|at| at.as_millis()),
+            store.next_deadline(),
+            Some(minute.as_millis()),
         ]
         .into_iter()
         .flatten()
@@ -134,19 +127,7 @@ pub(crate) async fn task(
                     next = UI_INPUT_CH.try_receive().ok();
                 }
                 costs.layout = costs.layout.max(Instant::now() - began);
-                let set = (
-                    app.state().node.brightness(),
-                    app.state().node.keyboard().light,
-                );
-                if set != lights {
-                    lights = set;
-                    let _ = display.set_brightness(Brightness::level(lights.0)).await;
-                    display.set_keyboard_light(lights.1);
-                }
-                arrival = arrivals_left.then(|| Instant::now() + ARRIVAL_AFTER_INPUT);
-                if store.identity_asked() {
-                    identity = Some(Instant::now() + IDENTITY_DELAY);
-                }
+                store.pace_arrivals((Instant::now() + ARRIVAL_AFTER_INPUT).as_millis());
                 // Shut down, confirmed.
                 if app.state().ending.is_some() {
                     SHUTDOWN_REQUEST.signal(ShutdownCause::Asked);
@@ -166,28 +147,25 @@ pub(crate) async fn task(
         if app.state().next_deadline().is_some_and(|at| at <= now()) {
             app.state_mut().expire(now());
         }
-        if identity.is_some_and(|at| at <= Instant::now()) {
-            identity = None;
-            if store.answer_identity() {
-                app.state_mut().identities_arrived();
+        store.advance(now());
+        if minute <= Instant::now() {
+            app.state_mut().set_wall_time(Some(store.time()));
+            minute = Instant::now() + Duration::from_millis(store.millis_to_next_minute());
+        }
+        // Taken in while the panel is still dark, so that a message
+        // arriving then is listed for the screen it wakes to.
+        if input::events(app, now()) {
+            pager::alert::tick();
+            if let Some(woke) = attention.wake(now()) {
+                transition = Some(woke);
             }
         }
-        if arrival.is_some_and(|at| at <= Instant::now()) {
-            arrival = None;
-            match store.arrive() {
-                Some((chat, message)) => {
-                    arrival = Some(Instant::now() + ARRIVAL_AFTER_ARRIVAL);
-                    // Taken in while the panel is still dark, so that one
-                    // arriving then is listed for the screen it wakes to.
-                    if app.state_mut().receive(chat, message, now()) {
-                        pager::alert::tick();
-                        if let Some(woke) = attention.wake(now()) {
-                            transition = Some(woke);
-                        }
-                    }
-                }
-                None => arrivals_left = false,
-            }
+        // A key, or the node, may have changed the lights.
+        let set = (brightness_level(node.brightness()), node.keyboard().light);
+        if set != lights {
+            lights = set;
+            let _ = display.set_brightness(Brightness::level(lights.0)).await;
+            display.set_keyboard_light(lights.1);
         }
         match transition {
             Some(Transition::Woke) => {

@@ -17,8 +17,8 @@ repository.workspace = true
 
 [features]
 # The mockup's chats, for a device with nothing behind it yet. It reads
-# typed addresses as a node would.
-fixture = ["dep:umsh-core"]
+# typed addresses as a node would, and offers the vetted radio profiles.
+fixture = ["dep:umsh-core", "dep:umsh-ulcp"]
 
 [dependencies]
 # The fork carries a prerendered anti-aliased font backend, line-limited
@@ -32,6 +32,7 @@ heapless = { version = "0.9", default-features = false }
 libm = "0.2"
 qrcodegen-no-heap = "1.8"
 umsh-core = { path = "../umsh-core", default-features = false, optional = true }
+umsh-ulcp = { path = "../umsh-ulcp", optional = true }
 
 [dev-dependencies]
 # The tests drive the fixture's chats.

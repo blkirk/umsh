@@ -10,6 +10,10 @@
 //! Keys are delivered as they are, and typed here through the
 //! [`Keyboard`](crate::keyboard::Keyboard): its modifiers, its typing aids,
 //! and the character picker.
+//!
+//! What the node has to say comes in here too: [`events`] takes in its
+//! events, after the inputs that led to them or whenever the board wakes
+//! for them.
 
 use buoyant::app::{App, Harness as _};
 use buoyant::event::Key;
@@ -67,6 +71,32 @@ where
     }
     app.finalize_view();
     app.state_mut().sync_keyboard();
+}
+
+/// Takes in the events the node has waiting, oldest first, at `now` on the
+/// board's clock, each through [`State::apply`]. Returns whether any calls
+/// for attention.
+///
+/// With nothing waiting, the interface is left as it was, so a board can
+/// look as often as it wakes.
+pub fn events<V, F>(app: &mut App<V, State, F>, now: u64) -> bool
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    let node = app.state().node;
+    let mut attention = false;
+    let mut any = false;
+    while let Some(event) = node.next_event() {
+        any = true;
+        attention |= app.state_mut().apply(event, now);
+    }
+    if any {
+        app.finalize_view();
+    }
+    attention
 }
 
 fn deliver<V, F>(app: &mut App<V, State, F>, input: Input, now: u64)

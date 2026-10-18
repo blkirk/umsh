@@ -4980,6 +4980,7 @@ dependencies = [
  "qrcodegen-no-heap",
  "swash",
  "umsh-core",
+ "umsh-ulcp",
  "umsh-ux-communicator",
 ]
 
