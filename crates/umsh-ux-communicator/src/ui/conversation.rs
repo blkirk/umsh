@@ -75,7 +75,9 @@ static INDICES: [usize; MAX_MESSAGES] = {
 
 pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     let summary = state.chat(chat);
-    let messages = state.conversation(chat).map_or(&[][..], |c| &c.messages);
+    let conversation = state.conversation(chat);
+    let messages = conversation.map_or(&[][..], |c| &c.messages);
+    let sent = conversation.map_or(0, |c| c.sent);
     let (actions, reply) = match state.screen() {
         Screen::Conversation { actions, reply, .. } => (*actions, *reply),
         _ => (None, None),
@@ -113,7 +115,7 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             summary.map(|s| &s.avatar),
             summary.map(|s| s.kind),
         ),
-        history(messages, actions, channel, open),
+        history(messages, sent, actions, channel, open),
         state.airtime_wait.map(airtime_line),
         quoted,
         summary.map(|s| composer(chat, &s.draft, reading, open, &placeholder)),
@@ -196,9 +198,11 @@ pub(super) fn header(
 
 /// The messages, oldest first, ending at the composer. History shorter
 /// than the space sits on the composer. The message whose actions are open
-/// stays marked while focus is in them.
+/// stays marked while focus is in them. A message sent brings the newest
+/// into view, however far back the history was read.
 fn history(
     messages: &[Message],
+    sent: u32,
     acting_on: Option<MessageId>,
     channel: bool,
     open: bool,
@@ -225,6 +229,7 @@ fn history(
     )
     .with_bar_visibility(ScrollBarVisibility::Never)
     .with_initial_pin_to_end(true)
+    .with_end_generation(sent)
     .with_short_content_at_end(true)
     .with_focus_margin(FOCUS_MARGIN)
     .with_scroll_step(SCROLL_STEP)

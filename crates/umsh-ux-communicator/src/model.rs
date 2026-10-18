@@ -526,6 +526,9 @@ pub type Messages = Vec<Message, MAX_MESSAGES>;
 pub struct Conversation {
     pub chat: ChatId,
     pub messages: Messages,
+    /// How many messages have been sent here, which brings the newest into
+    /// view each time it changes.
+    pub sent: u32,
 }
 
 impl Conversation {
@@ -866,6 +869,7 @@ impl State {
         let conversation = self.conversation.get_or_insert_with(|| Conversation {
             chat,
             messages: Vec::new(),
+            sent: 0,
         });
         conversation.chat = chat;
         conversation.messages.clear();
@@ -909,6 +913,7 @@ impl State {
         _ = self.chats.insert(0, summary);
         if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
             conversation.push(message);
+            conversation.sent = conversation.sent.wrapping_add(1);
         }
     }
 }
