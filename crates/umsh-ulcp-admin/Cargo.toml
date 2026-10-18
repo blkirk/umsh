@@ -1,0 +1,30 @@
+[package]
+name = "umsh-ulcp-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ULCP property client: a cached model of a device's settings, over a local or mesh exchange"
+
+[features]
+# The port into the firmware ULCP driver's in-process request event, for
+# a device that administers its own session.
+driver = ["dep:umsh-ulcp-runtime", "dep:embassy-sync"]
+
+[dependencies]
+umsh-ulcp = { path = "../umsh-ulcp" }
+umsh-ulcp-runtime = { path = "../umsh-ulcp-runtime", default-features = false, features = ["driver"], optional = true }
+embassy-sync = { version = "0.8", default-features = false, optional = true }
+
+[dev-dependencies]
+# The driver port's unit test reaches the real driver's channels, so it
+# needs what the `driver` feature brings even when the feature is off.
+umsh-ulcp-runtime = { path = "../umsh-ulcp-runtime", default-features = false, features = ["driver"] }
+embassy-sync = { version = "0.8", default-features = false }
+critical-section = { version = "1", features = ["std"] }
+# The local exchange runs against the soft device's real session, and the
+# model against a real session behind the mesh binding's engines.
+umsh-ulcp-device = { path = "../umsh-ulcp-device" }
+umsh-ulcp-simdev = { path = "../umsh-ulcp-simdev" }
+umsh-node-mgmt = { path = "../umsh-node-mgmt", default-features = false }
+umsh-crypto = { path = "../umsh-crypto", features = ["software-crypto"] }

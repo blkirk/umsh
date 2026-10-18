@@ -4879,6 +4879,20 @@ name = "umsh-ulcp"
 version = "0.1.0"
 
 [[package]]
+name = "umsh-ulcp-admin"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embassy-sync",
+ "umsh-crypto",
+ "umsh-node-mgmt",
+ "umsh-ulcp",
+ "umsh-ulcp-device",
+ "umsh-ulcp-runtime",
+ "umsh-ulcp-simdev",
+]
+
+[[package]]
 name = "umsh-ulcp-device"
 version = "0.1.0"
 dependencies = [
