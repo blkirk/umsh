@@ -113,9 +113,7 @@ impl DeviceEnv for Env {
     async fn reboot(&mut self) -> ! {
         unreachable!()
     }
-    fn set_advertising_allowed(&mut self, _: bool) {
-        unreachable!()
-    }
+    fn set_advertising_allowed(&mut self, _: bool) {}
     async fn older_snapshot(&mut self, out: &mut [u8]) -> Option<usize> {
         self.restore_gate.wait().await;
         let bytes = self.older.take()?;
@@ -169,6 +167,7 @@ fn transport_readiness_follows_restore_name_and_settings_on_every_boot_path() {
             ctl: Box::leak(Box::new(DeviceControl::new())),
             out: Box::leak(Box::new(TransportChannels::new())),
             session_gen: Box::leak(Box::new(AtomicU32::new(0))),
+            device: None,
         };
         let mut session = session("Default radio");
         let mut storage = [0; SNAPSHOT_MAX];
@@ -221,6 +220,7 @@ fn dfu_preparation_and_matching_transmission_precede_handoff() {
         ctl: Box::leak(Box::new(DeviceControl::new())),
         out: Box::leak(Box::new(TransportChannels::new())),
         session_gen: Box::leak(Box::new(AtomicU32::new(42))),
+        device: None,
     };
     let events = Rc::new(RefCell::new(std::vec::Vec::new()));
     let mut env = Env {
@@ -253,6 +253,7 @@ fn dfu_preparation_and_matching_transmission_precede_handoff() {
             &mut ReplySink::Transport {
                 destination: Some((Transport::Usb, 42)),
                 out: rt.out,
+                device: None,
             },
             &mut snapshot,
             &rt,
@@ -392,4 +393,122 @@ fn device_changes_persist_only_over_a_current_snapshot() {
         );
         assert_eq!(session.saved_status(), expected_status);
     }
+}
+
+/// The device's own interface is answered on its link and nowhere else,
+/// hears every publication the host hears, and is told when it fell too
+/// far behind to hear them all.
+#[test]
+fn the_device_interface_is_answered_on_its_link_and_hears_every_publication() {
+    use umsh_ulcp::{Frame, PropPayload, frame, ids::prop};
+    let link: &'static DeviceLink<NoopRawMutex> = Box::leak(Box::new(DeviceLink::new()));
+    let rt = DeviceRuntime {
+        input: Box::leak(Box::new(InputChannel::<NoopRawMutex>::new())),
+        radio: Box::leak(Box::new(Channels::<NoopRawMutex, 1, 1>::new())),
+        ctl: Box::leak(Box::new(DeviceControl::new())),
+        out: Box::leak(Box::new(TransportChannels::new())),
+        session_gen: Box::leak(Box::new(AtomicU32::new(0))),
+        device: Some(link),
+    };
+    let input = rt.input;
+    let out = rt.out;
+    let env = Env {
+        events: Rc::new(RefCell::new(std::vec::Vec::new())),
+        older: None,
+        restore_gate: Box::leak(Box::new(Signal::new())),
+        name_gate: None,
+        dfu_result: Err(Status::UNIMPLEMENTED),
+    };
+    let mut session = session("Device link");
+    let mut storage = [0; SNAPSHOT_MAX];
+    let mut run = core::pin::pin!(run_with_storage(
+        &mut session,
+        &mut storage,
+        None,
+        Some([0x55; 32]),
+        rt,
+        env
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut step = |event: Option<InEvent>| {
+        if let Some(event) = event {
+            assert!(input.try_send(event).is_ok());
+        }
+        assert!(run.as_mut().poll(&mut cx).is_pending());
+    };
+    step(None);
+    let parse = |bytes: &[u8]| {
+        let parsed = Frame::parse(bytes).unwrap();
+        let payload = PropPayload::parse(parsed.payload).unwrap();
+        (parsed.header.tid(), payload.key, payload.value.to_vec())
+    };
+
+    // With no host attached, a publication still reaches the interface.
+    step(Some(InEvent::Toggle(Setting::Bluetooth)));
+    let Some(DeviceFrame::Frame(published)) = link.try_receive() else {
+        panic!("the toggle was not published to the interface");
+    };
+    assert_eq!(parse(&published), (0, prop::BLE_ENABLED, vec![0]));
+
+    // A host attaches. The interface's request is answered on the link
+    // alone, under its own TID.
+    step(Some(InEvent::Attached(Transport::Usb)));
+    while out.wired.try_receive().is_ok() {}
+    let mut buf = [0u8; 64];
+    let len = frame::prop_set(&mut buf, 3, prop::DEV_NAME, b"Pocket").unwrap();
+    step(Some(InEvent::Device(
+        FrameBuf::from_slice(&buf[..len]).unwrap(),
+    )));
+    let Some(DeviceFrame::Frame(answer)) = link.try_receive() else {
+        panic!("the request was not answered");
+    };
+    assert_eq!(parse(&answer), (3, prop::DEV_NAME, b"Pocket".to_vec()));
+    assert!(link.try_receive().is_none(), "exactly one answer");
+    assert!(out.wired.try_receive().is_err(), "the host hears no answer");
+
+    // The host's own frames are still the host's: the exchange was not an
+    // attach, and displaced nothing.
+    let len = frame::prop_get(&mut buf, 2, prop::DEV_NAME).unwrap();
+    step(Some(InEvent::Frame(
+        Transport::Usb,
+        FrameBuf::from_slice(&buf[..len]).unwrap(),
+    )));
+    let reply = out.wired.try_receive().expect("the host is still served");
+    assert_eq!(parse(&reply.frame), (2, prop::DEV_NAME, b"Pocket".to_vec()));
+    assert!(
+        link.try_receive().is_none(),
+        "the host's answer is the host's"
+    );
+
+    // A publication reaches both.
+    step(Some(InEvent::Toggle(Setting::Bluetooth)));
+    let to_host = out.wired.try_receive().expect("published to the host");
+    assert_eq!(parse(&to_host.frame), (0, prop::BLE_ENABLED, vec![1]));
+    let Some(DeviceFrame::Frame(to_device)) = link.try_receive() else {
+        panic!("not published to the interface");
+    };
+    assert_eq!(parse(&to_device), (0, prop::BLE_ENABLED, vec![1]));
+
+    // An interface that stops reading loses publications, never blocks
+    // the driver, and is told after the ones that were kept.
+    for _ in 0..DEVICE_LINK_DEPTH + 2 {
+        step(Some(InEvent::Toggle(Setting::Bluetooth)));
+        while out.wired.try_receive().is_ok() {}
+    }
+    let mut kept = 0;
+    let mut overrun = false;
+    while let Some(frame) = link.try_receive() {
+        match frame {
+            DeviceFrame::Frame(_) => {
+                assert!(!overrun, "the overrun follows the frames kept");
+                kept += 1;
+            }
+            DeviceFrame::Overrun => {
+                assert!(!overrun, "the overrun is reported once");
+                overrun = true;
+            }
+        }
+    }
+    assert_eq!(kept, DEVICE_LINK_DEPTH);
+    assert!(overrun);
 }

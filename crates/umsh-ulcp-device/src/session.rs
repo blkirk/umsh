@@ -27,7 +27,8 @@ use umsh_ulcp::gnss::{self, GnssSnapshot};
 use umsh_ulcp::i2c::{self, BusInfo, DeviceInfo, ScanRequest, TransferRequest};
 use umsh_ulcp::ids::{
     self, DEFAULT_ADVERT_INTERVAL_S, DEFAULT_BEACON_INTERVAL_S, MAX_AUTO_ANNOUNCE_INTERVAL_S,
-    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, meshcore_region_policy, prop, stream,
+    MIN_AUTO_ANNOUNCE_INTERVAL_S, admin_writable, cap, device_writable, meshcore_region_policy,
+    prop, stream,
 };
 use umsh_ulcp::ip;
 use umsh_ulcp::items::{self, Filter, ItemError, REGION_CODE_LEN};
@@ -3160,6 +3161,10 @@ pub struct Session<A: AesProvider, S: Sha256Provider, const TX: usize = 1> {
     /// delivered live when true and queued when false. Starts detached;
     /// the transport binding reports attach/detach edges.
     attached: bool,
+    /// Whether the device's own interface is listening for what the
+    /// device publishes ([`Binding::Device`]). Set once by the platform
+    /// and never cleared: it describes the device, not a session.
+    device_interface: bool,
     /// Whether the attached transport meets its security binding for
     /// key provisioning (spec §Provisioning Security): physical
     /// possession for serial, an encrypted bonded LESC link for BLE.
@@ -3297,7 +3302,8 @@ pub struct Session<A: AesProvider, S: Sha256Provider, const TX: usize = 1> {
 /// what differs is who is asking. A local host is tethered to the device
 /// and owns the session and host domains; a mesh administrator reaches
 /// the device domain and nothing else (spec §Node Management—
-/// Authorization).
+/// Authorization). The device's own interface reaches the device domain
+/// too, with the authority of whoever is holding the device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Binding {
     /// The attached host's transport: USB-CDC, UART, or bonded BLE.
@@ -3306,6 +3312,16 @@ pub enum Binding {
     /// A Node Management Request from a listed administrator, arriving
     /// over the mesh.
     Admin,
+    /// The device's own settings interface, in process: a screen and
+    /// keyboard on the device itself.
+    ///
+    /// A local binding in every respect but one. It answers each request
+    /// with a non-zero TID exactly once, and a TID-0 request is
+    /// fire-and-forget. It is not an attach: it neither resets session
+    /// state nor displaces an attached host. What it reaches is the device
+    /// domain, as an administrator does, because the session and host
+    /// domains belong to whichever host is tethered.
+    Device,
 }
 
 /// Largest multi-property request the session accepts, and the most it
@@ -3432,6 +3448,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             host: HostDomain::default(),
             session: SessionState::default(),
             attached: false,
+            device_interface: false,
             link_secure: false,
             saved: None,
             snapshot_rejected: false,
@@ -3669,7 +3686,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.lan_bearer_state = state;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::LAN_BEARER_STATE, &[state as u8], emit);
         }
     }
@@ -3942,6 +3959,26 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.link_secure = false;
     }
 
+    /// Whether a host is attached.
+    pub const fn is_attached(&self) -> bool {
+        self.attached
+    }
+
+    /// The device has a settings interface of its own, served through
+    /// [`Session::handle_device_frame`]. From here on the device publishes
+    /// what it would publish to an attached host whether or not one is
+    /// attached, and the platform delivers those frames to the interface
+    /// as well as to any host.
+    pub fn open_device_interface(&mut self) {
+        self.device_interface = true;
+    }
+
+    /// Whether anyone is listening for what the device publishes: an
+    /// attached host, or the device's own interface.
+    const fn publishing(&self) -> bool {
+        self.attached || self.device_interface
+    }
+
     /// `PROP_MAC_BACKHAUL`: whether the host's outbound frames are
     /// handed to the device's own node instead of the air.
     ///
@@ -4054,8 +4091,24 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.dispatch_frame(bytes, now_ms, reply_budget, emit)
     }
 
-    /// Return to serving the local binding after an administrative
-    /// exchange, deferred round trips included.
+    /// Handle one ULCP frame from the device's own interface
+    /// ([`Binding::Device`]).
+    ///
+    /// The binding stays in effect across the deferred round trips of
+    /// this exchange, as an administrative one does. Call
+    /// [`Session::end_admin_exchange`] when the exchange is over.
+    pub fn handle_device_frame(
+        &mut self,
+        bytes: &[u8],
+        now_ms: u64,
+        emit: &mut impl FnMut(&[u8]),
+    ) -> Option<Effect> {
+        self.binding = Binding::Device;
+        self.dispatch_frame(bytes, now_ms, MULTI_MAX, emit)
+    }
+
+    /// Return to serving the local binding after an administrative or
+    /// device exchange, deferred round trips included.
     pub fn end_admin_exchange(&mut self) {
         self.multi = None;
         self.binding = Binding::Local;
@@ -4065,6 +4118,21 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// binding.
     fn is_admin(&self) -> bool {
         self.binding == Binding::Admin
+    }
+
+    /// Whether the frame in flight came from the tethered host, which owns
+    /// the session and host domains.
+    fn is_tethered(&self) -> bool {
+        self.binding == Binding::Local
+    }
+
+    /// Whether the binding of the frame in flight may change `key`.
+    fn binding_writable(&self, key: u32) -> bool {
+        match self.binding {
+            Binding::Local => true,
+            Binding::Admin => admin_writable(key),
+            Binding::Device => device_writable(key),
+        }
     }
 
     fn dispatch_frame(
@@ -4099,9 +4167,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 }
             },
             // The raw PHY stream and the host-facing receive queue are
-            // the tethered host's, and an administrator is not one
-            // (spec §Node Management—Authorization).
-            Some(Cmd::StrSend | Cmd::QueueDrain) if self.is_admin() => {
+            // the tethered host's, and neither an administrator nor the
+            // device's own interface is one (spec §Node Management—
+            // Authorization).
+            Some(Cmd::StrSend | Cmd::QueueDrain) if !self.is_tethered() => {
                 self.complete(tid, Status::NOT_PERMITTED, emit);
                 None
             }
@@ -5356,7 +5425,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return Err(Status::ITEM_NOT_FOUND);
         }
         self.select_stored_network(ssid)?;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::WIFI_NETWORK, ssid, emit);
         }
         Ok(())
@@ -5376,7 +5445,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         }
         self.device.ble_enabled = true;
         self.bump_dev_domain();
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::BLE_ENABLED, &[1], emit);
         }
         Some(true)
@@ -5405,7 +5474,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         *flag = !*flag;
         let enabled = *flag;
         self.bump_dev_domain();
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(key, &[enabled as u8], emit);
         }
         Some(enabled)
@@ -5422,7 +5491,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         // Every transition the host did not ask for is published; a host
         // that is not attached simply reads the current value when it
         // comes back.
-        if self.attached {
+        if self.publishing() {
             let mut value = [0u8; pui::MAX_LEN];
             let len = pui::encode(AlertState::None.code(), &mut value).unwrap_or(0);
             self.announce_prop_is(prop::ALERT, &value[..len], emit);
@@ -5440,14 +5509,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// reading: nothing here can answer a later `CMD_PROP_GET`.
     ///
     /// Returns whether a frame was emitted. Nothing is published while
-    /// no host is attached (there is nobody to notify), and a snapshot
+    /// nobody is listening (no host is attached and the device has no
+    /// interface of its own), and a snapshot
     /// populating a field the configured [`BatteryFields`] never claimed
     /// is dropped rather than sent—an unsolicited notification has no
     /// transaction to fail. A snapshot that merely omits an advertised
     /// field is published as-is: absence is how the device says the value
     /// is not knowable right now.
     pub fn publish_battery(&mut self, sample: BatteryStatus, emit: &mut impl FnMut(&[u8])) -> bool {
-        if !self.attached {
+        if !self.publishing() {
             return false;
         }
         let Some(fields) = self.config.battery else {
@@ -5628,10 +5698,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// clock going from unknown to known is the announcement that matters
     /// most; a fresh fix agreeing with the clock to the second is not.
     ///
-    /// Returns whether a frame was emitted; nothing is published while no
-    /// host is attached.
+    /// Returns whether a frame was emitted; nothing is published while
+    /// nobody is listening.
     pub fn publish_time(&mut self, epoch: Option<u32>, emit: &mut impl FnMut(&[u8])) -> bool {
-        if !self.attached || self.config.time.is_none() {
+        if !self.publishing() || self.config.time.is_none() {
             return false;
         }
         match epoch {
@@ -5671,15 +5741,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// that can tell a meaningful change from a jittering last digit.
     ///
     /// Returns whether a frame was emitted. `key` must be a positioning
-    /// property; anything else, and any publication while no host is
-    /// attached, is dropped.
+    /// property; anything else, and any publication while nobody is
+    /// listening, is dropped.
     pub fn publish_gnss(
         &mut self,
         key: u32,
         snapshot: &GnssSnapshot,
         emit: &mut impl FnMut(&[u8]),
     ) -> bool {
-        if !self.attached || self.config.gnss.is_none() {
+        if !self.publishing() || self.config.gnss.is_none() {
             return false;
         }
         let mut value = [0u8; gnss::MAX_VALUE_LEN];
@@ -6106,7 +6176,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.ble_bond_count = count;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::BLE_BOND_COUNT, &[count], emit);
         }
     }
@@ -6125,7 +6195,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.ble_link = state;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::BLE_LINK, &[state.code()], emit);
         }
     }
@@ -6142,7 +6212,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.ble_pairing_open = open;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::BLE_PAIRING, &[open as u8], emit);
         }
     }
@@ -6205,7 +6275,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.wifi_scanning = scanning;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::WIFI_SCANNING, &[scanning as u8], emit);
         }
     }
@@ -6217,7 +6287,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// inserts that follow can be taken at face value: every one of them
     /// lands in a table the host knows to be empty.
     pub fn clear_scan_results(&mut self, emit: &mut impl FnMut(&[u8])) {
-        if self.has_wifi() && self.attached {
+        if self.has_wifi() && self.publishing() {
             self.announce_prop_is(prop::WIFI_SCAN_RESULTS, &[], emit);
         }
     }
@@ -6235,7 +6305,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         result: &wifi::ScanResult<'_>,
         emit: &mut impl FnMut(&[u8]),
     ) {
-        if !self.has_wifi() || !self.attached {
+        if !self.has_wifi() || !self.publishing() {
             return;
         }
         let mut item = [0u8; wifi::SCAN_RESULT_MAX_LEN];
@@ -6314,7 +6384,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 if self.device.wifi_network == self.pending_network {
                     self.device.wifi_network = net::SelectedNetwork::default();
                     self.bump_dev_domain();
-                    if self.attached {
+                    if self.publishing() {
                         self.announce_prop_is(prop::WIFI_NETWORK, &[], emit);
                     }
                 }
@@ -6365,7 +6435,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.wifi_link = link;
-        if self.attached {
+        if self.publishing() {
             let mut value = [0u8; wifi::LINK_MAX_LEN];
             if let Ok(len) = link.encode(&mut value) {
                 self.announce_prop_is(prop::WIFI_LINK, &value[..len], emit);
@@ -6384,7 +6454,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         self.bridge_link = link;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(prop::BRIDGE_LINK, &link.encode(), emit);
         }
     }
@@ -6431,7 +6501,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             return;
         }
         *mirror = state;
-        if self.attached {
+        if self.publishing() {
             self.announce_prop_is(key, &[state.code()], emit);
         }
     }
@@ -6462,7 +6532,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
 
     /// Publish an authoritative live network table after the platform updated it.
     pub fn publish_network_table(&mut self, key: u32, value: &[u8], emit: &mut impl FnMut(&[u8])) {
-        if self.attached
+        if self.publishing()
             && self.known_prop(key)
             && matches!(
                 key,
@@ -6523,7 +6593,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if self.refuse_without_identity(tid, key, emit) {
             return None;
         }
-        if self.is_admin() && !admin_writable(key) {
+        if !self.binding_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
         }
@@ -6749,7 +6819,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         #[cfg(feature = "wifi")]
         if key == prop::WIFI_NETWORKS && previous_selection != self.device.wifi_network {
             let selection = self.device.wifi_network;
-            if self.attached {
+            if self.publishing() {
                 self.announce_prop_is(prop::WIFI_NETWORK, selection.as_bytes(), emit);
             }
         }
@@ -7260,7 +7330,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if self.refuse_without_identity(tid, key, emit) {
             return None;
         }
-        if self.is_admin() && !admin_writable(key) {
+        if !self.binding_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
         }
@@ -7500,7 +7570,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if self.refuse_without_identity(tid, key, emit) {
             return None;
         }
-        if self.is_admin() && !admin_writable(key) {
+        if !self.binding_writable(key) {
             self.complete(tid, Status::NOT_PERMITTED, emit);
             return None;
         }
@@ -7712,9 +7782,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// The mesh administrative binding meets it inherently: an executed
     /// request has already arrived authenticated and encrypted from a
     /// listed administrator, which is a stronger statement than either
-    /// physical possession or a bonded link.
+    /// physical possession or a bonded link. The device's own interface
+    /// meets it by physical possession.
     fn require_secure_link(&self) -> Result<(), Status> {
-        if self.link_secure || self.is_admin() {
+        if self.link_secure || !self.is_tethered() {
             Ok(())
         } else {
             Err(Status::INVALID_STATE)
@@ -17045,6 +17116,111 @@ mod tests {
             "TID-zero drain has no completion response"
         );
         assert_eq!(last_status_of(&mut session), Status::OK.0);
+    }
+
+    // ─── The device's own interface ──────────────────────────────────
+
+    /// Drive one exchange from the device's own interface the way the
+    /// driver does: hand the frame over and end the exchange.
+    fn device(session: &mut TestSession, request: &[u8]) -> (Vec<Vec<u8>>, Option<Effect>) {
+        let mut emitted = Vec::new();
+        let effect = session
+            .handle_device_frame(request, 0, &mut |bytes: &[u8]| emitted.push(bytes.to_vec()));
+        session.end_admin_exchange();
+        (emitted, effect)
+    }
+
+    /// A local binding's TID rules: a non-zero TID is answered once, under
+    /// that TID, and TID zero is fire-and-forget.
+    #[test]
+    fn the_device_interface_answers_by_tid_like_a_local_binding() {
+        let mut session: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        let mut buf = [0u8; 80];
+        let len = frame::prop_set(&mut buf, 4, prop::DEV_NAME, b"Pocket").unwrap();
+        let (emitted, effect) = device(&mut session, &buf[..len]);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(
+            parse_prop_is(&emitted[0]),
+            (4, prop::DEV_NAME, b"Pocket".to_vec())
+        );
+        assert!(matches!(effect, Some(Effect::DeviceNameChanged)));
+
+        let len = frame::prop_get(&mut buf, TID_UNSOLICITED, prop::DEV_NAME).unwrap();
+        let (emitted, _) = device(&mut session, &buf[..len]);
+        assert!(emitted.is_empty(), "TID zero is fire-and-forget");
+    }
+
+    /// Serving the device's own interface is not an attach: the host's
+    /// session survives it, and so does the host's standing.
+    #[test]
+    fn the_device_interface_displaces_no_host() {
+        let mut session = test_session();
+        // The attach owes its own notice; pay it before the exchange.
+        session.take_session_reset_notice(&mut |_| {});
+        let mut buf = [0u8; 80];
+        let len = frame::prop_set(&mut buf, 2, prop::HOST_AUTO_ACK, &[1]).unwrap();
+        dispatch(&mut session, &buf[..len], 0);
+        let len = frame::prop_set(&mut buf, 5, prop::DEV_NAME, b"Pocket").unwrap();
+        device(&mut session, &buf[..len]);
+        assert!(session.is_attached());
+        let mut owed = false;
+        session.take_session_reset_notice(&mut |_| owed = true);
+        assert!(!owed, "no session reset is owed to the host");
+        assert_eq!(get(&mut session, prop::HOST_AUTO_ACK), [1]);
+    }
+
+    /// The device domain is the interface's to write, with the authority
+    /// of physical possession behind its key material. The host domain,
+    /// session state, and the host's transports are the host's.
+    #[test]
+    fn the_device_interface_reaches_the_device_domain_only() {
+        let mut session: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        let mut buf = [0u8; 80];
+        let len = frame::prop_insert(
+            &mut buf,
+            3,
+            prop::DEV_CHANNEL_KEYS,
+            &[7u8; items::CHANNEL_KEY_LEN],
+        )
+        .unwrap();
+        let (emitted, _) = device(&mut session, &buf[..len]);
+        assert_eq!(
+            Frame::parse(&emitted[0]).unwrap().command(),
+            Some(Cmd::PropInserted),
+            "key material needs no secure host link"
+        );
+        for key in [prop::HOST_KEY, prop::HOST_AUTO_ACK, prop::MAC_PROMISCUOUS] {
+            let len = frame::prop_set(&mut buf, 3, key, &[0]).unwrap();
+            let (emitted, _) = device(&mut session, &buf[..len]);
+            expect_status(&emitted[0], 3, Status::NOT_PERMITTED);
+        }
+        let len = frame::queue_drain(&mut buf, 3).unwrap();
+        let (emitted, _) = device(&mut session, &buf[..len]);
+        expect_status(&emitted[0], 3, Status::NOT_PERMITTED);
+        assert!(device_writable(prop::DEV_PRIVATE_KEY));
+        assert!(!admin_writable(prop::DEV_PRIVATE_KEY));
+    }
+
+    /// With the interface open, what the device publishes is emitted
+    /// whether or not a host is attached; without it, nothing is.
+    #[test]
+    fn publications_reach_an_open_device_interface_without_a_host() {
+        let mut session: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        let mut emitted = Vec::new();
+        session.toggle_ble(&mut |bytes: &[u8]| emitted.push(bytes.to_vec()));
+        assert!(emitted.is_empty(), "nobody is listening");
+
+        session.open_device_interface();
+        session.toggle_ble(&mut |bytes: &[u8]| emitted.push(bytes.to_vec()));
+        assert_eq!(emitted.len(), 1);
+        assert!(Frame::parse(&emitted[0]).unwrap().is_publication());
+        assert_eq!(
+            parse_prop_is(&emitted[0]),
+            (TID_UNSOLICITED, prop::BLE_ENABLED, vec![1])
+        );
     }
 
     // ─── The mesh administrative binding ─────────────────────────────

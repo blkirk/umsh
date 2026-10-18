@@ -3795,6 +3795,7 @@ mod firmware {
                 ctl: &DEVICE_CTL,
                 out: &OUT_CH,
                 session_gen: &SESSION_GEN,
+                device: None,
             },
             BoardDeviceEnv {
                 // Owned outside Session: reconnects and CMD_RST retain indices.
