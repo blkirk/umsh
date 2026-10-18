@@ -39,6 +39,9 @@ Haptic or key-click feedback should be short, optional, and rate-limited. A
 speaker is for notifications and media-quality tones, not confirmation for
 every keystroke by default.
 
+Modifiers, typing aids, the character picker, and the keyboard light are in
+[Communicator Keyboard](communicator-keyboard.md).
+
 ## Optional phone integration
 
 A communicator may optionally pair with a phone for synchronization, backup,

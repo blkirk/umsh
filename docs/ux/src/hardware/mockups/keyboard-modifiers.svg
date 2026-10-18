@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="1042" viewBox="0 0 1360 1042" role="img" aria-labelledby="t" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"><title id="t">Shift and Alt modifier states</title><rect width="1360" height="1042" fill="#ECECEF"/>
+<text x="40.0" y="235.0" font-size="26" fill="#1C1C1E" font-weight="700">Shift</text>
+<rect x="190.0" y="170.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="210.0" y="200.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<text x="284.0" y="222.0" font-size="21" fill="#1C1C1E" font-weight="700">Off</text>
+<text x="284.0" y="246.0" font-size="16" fill="#3A3A3C">Keys type their own</text>
+<text x="284.0" y="266.0" font-size="16" fill="#3A3A3C">legend</text>
+<rect x="630.0" y="170.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="650.0" y="200.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<g transform="translate(678.0,226.0) scale(2) translate(-678.0,-226.0)">
+<path d="M678 220.5 L685 227.5 H681.2 V231.5 H674.8 V227.5 H671 Z" fill="none" stroke="#EEF1F5" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<text x="724.0" y="222.0" font-size="21" fill="#1C1C1E" font-weight="700">One-shot</text>
+<text x="724.0" y="246.0" font-size="16" fill="#3A3A3C">Applies to the next</text>
+<text x="724.0" y="266.0" font-size="16" fill="#3A3A3C">key</text>
+<rect x="1070.0" y="170.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="1090.0" y="200.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<g transform="translate(1118.0,226.0) scale(2) translate(-1118.0,-226.0)">
+<path d="M1118 220.5 L1125 227.5 H1121.2 V231.5 H1114.8 V227.5 H1111 Z" fill="#EEF1F5" stroke="#EEF1F5" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="1113.5" y="233.5" width="9.0" height="2.2" fill="#EEF1F5" rx="0.8"/>
+</g>
+<text x="1164.0" y="222.0" font-size="21" fill="#1C1C1E" font-weight="700">Caps lock</text>
+<text x="1164.0" y="246.0" font-size="16" fill="#3A3A3C">Applies until</text>
+<text x="1164.0" y="266.0" font-size="16" fill="#3A3A3C">released</text>
+<text x="40.0" y="755.0" font-size="26" fill="#1C1C1E" font-weight="700">Alt</text>
+<rect x="190.0" y="690.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="210.0" y="720.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<text x="284.0" y="742.0" font-size="21" fill="#1C1C1E" font-weight="700">Off</text>
+<text x="284.0" y="766.0" font-size="16" fill="#3A3A3C">Keys type their own</text>
+<text x="284.0" y="786.0" font-size="16" fill="#3A3A3C">legend</text>
+<rect x="630.0" y="690.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="650.0" y="720.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<g transform="translate(678.0,746.0) scale(2) translate(-678.0,-746.0)">
+<rect x="671.2" y="741.8" width="13.5" height="8.5" fill="none" rx="3.5" stroke="#F5A524" stroke-width="1.5"/>
+</g>
+<text x="724.0" y="742.0" font-size="21" fill="#1C1C1E" font-weight="700">One-shot</text>
+<text x="724.0" y="766.0" font-size="16" fill="#3A3A3C">Applies to the next</text>
+<text x="724.0" y="786.0" font-size="16" fill="#3A3A3C">key</text>
+<rect x="1070.0" y="690.0" width="250.0" height="112.0" fill="#FFFFFF" rx="16" stroke="#C9CBD1" stroke-width="1.5"/>
+<rect x="1090.0" y="720.0" width="56.0" height="52.0" fill="#0E1115" rx="10"/>
+<g transform="translate(1118.0,746.0) scale(2) translate(-1118.0,-746.0)">
+<rect x="1110.5" y="741.0" width="15.0" height="10.0" fill="#F5A524" rx="4"/>
+<rect x="1113.5" y="753.5" width="9.0" height="2.2" fill="#F5A524" rx="0.8"/>
+</g>
+<text x="1164.0" y="742.0" font-size="21" fill="#1C1C1E" font-weight="700">Symbol lock</text>
+<text x="1164.0" y="766.0" font-size="16" fill="#3A3A3C">Applies until</text>
+<text x="1164.0" y="786.0" font-size="16" fill="#3A3A3C">released</text>
+<path d="M380 170 C460 110 610 110 670 170" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M670.0 170.0 L660.5 164.5 L667.3 159.3 Z" fill="#2F6FDB"/>
+<text x="535.0" y="118.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap</text>
+<path d="M670 282 C610 342 460 342 380 282" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M380.0 282.0 L389.5 287.5 L382.7 292.7 Z" fill="#2F6FDB"/>
+<text x="535.0" y="352.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap again slowly,</text>
+<text x="535.0" y="374.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">or type the key</text>
+<path d="M820 170 C900 110 1050 110 1110 170" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1110.0 170.0 L1100.5 164.5 L1107.3 159.3 Z" fill="#2F6FDB"/>
+<text x="975.0" y="118.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap again quickly</text>
+<path d="M1195.0 282 C1195.0 472 315.0 472 315.0 282" fill="none" stroke="#8A8F98" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M315.0 282.0 L319.3 292.1 L310.7 292.1 Z" fill="#8A8F98"/>
+<text x="755.0" y="452.0" font-size="17" fill="#8A8F98" font-weight="600" text-anchor="middle">Tap Shift or Alt</text>
+<path d="M380 690 C460 630 610 630 670 690" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M670.0 690.0 L660.5 684.5 L667.3 679.3 Z" fill="#2F6FDB"/>
+<text x="535.0" y="638.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap</text>
+<path d="M670 802 C610 862 460 862 380 802" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M380.0 802.0 L389.5 807.5 L382.7 812.7 Z" fill="#2F6FDB"/>
+<text x="535.0" y="872.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap again slowly,</text>
+<text x="535.0" y="894.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">or type the key</text>
+<path d="M820 690 C900 630 1050 630 1110 690" fill="none" stroke="#2F6FDB" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1110.0 690.0 L1100.5 684.5 L1107.3 679.3 Z" fill="#2F6FDB"/>
+<text x="975.0" y="638.0" font-size="17" fill="#2F6FDB" font-weight="600" text-anchor="middle">Tap again quickly</text>
+<path d="M1195.0 802 C1195.0 992 315.0 992 315.0 802" fill="none" stroke="#8A8F98" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M315.0 802.0 L319.3 812.1 L310.7 812.1 Z" fill="#8A8F98"/>
+<text x="755.0" y="972.0" font-size="17" fill="#8A8F98" font-weight="600" text-anchor="middle">Tap Shift or Alt</text>
+<path d="M850 690 L1100 282" fill="none" stroke="#C2410C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1100.0 282.0 L1098.4 292.9 L1091.1 288.4 Z" fill="#C2410C"/>
+<path d="M850 282 L1100 690" fill="none" stroke="#C2410C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1100.0 690.0 L1091.1 683.6 L1098.4 679.1 Z" fill="#C2410C"/>
+<text x="935.0" y="496.0" font-size="17" fill="#C2410C" font-weight="600" text-anchor="end">Alt, then Shift</text>
+<text x="935.0" y="518.0" font-size="17" fill="#C2410C" font-weight="600" text-anchor="end">→ caps lock</text>
+<text x="1015.0" y="496.0" font-size="17" fill="#C2410C" font-weight="600">Shift, then Alt</text>
+<text x="1015.0" y="518.0" font-size="17" fill="#C2410C" font-weight="600">→ symbol lock</text>
+<path d="M755.0 80 L755.0 170" fill="none" stroke="#15803D" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M755.0 170.0 L750.7 159.9 L759.3 159.9 Z" fill="#15803D"/>
+<text x="743.0" y="104.0" font-size="17" fill="#15803D" font-weight="600" text-anchor="end">Start of a sentence</text>
+</svg>

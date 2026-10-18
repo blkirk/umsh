@@ -13,14 +13,15 @@ particular, treat the display as non-touch and do not inherit T-Deck Pro pins.
 
 | Hardware | Proposed use |
 |---|---|
-| Keyboard | Text composition, search, and documented shortcuts |
+| Keyboard | Text composition and search; see [Communicator Keyboard](../classes/communicator-keyboard.md) |
 | Rotary turn | Move focus, scroll lists/history, change a selected value |
+| Rotary turn with Alt held | Screen brightness |
 | Rotary press | Select/open; never Send unless Send is visibly focused |
 | Back/escape key, if confirmed | Back or cancel |
 | Boot/user button | Power and recovery only; not routine navigation |
 | Haptic motor | Optional short focus/action confirmation and silent alerts |
 | Speaker | Message/urgent notifications; optional and silenced by profile |
-| Keyboard backlight | Follows activity and user brightness/timeout settings |
+| Keyboard backlight | Alt+Space, then Space toggles it; also a Device › Keyboard switch |
 
 ## Proposed layout
 

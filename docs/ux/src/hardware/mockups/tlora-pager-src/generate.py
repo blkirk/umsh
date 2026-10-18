@@ -367,8 +367,35 @@ def clip(items, x, y, w, h):
 DEVICE_NAME = "Juniper"
 
 
+ALT_COL = "#F5A524"  # the Alt key's orange, which its symbol legends share
+
+
+def shift_icon(cx, cy, mode):
+    """Shift's state: 'once' an outlined arrow, 'lock' filled with a bar."""
+    top, mid, foot = cy - 7.5, cy - 0.5, cy + 3.5
+    d = (f"M{cx} {top} L{cx+7} {mid} H{cx+3.2} V{foot} H{cx-3.2} V{mid} "
+         f"H{cx-7} Z")
+    if mode == "lock":
+        return [P(d, C["text"], C["text"], sw=1.2),
+                R(cx - 4.5, cy + 5.5, 9, 2.2, C["text"], rx=0.8)]
+    return [P(d, C["text"], sw=1.5)]
+
+
+def alt_icon(cx, cy, mode):
+    """Alt's state, drawn as its orange key: outlined once, filled with a bar
+    when locked."""
+    x, y, w, h = cx - 7.5, cy - 7, 15, 10
+    if mode == "lock":
+        return [R(x, y, w, h, ALT_COL, rx=4),
+                R(cx - 4.5, cy + 5.5, 9, 2.2, ALT_COL, rx=0.8)]
+    return [R(x + 0.75, y + 0.75, w - 1.5, h - 1.5, rx=3.5, stroke=ALT_COL,
+              sw=1.5)]
+
+
 def status(time="14:32", segs=3, bolt=False, silent=False, phone=True,
-           batt_col=None):
+           batt_col=None, shift=None, alt=None):
+    """shift, alt: None, 'once' or 'lock', shown left of the status icons in
+    keyboard order."""
     o = [R(0, 0, W, STRIP, C["chrome"])]
     o.append(T(8, 16.5, DEVICE_NAME, F_SMALL, C["text2"], 600))
     o.append(T(W / 2, 16.5, time, F_SMALL, C["text"], 700, "middle"))
@@ -385,6 +412,13 @@ def status(time="14:32", segs=3, bolt=False, silent=False, phone=True,
         x -= 20
     if silent:
         o += scaled(bell(x, 11, slash=True), x, 11, 1.3)
+        x -= 20
+    x -= 6
+    if shift:
+        o += scaled(shift_icon(x, 11, shift), x, 11, 1.15)
+        x -= 24
+    if alt:
+        o += scaled(alt_icon(x, 11, alt), x, 11, 1.15)
     return o
 
 
@@ -1546,7 +1580,7 @@ def _device_categories(preset):
     o = [R(0, 0, W, H, C["bg"])]
     cats = [("Identity", DEVICE_NAME), ("Channels", "4 joined"),
             ("Radio", preset), ("Alerts", "Silent"), ("Display", ""),
-            ("Phone link", "Paired"), ("Maintenance", "")]
+            ("Keyboard", ""), ("Phone link", "Paired"), ("Maintenance", "")]
     body = []
     y = STRIP
     for c, v in cats:
@@ -1672,6 +1706,318 @@ def screen_setup_region():
     o += screen_header("What region are you in?", back=True)
     o += setup_status()
     return o
+
+
+# ---------------------------------------------------------------- keyboard
+EMOJI = "'Apple Color Emoji', 'Noto Color Emoji', sans-serif"
+
+
+def glyph_text(x, y, s, size, fill=None, anchor="middle"):
+    return (f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" '
+            f'font-family="{EMOJI}" fill="{fill or C["text"]}" '
+            f'text-anchor="{anchor}">{escape(s)}</text>')
+
+
+def kb_conversation(text=None, at=None, placeholder="Message", **mods):
+    """The Ridge Medic conversation, composer active, with modifier state in
+    the strip."""
+    o = [R(0, 0, W, H, C["bg"])]
+    tr, _ = transcript(ridge_items(), TOP, COMP_Y)
+    o += tr
+    o += ridge_header()
+    o += composer(text, placeholder, "active", at=at)
+    o += status(**mods)
+    return o
+
+
+def screen_kb_sentence():
+    return kb_conversation(None, shift="once")
+
+
+def screen_kb_period():
+    return kb_conversation("See you at the hut. ", shift="once")
+
+
+def screen_kb_caps():
+    return kb_conversation("Meet at the TRAILHEAD", shift="lock")
+
+
+def screen_kb_alt():
+    return kb_conversation("Meet at 5", alt="once")
+
+
+def screen_kb_numbers():
+    o = [R(0, 0, W, H, C["bg"])]
+    y = TOP + 14
+    o.append(section_label(10, y + 12, "Transmit power"))
+    y += 20
+    o += field_frame(8, y, W - 16, 34, "active", rx=12)
+    o.append(T(20, y + 24, "22", F_BODY, C["text"]))
+    o.append(caret(20 + tw("22", F_BODY) + 1, y + 7))
+    o.append(T(W - 20, y + 23, "dBm", F_SEC, C["text3"], 500, "end"))
+    o += screen_header("Radio")
+    o += status(silent=True, alt="lock")
+    return o
+
+
+PICKER_TABS = ["\U0001F552", "\U0001F600", "\U0001F44B", "❤️",
+               "★", "é", "€"]
+PICKER_SMILEYS = [
+    "😀😃😄😁😆😅😂🙂😉😊😇",
+    "😍🥰😘😋😛🤔🤨😐😑😶🙄",
+    "😏😣😥😮🤐😯😪😫😴😌😜",
+]
+PICKER_HEA = [
+    "❤️🧡💛💚💙💜🖤🤍🤎💔❣️",
+    "💕💞💓💗💖💘💝🙉🎧🤕😍",
+    "😻💑🫶🩷🩵🩶💟♥️🫀🗣️🧑‍⚕️",
+]
+CELL = 41
+
+
+def _graphemes(s):
+    out = []
+    for ch in s:
+        if out and (ch in "️‍" or out[-1].endswith("‍")):
+            out[-1] += ch
+        else:
+            out.append(ch)
+    return out
+
+
+def picker(rows, focus, tabs=True, query=None):
+    """The character picker over the conversation, above the composer so the
+    insertion point stays in view."""
+    px, py, pw = 6, TOP + 4, W - 12
+    ph = COMP_Y - 4 - py
+    o = menu_card(px, py, pw, ph)
+    head = 30
+    if tabs:
+        tx = px + 22
+        for i, t in enumerate(PICKER_TABS):
+            on = i == 1
+            o.append(glyph_text(tx, py + 22, t, 18,
+                                C["text"] if on else C["text3"]))
+            if on:
+                o.append(R(tx - 13, py + head - 3, 26, 3, C["accent"], rx=1.5))
+            tx += 40
+    else:
+        o += scaled([CIRC(px + 18, py + 15, 4, stroke=C["text2"], sw=1.3),
+                     P(f"M{px+21} {py+18} L{px+24} {py+21}", C["text2"],
+                       sw=1.4)], px + 19, py + 16, 1.4)
+        o.append(T(px + 36, py + 22, query, F_BODY, C["text"]))
+        o.append(caret(px + 36 + tw(query, F_BODY) + 1, py + 6))
+    o.append(LINE(px, py + head + 0.5, px + pw, py + head + 0.5,
+                  C["menuline"]))
+    grid = []
+    gy = py + head + 4
+    for r, row in enumerate(_graphemes_rows(rows)):
+        for c, g in enumerate(row):
+            cx = px + 12 + c * CELL + CELL / 2
+            cy = gy + r * CELL + CELL / 2
+            if (r, c) == focus:
+                grid.append(R(cx - CELL / 2 + 1, cy - CELL / 2 + 1, CELL - 2,
+                              CELL - 2, C["focus"], rx=8, stroke=C["accent"],
+                              sw=2))
+            grid.append(glyph_text(cx, cy + 9, g, 25))
+    o += clip(grid, px, py + head + 1, pw, ph - head - 1)
+    return o
+
+
+def _graphemes_rows(rows):
+    return [_graphemes(r) for r in rows]
+
+
+def screen_kb_picker():
+    o = kb_conversation("Thanks ", **{})[:-len(status())]
+    o += picker(PICKER_SMILEYS, (0, 6))
+    o += status()
+    return o
+
+
+def screen_kb_picker_filter():
+    o = kb_conversation("Thanks ", **{})[:-len(status())]
+    o += picker(PICKER_HEA, (0, 0), tabs=False, query="hea")
+    o += status()
+    return o
+
+
+def keyboard_glyph(cx, cy, col, lit):
+    o = [R(cx - 14, cy - 6, 28, 16, rx=3, stroke=col, sw=1.8)]
+    for r in range(2):
+        for c in range(5):
+            o.append(R(cx - 10.5 + c * 4.6, cy - 2.5 + r * 4.2, 2.6, 2.4, col,
+                       rx=0.5))
+    o.append(R(cx - 6, cy + 5.6, 12, 2, col, rx=0.8))
+    if lit:
+        for dx, ang in ((-10, -1), (0, 0), (10, 1)):
+            o.append(P(f"M{cx+dx+ang*1.5} {cy-10} L{cx+dx+ang*3.5} {cy-15}",
+                       col, sw=1.8))
+    return o
+
+
+def sun_glyph(cx, cy, col):
+    import math
+    o = [CIRC(cx, cy, 5, col)]
+    for i in range(8):
+        a = i * math.pi / 4
+        o.append(P(f"M{cx+8*math.cos(a):.1f} {cy+8*math.sin(a):.1f} "
+                   f"L{cx+11*math.cos(a):.1f} {cy+11*math.sin(a):.1f}", col,
+                   sw=2))
+    return o
+
+
+def hud(content_w):
+    """A centered transient card for a level or toggle; no words."""
+    w, h = content_w, 56
+    x, y = (W - w) / 2, (H - h) / 2 + 8
+    return [R(x + 1, y + 3, w, h, "#000", rx=14, extra=' opacity="0.55"'),
+            R(x, y, w, h, "#1E2631", rx=14, stroke="#34414F")], x, y, h
+
+
+def screen_kb_light():
+    o = kb_conversation("Thanks ", **{})[:-len(status())]
+    g, x, y, h = hud(96)
+    o += g
+    o += scaled(keyboard_glyph(x + 48, y + h / 2 + 4, C["text"], True),
+                x + 48, y + h / 2, 1.5)
+    o += status()
+    return o
+
+
+def screen_kb_brightness():
+    o = screen_chats()[:-len(status())]
+    g, x, y, h = hud(250)
+    o += g
+    o += sun_glyph(x + 30, y + h / 2, C["text"])
+    n, lit = 10, 7
+    bx = x + 56
+    for i in range(n):
+        o.append(R(bx + i * 18, y + h / 2 - 6, 14, 12,
+                   C["text"] if i < lit else "#3A414B", rx=3))
+    o += status(alt=None)
+    return o
+
+
+def screen_kb_settings():
+    o = [R(0, 0, W, H, C["bg"])]
+    body = []
+    y = TOP
+    for i, (label, on) in enumerate([("Capitalize sentences", True),
+                                     ("Period on double space", True),
+                                     ("Keyboard light", True)]):
+        body += setting_row(0, y, label, on, focused=i == 0)
+        y += 36
+    o += clip(body, 0, TOP, W, H - TOP)
+    o += screen_header("Keyboard")
+    o += status(silent=True)
+    return o
+
+
+# The Shift and Alt state machine, drawn for the canvas and the UX book.
+def _arrow(d, end, toward, col, label=None, lx=0, ly=0, anchor="middle"):
+    import math
+    ex, ey = end
+    tx, ty = toward
+    a = math.atan2(ey - ty, ex - tx)
+    k = 11
+    head = (f"M{ex:.1f} {ey:.1f} L{ex-k*math.cos(a-0.4):.1f} "
+            f"{ey-k*math.sin(a-0.4):.1f} L{ex-k*math.cos(a+0.4):.1f} "
+            f"{ey-k*math.sin(a+0.4):.1f} Z")
+    o = [P(d, col, sw=2.4), P(head, fill=col)]
+    if label:
+        for i, line in enumerate(label.split("\n")):
+            o.append(T(lx, ly + i * 22, line, 17, col, 600, anchor))
+    return o
+
+
+def modifier_diagram(x0, y0):
+    """Returns (svg list, width, height)."""
+    bw, bh = 250, 112
+    cols = [x0 + 150, x0 + 590, x0 + 1030]
+    lanes = [("Shift", shift_icon, y0 + 40), ("Alt", alt_icon, y0 + 560)]
+    names = ["Off", "One-shot", "Locked"]
+    lock_names = {"Shift": "Caps lock", "Alt": "Symbol lock"}
+    o = []
+    box = {}
+    for lane, icon, ly in lanes:
+        o.append(T(x0, ly + bh / 2 + 9, lane, 26, INK, 700))
+        for i, (bx, nm) in enumerate(zip(cols, names)):
+            o.append(R(bx, ly, bw, bh, "#FFFFFF", rx=16, stroke="#C9CBD1",
+                       sw=1.5))
+            chip_x = bx + 20
+            o.append(R(chip_x, ly + 30, 56, 52, C["chrome"], rx=10))
+            if i:
+                o += scaled(icon(chip_x + 28, ly + 58, "once" if i == 1
+                                 else "lock"), chip_x + 28, ly + 56, 2)
+            title = lock_names[lane] if i == 2 else nm
+            o.append(T(bx + 94, ly + 52, title, 21, INK, 700))
+            sub = {0: "Keys type their own legend",
+                   1: "Applies to the next key",
+                   2: "Applies until released"}[i]
+            for j, line in enumerate(wrap(sub, 16, bw - 104)):
+                o.append(T(bx + 94, ly + 76 + j * 20, line, 16, INK2))
+            box[(lane, i)] = (bx, ly)
+    col = "#2F6FDB"
+    for lane, _, ly in lanes:
+        top, bot = ly, ly + bh
+        a, b, c = cols
+        # Off -> One-shot, over the top.
+        o += _arrow(f"M{a+bw-60} {top} C{a+bw+20} {top-60} {b-20} {top-60} "
+                    f"{b+40} {top}", (b + 40, top), (b + 10, top - 40), col,
+                    "Tap", (a + bw + b) / 2, top - 52)
+        # One-shot -> Off, under: a slow second tap, or the key it applied to.
+        o += _arrow(f"M{b+40} {bot} C{b-20} {bot+60} {a+bw+20} {bot+60} "
+                    f"{a+bw-60} {bot}", (a + bw - 60, bot),
+                    (a + bw - 30, bot + 40), col,
+                    "Tap again slowly,\nor type the key", (a + bw + b) / 2,
+                    bot + 70)
+        # One-shot -> Locked.
+        o += _arrow(f"M{b+bw-60} {top} C{b+bw+20} {top-60} {c-20} {top-60} "
+                    f"{c+40} {top}", (c + 40, top), (c + 10, top - 40), col,
+                    "Tap again quickly", (b + bw + c) / 2, top - 52)
+        # Locked -> Off, along the bottom.
+        o += _arrow(f"M{c+bw/2} {bot} C{c+bw/2} {bot+190} {a+bw/2} "
+                    f"{bot+190} {a+bw/2} {bot}", (a + bw / 2, bot),
+                    (a + bw / 2, bot + 40), "#8A8F98",
+                    "Tap Shift or Alt", (a + c + bw) / 2, bot + 170)
+    # Across lanes: one modifier armed, then the other, locks the other.
+    sb = box[("Shift", 1)]
+    ab = box[("Alt", 1)]
+    sl = box[("Shift", 2)]
+    al = box[("Alt", 2)]
+    red = "#C2410C"
+    o += _arrow(f"M{ab[0]+bw-30} {ab[1]} L{sl[0]+30} {sl[1]+bh}",
+                (sl[0] + 30, sl[1] + bh), (ab[0] + bw - 30, ab[1]), red)
+    o += _arrow(f"M{sb[0]+bw-30} {sb[1]+bh} L{al[0]+30} {al[1]}",
+                (al[0] + 30, al[1]), (sb[0] + bw - 30, sb[1] + bh), red)
+    mx = (sb[0] + bw + sl[0]) / 2
+    my = (sb[1] + bh + ab[1]) / 2
+    o.append(T(mx - 40, my + 10, "Alt, then Shift", 17, red, 600, "end"))
+    o.append(T(mx - 40, my + 32, "→ caps lock", 17, red, 600, "end"))
+    o.append(T(mx + 40, my + 10, "Shift, then Alt", 17, red, 600))
+    o.append(T(mx + 40, my + 32, "→ symbol lock", 17, red, 600))
+    # Auto-capitalize arms Shift.
+    s0 = box[("Shift", 1)]
+    o += _arrow(f"M{s0[0]+bw/2} {s0[1]-90} L{s0[0]+bw/2} {s0[1]}",
+                (s0[0] + bw / 2, s0[1]), (s0[0] + bw / 2, s0[1] - 90),
+                "#15803D")
+    o.append(T(s0[0] + bw / 2 - 12, s0[1] - 66, "Start of a sentence", 17,
+               "#15803D", 600, "end"))
+    width = cols[2] + bw - x0
+    height = lanes[1][2] + bh + 200 - y0
+    return o, width, height
+
+
+def keyboard_diagram_svg():
+    o, w, h = modifier_diagram(40, 130)
+    W2, H2 = w + 80, h + 130 + 40
+    head = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W2}" '
+            f'height="{H2}" viewBox="0 0 {W2} {H2}" role="img" '
+            f'aria-labelledby="t" font-family="{SANS}"><title id="t">Shift '
+            f'and Alt modifier states</title>'
+            f'<rect width="{W2}" height="{H2}" fill="{CANVAS_BG}"/>')
+    return head + "\n" + "\n".join(o) + "\n</svg>\n"
 
 
 # ---------------------------------------------------------------- canvas
@@ -1941,6 +2287,45 @@ def main(path, native_dir=None):
              "Required before the first transmission, since it sets what the "
              "radio may use. The same list is Device › Radio › Region later."),
         ]),
+        ("Keyboard", [
+            ("Start of a sentence", screen_kb_sentence(),
+             "Shift arms itself where a sentence starts, shown by the outlined "
+             "arrow in the strip. The next letter is a capital; tapping Shift "
+             "instead disarms it."),
+            ("Double space", screen_kb_period(),
+             "“hut” then two quick spaces typed “hut. ”, and Shift armed for "
+             "the next sentence. Only when the key before the first space was "
+             "a letter; moving the cursor in between breaks the sequence."),
+            ("Caps lock", screen_kb_caps(),
+             "Shift tapped twice quickly, or Alt then Shift. The filled arrow "
+             "with a bar stays until Shift or Alt is tapped."),
+            ("Alt, once", screen_kb_alt(),
+             "Alt tapped once: the next key types its orange legend, here "
+             "about to type “?”, and Alt disarms. Held instead, Alt applies "
+             "while it is down and the strip shows nothing."),
+            ("Numbers-only field", screen_kb_numbers(),
+             "A numeric field opens in symbol lock, so the top row types "
+             "digits and Alt+F the minus sign. Space types a space. No "
+             "capitalizing or double-space period here."),
+            ("Character picker", screen_kb_picker(),
+             "Alt+Space. Turning walks the grid and its categories in order; "
+             "press inserts at the cursor and closes. Backspace closes "
+             "without inserting. The third row is clipped: the grid goes on."),
+            ("Picker, filtered", screen_kb_picker_filter(),
+             "Letters typed in the picker filter it by name, in place of the "
+             "category row."),
+            ("Keyboard light", screen_kb_light(),
+             "Space while the picker is open toggles the keyboard light and "
+             "closes the picker, so Alt+Space, Space is the light switch."),
+            ("Brightness", screen_kb_brightness(),
+             "Holding Alt down while turning the wheel sets the screen "
+             "brightness. Only a held Alt: a one-shot or locked Alt leaves "
+             "the wheel to move focus or the cursor."),
+            ("Keyboard settings", screen_kb_settings(),
+             "Device › Keyboard. The two typing aids can be turned off "
+             "everywhere; fields that never want them turn them off for "
+             "themselves."),
+        ]),
     ]
     by = hy + HW_H + 140
     boards = []
@@ -1956,6 +2341,13 @@ def main(path, native_dir=None):
             bx = margin + c * (BOARD_W + gap)
             o += board(bx, by + r * (BOARD_H + 230), title, body, notes)
         by += -(-len(items) // cols) * (BOARD_H + 230) + 40
+    o.append(T(margin, by, "Shift and Alt", 34, INK, 700))
+    o.append(T(margin, by + 38, "Each modifier is off, one-shot or locked. "
+               "Held down, either applies only while it is down and changes "
+               "no state.", 19, INK2))
+    dg, _, dh = modifier_diagram(margin, by + 130)
+    o += dg
+    by += 130 + dh + 40
     height = by
 
 
@@ -2015,10 +2407,13 @@ def main(path, native_dir=None):
             f'<rect width="{cwidth}" height="{height}" fill="{CANVAS_BG}"/>')
     with open(path, "w") as f:
         f.write(head + "\n" + "\n".join(o) + "\n</svg>\n")
+    # The state diagram alone, for the UX book.
+    with open(os.path.join(os.path.dirname(path), "keyboard-modifiers.svg"),
+              "w") as f:
+        f.write(keyboard_diagram_svg())
 
     if native_dir:
         # Each screen alone, in panel pixels, for rasterizing at 1:1.
-        import os
         import re
         os.makedirs(native_dir, exist_ok=True)
         for title, body, _ in boards:

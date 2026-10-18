@@ -29,6 +29,7 @@
 # Device-Class Guidance
 
 - [Communicators](classes/communicators.md)
+  - [Communicator Keyboard](classes/communicator-keyboard.md)
 - [Trackers](classes/trackers.md)
   - [Display Tracker Screens](classes/display-tracker-screens.md)
 
