@@ -1592,36 +1592,168 @@ def screen_banner():
     return o
 
 
-def screen_wake():
-    """What the screen shows when a message wakes it."""
-    o = [R(0, 0, W, H, C["bg"])]
-    o.append(section_label(10, STRIP + 18, "While the screen was off"))
-    cards = [
-        ("channel", "Trail Crew", "9m",
-         "Sam: Will wait 10 min at the saddle, then we head down", True),
-        ("peer", "Pat Okafor", "2m", "Got the antenna. Bringing two.", False),
-        ("peer", "Jo Reyes", "1m", "Are you on the ridge yet?", False),
-    ]
-    y = STRIP + 26
-    body = []
-    for kind, name, t, text, focused in cards:
-        lines = wrap(text, F_SEC, W - 72)[:2]
-        ch = 30 + len(lines) * 20
-        if focused:
-            body.append(R(6, y, W - 12, ch, C["focus"], rx=10,
-                          stroke=C["accent"], sw=1.6))
-        else:
-            body.append(R(6, y, W - 12, ch, C["panel"], rx=10,
-                          stroke=C["line"]))
-        body += avatar(30, y + 22, 14, name, kind)
-        body.append(T(52, y + 24, name, F_BODY, C["text"], 700))
-        body.append(T(W - 16, y + 23, t, F_SMALL, C["text3"], 600, "end"))
-        for i, line in enumerate(lines):
-            body.append(T(52, y + 46 + i * 20, line, F_SEC, C["text2"]))
-        y += ch + 6
-    o += clip(body, 0, STRIP + 26, W, H - STRIP - 26)
-    o += status()
+# ---------------------------------------------------------------- locking
+LOCK_TIME = "14:32"
+LOCK_DATE = "Sunday, October 19"
+LOCK_BAR_X = 462  # the unlock bar, right of everything
+LOCK_TOP = 30  # below the device name and icons
+LOCK_BOTTOM = 190  # above the unlock hint
+
+
+def padlock(cx, cy, col, open_=False):
+    shackle = (f"M{cx-3.5} {cy-1} V{cy-4} Q{cx-3.5} {cy-8} {cx} {cy-8} "
+               f"Q{cx+3.5} {cy-8} {cx+3.5} {cy-4}")
+    shackle += f" V{cy-3}" if open_ else f" V{cy-1}"
+    return [P(shackle, col, sw=1.4),
+            R(cx - 5.5, cy - 1, 11, 8.5, col, rx=1.5)]
+
+
+def lock_top(segs=3, bolt=False):
+    """The device name and status icons, on the background: the time is the
+    screen's own."""
+    o = [T(12, 19, DEVICE_NAME, F_SMALL, C["text2"], 600)]
+    o += scaled(battery(449, 8.5, segs, bolt), 459, 13, 1.3)
+    x = 418 if bolt else 426
+    o += scaled(gnss(x, 13), x, 13, 1.3)
+    o += scaled(bt(x - 20, 13), x - 20, 13, 1.3)
     return o
+
+
+def unlock_bar(fill, ready=False):
+    """fill: how far the wheel has turned toward the mark, 0 to 1."""
+    col = C["green"] if ready else C["accent"]
+    h = LOCK_BOTTOM - LOCK_TOP
+    o = [R(LOCK_BAR_X - 3, LOCK_TOP, 6, h, C["line"], rx=3)]
+    if fill:
+        o.append(R(LOCK_BAR_X - 3, LOCK_TOP, 6, h * fill, col, rx=3))
+    cy = LOCK_BOTTOM + 8
+    o.append(P(f"M{LOCK_BAR_X-4} {cy-2} L{LOCK_BAR_X} {cy+2} "
+               f"L{LOCK_BAR_X+4} {cy-2}",
+               col if fill else C["text3"], sw=1.6))
+    return o
+
+
+def unlock_hint(ready=False):
+    s = "Press to unlock" if ready else "Scroll down and press to unlock"
+    col = C["green"] if ready else C["text3"]
+    w = tw(s, F_SMALL, ready)
+    x = (W - w) / 2 + 9
+    o = scaled(padlock(x - 13, 207, col, open_=ready), x - 13, 207, 1.1)
+    o.append(T(x, 213, s, F_SMALL, col, 700 if ready else 500))
+    return o
+
+
+def unread_badge(x, cy, n):
+    o = scaled(glyph_chats(x + 9, cy, C["text2"]), x + 9, cy, 1.3)
+    s = str(n)
+    bw = max(22, tw(s, F_SMALL, True) + 12)
+    o.append(R(x + 26, cy - 11, bw, 22, C["red"], rx=11))
+    o.append(T(x + 26 + bw / 2, cy + 6, s, F_SMALL, "#fff", 700, "middle"))
+    return o
+
+
+LOCK_CARDS = [
+    ("peer", "Jo Reyes", "now", "Are you on the ridge yet?"),
+    ("peer", "Pat Okafor", "2m", "Got the antenna. Bringing two."),
+    ("channel", "Trail Crew", "9m", "Sam: Will wait 10 min at the saddle"),
+    ("peer", "Rick Alvarez", "14m", "Road is open past the gate"),
+]
+
+
+def screen_lock(fill=0.0, ready=False):
+    """The lock screen with what arrived since the device locked."""
+    o = [R(0, 0, W, H, C["bg"])]
+    o += lock_top()
+    o.append(T(14, 88, LOCK_TIME, 54, C["text"], 700))
+    o.append(T(16, 114, LOCK_DATE, F_SEC, C["text2"]))
+    o += unread_badge(16, 148, 4)
+    x0, x1 = 196, 450
+    body = []
+    y = LOCK_TOP
+    for kind, name, t, text in LOCK_CARDS:
+        body.append(R(x0, y, x1 - x0, 52, C["panel"], rx=10,
+                      stroke=C["line"]))
+        body += avatar(x0 + 20, y + 26, 12, name, kind)
+        tw_t = tw(t, F_SMALL, True)
+        body.append(T(x0 + 40, y + 22, fit(name, F_SEC, x1 - x0 - 60 - tw_t,
+                                           True), F_SEC, C["text"], 700))
+        body.append(T(x1 - 10, y + 21, t, F_SMALL, C["text3"], 600, "end"))
+        body.append(T(x0 + 40, y + 43, fit(text, F_SMALL, x1 - x0 - 50),
+                      F_SMALL, C["text2"]))
+        y += 58
+    o += clip(body, 0, LOCK_TOP, W, LOCK_BOTTOM - LOCK_TOP)
+    o += unlock_bar(1.0 if ready else fill, ready)
+    o += unlock_hint(ready)
+    return o
+
+
+def screen_lock_quiet():
+    """Nothing new: the time takes the middle."""
+    o = [R(0, 0, W, H, C["bg"])]
+    o += lock_top(segs=2, bolt=True)
+    cx = (LOCK_BAR_X - 12) / 2 + 6
+    o.append(T(cx, 108, LOCK_TIME, 72, C["text"], 700, "middle"))
+    o.append(T(cx, 138, LOCK_DATE, F_SEC, C["text2"], 400, "middle"))
+    # Charging: the charge, under the date.
+    s = "64%"
+    w = tw(s, F_SEC, True)
+    bx = cx - (w + 14) / 2
+    o.append(P(f"M{bx+5} {157} L{bx} {166} H{bx+4} L{bx+2} {174} "
+               f"L{bx+9} {163} H{bx+5} Z", fill=C["green"]))
+    o.append(T(bx + 14, 171, s, F_SEC, C["green"], 700))
+    o += unlock_bar(0)
+    o += unlock_hint()
+    return o
+
+
+def lock_diagram(x0, y0):
+    """The lock states. Returns (svg list, width, height)."""
+    bw, bh = 250, 96
+    gap = 190
+    xs = [x0 + i * (bw + gap) for i in range(4)]
+    names = [("Unlocked", "Where you left off"),
+             ("Locked, dark", "Panel off"),
+             ("Lock screen", "Lit 15 s, then fades"),
+             ("Ready to unlock", "For 800 ms")]
+    o = []
+    for x, (nm, sub) in zip(xs, names):
+        o.append(R(x, y0, bw, bh, "#FFFFFF", rx=16, stroke="#C9CBD1",
+                   sw=1.5))
+        o.append(T(x + 22, y0 + 42, nm, 21, INK, 700))
+        o.append(T(x + 22, y0 + 70, sub, 16, INK2))
+    col = "#2F6FDB"
+    gray = "#8A8F98"
+    green = "#15803D"
+    top, bot = y0, y0 + bh
+
+    def over(a, b, label, c=col):
+        sx, ex = xs[a] + bw - 50, xs[b] + 50
+        return _arrow(f"M{sx} {top} C{sx+70} {top-70} {ex-70} {top-70} "
+                      f"{ex} {top}", (ex, top), (ex - 30, top - 40), c,
+                      label, (sx + ex) / 2, top - 74 - 22 *
+                      (label.count("\n")))
+
+    def under(a, b, label, c=gray, depth=70):
+        sx, ex = xs[a] + 50, xs[b] + bw - 50
+        return _arrow(f"M{sx} {bot} C{sx-70} {bot+depth} {ex+70} "
+                      f"{bot+depth} {ex} {bot}", (ex, bot),
+                      (ex + 30, bot + 40), c, label, (sx + ex) / 2,
+                      bot + depth + 4)
+
+    o += over(0, 1, "Screen timed out, then 1 s\nwithout input; or the "
+              "lock button")
+    o += over(1, 2, "Any key, a small turn,\nor a message")
+    o += over(2, 3, "Turned down five\nsteps, to the mark")
+    o += under(2, 1, "Faded out, or\nthe lock button")
+    o += under(3, 2, "No press in time")
+    # Ready -> Unlocked, the long way under everything.
+    sx, ex = xs[3] + bw / 2, xs[0] + bw / 2
+    o += _arrow(f"M{sx} {bot} C{sx} {bot+230} {ex} {bot+230} {ex} {bot}",
+                (ex, bot), (ex, bot + 40), green, "Press",
+                (sx + ex) / 2, bot + 196)
+    width = xs[3] + bw - x0
+    height = bh + 230
+    return o, width, height
 
 
 def peer_row(y, name, meta, t, bars=None, dim=False):
@@ -1816,7 +1948,8 @@ def _device_categories(preset):
     o = [R(0, 0, W, H, C["bg"])]
     cats = [("Identity", DEVICE_NAME), ("Channels", "4 joined"),
             ("Radio", preset), ("Alerts", "Silent"), ("Display", ""),
-            ("Keyboard", ""), ("Phone link", "Paired"), ("Maintenance", "")]
+            ("Keyboard", ""), ("Clock", "GNSS"), ("Phone link", "Paired"),
+            ("Maintenance", "")]
     body = []
     y = STRIP
     for c, v in cats:
@@ -1940,6 +2073,23 @@ def screen_setup_region():
         y += 36
     o += clip(body, 0, TOP, W, H - TOP)
     o += screen_header("What region are you in?", back=True)
+    o += setup_status()
+    return o
+
+
+def screen_setup_time_zone():
+    """The region's zones, so the usual answer is a turn or two away."""
+    o = [R(0, 0, W, H, C["bg"])]
+    zones = [("Los Angeles", "UTC−7"), ("Phoenix", "UTC−7"),
+             ("Denver", "UTC−6"), ("Chicago", "UTC−5"),
+             ("New York", "UTC−4"), ("Anchorage", "UTC−8")]
+    body = []
+    y = TOP
+    for i, (name, off) in enumerate(zones):
+        body += setting_row(0, y, name, off, focused=i == 0)
+        y += 36
+    o += clip(body, 0, TOP, W, H - TOP)
+    o += screen_header("What time zone are you in?", back=True)
     o += setup_status()
     return o
 
@@ -2147,6 +2297,106 @@ def screen_kb_settings():
     o += clip(body, 0, TOP, W, H - TOP)
     o += screen_header("Keyboard")
     o += status(silent=True)
+    return o
+
+
+# ---------------------------------------------------------------- clock
+# The Clock boards show the 12-hour setting; the rest of the canvas is 24-hour.
+TIME_12 = "2:32 PM"
+
+
+def screen_clock():
+    o = [R(0, 0, W, H, C["bg"])]
+    rows = [("Set automatically", True, False),
+            ("Date and time", "Oct 19, " + TIME_12, False),
+            ("Time zone", "Los Angeles", True),
+            ("24-hour time", False, False),
+            ("Last set from", "GNSS, 4m ago", False)]
+    body = []
+    y = TOP
+    for i, (label, val, chev) in enumerate(rows):
+        body += setting_row(0, y, label, val, focused=i == 0, chev=chev,
+                            muted=label == "Date and time")
+        y += 36
+    o += clip(body, 0, TOP, W, H - TOP)
+    o += screen_header("Clock")
+    o += status(time=TIME_12, silent=True)
+    return o
+
+
+def screen_set_time():
+    """Date and time, set by hand: a part at a time."""
+    o = [R(0, 0, W, H, C["bg"])]
+    fs = 24
+    groups = [["Oct", "19", "2026"], ["2", "32", "PM"]]
+    focus = (0, 1)
+    pad, gap, group_gap, sh = 12, 6, 26, 40
+    colon = 16  # between the hour and the minute
+    widths = [[tw(s, fs, True) + 2 * pad for s in g] for g in groups]
+    total = (sum(sum(w) for w in widths) + group_gap + colon - gap
+             + sum((len(g) - 1) * gap for g in groups))
+    x = (W - total) / 2
+    y = TOP + 26
+    for gi, (g, ws) in enumerate(zip(groups, widths)):
+        for si, (s, w) in enumerate(zip(g, ws)):
+            on = (gi, si) == focus
+            o += field_frame(x, y, w, sh, "active" if on else "away", rx=9)
+            o.append(T(x + w / 2, y + 28, s, fs, C["text"],
+                       700 if on else 500, "middle"))
+            if on:
+                cx = x + w / 2
+                o.append(P(f"M{cx-6} {y-6} L{cx} {y-12} L{cx+6} {y-6}",
+                           C["accent"], sw=2))
+                o.append(P(f"M{cx-6} {y+sh+6} L{cx} {y+sh+12} "
+                           f"L{cx+6} {y+sh+6}", C["accent"], sw=2))
+            x += w + gap
+            if (gi, si) == (1, 0):
+                o.append(T(x + (colon - gap) / 2 - 1, y + 27, ":", fs,
+                           C["text2"], 700, "middle"))
+                x += colon - gap
+        x += group_gap - gap
+    o.append(T(W / 2, TOP + 104, "Los Angeles, UTC−7", F_SEC, C["text2"],
+               400, "middle"))
+    o += setting_row(0, H - 44, "Set", None)
+    o += screen_header("Date and time")
+    o += status(time="", silent=True)
+    return o
+
+
+def screen_time_zone():
+    o = [R(0, 0, W, H, C["bg"])]
+    zones = [("Denver", "UTC−6"), ("Honolulu", "UTC−10"),
+             ("Los Angeles", "UTC−7"), ("New York", "UTC−4"),
+             ("Phoenix", "UTC−7")]
+    body = []
+    y = TOP
+    for name, off in zones:
+        current = name == "Los Angeles"
+        body += setting_row(0, y, "", off, focused=current)
+        if current:
+            body.append(P(f"M14 {y+18} L19 {y+23} L27 {y+13}", C["accent"],
+                          sw=2.4))
+        body.append(T(36, y + 25, name, F_BODY, C["text"],
+                      700 if current else 400))
+        y += 36
+    o += clip(body, 0, TOP, W, H - TOP)
+    o += screen_header("Time zone")
+    o += status(time=TIME_12, silent=True)
+    return o
+
+
+def clock_glyph(cx, cy, col):
+    return [CIRC(cx, cy, 7, stroke=col, sw=1.3),
+            P(f"M{cx} {cy-4} V{cy} L{cx+3} {cy+2}", col, sw=1.3)]
+
+
+def screen_lock_no_time():
+    """The lock screen before the clock is known: no time and no date."""
+    o = screen_lock()
+    # Replace the time and date with the clock's state.
+    o = [s for s in o if LOCK_TIME not in s and LOCK_DATE not in s]
+    o += scaled(clock_glyph(32, 70, C["text2"]), 32, 70, 2.4)
+    o.append(T(16, 114, "Clock not set", F_SEC, C["text2"], 600))
     return o
 
 
@@ -2449,10 +2699,6 @@ def main(path, native_dir=None):
              "Banners are passive. They never take a key, so Enter still "
              "sends the draft they interrupted. A haptic tick, then it times "
              "out; the chat waits at the top of Chats."),
-            ("Waking to messages", screen_wake(),
-             "A message that arrives with the screen off wakes it to this. "
-             "Press opens the focused chat; typing starts a reply in it; "
-             "Backspace goes back to where you were."),
         ]),
         ("Message states", [
             ("Times", screen_times(),
@@ -2570,6 +2816,10 @@ def main(path, native_dir=None):
             ("First run: region", screen_setup_region(),
              "Required before the first transmission, since it sets what the "
              "radio may use. The same list is Device › Radio › Region later."),
+            ("First run: time zone", screen_setup_time_zone(),
+             "Asked even with a GNSS fix, which gives the time but not the "
+             "zone. The list starts with the region’s zones; letters search "
+             "them all. Device › Clock › Time zone later."),
         ]),
         ("Keyboard", [
             ("Start of a sentence", screen_kb_sentence(),
@@ -2610,6 +2860,43 @@ def main(path, native_dir=None):
              "everywhere; fields that never want them turn them off for "
              "themselves."),
         ]),
+        ("Locking", [
+            ("Lock screen", screen_lock(),
+             "A key or a small turn lights a locked device to this. So does "
+             "every message that would alert, with the haptic tick, its card "
+             "landing on top and the 15 s starting over. One card per chat "
+             "heard from since locking; the badge counts unread chats."),
+            ("Scrolling to unlock", screen_lock(fill=0.55),
+             "Turning down fills the bar, five steps to the mark; turning "
+             "up empties it. The cards stay put: the wheel only feeds the "
+             "bar. Pressing before the bar is full does nothing."),
+            ("Ready to unlock", screen_lock(ready=True),
+             "Past the mark the bar turns green and the hint changes. A "
+             "press within 800 ms unlocks, back to where you were, with the "
+             "cards’ chats at the top of Chats; otherwise the bar empties "
+             "and it starts over."),
+            ("Nothing new", screen_lock_quiet(),
+             "With no cards, the time takes the middle. While charging, the "
+             "charge shows under the date. After 15 s the screen fades, then "
+             "goes dark, sooner than when unlocked."),
+            ("Clock not set", screen_lock_no_time(),
+             "Until the clock is known, no time or date shows anywhere: not "
+             "here, in the strip, or in Details. Ages of messages heard since "
+             "power-on are measured, not read off the clock, so they stay."),
+        ]),
+        ("Clock", [
+            ("Clock", screen_clock(),
+             "Device › Clock. Set automatically takes the time from GNSS, or "
+             "from the phone when linked; Date and time is then a readout. "
+             "Last set from says where the time came from, and when."),
+            ("Date and time", screen_set_time(),
+             "With Set automatically off. Turning moves between the parts; "
+             "pressing one lets turning change it, and digits type it. Set "
+             "starts the minute at zero seconds."),
+            ("Time zone", screen_time_zone(),
+             "Cities, as on iOS, with today’s offset, daylight saving "
+             "included. Letters filter the list, as on every list."),
+        ]),
     ]
     by = hy + HW_H + 140
     boards = []
@@ -2632,6 +2919,13 @@ def main(path, native_dir=None):
     dg, _, dh = modifier_diagram(margin, by + 130)
     o += dg
     by += 130 + dh + 40
+    o.append(T(margin, by, "Locking and unlocking", 34, INK, 700))
+    o.append(T(margin, by + 38, "The lock button is the one at the bottom "
+               "edge, also the bootloader button. A password, later, would "
+               "follow the press.", 19, INK2))
+    dg, _, dh = lock_diagram(margin + 20, by + 190)
+    o += dg
+    by += 190 + dh + 40
     height = by
 
 
