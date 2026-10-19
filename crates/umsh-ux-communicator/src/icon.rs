@@ -23,6 +23,8 @@ pub enum Pad {
     /// A chip for my reaction in an open channel, in
     /// [`theme::OUTBOUND_OPEN`](crate::theme::OUTBOUND_OPEN).
     MineOpen,
+    /// The screen itself, in [`theme::BACKGROUND`](crate::theme::BACKGROUND).
+    Screen,
 }
 
 /// The glyph for `reaction` on `pad`.

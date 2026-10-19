@@ -545,6 +545,14 @@ impl<
         }
     }
 
+    /// Invoke `f` with the key of every channel registered in the MAC.
+    pub async fn for_each_channel(&self, f: &mut dyn FnMut(&umsh_core::ChannelKey)) {
+        let mac = self.mac.borrow().await;
+        for channel in mac.channels().iter() {
+            f(&channel.channel_key);
+        }
+    }
+
     /// Invoke `f` for each transmitter heard on the air, most recent
     /// reception first held.
     ///

@@ -1019,6 +1019,11 @@ impl<const N: usize, const RN: usize, const HN: usize> ChannelTable<N, RN, HN> {
             .find(|channel| channel.derived.channel_id == *id)
     }
 
+    /// Iterate over all channel states.
+    pub fn iter(&self) -> impl Iterator<Item = &ChannelState<RN, HN>> {
+        self.channels.iter()
+    }
+
     /// Mutably iterate over all channel states.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut ChannelState<RN, HN>> {
         self.channels.iter_mut()

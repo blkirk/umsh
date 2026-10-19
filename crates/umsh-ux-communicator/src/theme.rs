@@ -23,19 +23,36 @@ pub const TEXT_TERTIARY: Rgb565 = rgb(0x7F8995);
 pub const ACCENT: Rgb565 = rgb(0x4DA3FF);
 /// The accent where anyone can read what is written: an open channel.
 pub const ACCENT_OPEN: Rgb565 = GREEN;
+/// The accent where what is written goes under forward secrecy.
+pub const ACCENT_SECRET: Rgb565 = rgb(0xA585FF);
 pub const FOCUS: Rgb565 = rgb(0x18304D);
 /// My messages where only those holding the key can read them.
 pub const OUTBOUND: Rgb565 = rgb(0x2A62C9);
 /// My messages in an open channel, which anyone can read.
 pub const OUTBOUND_OPEN: Rgb565 = rgb(0x1E7B45);
+/// My messages sent under a session with forward secrecy.
+pub const OUTBOUND_SECRET: Rgb565 = rgb(0x7045CC);
 pub const INBOUND: Rgb565 = rgb(0x23272E);
+/// A reply's quote inside one of my bubbles: its bar, whom it quotes, and
+/// what.
+pub const QUOTE_BAR_MINE: Rgb565 = rgb(0xCFE0FF);
+pub const QUOTE_NAME_MINE: Rgb565 = rgb(0xE4EDFF);
+pub const QUOTE_TEXT_MINE: Rgb565 = rgb(0xC9D8F5);
+/// The same, in tints of [`OUTBOUND_SECRET`].
+pub const QUOTE_BAR_SECRET: Rgb565 = rgb(0xDDD0FF);
+pub const QUOTE_NAME_SECRET: Rgb565 = rgb(0xECE4FF);
+pub const QUOTE_TEXT_SECRET: Rgb565 = rgb(0xD6CCF5);
+/// The faintest of the dots in the place of a message on its way again.
+pub const GAP_DOT: Rgb565 = rgb(0x4B535E);
 pub const GREEN: Rgb565 = rgb(0x3DD68C);
 pub const AMBER: Rgb565 = rgb(0xF5B544);
 pub const RED: Rgb565 = rgb(0xFF6B5E);
 pub const FIELD: Rgb565 = rgb(0x161A20);
-/// A field while it is edited, and while it is edited in an open channel.
+/// A field while it is edited, while it is edited in an open channel, and
+/// while what it sends goes under forward secrecy.
 pub const ACTIVE_FIELD: Rgb565 = rgb(0x1A2333);
 pub const ACTIVE_FIELD_OPEN: Rgb565 = rgb(0x152B1F);
+pub const ACTIVE_FIELD_SECRET: Rgb565 = rgb(0x221A36);
 /// A switch that is off, and its knob.
 pub const SWITCH_OFF: Rgb565 = rgb(0x3A414B);
 pub const KNOB_OFF: Rgb565 = rgb(0xC9CED6);

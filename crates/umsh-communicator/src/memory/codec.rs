@@ -147,7 +147,8 @@ pub(super) fn record(disk: &Disk, key: &RecordKey, out: &mut Vec<u8>) -> bool {
             out.u8(u8::from(flags.late)
                 | u8::from(flags.notify) << 1
                 | u8::from(flags.edited) << 2
-                | u8::from(flags.deleted) << 3);
+                | u8::from(flags.deleted) << 3
+                | u8::from(flags.forward_secret) << 4);
             out.u16(record.delivery.sent);
             out.u16(record.delivery.acked);
             out.u16(record.delivery.failed);
@@ -382,6 +383,7 @@ fn message(id: u32, input: &mut In<'_>) -> Option<MessageEntry> {
         notify: flags & 2 != 0,
         edited: flags & 4 != 0,
         deleted: flags & 8 != 0,
+        forward_secret: flags & 16 != 0,
     };
     let delivery = Delivery {
         sent: input.u16()?,

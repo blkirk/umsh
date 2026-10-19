@@ -8,7 +8,7 @@ use crate::batch::{Batch, Committed};
 use crate::ids::{ChatId, MessageId, PeerId};
 use crate::record::{
     ChannelChange, ChannelRecord, ChatChange, ChatRecord, MessageRecord, PeerChange, PeerFilter,
-    PeerRecord, StoreError, Usage, WireAlias,
+    PeerRecord, ReactorRecord, StoreError, Usage, WireAlias,
 };
 
 /// A communicator's durable chat state.
@@ -31,6 +31,9 @@ pub trait ChatStore {
     ) -> impl Iterator<Item = Result<MessageRecord, StoreError>> + '_;
     fn message(&self, id: MessageId) -> Result<Option<MessageRecord>, StoreError>;
     fn body<'b>(&self, id: MessageId, out: &'b mut [u8]) -> Result<Option<&'b str>, StoreError>;
+    /// Who reacted to the message, and how: the latest from each sender,
+    /// in the order they came. Their counts are the record's `reactions`.
+    fn reactors(&self, id: MessageId) -> impl Iterator<Item = ReactorRecord> + '_;
     fn resolve_wire(&self, alias: &WireAlias) -> Option<MessageId>;
 
     fn archive<'b>(

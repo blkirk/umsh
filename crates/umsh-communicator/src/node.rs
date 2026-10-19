@@ -10,7 +10,7 @@ use core::task::Poll;
 
 use embassy_sync::waitqueue::WakerRegistration;
 
-use umsh_core::PublicKey;
+use umsh_core::{ChannelKey, PublicKey};
 use umsh_text::chat::Seeds;
 use umsh_text::node_adapter::{Departure, Sent};
 use umsh_ulcp::profiles::VETTED;
@@ -24,7 +24,7 @@ use umsh_ux_communicator::model::{
 };
 use umsh_ux_communicator::text::TextHeap;
 
-use crate::chat::{ChannelCrypto, Chats as ChatHalf};
+use crate::chat::{ChannelCrypto, Chats as ChatHalf, Joined};
 use crate::memory::MemoryStore;
 use crate::record::StoreError;
 use crate::settings::Settings;
@@ -118,6 +118,9 @@ impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
             chats.start(PublicKey(*key), self.seeds, now_ms, &mut push);
         }
         chats.hold(settings.channels(), &mut push);
+        for tag in settings.take_refused_joins() {
+            chats.let_go(tag, &mut push);
+        }
         chats.hold_peers(&settings.peers(), &mut push);
         chats.set_handle(&settings.device_name());
     }
@@ -134,6 +137,22 @@ impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
                 round_trip_ms,
                 rx,
             } => chats.pong(peer, round_trip_ms, &rx, now_ms, events),
+            Arrival::Secrecy { peer, change } => chats.secrecy(peer, change, events),
+        });
+    }
+
+    /// Whether the chats wait on the device node for a channel's key: the
+    /// device lists a channel by its tag alone.
+    pub fn misses_channel_keys(&self) -> bool {
+        self.chats.borrow().misses_keys()
+    }
+
+    /// Takes `keys`, those of the device node's channels.
+    pub fn learn_channel_keys(&self, keys: &[ChannelKey]) {
+        self.with_chats(|chats, _, _, events| {
+            for key in keys {
+                chats.learn_key(*key, events);
+            }
         });
     }
 
@@ -234,6 +253,19 @@ impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
             .keep_device_lists(record)
     }
 
+    /// Asks the device to hold the channel a join here holds already, and
+    /// lets it go if it cannot be asked.
+    fn joined(&self, joined: Option<Joined>) -> Option<ChatSummary> {
+        let (summary, join) = joined?;
+        if let Some((key, tag)) = join
+            && !self.settings.borrow_mut().join_channel(&key.0, tag)
+        {
+            self.with_chats(|chats, _, _, events| chats.let_go(tag, events));
+            return None;
+        }
+        Some(summary)
+    }
+
     fn change(&self, setting: Setting, change: impl FnOnce(&mut Settings<P>) -> bool) {
         if !change(&mut self.settings.borrow_mut()) {
             self.events
@@ -281,9 +313,10 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
     }
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
+        let mine = self.settings.borrow().avatar();
         self.chats
             .borrow()
-            .details(chat, message, self.clock.utc_offset_min())
+            .details(chat, message, self.clock.utc_offset_min(), &mine)
     }
 
     fn member(&self, chat: ChatId, message: MessageId) -> Option<Member> {
@@ -294,9 +327,15 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
 
     // ─── Sending ─────────────────────────────────────────────────────
 
-    fn send(&self, chat: ChatId, text: &str, reply_to: Option<MessageId>) -> Option<Message> {
+    fn send(
+        &self,
+        chat: ChatId,
+        text: &str,
+        reply_to: Option<MessageId>,
+        forward_secret: bool,
+    ) -> Option<Message> {
         let message = self.with_chats(|chats, now_ms, time, events| {
-            chats.send(chat, text, reply_to, now_ms, time, events)
+            chats.send(chat, text, reply_to, forward_secret, now_ms, time, events)
         });
         self.wake();
         message
@@ -312,6 +351,14 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
     fn retry(&self, chat: ChatId, message: MessageId) -> bool {
         let queued = self.with_chats(|chats, now_ms, time, events| {
             chats.retry(chat, message, now_ms, time, events)
+        });
+        self.wake();
+        queued
+    }
+
+    fn retry_without_secrecy(&self, chat: ChatId, message: MessageId) -> bool {
+        let queued = self.with_chats(|chats, now_ms, time, events| {
+            chats.retry_without_secrecy(chat, message, now_ms, time, events)
         });
         self.wake();
         queued
@@ -339,14 +386,22 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
             .peer_detail(peer, self.clock.now_ms(), self.clock.wall())
     }
 
-    /// Only the preference is kept: sessions with forward secrecy are not
-    /// started yet.
     fn set_forward_secrecy(&self, peer: PeerId, on: bool) {
         self.with_chats(|chats, _, _, events| chats.set_forward_secrecy(peer, on, events));
+        self.wake();
     }
 
     fn ping(&self, peer: PeerId) {
         self.chats.borrow_mut().ping(peer);
+        self.wake();
+    }
+
+    fn utc_offset_min(&self) -> i16 {
+        self.clock.utc_offset_min()
+    }
+
+    fn request_peer_identity(&self, peer: PeerId) {
+        self.chats.borrow_mut().request_peer_identity(peer);
         self.wake();
     }
 
@@ -365,22 +420,20 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
         Some(summary)
     }
 
-    // ─── Joining: not yet ────────────────────────────────────────────
+    // ─── Channels ────────────────────────────────────────────────────
 
-    fn join(&self, _invite: &Invite, _name: &str) -> Option<ChatSummary> {
-        None
+    fn join(&self, invite: &Invite, name: &str) -> Option<ChatSummary> {
+        let joined = self.with_chats(|chats, _, _, events| chats.join(invite, name, events));
+        self.joined(joined)
     }
 
     fn inspect_channel(&self, text: &str) -> ChannelEntry {
-        if text.trim().is_empty() {
-            ChannelEntry::Empty
-        } else {
-            ChannelEntry::Invalid
-        }
+        self.chats.borrow().inspect_channel(text)
     }
 
-    fn add_channel(&self, _text: &str) -> Option<ChatSummary> {
-        None
+    fn add_channel(&self, text: &str) -> Option<ChatSummary> {
+        let joined = self.with_chats(|chats, _, _, events| chats.add_channel(text, events));
+        self.joined(joined)
     }
 
     fn find_heard(&self, query: &str) -> Vec<Heard, MAX_HEARD> {
@@ -410,7 +463,7 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
     fn share_uri(&self, what: Shareable) -> Option<ShareUri> {
         match what {
             Shareable::Identity => self.settings.borrow().share_uri(),
-            Shareable::Channel(_) => None,
+            Shareable::Channel(chat) => self.chats.borrow().share_channel(chat),
         }
     }
 

@@ -462,6 +462,65 @@ fn pressing_an_unconfirmed_message_sends_it_again() {
     assert_eq!(delivery(app.state(), ANTENNA), Delivery::Sending);
 }
 
+/// The fixture's chat of message states, which holds a session with
+/// forward secrecy, and my message in it that went unconfirmed under one.
+const STATES: u32 = 7;
+const SECRET: u32 = (STATES << 8) | 7;
+
+fn unsent(state: &State) -> Option<u32> {
+    match state.screen() {
+        Screen::Conversation { unsent, .. } => *unsent,
+        _ => None,
+    }
+}
+
+fn forward_secret(state: &State, message: u32) -> bool {
+    let conversation = state.conversation.as_ref().expect("a chat is open");
+    let message = conversation.messages.iter().find(|m| m.id == message);
+    message.expect("the message").forward_secret
+}
+
+#[test]
+fn an_unconfirmed_message_under_forward_secrecy_asks_before_going_without() {
+    let mut app = app!();
+    app.state_mut().open_chat(STATES);
+    app.finalize_view();
+    assert!(app.state().chat(STATES).unwrap().forward_secret);
+    assert!(forward_secret(app.state(), SECRET));
+    app.state_mut().retry(SECRET);
+    app.finalize_view();
+    assert_eq!(unsent(app.state()), Some(SECRET));
+    assert_eq!(focus(app.state()), Some(keys::RESEND));
+    assert_eq!(delivery(app.state(), SECRET), Delivery::Unconfirmed);
+
+    // Back leaves it as it was.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(unsent(app.state()), None);
+    assert_eq!(focus(app.state()), Some(keys::message(SECRET)));
+    assert_eq!(delivery(app.state(), SECRET), Delivery::Unconfirmed);
+
+    // Going without, it is mine like any other.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(unsent(app.state()), Some(SECRET));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(unsent(app.state()), None);
+    assert_eq!(delivery(app.state(), SECRET), Delivery::Sending);
+    assert!(!forward_secret(app.state(), SECRET));
+}
+
+#[test]
+fn trying_again_keeps_forward_secrecy() {
+    let mut app = app!();
+    app.state_mut().open_chat(STATES);
+    app.finalize_view();
+    app.state_mut().retry(SECRET);
+    app.finalize_view();
+    run(&mut app, &[Input::Press]);
+    assert_eq!(unsent(app.state()), None);
+    assert_eq!(delivery(app.state(), SECRET), Delivery::Sending);
+    assert!(forward_secret(app.state(), SECRET));
+}
+
 #[test]
 fn spent_airtime_keeps_the_draft_and_holds_a_retry() {
     let mut app = app!();
@@ -1092,11 +1151,35 @@ fn forward_secrecy_switches_and_a_ping_is_answered() {
 }
 
 #[test]
+fn a_saved_peer_is_asked_for_their_identity() {
+    let mut app = app!();
+    open_pat(&mut app);
+    run(&mut app, &[Input::Turn(5)]);
+    assert_eq!(focus(app.state()), Some(keys::PEER_IDENTITY));
+    assert!(matches!(
+        app.state().screen(),
+        Screen::Peer {
+            requested: false,
+            ..
+        }
+    ));
+    run(&mut app, &[Input::Press]);
+    assert!(matches!(
+        app.state().screen(),
+        Screen::Peer {
+            requested: true,
+            ..
+        }
+    ));
+    assert_eq!(focus(app.state()), Some(keys::PEER_IDENTITY));
+}
+
+#[test]
 fn forget_asks_first_and_cancel_keeps_the_peer() {
     let mut app = app!();
     open_pat(&mut app);
     let peers = app.state().peers.len();
-    run(&mut app, &[Input::Turn(5)]);
+    run(&mut app, &[Input::Turn(6)]);
     assert_eq!(focus(app.state()), Some(keys::PEER_FORGET));
     run(&mut app, &[Input::Press]);
     assert_eq!(focus(app.state()), Some(keys::FORGET_CANCEL));

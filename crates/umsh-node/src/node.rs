@@ -501,6 +501,11 @@ impl<M: MacBackend> LocalNode<M> {
         self.mac.for_each_peer(f).await
     }
 
+    /// Invoke `f` with the key of every channel registered in the MAC.
+    pub async fn for_each_channel(&self, f: &mut dyn FnMut(&umsh_core::ChannelKey)) {
+        self.mac.for_each_channel(f).await
+    }
+
     /// Invoke `f` for each peer with established crypto state, passing the
     /// peer's public key, last-accepted RX counter, and persisted RX boundary.
     pub async fn for_each_peer_counter(&self, f: &mut dyn FnMut(PublicKey, u32, u32)) {
@@ -1310,6 +1315,56 @@ impl<M: MacBackend> LocalNode<M> {
         Ok(())
     }
 
+    /// Sends `payload` to `to` under the session with forward secrecy held
+    /// with them, or, without `forward_secret`, under the long-term keys
+    /// alone even while one is held. Fails with
+    /// [`NodeError::PfsSessionMissing`] when a session is wanted and none
+    /// is held: it never goes without one.
+    #[cfg(feature = "software-crypto")]
+    pub async fn send_with_secrecy(
+        &self,
+        to: &PublicKey,
+        payload: &[u8],
+        options: &SendOptions,
+        forward_secret: bool,
+    ) -> Result<SendProgressTicket, NodeError<M>> {
+        let route = if forward_secret {
+            let now_ms = self.mac.now_ms().await;
+            let route = self.state.borrow().pfs.active_route(to, now_ms);
+            Some(route.ok_or(NodeError::PfsSessionMissing)?)
+        } else {
+            None
+        };
+        self.send_via(route, to, payload, options).await
+    }
+
+    /// Sends `payload` to `to` from the session identity `route` names, to
+    /// the peer's ephemeral key, or without one from this node's own.
+    #[cfg(feature = "software-crypto")]
+    async fn send_via(
+        &self,
+        route: Option<(LocalIdentityId, PublicKey)>,
+        to: &PublicKey,
+        payload: &[u8],
+        options: &SendOptions,
+    ) -> Result<SendProgressTicket, NodeError<M>> {
+        let (identity, receipt) = match route {
+            Some((local_id, peer_ephemeral)) => (
+                local_id,
+                self.mac
+                    .send_unicast(local_id, &peer_ephemeral, payload, options)
+                    .await?,
+            ),
+            None => (
+                self.identity_id,
+                self.mac
+                    .send_unicast(self.identity_id, to, payload, options)
+                    .await?,
+            ),
+        };
+        Ok(self.register_ack_send(identity, receipt))
+    }
+
     #[cfg(feature = "software-crypto")]
     pub async fn pfs_status(&self, peer: &PublicKey) -> Result<PfsStatus, NodeError<M>> {
         let now_ms = self.mac.now_ms().await;
@@ -1725,33 +1780,21 @@ impl<M: MacBackend> Transport for LocalNode<M> {
         payload: &[u8],
         options: &SendOptions,
     ) -> Result<SendProgressTicket, Self::Error> {
+        // Under the session with forward secrecy held with them, if one is.
         #[cfg(feature = "software-crypto")]
-        let (send_identity_id, receipt) = {
+        {
             let now_ms = self.mac.now_ms().await;
-            if let Some((local_id, peer_ephemeral)) =
-                self.state.borrow().pfs.active_route(to, now_ms)
-            {
-                let receipt = self
-                    .mac
-                    .send_unicast(local_id, &peer_ephemeral, payload, options)
-                    .await?;
-                (local_id, receipt)
-            } else {
-                let receipt = self
-                    .mac
-                    .send_unicast(self.identity_id, to, payload, options)
-                    .await?;
-                (self.identity_id, receipt)
-            }
-        };
+            let route = self.state.borrow().pfs.active_route(to, now_ms);
+            self.send_via(route, to, payload, options).await
+        }
         #[cfg(not(feature = "software-crypto"))]
-        let (send_identity_id, receipt) = (
-            self.identity_id,
-            self.mac
+        {
+            let receipt = self
+                .mac
                 .send_unicast(self.identity_id, to, payload, options)
-                .await?,
-        );
-        Ok(self.register_ack_send(send_identity_id, receipt))
+                .await?;
+            Ok(self.register_ack_send(self.identity_id, receipt))
+        }
     }
 
     async fn send_all(

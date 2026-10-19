@@ -747,26 +747,68 @@ def layout_items(items):
     prev = None
     for it in items:
         k = it["k"]
-        if k in ("date", "status"):
+        if k in ("date", "status", "tomb", "parts"):
             h = 21
         elif k == "invite":
             h = 64
+        elif k == "gap":
+            h = B_LH + 2 * B_PY
         else:
             lines = wrap(it["text"], B_FS, B_MAX - 2 * B_PX)
             it["_lines"] = lines
             h = len(lines) * B_LH + 2 * B_PY
+            if it.get("quote"):
+                h += QUOTE_H
             if it.get("sender"):
                 h += 18
             h += reaction_reserve(it)
-        if prev is None or k in ("date", "status"):
-            gap = 0 if k == "status" else 3
+        if prev is None or k in ("date", "status", "parts"):
+            gap = 0 if k in ("status", "parts") else 3
+        elif k == "date" or prev["k"] == "date":
+            gap = 6
         else:
             same = (prev["k"] == k and prev.get("who") == it.get("who"))
             gap = 3 if same else 8
-        if k != "status":
+        if k not in ("status", "parts"):
             prev = it
         out.append((it, h, gap))
     return out
+
+
+# A reply's quote of the message it answers, inside the top of its bubble.
+QUOTE_H = 42
+
+
+def quote_block(x, y, w, outbound, who, snippet):
+    """The answered message's sender and the start of its text, behind a
+    bar, as the composer's Replying-to strip draws them."""
+    bar = "#CFE0FF" if outbound else C["accent"]
+    name = "#E4EDFF" if outbound else C["accent"]
+    body = "#C9D8F5" if outbound else C["text2"]
+    return [R(x, y + 5, 3, QUOTE_H - 9, bar, rx=1.5),
+            T(x + 10, y + 19, fit(who, F_SMALL, w - 10, True), F_SMALL, name,
+              700),
+            T(x + 10, y + 36, fit(snippet, F_SMALL, w - 10), F_SMALL, body)]
+
+
+def quote_width(who, snippet):
+    return min(B_MAX - 2 * B_PX,
+               10 + max(tw(who, F_SMALL, True), tw(snippet, F_SMALL)))
+
+
+def part_dots(x, cy, present, count, missing=()):
+    """One dot per part of a message arriving in pieces: filled when
+    received, hollow while awaited, amber once given up on."""
+    o = []
+    for i in range(count):
+        cx = x + 5 + i * 13
+        if i in missing:
+            o.append(CIRC(cx, cy, 4, stroke=C["amber"], sw=1.6))
+        elif i < present:
+            o.append(CIRC(cx, cy, 4.5, C["text2"]))
+        else:
+            o.append(CIRC(cx, cy, 4, stroke=C["text3"], sw=1.6))
+    return o
 
 
 def invite_card(x, y, focused, name="Trail Crew"):
@@ -803,11 +845,35 @@ def transcript(items, top, bottom, channel=False):
             y += h
             continue
         if k == "date":
-            o.append(T(W / 2, y + 15, it["text"], F_SMALL, C["text3"], 600,
-                       "middle"))
+            # The day, then the time, as the iOS separator sets them.
+            day, time = it["day"], it["time"]
+            gap_w = tw(" ", F_SMALL)
+            dw = tw(day, F_SMALL, True) + gap_w + tw(time, F_SMALL)
+            dx = W / 2 - dw / 2
+            o.append(T(dx, y + 15, day, F_SMALL, C["text3"], 700))
+            o.append(T(dx + tw(day, F_SMALL, True) + gap_w, y + 15, time,
+                       F_SMALL, C["text3"]))
         elif k == "status":
             col = {"amber": C["amber"]}.get(it.get("tone"), C["text3"])
-            o.append(T(W - 8, y + 18, it["text"], F_SMALL, col, 600, "end"))
+            if it.get("side") == "in":
+                o.append(T(in_x + 4, y + 18, it["text"], F_SMALL, col, 600))
+            else:
+                o.append(T(W - 8, y + 18, it["text"], F_SMALL, col, 600,
+                           "end"))
+        elif k == "parts":
+            o += part_dots(in_x + 2, y + 12, it["present"], it["count"],
+                           it.get("missing", ()))
+        elif k == "tomb":
+            o.append(T(in_x + 4, y + 16, it["text"], F_SEC, C["text3"],
+                       extra=' font-style="italic"'))
+        elif k == "gap":
+            # Waiting on a repair: the dots of someone typing, in the slot
+            # the missing message will take.
+            bw, bh = 62, h
+            o.append(P(rrect(in_x, y, bw, bh, 14, 14, 14, 5), fill=C["inb"]))
+            for i, shade in enumerate((C["text2"], C["text3"], "#4B535E")):
+                o.append(CIRC(in_x + 17 + i * 14, y + bh / 2, 4, shade))
+            pos[idx] = (in_x, y, bw, bh)
         elif k == "invite":
             g, w = invite_card(in_x, y, it.get("focused"))
             o += g
@@ -815,6 +881,10 @@ def transcript(items, top, bottom, channel=False):
         else:
             lines = it["_lines"]
             bw = max(tw(line, B_FS) for line in lines) + 2 * B_PX
+            if it.get("pending"):
+                bw += tw(" ", B_FS) + tw("\u22ef", B_FS, True)
+            if it.get("quote"):
+                bw = max(bw, quote_width(*it["quote"]) + 2 * B_PX)
             by = y
             if it.get("sender"):
                 o.append(T(in_x + 4, y + 14, it["sender"], F_SMALL,
@@ -822,6 +892,8 @@ def transcript(items, top, bottom, channel=False):
                 by += 18
             by += reaction_reserve(it)
             bh = len(lines) * B_LH + 2 * B_PY
+            qh = QUOTE_H if it.get("quote") else 0
+            bh += qh
             if k == "out":
                 bx = W - 8 - bw
                 d = rrect(bx, by, bw, bh, 14, 14, 5, 14)
@@ -836,9 +908,19 @@ def transcript(items, top, bottom, channel=False):
                 o.append(P(rrect(bx - 3.5, by - 3.5, bw + 7, bh + 7, 17, 17,
                                  17, 17), C["accent"], sw=2.2))
             o.append(P(d, fill=fill))
+            if qh:
+                o += quote_block(bx + B_PX, by, bw - 2 * B_PX, k == "out",
+                                 *it["quote"])
             for li, line in enumerate(lines):
-                o.append(T(bx + B_PX, by + B_PY + 18 + li * B_LH, line,
+                o.append(T(bx + B_PX, by + qh + B_PY + 18 + li * B_LH, line,
                            B_FS, "#fff" if k == "out" else C["text"]))
+            if it.get("pending"):
+                # Where the parts still to come will go.
+                lx = bx + B_PX + tw(lines[-1], B_FS) + tw(" ", B_FS)
+                ly = by + qh + B_PY + 18 + (len(lines) - 1) * B_LH
+                o.append(T(lx, ly, "\u22ef", B_FS,
+                           C["amber"] if it["pending"] == "missing"
+                           else C["text3"], 700))
             if it.get("reactions"):
                 o += reaction_cluster(bx, by, bw, k == "out",
                                       it["reactions"])
@@ -936,7 +1018,7 @@ def screen_chats(focus=1, unread=1):
              time="9m", unread=True),
         dict(kind="peer", name="Pat Okafor",
              preview="You: Bring the spare antenna?", time="41m"),
-        dict(kind="channel", name="public",
+        dict(kind="channel", name="Public",
              preview="Kit: Anyone near Mill Creek?", time="1h", muted=True),
         dict(kind="peer", name="Jo Reyes", preview="Thanks!", time="3h"),
     ]
@@ -1344,6 +1426,105 @@ def banner(title_parts, icon, w=330):
         s = fit(s, F_SEC, x + w - 10 - px, wt > 400)
         o.append(T(px, c + 6, s, F_SEC, col, wt))
         px += tw(s, F_SEC, wt > 400) + 8
+    return o
+
+
+# ---------------------------------------------------------------- message states
+def screen_times():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "in", "who": "rm", "text": "Hut tomorrow?"},
+        {"k": "out", "who": "me", "text": "Leaving at 7"},
+        {"k": "status", "text": "Delivered"},
+        {"k": "date", "day": "Today", "time": "07:12"},
+        {"k": "in", "who": "rm", "text": "Stove is lit"},
+        {"k": "in", "who": "rm", "text": "Coffee in ten"},
+    ]
+    tr, _ = transcript(items, TOP, BAR_Y)
+    o += tr
+    o += ridge_header()
+    o += composer_bar()
+    o += status(time="07:31")
+    return o
+
+
+def screen_reply_received():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [dict(CREW[2]),
+             {"k": "in", "who": "Sam Ito", "sender": "Sam",
+              "text": "Wind is up, layer on", "avatar": "peer",
+              "quote": ("You", "Switchbacks, 15 min out")}]
+    tr, _ = transcript(items, TOP, BAR_Y, channel=True)
+    o += tr
+    o += screen_header("Trail Crew", "channel", "Channel")
+    o += composer_bar(placeholder="Message Trail Crew")
+    o += status()
+    return o
+
+
+def screen_edited_deleted():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "in", "who": "rm", "text": "Meet at the north junction"},
+        {"k": "status", "side": "in", "text": "Edited"},
+        {"k": "tomb", "text": "Message deleted"},
+        {"k": "in", "who": "rm", "text": "Creek is fine after all"},
+    ]
+    tr, _ = transcript(items, TOP, COMP_Y)
+    o += tr
+    o += ridge_header()
+    o += composer(placeholder="Message", mode="inactive")
+    o += status()
+    return o
+
+
+def screen_gap():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "in", "who": "po", "text": "Bald Knob repeater is up"},
+        {"k": "gap", "who": "po"},
+        {"k": "in", "who": "po", "text": "Try the valley from the saddle"},
+    ]
+    tr, _ = transcript(items, TOP, COMP_Y)
+    o += tr
+    o += screen_header("Pat Okafor", "peer", "Direct")
+    o += composer(placeholder="Message", mode="inactive")
+    o += status()
+    return o
+
+
+def screen_gap_settled():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "in", "who": "po", "text": "It covers the north side now"},
+        {"k": "status", "side": "in", "text": "Received late"},
+        {"k": "tomb", "text": "Message unavailable"},
+        {"k": "in", "who": "po", "text": "See you Saturday"},
+    ]
+    tr, _ = transcript(items, TOP, BAR_Y)
+    o += tr
+    o += screen_header("Pat Okafor", "peer", "Direct")
+    o += composer_bar()
+    o += status()
+    return o
+
+
+def screen_parts(missing=False):
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "out", "who": "me", "text": "How is the trail past the creek?"},
+        {"k": "status", "text": "Delivered"},
+        {"k": "in", "who": "rm",
+         "text": "Washed out past the second crossing, so take the ridge",
+         "pending": "missing" if missing else "waiting"},
+        {"k": "parts", "present": 2, "count": 3,
+         "missing": (2,) if missing else ()},
+    ]
+    tr, _ = transcript(items, TOP, COMP_Y)
+    o += tr
+    o += ridge_header()
+    o += composer(placeholder="Message", mode="inactive")
+    o += status()
     return o
 
 
@@ -2217,6 +2398,38 @@ def main(path, native_dir=None):
              "A message that arrives with the screen off wakes it to this. "
              "Press opens the focused chat; typing starts a reply in it; "
              "Backspace goes back to where you were."),
+        ]),
+        ("Message states", [
+            ("Times", screen_times(),
+             "After an hour’s quiet, a separator says when the conversation "
+             "picked up again: the day, then the time, as on iOS. Today, "
+             "Yesterday, a weekday within the week, then the date. Each "
+             "message’s own time is in Details."),
+            ("Reply", screen_reply_received(),
+             "A reply quotes the start of the message it answers, with its "
+             "sender, at the top of its bubble, as the composer’s strip does "
+             "while you write one. When the answered message is not here, "
+             "the reply shows without a quote."),
+            ("Edited and deleted", screen_edited_deleted(),
+             "An edited message shows its new text and says so under the "
+             "bubble. A deleted one leaves a line in its place, with no "
+             "bubble, menu, or reactions."),
+            ("Missing message", screen_gap(),
+             "A message missing from the sequence has been asked for again. "
+             "The typing dots hold its place until it comes, so it lands "
+             "where it was sent rather than at the end."),
+            ("Found or lost", screen_gap_settled(),
+             "Above, the missing message came and fills its slot, marked "
+             "late. Below, its sender could no longer supply the next one, "
+             "and a line marks the loss."),
+            ("Arriving in parts", screen_parts(),
+             "A long message shows as its parts arrive. The dots count them, "
+             "filled as each comes in, and the ellipsis marks where the rest "
+             "will go."),
+            ("Part missing", screen_parts(missing=True),
+             "A part that never came: the message is shown without it, the "
+             "ellipsis and its dot turn amber, and the message no longer "
+             "waits."),
         ]),
         ("Channels", [
             ("Channel", screen_channel(),

@@ -33,7 +33,7 @@ use umsh_ulcp_admin::{
     Event, Freshness, LocalExchange, LocalPort, Model, Refusal, WriteId, WriteOutcome,
 };
 use umsh_ux_communicator::avatar::{AvatarStyle, PeerShape};
-use umsh_ux_communicator::heapless::{Deque, String};
+use umsh_ux_communicator::heapless::{Deque, String, Vec};
 use umsh_ux_communicator::model::{
     KeyboardSettings, NodeEvent, Profile, RadioSettings, Setting, ShareUri, brightness_at,
 };
@@ -60,6 +60,10 @@ const WRITES_KEPT: usize = 16;
 /// answers them.
 const PEER_WRITES_KEPT: usize = 8;
 
+/// How many joins of channels are remembered until the device answers
+/// them.
+const CHANNEL_WRITES_KEPT: usize = 4;
+
 /// The settings half of the communicator's node.
 pub struct Settings<P> {
     model: Model,
@@ -69,6 +73,11 @@ pub struct Settings<P> {
     /// Peers saved, or with `false` forgotten, that the device has yet to
     /// answer for, oldest first.
     peer_writes: Deque<(WriteId, [u8; 32], bool), PEER_WRITES_KEPT>,
+    /// Channels joined that the device has yet to answer for, oldest
+    /// first.
+    channel_writes: Deque<(WriteId, ChannelTag), CHANNEL_WRITES_KEPT>,
+    /// Channels the device would not join, for the chats to let go of.
+    refused_joins: Vec<ChannelTag, CHANNEL_WRITES_KEPT>,
     /// When to ask the device to save.
     save_at: Option<u64>,
     /// Whether the device's saved state at boot has been looked at.
@@ -89,6 +98,8 @@ impl<P: LocalPort> Settings<P> {
             exchange: LocalExchange::new(port),
             writes: Deque::new(),
             peer_writes: Deque::new(),
+            channel_writes: Deque::new(),
+            refused_joins: Vec::new(),
             save_at: None,
             boot_checked: false,
             airtime_at: AIRTIME_READ_MS,
@@ -152,6 +163,20 @@ impl<P: LocalPort> Settings<P> {
                 if self.peer_writes.iter().any(|(write, ..)| *write == id) {
                     self.peer_writes.retain(|(write, ..)| *write != id);
                     events(NodeEvent::SettingsChanged);
+                    return;
+                }
+                if let Some(&(_, tag)) = self.channel_writes.iter().find(|(write, _)| *write == id)
+                {
+                    self.channel_writes.retain(|(write, _)| *write != id);
+                    // An answer that went astray says nothing: the device
+                    // is read again, and the channel stays until it says.
+                    let refused = matches!(
+                        outcome,
+                        WriteOutcome::Refused(_) | WriteOutcome::Skipped | WriteOutcome::Unsent
+                    );
+                    if refused && !self.model.channels().any(|held| *held == tag.0) {
+                        _ = self.refused_joins.push(tag);
+                    }
                     return;
                 }
                 let Some(setting) = self
@@ -266,6 +291,23 @@ impl<P: LocalPort> Settings<P> {
         self.peer_written(key, false, write)
     }
 
+    /// Has the device join the channel `key`, whose tag is `tag`.
+    pub fn join_channel(&mut self, key: &[u8; 32], tag: ChannelTag) -> bool {
+        let Ok(id) = self.model.join_channel(key) else {
+            return false;
+        };
+        if self.channel_writes.is_full() {
+            self.channel_writes.pop_front();
+        }
+        let _ = self.channel_writes.push_back((id, tag));
+        true
+    }
+
+    /// The channels the device would not join since last asked.
+    pub fn take_refused_joins(&mut self) -> Vec<ChannelTag, CHANNEL_WRITES_KEPT> {
+        core::mem::take(&mut self.refused_joins)
+    }
+
     fn peer_written(
         &mut self,
         key: &[u8; 32],
@@ -318,9 +360,18 @@ impl<P: LocalPort> Settings<P> {
         peers
     }
 
-    /// The channels the device identity holds, by tag.
+    /// The channels the device identity holds, by tag, and those it has
+    /// been asked to join and has yet to answer for.
     pub fn channels(&self) -> impl Iterator<Item = ChannelTag> + '_ {
-        self.model.channels().map(|tag| ChannelTag(*tag))
+        let joining = self
+            .channel_writes
+            .iter()
+            .map(|&(_, tag)| tag)
+            .filter(|tag| !self.model.channels().any(|held| *held == tag.0));
+        self.model
+            .channels()
+            .map(|tag| ChannelTag(*tag))
+            .chain(joining)
     }
 
     /// How the device identity is drawn: its key's leading octets as the

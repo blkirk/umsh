@@ -15,13 +15,14 @@ use embedded_graphics::prelude::RgbColor;
 use heapless::Vec;
 
 use super::label;
+use super::setting::{card, choice};
 use crate::avatar::AvatarStyle;
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, Invite, MAX_MESSAGES, Message,
-    MessageId, Messages, Reacted, Reaction, Reactions, State,
+    MessageId, Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State,
 };
 use crate::nav::{Screen, keys};
-use crate::text::DraftText;
+use crate::text::{DraftText, SharedText};
 use crate::{font, icon, theme};
 use buoyant::font::PrerenderedFont;
 use buoyant::primitives::geometry::CornerRadii;
@@ -37,8 +38,12 @@ const BAR: u32 = 24;
 /// From the screen's edges to the bubbles.
 const SIDE: u32 = 8;
 const BUBBLE_MAX: u32 = 330;
+/// The card of how to send a message again.
+const RESEND_WIDTH: u32 = 360;
 const BUBBLE_PAD_X: u32 = 11;
 const BUBBLE_PAD_Y: u32 = 4;
+/// A line of a bubble's text: 1.2 em.
+const BODY_LINE: u32 = theme::BODY * 6 / 5;
 const BUBBLE_RADIUS: u16 = 14;
 /// The corner on the sender's side, at the bottom.
 const TAIL_RADIUS: u16 = 5;
@@ -78,9 +83,14 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     let conversation = state.conversation(chat);
     let messages = conversation.map_or(&[][..], |c| &c.messages);
     let sent = conversation.map_or(0, |c| c.sent);
-    let (actions, reply) = match state.screen() {
-        Screen::Conversation { actions, reply, .. } => (*actions, *reply),
-        _ => (None, None),
+    let (actions, reply, unsent) = match state.screen() {
+        Screen::Conversation {
+            actions,
+            reply,
+            unsent,
+            ..
+        } => (*actions, *reply, *unsent),
+        _ => (None, None, None),
     };
     // A message's actions are part of reading it.
     let reading = actions.is_some()
@@ -92,18 +102,29 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
     let find = |id: Option<MessageId>| id.and_then(|id| messages.iter().find(|m| m.id == id));
     // The menu offers my reaction as the one already chosen, and a
     // member's message offers its sender.
-    let menu = find(actions).map(|m| {
-        let join = m.invite.as_ref().map(|invite| {
-            let mut text = MenuText::new();
-            _ = core::fmt::write(&mut text, format_args!("Join {}", invite.name.as_str()));
-            text
-        });
-        (m.my_reaction(), m.sender.is_some(), join)
-    });
+    let over = find(actions)
+        .map(|m| {
+            let join = m.invite.as_ref().map(|invite| {
+                let mut text = MenuText::new();
+                _ = core::fmt::write(&mut text, format_args!("Join {}", invite.name.as_str()));
+                text
+            });
+            Over::Actions(m.my_reaction(), m.sender.is_some(), join)
+        })
+        .or(unsent.map(|_| Over::Resend));
     let quoted = find(reply).map(|message| quote(message, summary.map_or("", |s| &s.name)));
     let kind = summary.map(|s| s.kind);
     let channel = matches!(kind, Some(ChatKind::Channel { .. }));
     let open = kind.is_some_and(ChatKind::is_open);
+    // Editing, the composer takes the color of what it will send: green
+    // where anyone can read it, violet under forward secrecy.
+    let tone = if open {
+        (theme::ACTIVE_FIELD_OPEN, theme::ACCENT_OPEN)
+    } else if summary.is_some_and(|s| s.forward_secret) {
+        (theme::ACTIVE_FIELD_SECRET, theme::ACCENT_SECRET)
+    } else {
+        (theme::ACTIVE_FIELD, theme::ACCENT)
+    };
     let mut placeholder = Placeholder::new();
     _ = core::fmt::write(
         &mut placeholder,
@@ -115,10 +136,22 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             summary.map(|s| &s.avatar),
             summary.map(|s| s.kind),
         ),
-        history(messages, sent, actions, channel, open),
+        history(
+            messages,
+            sent,
+            actions,
+            channel,
+            open,
+            Times {
+                now: state.wall_time,
+                offset_min: state.utc_offset_min(),
+                // A full window may have more behind it.
+                older: messages.len() == MAX_MESSAGES,
+            },
+        ),
         state.airtime_wait.map(airtime_line),
         quoted,
-        summary.map(|s| composer(chat, &s.draft, reading, open, &placeholder)),
+        summary.map(|s| composer(chat, &s.draft, reading, tone, &placeholder)),
     ))
     .with_spacing(0)
     .bound_focus(BoundaryBehavior::Stop)
@@ -136,9 +169,59 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
         }
         _ => KeyResponse::Ignored,
     })
-    .popover(menu.as_ref(), |(mine, member, join)| {
-        actions_menu(*mine, *member, join.clone())
+    // One popover for both: each wrapper around the conversation costs the
+    // Pager's stack a copy of its render tree.
+    .popover(over.as_ref(), |over| {
+        buoyant::match_view!(over, {
+            Over::Actions(mine, member, join) => actions_menu(*mine, *member, join.clone()),
+            Over::Resend => resend_choices(),
+        })
     })
+}
+
+/// What opens over the conversation.
+#[derive(Clone)]
+enum Over {
+    /// A message's actions: my reaction, whether a member sent it, and the
+    /// channel it invites to.
+    Actions(Option<Reaction>, bool, Option<MenuText>),
+    /// How to send again a message that was to go under forward secrecy.
+    Resend,
+}
+
+/// How to send again a message that was to go under forward secrecy.
+#[inline(never)]
+fn resend_choices() -> impl View<Rgb565, State> + use<> {
+    let text = |text: &str| heapless::String::try_from(text).unwrap_or_default();
+    card(
+        VStack::new((
+            choice(
+                text("Try again"),
+                keys::RESEND,
+                State::resend,
+                theme::TEXT,
+                None,
+            ),
+            choice(
+                text("Send without forward secrecy"),
+                keys::RESEND_WITHOUT_SECRECY,
+                State::resend_without_secrecy,
+                theme::TEXT,
+                None,
+            ),
+            choice(
+                text("Cancel"),
+                keys::RESEND_CANCEL,
+                |s| _ = s.cancel_resend(),
+                theme::TEXT,
+                None,
+            ),
+        ))
+        .with_spacing(0),
+        RESEND_WIDTH,
+        HorizontalAlignment::Center,
+        |s| _ = s.cancel_resend(),
+    )
 }
 
 /// Back, the peer or channel, and how far away a peer is or that it is a
@@ -206,6 +289,7 @@ fn history(
     acting_on: Option<MessageId>,
     channel: bool,
     open: bool,
+    times: Times,
 ) -> impl View<Rgb565, State> + use<> {
     let messages = Messages::from_slice(messages).unwrap_or_default();
     let ids: Vec<MessageId, MAX_MESSAGES> = messages.iter().map(|m| m.id).collect();
@@ -223,7 +307,7 @@ fn history(
             let delivery = Some(i) == newest_sent
                 || Some(i) == newest_delivered
                 || messages[i].delivery == Delivery::Unconfirmed;
-            item(&messages, i, delivery, acting_on, channel, open)
+            item(&messages, i, delivery, acting_on, channel, open, times)
         })
         .keyed(move |&i| keys::message(ids[i])),
     )
@@ -245,23 +329,50 @@ fn item(
     acting_on: Option<MessageId>,
     channel: bool,
     open: bool,
+    times: Times,
 ) -> impl View<Rgb565, State> + use<> {
     let message = &messages[i];
-    let follows_same = i.checked_sub(1).is_some_and(|p| {
-        messages[p].direction == message.direction && messages[p].sender == message.sender
-    });
-    let gap = if i == 0 || follows_same {
+    // A run of messages on their way again shows as the first of them.
+    let pending = message.presence == Presence::PendingRepair;
+    let collapsed = pending
+        && i.checked_sub(1)
+            .is_some_and(|p| messages[p].presence == Presence::PendingRepair);
+    let separator = (!collapsed)
+        .then(|| separator(messages, i, times))
+        .flatten();
+    let follows_same = separator.is_none()
+        && i.checked_sub(1).is_some_and(|p| {
+            messages[p].direction == message.direction && messages[p].sender == message.sender
+        });
+    let gap = if collapsed {
+        0
+    } else if i == 0 || follows_same {
         GAP_SAME
     } else {
         GAP_CHANGE
     };
+    // What stands in the place of a message that is not there.
+    let stand_in = if collapsed {
+        None
+    } else if pending {
+        Some(StandIn::Coming)
+    } else if message.presence == Presence::Unavailable {
+        Some(StandIn::Gone("Message unavailable"))
+    } else if message.deleted {
+        Some(StandIn::Gone("Message deleted"))
+    } else {
+        None
+    };
+    let shown = !collapsed && stand_in.is_none();
     let outbound = message.direction == Direction::Outbound;
     let alignment = if outbound {
         HorizontalAlignment::Trailing
     } else {
         HorizontalAlignment::Leading
     };
-    let sender = (!follows_same).then(|| message.sender.clone()).flatten();
+    let sender = (!follows_same && !collapsed)
+        .then(|| message.sender.clone())
+        .flatten();
     let ends_run = messages
         .get(i + 1)
         .is_none_or(|next| next.direction != message.direction || next.sender != message.sender);
@@ -270,7 +381,7 @@ fn item(
     let avatar = message
         .sender
         .as_ref()
-        .filter(|_| beside_avatar && ends_run)
+        .filter(|_| beside_avatar && ends_run && !collapsed)
         .map(|sender| {
             Lazy::new(sender.avatar.clone(), member_avatar)
                 .padding(Edges::Leading, MEMBER_AVATAR_X)
@@ -284,7 +395,21 @@ fn item(
     } else {
         0
     });
+    let notes = match stand_in {
+        Some(stand_in) => Some(Notes::StandIn(stand_in)),
+        None if shown => {
+            let caption = caption(message, delivery);
+            let parts = message.parts;
+            (caption.is_some() || parts.is_some()).then_some(Notes::Below { caption, parts })
+        }
+        None => None,
+    };
     VStack::new((
+        separator.map(|day| {
+            Lazy::new(day, separator_line)
+                .flex_infinite_width(HorizontalAlignment::Center)
+                .padding(Edges::Bottom, GAP_SEPARATOR)
+        }),
         sender.map(|sender| {
             label::<24>(
                 &sender.name,
@@ -296,8 +421,11 @@ fn item(
             .with_height(SENDER_LINE)
             .padding(Edges::Leading, lead + 4)
         }),
-        bubble(message, acting_on == Some(message.id), open).padding(Edges::Leading, lead - SIDE),
-        delivery.then(|| delivery_line(message.delivery)),
+        shown.then(|| {
+            bubble(message, acting_on == Some(message.id), open)
+                .padding(Edges::Leading, lead - SIDE)
+        }),
+        notes.map(|notes| Lazy::new((notes, outbound, beside_avatar), notes_view)),
     ))
     .with_spacing(0)
     .with_alignment(alignment)
@@ -307,13 +435,53 @@ fn item(
     .padding(Edges::Top, gap + reserve)
 }
 
+/// What goes with a message besides its bubble: what stands in its place
+/// when it is not there, or the line about it and the dots of its parts.
+#[derive(Clone, Copy)]
+enum Notes {
+    StandIn(StandIn),
+    Below {
+        caption: Option<Caption>,
+        parts: Option<Parts>,
+    },
+}
+
+/// A message's notes, set in from its side as its bubble is.
+///
+/// Built from its data each time it is drawn ([`Lazy`]), as a bubble's
+/// contents are.
+fn notes_view(
+    &(notes, outbound, beside_avatar): &(Notes, bool, bool),
+) -> impl View<Rgb565, ()> + use<> {
+    let lead = if beside_avatar { IN_X } else { SIDE };
+    let (stand_in, caption, parts) = match notes {
+        Notes::StandIn(stand_in) => (Some(stand_in), None, None),
+        Notes::Below { caption, parts } => (None, caption, parts),
+    };
+    VStack::new((
+        stand_in
+            .map(|stand_in| stand_in_view(stand_in, outbound).padding(Edges::Leading, lead - SIDE)),
+        caption.map(|caption| {
+            caption_line(caption, outbound)
+                .padding(Edges::Leading, lead + 4)
+                .padding(Edges::Trailing, SIDE)
+        }),
+        parts.map(|parts| part_dots(parts).padding(Edges::Leading, lead + 2)),
+    ))
+    .with_spacing(0)
+    .with_alignment(if outbound {
+        HorizontalAlignment::Trailing
+    } else {
+        HorizontalAlignment::Leading
+    })
+}
+
 /// A message in its bubble. Mine are in the color that says who can read
-/// them: green in an `open` channel.
+/// them: green in an `open` channel, violet when sent under a session with
+/// forward secrecy.
 fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, State> + use<> {
     let id = message.id;
-    let text = message.text.clone();
     let reactions = message.reactions.clone();
-    let invite = message.invite.clone();
     let outbound = message.direction == Direction::Outbound;
     let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
     if outbound {
@@ -325,6 +493,8 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
         (
             if open {
                 theme::OUTBOUND_OPEN
+            } else if message.forward_secret {
+                theme::OUTBOUND_SECRET
             } else {
                 theme::OUTBOUND
             },
@@ -333,6 +503,24 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
         )
     } else {
         (theme::INBOUND, theme::TEXT, HorizontalAlignment::Leading)
+    };
+    let body = Body {
+        text: message.text.clone(),
+        reply: message.reply.clone(),
+        // Parts still to come go after the text: amber once one will not.
+        to_come: message.parts.map(|parts| {
+            if parts.lost == 0 {
+                theme::TEXT_TERTIARY
+            } else {
+                theme::AMBER
+            }
+        }),
+        invite: message.invite.clone(),
+        fill,
+        color,
+        corners,
+        outbound,
+        forward_secret: message.forward_secret,
     };
     let corner = if outbound {
         Alignment::TopLeading
@@ -351,46 +539,148 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
             }
         },
         move |button: ButtonState| {
-            VStack::new((
-                // An invitation is its card alone: its text is only the
-                // channel's link.
-                invite.is_none().then(|| {
-                    Text::new(text.clone(), &font::REGULAR)
-                        .with_font_size(theme::BODY)
-                        .foreground_color(color)
-                        .hint_background_color(fill)
-                        .padding(Edges::Horizontal, BUBBLE_PAD_X)
-                        .padding(Edges::Vertical, BUBBLE_PAD_Y)
-                        .background_color(fill, RoundedRectangle::with_radii(corners))
-                }),
-                invite
-                    .as_ref()
-                    .map(|invite| Lazy::new((invite.clone(), fill, color, corners), invite_card)),
-            ))
-            .with_spacing(GAP_SAME)
-            .with_alignment(side)
-            .padding(Edges::All, RING_GAP)
-            .overlay(
-                Alignment::Center,
-                (button.is_focused() || acting_on).then(|| {
-                    RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
-                        .stroked(2)
-                        .foreground_color(theme::ACCENT)
-                }),
-            )
-            // Over the ring, so a chip cuts it as it cuts the bubble.
-            .overlay(
-                corner,
-                (!reactions.is_empty())
-                    .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
-            )
-            // Text wraps to fit; a short bubble keeps to its side.
-            .flex_frame()
-            .with_max_width(BUBBLE_MAX + 2 * RING_GAP)
-            .with_horizontal_alignment(side)
+            Lazy::new(body.clone(), body_view)
+                .padding(Edges::All, RING_GAP)
+                .overlay(
+                    Alignment::Center,
+                    (button.is_focused() || acting_on).then(|| {
+                        RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
+                            .stroked(2)
+                            .foreground_color(theme::ACCENT)
+                    }),
+                )
+                // Over the ring, so a chip cuts it as it cuts the bubble.
+                .overlay(
+                    corner,
+                    (!reactions.is_empty())
+                        .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
+                )
+                // Text wraps to fit; a short bubble keeps to its side.
+                .flex_frame()
+                .with_max_width(BUBBLE_MAX + 2 * RING_GAP)
+                .with_horizontal_alignment(side)
         },
     )
     .padding(Edges::Horizontal, SIDE - RING_GAP)
+}
+
+/// What a bubble holds, and how it is drawn.
+#[derive(Clone)]
+struct Body {
+    text: SharedText,
+    reply: Option<Quote>,
+    /// The color of the dots for parts still to come.
+    to_come: Option<Rgb565>,
+    invite: Option<Invite>,
+    fill: Rgb565,
+    color: Rgb565,
+    corners: CornerRadii<u16>,
+    outbound: bool,
+    forward_secret: bool,
+}
+
+/// A message's text, under the quote of what it answers and before the
+/// dots for parts still to come; or an invitation, which is its card
+/// alone: its text is only the channel's link.
+///
+/// Built from its data each time it is drawn ([`Lazy`]): kept in the
+/// render trees, every bubble's would outweigh the rest of the screen.
+fn body_view(body: &Body) -> impl View<Rgb565, ()> + use<> {
+    let Body {
+        fill,
+        color,
+        corners,
+        outbound,
+        forward_secret,
+        ..
+    } = *body;
+    let quote_colors = match (outbound, forward_secret) {
+        (true, true) => (
+            theme::QUOTE_BAR_SECRET,
+            theme::QUOTE_NAME_SECRET,
+            theme::QUOTE_TEXT_SECRET,
+        ),
+        (true, false) => (
+            theme::QUOTE_BAR_MINE,
+            theme::QUOTE_NAME_MINE,
+            theme::QUOTE_TEXT_MINE,
+        ),
+        (false, _) => (theme::ACCENT, theme::ACCENT, theme::TEXT_SECONDARY),
+    };
+    VStack::new((
+        body.invite.is_none().then(|| {
+            VStack::new((
+                body.reply.as_ref().map(|reply| quoted(reply, quote_colors)),
+                HStack::new((
+                    Text::new(body.text.clone(), &font::REGULAR)
+                        .with_font_size(theme::BODY)
+                        .foreground_color(color),
+                    body.to_come.map(to_come_dots),
+                ))
+                .with_spacing(4)
+                .with_alignment(VerticalAlignment::Bottom)
+                .hint_background_color(fill),
+            ))
+            .with_spacing(0)
+            .with_alignment(HorizontalAlignment::Leading)
+            .padding(Edges::Horizontal, BUBBLE_PAD_X)
+            .padding(Edges::Vertical, BUBBLE_PAD_Y)
+            .background_color(fill, RoundedRectangle::with_radii(corners))
+        }),
+        body.invite
+            .as_ref()
+            .map(|invite| invite_card(invite, fill, color, corners)),
+    ))
+}
+
+/// Where the parts still to come will go, after a message's text: three
+/// dots at the middle of its last line.
+fn to_come_dots(color: Rgb565) -> impl View<Rgb565, ()> + use<> {
+    let dot = Circle.foreground_color(color).frame_sized(4, 4);
+    HStack::new((dot.clone(), dot.clone(), dot))
+        .with_spacing(3)
+        .padding(Edges::Bottom, BODY_LINE / 2 - 4)
+}
+
+/// A reply's quote, at the top of its bubble.
+const QUOTED: u32 = 38;
+
+/// Whom and what a reply answers, behind a bar, as the quote over the
+/// composer shows a draft's: in its bar's, the name's, and the text's
+/// `colors`, which in my bubbles are tints of the bubble's.
+fn quoted(
+    reply: &Quote,
+    (bar, name, text): (Rgb565, Rgb565, Rgb565),
+) -> impl View<Rgb565, ()> + use<> {
+    let line = |face| {
+        move |s| {
+            Text::new(s, face)
+                .with_font_size(theme::SMALL)
+                .with_line_limit(1)
+        }
+    };
+    HStack::new((
+        RoundedRectangle::new(1)
+            .foreground_color(bar)
+            .frame_sized(3, QUOTED - 6),
+        VStack::new((
+            reply
+                .name
+                .clone()
+                .map(|who| line(&font::BOLD)(who).foreground_color(name)),
+            reply.name.is_none().then(|| {
+                Text::new("You", &font::BOLD)
+                    .with_font_size(theme::SMALL)
+                    .foreground_color(name)
+            }),
+            line(&font::REGULAR)(reply.text.clone()).foreground_color(text),
+        ))
+        .with_spacing(0)
+        .with_alignment(HorizontalAlignment::Leading),
+    ))
+    .with_spacing(7)
+    .frame()
+    .with_height(QUOTED)
 }
 
 /// An invitation's card, and its avatar.
@@ -400,12 +690,12 @@ const CARD_AVATAR: u32 = 44;
 
 /// The channel an invitation is to, in a card that a press can take: a link
 /// inside text could not be focused.
-///
-/// Built from its data each time it is drawn ([`Lazy`]), as the chips are.
 fn invite_card(
-    (invite, fill, color, corners): &(Invite, Rgb565, Rgb565, CornerRadii<u16>),
+    invite: &Invite,
+    fill: Rgb565,
+    color: Rgb565,
+    corners: CornerRadii<u16>,
 ) -> impl View<Rgb565, ()> + use<> {
-    let (fill, color, corners) = (*fill, *color, *corners);
     HStack::new((
         super::avatar::view(&invite.avatar(), CARD_AVATAR),
         VStack::new((
@@ -566,17 +856,273 @@ fn chips((reactions, outbound, open): &(Reactions, bool, bool)) -> impl View<Rgb
     })
 }
 
-fn delivery_line(delivery: Delivery) -> impl View<Rgb565, State> + use<> {
-    let (text, color) = match delivery {
-        Delivery::Sending => ("Sending", theme::TEXT_TERTIARY),
-        Delivery::Sent => ("Sent", theme::TEXT_TERTIARY),
-        Delivery::Delivered => ("Delivered", theme::TEXT_TERTIARY),
-        Delivery::Unconfirmed => ("Unconfirmed", theme::AMBER),
+/// What the line under a message says: that it was changed or came late,
+/// and, when asked, how its delivery went.
+#[derive(Clone, Copy)]
+struct Caption {
+    edited: bool,
+    status: Option<&'static str>,
+    color: Rgb565,
+}
+
+fn caption(message: &Message, delivery: bool) -> Option<Caption> {
+    let mut color = theme::TEXT_TERTIARY;
+    let status = match message.direction {
+        Direction::Inbound if message.late => Some("Received late"),
+        Direction::Outbound if delivery => Some(match message.delivery {
+            Delivery::Sending => "Sending",
+            Delivery::Sent => "Sent",
+            Delivery::Delivered => "Delivered",
+            Delivery::Unconfirmed => {
+                color = theme::AMBER;
+                "Unconfirmed"
+            }
+        }),
+        _ => None,
     };
-    label::<16>(text, &font::SEMIBOLD, theme::SMALL, color)
+    (message.edited || status.is_some()).then_some(Caption {
+        edited: message.edited,
+        status,
+        color,
+    })
+}
+
+fn caption_line(caption: Caption, outbound: bool) -> impl View<Rgb565, ()> + use<> {
+    let mut text: heapless::String<40> = heapless::String::new();
+    if caption.edited {
+        _ = text.push_str("Edited");
+    }
+    if let Some(status) = caption.status {
+        if !text.is_empty() {
+            _ = text.push_str(" \u{B7} ");
+        }
+        _ = text.push_str(status);
+    }
+    Text::new(text, &font::SEMIBOLD)
+        .with_font_size(theme::SMALL)
+        .with_line_limit(1)
+        .foreground_color(caption.color)
         .frame()
         .with_height(STATUS_LINE)
-        .padding(Edges::Trailing, SIDE)
+        .flex_infinite_width(if outbound {
+            HorizontalAlignment::Trailing
+        } else {
+            HorizontalAlignment::Leading
+        })
+}
+
+/// What stands in the place of a message that is not there: the dots of
+/// one on its way again, or a line saying it is gone.
+#[derive(Clone, Copy)]
+enum StandIn {
+    Coming,
+    Gone(&'static str),
+}
+
+/// The width of the bubble that holds a message's place while it comes
+/// again.
+const COMING_WIDTH: u32 = 62;
+
+fn stand_in_view(stand_in: StandIn, outbound: bool) -> impl View<Rgb565, ()> + use<> {
+    let side = if outbound {
+        HorizontalAlignment::Trailing
+    } else {
+        HorizontalAlignment::Leading
+    };
+    let coming = matches!(stand_in, StandIn::Coming).then(|| {
+        let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
+        if outbound {
+            corners.bottom_right = TAIL_RADIUS;
+        } else {
+            corners.bottom_left = TAIL_RADIUS;
+        }
+        let dot = |color| Circle.foreground_color(color).frame_sized(8, 8);
+        HStack::new((
+            dot(theme::TEXT_SECONDARY),
+            dot(theme::TEXT_TERTIARY),
+            dot(theme::GAP_DOT),
+        ))
+        .with_spacing(6)
+        .frame_sized(COMING_WIDTH, BODY_LINE + 2 * BUBBLE_PAD_Y)
+        .background_color(
+            if outbound {
+                theme::OUTBOUND
+            } else {
+                theme::INBOUND
+            },
+            RoundedRectangle::with_radii(corners),
+        )
+    });
+    let gone = match stand_in {
+        StandIn::Gone(text) => Some(
+            Text::new(text, &font::REGULAR)
+                .with_font_size(theme::SECONDARY)
+                .with_line_limit(1)
+                .foreground_color(theme::TEXT_TERTIARY)
+                .frame()
+                .with_height(STATUS_LINE)
+                .padding(Edges::Horizontal, 4),
+        ),
+        StandIn::Coming => None,
+    };
+    VStack::new((coming, gone))
+        .padding(Edges::Horizontal, SIDE)
+        .flex_infinite_width(side)
+}
+
+/// A dot for each part of a message arriving in parts: filled once it
+/// came, hollow while it is awaited, amber when it will not come.
+fn part_dots(parts: Parts) -> impl View<Rgb565, ()> + use<> {
+    let count = usize::from(parts.count).min(PART_INDICES.len());
+    ForEach::<{ PART_INDICES.len() }>::new_horizontal(&PART_INDICES[..count], move |&i| {
+        let bit = 1u16 << i;
+        let (filled, color) = if parts.lost & bit != 0 {
+            (false, theme::AMBER)
+        } else if parts.received & bit != 0 {
+            (true, theme::TEXT_SECONDARY)
+        } else {
+            (false, theme::TEXT_TERTIARY)
+        };
+        ZStack::new((
+            filled.then(|| Circle.foreground_color(color).frame_sized(9, 9)),
+            (!filled).then(|| Circle.stroked(2).foreground_color(color).frame_sized(8, 8)),
+        ))
+        .frame_sized(9, 9)
+    })
+    .with_spacing(4)
+    .frame()
+    .with_height(STATUS_LINE)
+}
+
+static PART_INDICES: [u16; 16] = {
+    let mut a = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        a[i] = i as u16;
+        i += 1;
+    }
+    a
+};
+
+/// When the conversation picked up again after a lull: the local day and
+/// time of the message after it.
+#[derive(Clone, Copy)]
+struct Times {
+    /// Now, in Unix seconds, when the clock is known.
+    now: Option<u32>,
+    offset_min: i16,
+    /// Messages older than those shown may be kept.
+    older: bool,
+}
+
+/// How long a lull runs before the conversation says when it picked up
+/// again: an hour, as on iOS.
+const LULL: u32 = 60 * 60;
+
+/// The day and the time over the message `i`, when a lull went before it,
+/// or when it is the first there is.
+fn separator(messages: &Messages, i: usize, times: Times) -> Option<Stamp> {
+    let time = messages[i].time?;
+    let lull = match messages[..i].iter().rev().find_map(|m| m.time) {
+        Some(before) => time.saturating_sub(before) >= LULL,
+        None => !times.older,
+    };
+    if !lull {
+        return None;
+    }
+    let local = |time: u32| i64::from(time) + i64::from(times.offset_min) * 60;
+    Some(Stamp {
+        day: local(time).div_euclid(86_400) as i32,
+        minute: (local(time).rem_euclid(86_400) / 60) as u16,
+        today: times.now.map(|now| local(now).div_euclid(86_400) as i32),
+    })
+}
+
+/// When a lull ended, in local time: the day since 1970-01-01 and the
+/// minute of that day, and today when the clock is known.
+#[derive(Clone, Copy)]
+struct Stamp {
+    day: i32,
+    minute: u16,
+    today: Option<i32>,
+}
+
+/// A stamp's day: Today, Yesterday, a weekday within the week, or a date.
+fn day_label(stamp: &Stamp) -> heapless::String<16> {
+    let mut label = heapless::String::new();
+    match stamp.today.map(|today| today - stamp.day) {
+        Some(0) => _ = label.push_str("Today"),
+        Some(1) => _ = label.push_str("Yesterday"),
+        // Inside the last week a weekday places a message better than a
+        // date does.
+        Some(2..=6) => _ = label.push_str(WEEKDAYS[(stamp.day + 4).rem_euclid(7) as usize]),
+        _ => {
+            let (year, month, date) = civil(i64::from(stamp.day));
+            _ = core::fmt::write(
+                &mut label,
+                format_args!("{} {date}", MONTHS[month as usize - 1]),
+            );
+            if stamp
+                .today
+                .map(|today| civil(i64::from(today)))
+                .is_none_or(|(this_year, ..)| this_year != year)
+            {
+                _ = core::fmt::write(&mut label, format_args!(", {year}"));
+            }
+        }
+    }
+    label
+}
+
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The year, month, and day of the month of `days` since 1970-01-01, in
+/// the proleptic Gregorian calendar.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// How far the message after a separator stands below it.
+const GAP_SEPARATOR: u32 = 6;
+
+fn separator_line(stamp: &Stamp) -> impl View<Rgb565, ()> + use<> {
+    let mut clock: heapless::String<8> = heapless::String::new();
+    _ = core::fmt::write(
+        &mut clock,
+        format_args!("{:02}:{:02}", stamp.minute / 60, stamp.minute % 60),
+    );
+    HStack::new((
+        Text::new(day_label(stamp), &font::BOLD)
+            .with_font_size(theme::SMALL)
+            .foreground_color(theme::TEXT_TERTIARY),
+        Text::new(clock, &font::REGULAR)
+            .with_font_size(theme::SMALL)
+            .foreground_color(theme::TEXT_TERTIARY),
+    ))
+    .with_spacing(4)
+    .frame()
+    .with_height(STATUS_LINE)
 }
 
 /// When sending returns, while airtime is spent.
@@ -598,23 +1144,24 @@ fn airtime_line(wait: u16) -> impl View<Rgb565, State> + use<> {
 }
 
 /// The composer, or the line it folds to while you read.
+/// `tone` is the field's fill and ring while it is edited.
 fn composer(
     chat: ChatId,
     draft: &Draft,
     folded: bool,
-    open: bool,
+    tone: (Rgb565, Rgb565),
     placeholder: &Placeholder,
 ) -> impl View<Rgb565, State> + use<> {
     buoyant::match_view!(folded, {
         true => folded_bar(draft, placeholder.clone()),
-        false => field(chat, draft, open, placeholder.clone()),
+        false => field(chat, draft, tone, placeholder.clone()),
     })
 }
 
 fn field(
     chat: ChatId,
     draft: &Draft,
-    open: bool,
+    tone: (Rgb565, Rgb565),
     placeholder: Placeholder,
 ) -> impl View<Rgb565, State> + use<> {
     let empty = draft.is_empty();
@@ -626,7 +1173,7 @@ fn field(
     .on_submit(move |s: &mut State| s.send(chat))
     .on_active(State::field_active)
     .with_label(move |status: TextFieldStatus, area| {
-        field_look(status, area, open, empty.then_some(&placeholder))
+        field_look(status, area, tone, empty.then_some(&placeholder))
     })
     .focus_key(keys::COMPOSER)
     .padding(Edges::Horizontal, SIDE)
@@ -636,16 +1183,9 @@ fn field(
 fn field_look(
     status: TextFieldStatus,
     area: TextArea<'static, DraftText, PrerenderedFont>,
-    open: bool,
+    (active_fill, active_ring): (Rgb565, Rgb565),
     placeholder: Option<&Placeholder>,
 ) -> impl View<Rgb565, State> + use<> {
-    // Editing, the field takes the color of what it will send: green where
-    // anyone can read it.
-    let (active_fill, active_ring) = if open {
-        (theme::ACTIVE_FIELD_OPEN, theme::ACCENT_OPEN)
-    } else {
-        (theme::ACTIVE_FIELD, theme::ACCENT)
-    };
     let (fill, line_width) = if status.is_active() {
         (active_fill, 2)
     } else {

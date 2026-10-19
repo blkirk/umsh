@@ -1,6 +1,6 @@
 //! How a message reached this device: the rows of the iOS details sheet
-//! that a reader on a communicator needs. The wheel scrolls through them;
-//! Backspace goes back.
+//! that a reader on a communicator needs, and who reacted to it. The wheel
+//! scrolls through them; Backspace goes back.
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
@@ -9,13 +9,28 @@ use embedded_graphics::pixelcolor::Rgb565;
 use heapless::String;
 
 use super::conversation::header;
-use super::label;
-use crate::model::{Details, State};
+use super::{label, line};
+use crate::model::{Details, MAX_REACTORS, Reactor, State};
 use crate::nav::keys;
-use crate::{font, theme};
+use crate::{font, icon, theme};
 
 const ROW: u32 = 36;
 const INSET: u32 = 12;
+/// The caption over the reactions.
+const CAPTION: u32 = 30;
+const AVATAR: u32 = 26;
+/// A reactor's name, past their avatar.
+const NAME_X: u32 = INSET + AVATAR + 10;
+
+static INDICES: [usize; MAX_REACTORS] = {
+    let mut a = [0; MAX_REACTORS];
+    let mut i = 0;
+    while i < MAX_REACTORS {
+        a[i] = i;
+        i += 1;
+    }
+    a
+};
 
 pub fn view(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
     let details = details.clone();
@@ -82,10 +97,53 @@ fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
             };
             row("Source", source, false)
         }),
+        (!details.reactors.is_empty()).then(|| {
+            label::<16>(
+                "Reactions",
+                &font::BOLD,
+                theme::SMALL,
+                theme::TEXT_SECONDARY,
+            )
+            .padding(Edges::Leading, INSET)
+            .flex_infinite_width(HorizontalAlignment::Leading)
+            .frame()
+            .with_height(CAPTION)
+            .with_alignment(Alignment::BottomLeading)
+        }),
+        {
+            let reactors = details.reactors.clone();
+            ForEach::<MAX_REACTORS>::new_vertical(&INDICES[..reactors.len()], move |&i| {
+                reactor(&reactors[i])
+            })
+            .with_spacing(0)
+        },
     ))
     .with_spacing(0)
     // The whole block, so it scrolls from its first row's top.
     .content_shape(Rectangle)
+}
+
+/// Someone's reaction: who, and the glyph for it.
+fn reactor(reactor: &Reactor) -> impl View<Rgb565, State> + use<> {
+    let name = |text| line(text, &font::REGULAR, theme::BODY, theme::TEXT);
+    HStack::new((
+        reactor.name.clone().map(name),
+        reactor
+            .name
+            .is_none()
+            .then(|| line("You", &font::REGULAR, theme::BODY, theme::TEXT)),
+        Spacer::default(),
+        Image::new(icon::reaction(reactor.reaction, icon::Pad::Screen)),
+    ))
+    .with_spacing(8)
+    .padding(Edges::Leading, NAME_X)
+    .padding(Edges::Trailing, 14)
+    .frame()
+    .with_height(ROW)
+    .overlay(
+        Alignment::Leading,
+        super::avatar::view(&reactor.avatar, AVATAR).padding(Edges::Leading, INSET),
+    )
 }
 
 /// A labeled value, with a rule under it. A `muted` label is for a value

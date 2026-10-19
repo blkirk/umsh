@@ -191,3 +191,7 @@ ignored by the receiver.
 ## Message Body
 
 The message body is a UTF-8 string.
+
+### Channel Invitations
+
+A basic text message whose entire body, ignoring leading and trailing whitespace, is a [channel URI](uri-formats.md#channel-uris) invites its recipients to that channel. A receiver that recognizes the URI MAY present the message as an invitation to join; one that does not displays the body as text.

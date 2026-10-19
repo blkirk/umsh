@@ -68,8 +68,9 @@ const SPECS: &[Spec] = &[
     },
 ];
 
-/// Drawn for characters a face lacks.
-const FALLBACK: char = '?';
+/// Drawn for characters a face lacks. The fonts lack it too, so it is drawn
+/// here: see [`replacement`].
+const REPLACEMENT: char = '\u{FFFD}';
 
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -235,16 +236,18 @@ fn reaction_glyphs() -> [Vec<Paint>; 6] {
 }
 
 /// What a reaction glyph is drawn on, and at what size and scale: the
-/// palette in the actions menu, and the chips over a bubble: mine, someone
-/// else's, and mine in an open channel. The colors are `theme::REACTION_PAD`,
-/// `theme::OUTBOUND`, `theme::CHIP_THEIRS` and `theme::OUTBOUND_OPEN`, in
-/// `icon::Pad` order; each image is composited onto its own, since the panel
-/// is drawn without reading it back.
+/// palette in the actions menu; the chips over a bubble: mine, someone
+/// else's, and mine in an open channel; and the screen itself. The colors
+/// are `theme::REACTION_PAD`, `theme::OUTBOUND`, `theme::CHIP_THEIRS`,
+/// `theme::OUTBOUND_OPEN` and `theme::BACKGROUND`, in `icon::Pad` order;
+/// each image is composited onto its own, since the panel is drawn without
+/// reading it back.
 const REACTION_PADS: &[(u32, u32, f32)] = &[
     (0x2A313B, 23, 1.0),
     (0x2A62C9, 19, 0.78),
     (0x323A45, 19, 0.78),
     (0x1E7B45, 19, 0.78),
+    (0x0B0D10, 23, 1.0),
 ];
 
 /// The reaction glyphs as RGB565 images, `REACTIONS[reaction][pad]`.
@@ -765,6 +768,70 @@ fn rounded_polygon(points: &[(f32, f32)], radius: f32) -> String {
     d
 }
 
+/// The replacement character at `size`: a diamond centered on the capitals,
+/// `cap` tall, with a bold question mark knocked out of it. Returns the
+/// diamond's side, how far its top stands above the baseline, and its 4-bit
+/// coverage.
+fn replacement(
+    context: &mut ScaleContext,
+    font: FontRef,
+    spec: &Spec,
+    size: u16,
+    cap: i32,
+    ascent: i32,
+    descent: i32,
+) -> (u32, i32, Vec<u8>) {
+    // As tall as the line box allows, up to 1.4 capitals.
+    let side = ((cap as f32 * 1.4).round() as i32)
+        .min(2 * ascent - cap)
+        .min(cap - 2 * descent)
+        .max(1);
+    let rise = ((cap + side) as f32 / 2.0).round() as i32;
+    let mark = {
+        let settings = [Setting {
+            tag: swash::tag_from_bytes(b"wght"),
+            value: spec.weight.max(700.0),
+        }];
+        let mut scaler = context
+            .builder(font)
+            .size(f32::from(size) * 0.55 * side as f32 / cap.max(1) as f32)
+            .hint(false)
+            .variations(settings.iter().copied())
+            .build();
+        let mut renderer = Render::new(&[Source::Outline]);
+        renderer.format(Format::Alpha);
+        renderer
+            .render(&mut scaler, font.charmap().map('?'))
+            .expect("a question mark")
+    };
+    let (mark_width, mark_height) = (mark.placement.width as i32, mark.placement.height as i32);
+    let (mark_x, mark_y) = ((side - mark_width) / 2, (side - mark_height) / 2);
+    let half = side as f32 / 2.0;
+    let mut coverage = Vec::with_capacity((side * side) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            // Four by four samples of the diamond.
+            let mut inside = 0;
+            for j in 0..4 {
+                for i in 0..4 {
+                    let dx = (x as f32 + (i as f32 + 0.5) / 4.0 - half).abs();
+                    let dy = (y as f32 + (j as f32 + 0.5) / 4.0 - half).abs();
+                    inside += u32::from(dx + dy <= half);
+                }
+            }
+            let (mx, my) = (x - mark_x, y - mark_y);
+            let knocked = if (0..mark_width).contains(&mx) && (0..mark_height).contains(&my) {
+                u32::from(mark.data[(my * mark_width + mx) as usize])
+            } else {
+                0
+            };
+            let alpha = inside * 255 / 16 * (255 - knocked) / 255;
+            coverage.push(((alpha * 15 + 127) / 255) as u8);
+        }
+    }
+    (side as u32, rise, coverage)
+}
+
 /// Writes one face's tables and returns its `Face` expression.
 fn face(
     out: &mut String,
@@ -826,10 +893,18 @@ fn face(
         .max()
         .unwrap_or(0);
     let line_gap = ((f32::from(size) * 1.2).round() as i32 - (ascent - descent)).max(0);
+    let cap = images
+        .iter()
+        .find(|(c, ..)| *c == 'H')
+        .and_then(|(_, _, i)| i.as_ref())
+        .map_or(ascent, |i| i.placement.top);
+    assert!(
+        images.last().is_none_or(|(c, ..)| *c < REPLACEMENT),
+        "the replacement character goes last"
+    );
 
     let mut pixels: Vec<u8> = Vec::new();
     let mut entries = Vec::new();
-    let mut fallback = None;
     for (c, advance, image) in images {
         let start = pixels.len();
         let (left, top, width, height) = match image {
@@ -850,11 +925,22 @@ fn face(
             "GlyphEntry {{ character: {c:?}, advance: {advance}, left: {left}, top: {top}, \
              width: {width}, height: {height}, start: {start} }}"
         );
-        if c == FALLBACK {
-            fallback = Some(entry.clone());
-        }
         entries.push(entry);
     }
+    let fallback = {
+        let (side, rise, coverage) = replacement(context, font, spec, size, cap, ascent, descent);
+        let start = pixels.len();
+        pixels.extend(coverage);
+        let left = (f32::from(size) * 0.06).round() as i32;
+        let entry = format!(
+            "GlyphEntry {{ character: {REPLACEMENT:?}, advance: {}, left: {left}, top: {}, \
+             width: {side}, height: {side}, start: {start} }}",
+            side as i32 + 2 * left,
+            ascent - rise,
+        );
+        entries.push(entry.clone());
+        entry
+    };
 
     let id = format!("{}_{}", spec.name, size);
     let mut packed = Vec::with_capacity(pixels.len().div_ceil(2));
@@ -876,7 +962,6 @@ fn face(
     .unwrap();
     format!(
         "Face {{ size: {size}, ascent: {ascent}, descent: {descent}, line_gap: {line_gap}, \
-         glyphs: &{id}_GLYPHS, coverage: &{id}_COVERAGE, fallback: {} }}",
-        fallback.map_or_else(|| "None".to_string(), |e| format!("Some({e})"))
+         glyphs: &{id}_GLYPHS, coverage: &{id}_COVERAGE, fallback: Some({fallback}) }}"
     )
 }

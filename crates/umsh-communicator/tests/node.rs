@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod support;
 
-use support::{Port, SharedFlash, config, device, provision, starting_keys};
+use support::{Port, SharedFlash, config, device, phone_inserts, provision, starting_keys};
 use umsh_communicator::settings::SAVE_DELAY_MS;
-use umsh_communicator::task::Arrival;
 use umsh_communicator::task::Command;
+use umsh_communicator::task::{Arrival, Secrecy};
 use umsh_communicator::{
     ChannelCrypto, Clock, CommunicatorNode, FlashMap, FlashMapStore, MemoryStore, Quota, Seeds,
 };
@@ -25,7 +25,7 @@ use umsh_mac::{ChannelInfoRef, ReceivedPacketRef, RxMetadata, Snr};
 use umsh_node::{NodeCapabilities, NodeIdentityPayload, NodeRole};
 use umsh_text::ConversationKey;
 use umsh_text::chat::ChatFacade;
-use umsh_text::engine::{ComposeIntent, EngineConfig};
+use umsh_text::engine::{ComposeIntent, EngineConfig, RegardingRef};
 use umsh_text::node_adapter::{
     Inbound, InboundText, RxSummary, Sent, WellKnownChannels, inbound_text,
 };
@@ -36,8 +36,8 @@ use umsh_ulcp::ids::prop;
 use umsh_ulcp::profiles::VETTED;
 use umsh_ulcp_simdev::{SessionConfig, SimulatedDevice};
 use umsh_ux_communicator::model::{
-    ChatKind, Chats, Delivery, Direction, KeyboardSettings, Messages, Node, NodeEvent, PeerEntry,
-    Peers, Profile, Reaction, Setting, Shareable,
+    ChannelAccess, ChannelEntry, ChatKind, Chats, Delivery, Direction, KeyboardSettings, Messages,
+    Node, NodeEvent, PeerEntry, Peers, Profile, Reaction, Setting, Shareable,
 };
 
 /// 14:32 UTC, when the test clock starts.
@@ -359,12 +359,12 @@ fn the_address_and_share_link_come_from_the_device_identity() {
     assert_eq!(address.len(), 44);
     let uri = node.share_uri(Shareable::Identity).unwrap();
     assert_eq!(uri.as_str(), format!("umsh:n:{address}"));
-    assert_eq!(node.share_uri(Shareable::Channel(1)), None);
+    assert_eq!(node.share_uri(Shareable::Channel(99)), None);
 }
 
 // ─── Chats ───────────────────────────────────────────────────────────
 
-/// A communicator starts out on `public` and `EMERGENCY`, and its chats
+/// A communicator starts out on Public and `EMERGENCY`, and its chats
 /// for them are there before anything arrives.
 #[test]
 fn a_communicator_starts_out_on_public_and_emergency() {
@@ -375,8 +375,183 @@ fn a_communicator_starts_out_on_public_and_emergency() {
         .map(|chat| chat.name.as_str().into())
         .collect();
     assert_eq!(names.len(), 2);
-    assert!(names.contains(&"public".into()), "{names:?}");
+    assert!(names.contains(&"Public".into()), "{names:?}");
     assert!(names.contains(&"EMERGENCY".into()), "{names:?}");
+}
+
+/// A channel a phone joins is listed by its tag alone; its chat appears
+/// once the device node's key for it is learned.
+#[test]
+fn a_channel_joined_elsewhere_is_taken_from_the_device_node() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let crew = ChannelKey([0x5c; 32]);
+    phone_inserts(&sim, prop::DEV_CHANNEL_KEYS, &crew.0);
+    clock.set(2_000);
+    node.pump();
+    assert!(node.misses_channel_keys());
+    assert_eq!(chats(&node).len(), 2);
+
+    node.learn_channel_keys(&[WellKnownChannels::derive().public, crew]);
+    assert!(!node.misses_channel_keys());
+    let names: Vec<String> = chats(&node)
+        .iter()
+        .map(|chat| chat.name.as_str().into())
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert!(
+        names.iter().any(|name| name.starts_with("Channel ")),
+        "{names:?}"
+    );
+}
+
+/// A channel joined by its name is held by the device, and shared by the
+/// name its key derives from.
+#[test]
+fn a_channel_is_joined_by_its_name_and_shared_by_it() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    assert_eq!(node.inspect_channel(" "), ChannelEntry::Empty);
+    assert_eq!(node.inspect_channel("Trail Crew"), ChannelEntry::Named);
+    assert_eq!(node.inspect_channel("trail:crew"), ChannelEntry::Invalid);
+    assert_eq!(node.inspect_channel("umsh:cs:"), ChannelEntry::Empty);
+
+    let crew = node.add_channel("Trail Crew").unwrap();
+    assert_eq!(crew.name, "Trail Crew");
+    assert_eq!(
+        crew.kind,
+        ChatKind::Channel {
+            access: ChannelAccess::Named
+        }
+    );
+    clock.set(1_000);
+    node.pump();
+    assert!(
+        !events(&node)
+            .iter()
+            .any(|event| matches!(event, NodeEvent::ChatRemoved(_)))
+    );
+    let uri = node.share_uri(Shareable::Channel(crew.id)).unwrap();
+    assert_eq!(uri.as_str(), "umsh:cs:trail%20crew");
+    // The same channel, by its invitation: joined already.
+    assert_eq!(node.add_channel(&uri).unwrap().id, crew.id);
+    assert_eq!(node.add_channel("public").unwrap().name, "Public");
+    assert_eq!(chats(&node).len(), 3);
+
+    // The device holds it: a node started over it again lists its tag.
+    drop(node);
+    assert!(node_over(&sim).misses_channel_keys());
+}
+
+/// The base58 digits of `key`.
+fn digits(key: &ChannelKey) -> String {
+    String::from_utf8(umsh_core::base58::encode(&key.0).to_vec()).unwrap()
+}
+
+/// A private channel's invitation is read as it is typed, joined under
+/// the name it gives, and shared as it came.
+#[test]
+fn a_private_channel_is_joined_by_its_invitation() {
+    let sim = device();
+    let (node, _) = started(&sim);
+    let key = ChannelKey([0x6d; 32]);
+    let uri = format!("umsh:ck:{}?n=Base%20Camp", digits(&key));
+    assert_eq!(
+        node.inspect_channel("umsh:ck"),
+        ChannelEntry::Partial { missing: 44 }
+    );
+    assert_eq!(
+        node.inspect_channel(&uri[..20]),
+        ChannelEntry::Partial { missing: 32 }
+    );
+    assert_eq!(node.inspect_channel("umsh:ck:0"), ChannelEntry::Invalid);
+    assert_eq!(node.inspect_channel(&uri), ChannelEntry::Private);
+
+    let camp = node.add_channel(&uri).unwrap();
+    assert_eq!(camp.name, "Base Camp");
+    assert_eq!(
+        camp.kind,
+        ChatKind::Channel {
+            access: ChannelAccess::Private
+        }
+    );
+    assert_eq!(
+        node.share_uri(Shareable::Channel(camp.id))
+            .unwrap()
+            .as_str(),
+        uri
+    );
+}
+
+/// A message that is a whole invitation is shown as one, and joining it
+/// under another name shares it by that name.
+#[test]
+fn an_invitation_in_a_message_is_joined() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let public = WellKnownChannels::derive().public;
+    let robin = PublicKey([0x37; 32]);
+    let key = ChannelKey([0x6d; 32]);
+    let uri = format!("umsh:ck:{}?n=Base%20Camp", digits(&key));
+    let payload = composed(robin, public, "Robin", &format!(" {uri}\n"));
+    node.arrive(Arrival::Text(received(&public, robin, &payload)));
+    let Some(NodeEvent::Arrived { chat, message }) = events(&node)
+        .into_iter()
+        .find(|event| matches!(event, NodeEvent::Arrived { .. }))
+    else {
+        panic!("nothing arrived");
+    };
+    let invite = node.message(chat, message).unwrap().invite.unwrap();
+    assert_eq!(&*invite.name, "Base Camp");
+    assert_eq!(invite.access, ChannelAccess::Private);
+    assert_eq!(invite.key, key.0);
+
+    let camp = node.join(&invite, "Camp").unwrap();
+    assert_eq!(camp.name, "Camp");
+    clock.set(1_000);
+    node.pump();
+    assert_eq!(node.join(&invite, "Camp").unwrap().id, camp.id);
+    assert_eq!(
+        node.share_uri(Shareable::Channel(camp.id))
+            .unwrap()
+            .as_str(),
+        format!("umsh:ck:{}?n=Camp", digits(&key))
+    );
+
+    // Text around an invitation is a message, not an invitation.
+    let ash = PublicKey([0x38; 32]);
+    let payload = composed(ash, public, "Ash", &format!("join {uri}"));
+    node.arrive(Arrival::Text(received(&public, ash, &payload)));
+    let Some(NodeEvent::Arrived { chat, message }) = events(&node)
+        .into_iter()
+        .find(|event| matches!(event, NodeEvent::Arrived { .. }))
+    else {
+        panic!("nothing arrived");
+    };
+    assert_eq!(node.message(chat, message).unwrap().invite, None);
+}
+
+/// A channel the device has no room for goes again, chat and all.
+#[test]
+fn a_channel_the_device_will_not_hold_goes_again() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    // Public and EMERGENCY, and six more, fill the device's list.
+    for index in 0..6 {
+        node.add_channel(&format!("crew{index}")).unwrap();
+        clock.set(1_000 * (index + 1));
+        node.pump();
+    }
+    events(&node);
+    assert_eq!(chats(&node).len(), 8);
+
+    let more = node.add_channel("one too many").unwrap();
+    assert_eq!(chats(&node).len(), 9);
+    clock.set(10_000);
+    node.pump();
+    assert!(events(&node).contains(&NodeEvent::ChatRemoved(more.id)));
+    assert_eq!(chats(&node).len(), 8);
+    assert_eq!(node.chat(more.id), None);
 }
 
 /// A message on `public` arrives in its chat, under the name its sender
@@ -401,7 +576,7 @@ fn a_public_message_arrives_with_its_sender_and_details() {
     assert!(arrived.contains(&NodeEvent::IdentitiesLearned));
 
     let summary = node.chat(chat).unwrap();
-    assert_eq!(summary.name, "public");
+    assert_eq!(summary.name, "Public");
     assert!(summary.unread);
     assert_eq!(summary.preview, "Robin: Anyone near the trailhead?");
 
@@ -484,7 +659,7 @@ fn a_direct_message_goes_out_and_can_be_retried() {
     assert_eq!(chat.kind, ChatKind::Peer { hops: None });
     events(&node);
 
-    let message = node.send(chat.id, "On my way", None).unwrap();
+    let message = node.send(chat.id, "On my way", None, false).unwrap();
     assert_eq!(message.delivery, Delivery::Sending);
     assert_eq!(message.direction, Direction::Outbound);
     let departure = node.depart().expect("the message leaves");
@@ -554,7 +729,7 @@ fn a_restarted_node_keeps_its_chats_and_its_sequence() {
     let chat = first
         .direct_chat(&address_of(&robin), "Robin", &first.avatar())
         .unwrap();
-    let said = first.send(chat.id, "On my way", None).unwrap();
+    let said = first.send(chat.id, "On my way", None, false).unwrap();
     let departed = first.depart().unwrap();
     let before = umsh_text::codec::parse(departed.payload()).unwrap();
     let before = before.sequence.unwrap().message_id;
@@ -567,7 +742,7 @@ fn a_restarted_node_keeps_its_chats_and_its_sequence() {
     let message = second.message(chat.id, said.id).unwrap();
     assert_eq!(&*message.text, "On my way");
 
-    second.send(chat.id, "Almost there", None).unwrap();
+    second.send(chat.id, "Almost there", None, false).unwrap();
     let departed = second.depart().unwrap();
     let after = umsh_text::codec::parse(departed.payload()).unwrap();
     assert!(!after.sequence_reset, "the stream goes on");
@@ -588,7 +763,7 @@ fn a_message_cut_off_by_a_restart_can_be_retried() {
     let chat = first
         .direct_chat(&address_of(&robin), "Robin", &first.avatar())
         .unwrap();
-    let said = first.send(chat.id, "On my way", None).unwrap();
+    let said = first.send(chat.id, "On my way", None, false).unwrap();
     let departed = first.depart().unwrap();
     let wire = umsh_text::codec::parse(departed.payload()).unwrap();
     let wire = wire.sequence.unwrap().message_id;
@@ -621,7 +796,7 @@ fn sending_clears_the_draft() {
     let (node, _) = started(&sim);
     let chat = chats(&node)[1].id;
     node.save_draft(chat, "Back at six");
-    let message = node.send(chat, "Back at six", None).unwrap();
+    let message = node.send(chat, "Back at six", None, false).unwrap();
     assert_eq!(&*message.text, "Back at six");
     let summary = node.chat(chat).unwrap();
     assert_eq!(summary.draft.text(), "");
@@ -654,6 +829,159 @@ fn a_reaction_is_kept_and_sent() {
             .any(|r| r.reaction == Reaction::Heart && r.mine)
     );
     assert!(node.depart().is_some());
+}
+
+/// Robin's reaction to their own message on Public reaches its chips, and
+/// taking it back clears them.
+#[test]
+fn a_reaction_from_another_node_is_shown_and_withdrawn() {
+    let sim = device();
+    let (node, _) = started(&sim);
+    let public = WellKnownChannels::derive().public;
+    let robin = PublicKey([0x37; 32]);
+    let mut facade: ChatFacade = ChatFacade::new(
+        DirectChannelProfile,
+        robin,
+        EngineConfig::default(),
+        Seeds {
+            session_id: 7,
+            jitter_seed: 8,
+        },
+    );
+    facade.channels_mut().register(tag(&public), public, None);
+    let conversation = ConversationKey::ChannelGroup {
+        channel: tag(&public),
+    };
+    fn say(
+        facade: &mut ChatFacade,
+        conversation: ConversationKey,
+        intent: ComposeIntent<'_>,
+    ) -> (Option<RegardingRef>, Vec<u8>) {
+        let batch = facade.compose(conversation, 1, intent, None, 0).unwrap();
+        let handle = batch
+            .mutations
+            .first()
+            .map(|mutation| RegardingRef::Handle(mutation.handle));
+        let outbound = facade.commit(batch).unwrap();
+        (handle, outbound.transmissions()[0].payload.to_vec())
+    }
+    let (asked, payload) = say(
+        &mut facade,
+        conversation,
+        ComposeIntent::Text {
+            body: "Anyone near the trailhead?",
+            status: false,
+        },
+    );
+    node.arrive(Arrival::Text(received(&public, robin, &payload)));
+    let Some(NodeEvent::Arrived { chat, message }) = events(&node)
+        .into_iter()
+        .find(|event| matches!(event, NodeEvent::Arrived { .. }))
+    else {
+        panic!("nothing arrived");
+    };
+
+    let regarding = asked.unwrap();
+    for (body, shown) in [("+1", Some(Reaction::ThumbsUp)), ("", None)] {
+        let (_, payload) = say(
+            &mut facade,
+            conversation,
+            ComposeIntent::Reply {
+                body,
+                regarding,
+                status: true,
+            },
+        );
+        node.arrive(Arrival::Text(received(&public, robin, &payload)));
+        assert!(
+            events(&node).contains(&NodeEvent::MessageChanged { chat, message }),
+            "{body:?}"
+        );
+        let reactions = node.message(chat, message).unwrap().reactions;
+        let theirs: Vec<_> = reactions
+            .iter()
+            .map(|r| (r.reaction, r.count, r.mine))
+            .collect();
+        assert_eq!(
+            theirs,
+            shown.map(|r| (r, 1, false)).into_iter().collect::<Vec<_>>()
+        );
+        // Details say who.
+        let reactors = node.details(chat, message).unwrap().reactors;
+        let who: Vec<_> = reactors
+            .iter()
+            .map(|r| (r.name.as_deref().map(String::from), r.reaction))
+            .collect();
+        let robin_shown = format!("Member {}", &address_of(&robin)[..4]);
+        assert_eq!(
+            who,
+            shown
+                .map(|r| (Some(robin_shown.clone()), r))
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // Mine is listed as mine.
+    node.react(chat, message, Some(Reaction::Heart));
+    let reactors = node.details(chat, message).unwrap().reactors;
+    assert_eq!(reactors.len(), 1);
+    assert_eq!(reactors[0].name, None);
+    assert_eq!(reactors[0].reaction, Reaction::Heart);
+}
+
+/// A reply arrives quoting whom and what it answers.
+#[test]
+fn a_reply_quotes_what_it_answers() {
+    let sim = device();
+    let (node, _) = started(&sim);
+    let public = WellKnownChannels::derive().public;
+    let robin = PublicKey([0x37; 32]);
+    let mut facade: ChatFacade = ChatFacade::new(
+        DirectChannelProfile,
+        robin,
+        EngineConfig::default(),
+        Seeds {
+            session_id: 7,
+            jitter_seed: 8,
+        },
+    );
+    facade.channels_mut().register(tag(&public), public, None);
+    facade.set_local_handle("Robin");
+    let conversation = ConversationKey::ChannelGroup {
+        channel: tag(&public),
+    };
+    let mut say = |intent| {
+        let batch = facade.compose(conversation, 1, intent, None, 0).unwrap();
+        let handle = batch
+            .mutations
+            .first()
+            .map(|m| RegardingRef::Handle(m.handle));
+        let outbound = facade.commit(batch).unwrap();
+        (handle, outbound.transmissions()[0].payload.to_vec())
+    };
+    let (asked, payload) = say(ComposeIntent::Text {
+        body: "Anyone near the trailhead?",
+        status: false,
+    });
+    node.arrive(Arrival::Text(received(&public, robin, &payload)));
+    let (_, payload) = say(ComposeIntent::Reply {
+        body: "Never mind, found them",
+        regarding: asked.unwrap(),
+        status: false,
+    });
+    node.arrive(Arrival::Text(received(&public, robin, &payload)));
+    let arrived: Vec<_> = events(&node)
+        .into_iter()
+        .filter_map(|event| match event {
+            NodeEvent::Arrived { chat, message } => Some((chat, message)),
+            _ => None,
+        })
+        .collect();
+    let &(chat, message) = arrived.last().unwrap();
+    let reply = node.message(chat, message).unwrap().reply.unwrap();
+    assert_eq!(reply.name.as_deref(), Some("Robin"));
+    assert_eq!(&*reply.text, "Anyone near the trailhead?");
 }
 
 // ─── Peers ───────────────────────────────────────────────────────────
@@ -768,6 +1096,193 @@ fn a_peer_saved_elsewhere_is_listed() {
     assert!(events(&node).contains(&NodeEvent::PeerChanged(peers[0].id)));
 }
 
+/// A saved peer's row says how they were heard as soon as a message from
+/// them arrives, and stops saying where they are once that is old.
+#[test]
+fn a_saved_peers_row_follows_how_they_are_heard() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let robin = PublicKey([0x37; 32]);
+    phone_inserts(&sim, prop::DEV_PEERS, &robin.0);
+    clock.set(2_000);
+    node.pump();
+    let peer = peers(&node)[0].id;
+    assert_eq!(peers(&node)[0].hops, None);
+    events(&node);
+
+    let public = WellKnownChannels::derive().public;
+    let payload = composed(robin, public, "Robin", "Anyone near the trailhead?");
+    let mut inbound = received(&public, robin, &payload);
+    inbound.rx.hop_count = Some(1);
+    clock.set(5_000);
+    node.arrive(Arrival::Text(inbound));
+    assert!(events(&node).contains(&NodeEvent::PeerChanged(peer)));
+    assert_eq!(peers(&node)[0].hops, Some(0));
+    assert!(peers(&node)[0].signal.is_some());
+
+    clock.set(5_000 + 29 * 60 * 1_000);
+    node.tick();
+    assert!(!events(&node).contains(&NodeEvent::PeerChanged(peer)));
+    clock.set(5_000 + 30 * 60 * 1_000);
+    node.tick();
+    assert!(events(&node).contains(&NodeEvent::PeerChanged(peer)));
+    let lapsed = &peers(&node)[0];
+    assert_eq!(lapsed.hops, None);
+    assert_eq!(lapsed.signal, None);
+    assert_eq!(lapsed.heard, "30m");
+}
+
+/// A saved peer is asked for their identity directly, and listed by the
+/// name they answer with.
+#[test]
+fn a_saved_peer_is_asked_for_their_identity() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let robin = PublicKey([0x37; 32]);
+    phone_inserts(&sim, prop::DEV_PEERS, &robin.0);
+    clock.set(2_000);
+    node.pump();
+    let peer = peers(&node)[0].id;
+    events(&node);
+
+    node.request_peer_identity(peer);
+    let Some(Command::AskPeer { peer: asked, .. }) = node.command() else {
+        panic!("nothing asked");
+    };
+    assert_eq!(asked, robin);
+
+    node.arrive(Arrival::Identity {
+        key: robin,
+        identity: chatter("Robin"),
+        rx: rx(1),
+    });
+    assert!(events(&node).contains(&NodeEvent::PeerChanged(peer)));
+    assert_eq!(peers(&node)[0].name, "Robin");
+}
+
+/// A session with forward secrecy is asked for when a saved peer comes to
+/// prefer one, again when it ends, and when next needed after one could
+/// not be had; it is ended when they no longer prefer one.
+#[test]
+fn forward_secrecy_is_asked_for_and_kept() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let robin = PublicKey([0x37; 32]);
+    phone_inserts(&sim, prop::DEV_PEERS, &robin.0);
+    clock.set(2_000);
+    node.pump();
+    let peer = peers(&node)[0].id;
+    events(&node);
+    let asked = |node: &CommunicatorNode<Port>| match node.command() {
+        Some(Command::StartSecrecy { peer, .. }) => peer == robin,
+        _ => false,
+    };
+
+    node.set_forward_secrecy(peer, true);
+    assert!(events(&node).contains(&NodeEvent::PeerChanged(peer)));
+    assert!(node.peer_detail(peer).unwrap().forward_secrecy);
+    assert!(asked(&node));
+    node.set_forward_secrecy(peer, true);
+    assert!(node.command().is_none(), "asked once");
+
+    node.arrive(Arrival::Secrecy {
+        peer: robin,
+        change: Secrecy::Established,
+    });
+    assert!(node.command().is_none());
+    node.arrive(Arrival::Secrecy {
+        peer: robin,
+        change: Secrecy::Ended,
+    });
+    assert!(asked(&node), "asked again when it ends");
+
+    node.arrive(Arrival::Secrecy {
+        peer: robin,
+        change: Secrecy::Failed,
+    });
+    assert!(node.command().is_none(), "not asked again at once");
+    let avatar = node.avatar();
+    let chat = node
+        .direct_chat(&address_of(&robin), "Robin", &avatar)
+        .unwrap();
+    node.send(chat.id, "On my way", None, false).unwrap();
+    assert!(asked(&node), "asked again when next needed");
+    assert!(node.depart().is_some(), "the message does not wait");
+
+    node.set_forward_secrecy(peer, false);
+    assert!(!node.peer_detail(peer).unwrap().forward_secrecy);
+    assert!(matches!(
+        node.command(),
+        Some(Command::EndSecrecy { peer, .. }) if peer == robin
+    ));
+    node.send(chat.id, "Here", None, false).unwrap();
+    assert!(node.command().is_none(), "no longer asked");
+}
+
+/// What is sent while the chat shows a session with forward secrecy goes
+/// under one or not at all: when it cannot, it waits to be sent again as
+/// it was, or without, as I choose. What is sent otherwise never goes
+/// under one.
+#[test]
+fn a_message_shown_under_forward_secrecy_never_goes_without() {
+    let sim = device();
+    let (node, clock) = started(&sim);
+    let robin = PublicKey([0x37; 32]);
+    phone_inserts(&sim, prop::DEV_PEERS, &robin.0);
+    clock.set(2_000);
+    node.pump();
+    let peer = peers(&node)[0].id;
+    let avatar = node.avatar();
+    let chat = node
+        .direct_chat(&address_of(&robin), "Robin", &avatar)
+        .unwrap();
+    node.set_forward_secrecy(peer, true);
+    while node.command().is_some() {}
+    events(&node);
+    assert!(
+        !node.chat(chat.id).unwrap().forward_secret,
+        "not until held"
+    );
+    node.arrive(Arrival::Secrecy {
+        peer: robin,
+        change: Secrecy::Established,
+    });
+    assert!(events(&node).contains(&NodeEvent::ChatChanged(chat.id)));
+    assert!(node.chat(chat.id).unwrap().forward_secret);
+
+    let message = node.send(chat.id, "Meet at the ridge", None, true).unwrap();
+    assert!(message.forward_secret);
+    let departure = node.depart().expect("the message leaves");
+    assert_eq!(departure.forward_secrecy(), Some(true));
+    // The session lapsed before it went.
+    assert!(node.departed(departure, Sent::Unsendable));
+    let failed = node.message(chat.id, message.id).unwrap();
+    assert_eq!(failed.delivery, Delivery::Unconfirmed);
+    assert!(failed.forward_secret);
+
+    assert!(node.retry(chat.id, message.id));
+    let again = node.depart().expect("it leaves again");
+    assert_eq!(again.forward_secrecy(), Some(true), "as it was");
+    assert!(node.departed(again, Sent::Unsendable));
+
+    events(&node);
+    assert!(node.retry_without_secrecy(chat.id, message.id));
+    assert!(events(&node).contains(&NodeEvent::MessageChanged {
+        chat: chat.id,
+        message: message.id
+    }));
+    let without = node.message(chat.id, message.id).unwrap();
+    assert!(!without.forward_secret);
+    assert_eq!(without.delivery, Delivery::Sending);
+    let plain = node.depart().expect("it leaves without");
+    assert_eq!(plain.forward_secrecy(), Some(false));
+    assert!(node.departed(plain, Sent::Unsendable));
+
+    node.send(chat.id, "Here", None, false).unwrap();
+    let held = node.depart().expect("the next leaves");
+    assert_eq!(held.forward_secrecy(), Some(false), "though one is held");
+}
+
 /// A member known only by their hint is asked about on their channel,
 /// and known by name and address once they answer.
 #[test]
@@ -831,17 +1346,6 @@ fn an_address_is_read_as_it_is_typed() {
     };
     assert_eq!(whole.as_str(), address);
     assert_eq!(name, None);
-}
-
-/// A phone attached to `sim` inserts `item` into the table `key`.
-fn phone_inserts(sim: &Rc<RefCell<SimulatedDevice>>, key: u32, item: &[u8]) {
-    sim.borrow_mut().attach();
-    while sim.borrow_mut().take_outbound().is_some() {}
-    let mut request = [0u8; 64];
-    let len = frame::prop_insert(&mut request, 2, key, item).unwrap();
-    let mut encoded = vec![0u8; hdlc::max_encoded_len(len)];
-    let len = hdlc::encode_frame(&request[..len], &mut encoded).unwrap();
-    sim.borrow_mut().ingest(&encoded[..len], 0).unwrap();
 }
 
 /// A second node over `sim`, as a reboot would start one.

@@ -10,6 +10,7 @@ use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash,
 use umsh_communicator::{ChannelCrypto, RamFlash, RamFlashError};
 
 use umsh_ulcp::frame;
+use umsh_ulcp::hdlc;
 use umsh_ulcp::ids::prop;
 use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
 use umsh_ulcp_simdev::{DutyLedger, RadioSettings, SessionConfig, SimulatedDevice};
@@ -101,6 +102,17 @@ pub fn provision(sim: &Rc<RefCell<SimulatedDevice>>, secret: Option<&[u8; 32]>) 
     let len = frame::prop_set(&mut request, 1, prop::DEV_PRIVATE_KEY, value).unwrap();
     sim.borrow_mut().device_request(&request[..len], 0);
     while sim.borrow_mut().take_device_frame().is_some() {}
+}
+
+/// A phone attached to `sim` inserts `item` into the table `key`.
+pub fn phone_inserts(sim: &Rc<RefCell<SimulatedDevice>>, key: u32, item: &[u8]) {
+    sim.borrow_mut().attach();
+    while sim.borrow_mut().take_outbound().is_some() {}
+    let mut request = [0u8; 64];
+    let len = frame::prop_insert(&mut request, 2, key, item).unwrap();
+    let mut encoded = vec![0u8; hdlc::max_encoded_len(len)];
+    let len = hdlc::encode_frame(&request[..len], &mut encoded).unwrap();
+    sim.borrow_mut().ingest(&encoded[..len], 0).unwrap();
 }
 
 /// One flash that a node started again finds as the last one left it.

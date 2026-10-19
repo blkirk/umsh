@@ -23,14 +23,14 @@ use umsh_text::chat::{self, Insert, Mutation};
 use umsh_text::engine::{ArchiveKey, Direction, Presence, ResolvedRef, StreamCheckpoint};
 use umsh_text::{ConversationKey, MessageType, SenderScope, WireRef};
 
-use crate::batch::{Batch, Change, CommitStep, Committed};
+use crate::batch::{Batch, Change, CommitStep, Committed, Subject};
 use crate::durable::{Durable, Volatile};
 use crate::ids::{ChatId, MessageId, PeerId};
 use crate::reaction::{Reacted, Reaction, Reactions};
 use crate::record::{
     self, BODY_MAX, ChannelChange, ChannelRecord, ChatChange, ChatRecord, Delivery, IDENTITY_MAX,
     LinkInfo, MessageFlags, MessageRecord, PeerChange, PeerFilter, PeerRecord, ROUTE_MAX,
-    StoreError, Usage, WireAlias,
+    ReactorRecord, StoreError, Usage, WireAlias,
 };
 use crate::store::ChatStore;
 use crate::wire::{AliasCode, ArchiveCode, ConversationCode, SenderCode, archive_code};
@@ -688,6 +688,23 @@ impl<D: Durable> MemoryStore<D> {
                         committed.touch_message(MessageId(id));
                     }
                 }
+                Change::Secrecy {
+                    message,
+                    forward_secret,
+                } => {
+                    let id = match message {
+                        Subject::Handle(handle) => self.resolve(batch, &committed, handle),
+                        Subject::Kept(id) => Some(id.0),
+                    };
+                    if let Some(id) = id
+                        && let Some(message) = self.disk.messages.get_mut(&id)
+                        && message.record.flags.forward_secret != forward_secret
+                    {
+                        self.dirty.mark(RecordKey::Message(id));
+                        message.record.flags.forward_secret = forward_secret;
+                        committed.touch_message(MessageId(id));
+                    }
+                }
             }
         }
         committed
@@ -999,6 +1016,19 @@ impl<D: Durable> ChatStore for MemoryStore<D> {
             return Ok(None);
         };
         copy_text(&message.body, out).map(Some)
+    }
+
+    fn reactors(&self, id: MessageId) -> impl Iterator<Item = ReactorRecord> + '_ {
+        self.disk
+            .messages
+            .get(&id.0)
+            .into_iter()
+            .flat_map(|message| &message.reactors)
+            .map(|reactor| ReactorRecord {
+                sender: reactor.who.scope(),
+                mine: reactor.mine,
+                reaction: reactor.reaction,
+            })
     }
 
     fn resolve_wire(&self, alias: &WireAlias) -> Option<MessageId> {

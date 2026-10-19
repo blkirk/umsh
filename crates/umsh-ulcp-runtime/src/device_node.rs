@@ -172,6 +172,14 @@ pub const NODE_PEERS: usize = MAX_NODE_PEERS;
 #[cfg(feature = "communicator")]
 pub const NODE_PEERS: usize = 2 * MAX_NODE_PEERS;
 
+/// The MAC's identities: the device identity, and on a communicator one
+/// ephemeral identity for each session with forward secrecy that its chats
+/// can hold at once.
+#[cfg(not(feature = "communicator"))]
+pub const NODE_IDENTITIES: usize = 1;
+#[cfg(feature = "communicator")]
+pub const NODE_IDENTITIES: usize = 1 + 4;
+
 /// Pending acknowledgments and transmit slots: beacons and answers alone,
 /// or on a communicator its chats' frames as well.
 #[cfg(not(feature = "communicator"))]
@@ -184,8 +192,8 @@ pub const NODE_TX: usize = 4;
 pub const NODE_TX: usize = 8;
 
 /// Device-node MAC sized to the session's device-domain tables, which are
-/// the only provisioning source it has: 1 identity (the device identity;
-/// no PFS ephemerals on the device node), [`NODE_PEERS`] peers,
+/// the only provisioning source it has: [`NODE_IDENTITIES`] identities,
+/// [`NODE_PEERS`] peers,
 /// `MAX_CHANNEL_KEYS` channels (a smaller MAC table would refuse channels
 /// the property surface accepted), [`NODE_ACKS`] pending ACKs,
 /// [`NODE_TX`] TX slots, 255-byte frames, 32-entry dup cache. The
@@ -196,7 +204,7 @@ pub const NODE_TX: usize = 8;
 /// has no person choosing paths).
 pub type DeviceNodeMac<CS> = umsh_mac::Mac<
     DeviceNodePlatform<CS>,
-    1,
+    NODE_IDENTITIES,
     NODE_PEERS,
     MAX_CHANNEL_KEYS,
     NODE_ACKS,
@@ -210,7 +218,7 @@ pub type DeviceNodeMac<CS> = umsh_mac::Mac<
 pub type DeviceNodeHandle<CS> = MacHandle<
     'static,
     DeviceNodePlatform<CS>,
-    1,
+    NODE_IDENTITIES,
     NODE_PEERS,
     MAX_CHANNEL_KEYS,
     NODE_ACKS,

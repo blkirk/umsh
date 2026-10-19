@@ -81,10 +81,12 @@ fn row(chat: &ChatSummary, age: Age) -> impl View<Rgb565, State> + use<> {
             };
             // Each line has a fixed height and the avatar is an overlay, so
             // no stack nests in another: every size a stack probes a line
-            // with is the same, and its text is measured once.
+            // with is the same, and its text is measured once. A chat with
+            // nothing in it has its name alone, in the middle.
+            let previewed = !chat.preview.is_empty() || !chat.draft.is_empty();
             VStack::new((
                 name_line(&chat, &age).frame().with_height(NAME_LINE),
-                preview_line(&chat).frame().with_height(PREVIEW_LINE),
+                previewed.then(|| preview_line(&chat).frame().with_height(PREVIEW_LINE)),
             ))
             .with_spacing(0)
             .with_alignment(HorizontalAlignment::Leading)

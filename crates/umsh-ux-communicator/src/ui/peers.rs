@@ -146,7 +146,11 @@ fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
                     .padding(Edges::Trailing, 10)
                     .frame()
                     .with_height(NAME_LINE),
-                    route_line(&peer).frame().with_height(ROUTE_LINE),
+                    // A peer not known to be anywhere has its name alone,
+                    // in the middle.
+                    peer.hops
+                        .is_some()
+                        .then(|| route_line(&peer).frame().with_height(ROUTE_LINE)),
                 ))
                 .with_spacing(0)
                 .with_alignment(HorizontalAlignment::Leading)

@@ -102,10 +102,14 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
             Screen::Join { invite, name, .. } => join::view(invite, name),
             Screen::AddPeer { text, .. } => add_peer::view(state, text),
             Screen::Peer {
-                peer, detail, confirm, ..
+                peer,
+                detail,
+                confirm,
+                requested,
+                ..
             } => state
                 .peer(*peer)
-                .map(|summary| peer::view(summary, detail, *confirm)),
+                .map(|summary| peer::view(summary, detail, *confirm, *requested)),
             Screen::Device { page, .. } => device::page(state, page),
             Screen::Setup { page, .. } => setup::view(state, page),
             Screen::Wake { .. } => wake::view(state),

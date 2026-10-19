@@ -23,17 +23,29 @@ use super::{Chats, FLOOD_HOPS, address, cut, unnamed_member};
 use crate::ids::{ChatId, MessageId, PeerId};
 use crate::record::{ChatChange, PeerChange, PeerFilter, PeerRecord};
 use crate::store::ChatStore;
-use crate::task::Command;
+use crate::task::{Command, Secrecy};
 
 /// How many nodes' links are kept. Past it, the one heard longest ago
 /// goes.
 const LINKS_KEPT: usize = 64;
+
+/// How long a link says where a node is. Past it, how far away the node
+/// is and how strongly it came in are no longer shown, until it is heard
+/// again.
+const LINK_FRESH_MS: u64 = 30 * 60 * 1_000;
 
 /// How many pings' answers are kept.
 const PINGS_KEPT: usize = 16;
 
 /// What a peer invitation starts with.
 const INVITATION: &str = "umsh:n:";
+
+/// Where a session with forward secrecy with a peer stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Session {
+    Asked,
+    Held,
+}
 
 /// How a node was last heard.
 #[derive(Clone, Copy, Debug)]
@@ -57,13 +69,24 @@ impl Link {
     fn direct(&self) -> bool {
         self.hop_count == Some(1)
     }
+
+    /// Whether it still says where the node is.
+    fn placed(&self) -> bool {
+        self.hop_count.is_some() || self.rssi_dbm.is_some() || self.snr_centibels.is_some()
+    }
 }
 
 impl<S: ChatStore> Chats<S> {
     // ─── Hearing ─────────────────────────────────────────────────────
 
     /// Notes how `key` was just heard.
-    pub(super) fn hear(&mut self, key: &PublicKey, rx: &RxSummary, now_ms: u64) {
+    pub(super) fn hear(
+        &mut self,
+        key: &PublicKey,
+        rx: &RxSummary,
+        now_ms: u64,
+        events: &mut dyn FnMut(NodeEvent),
+    ) {
         if !self.links.contains_key(&key.0)
             && self.links.len() >= LINKS_KEPT
             && let Some(oldest) = self
@@ -83,6 +106,39 @@ impl<S: ChatStore> Chats<S> {
                 at_ms: now_ms,
             },
         );
+        self.shown_changed(key, events);
+    }
+
+    /// Forgets where nodes not heard for [`LINK_FRESH_MS`] were heard
+    /// from, keeping when.
+    pub(super) fn lapse_links(&mut self, now_ms: u64, events: &mut dyn FnMut(NodeEvent)) {
+        let lapsed: alloc::vec::Vec<[u8; 32]> = self
+            .links
+            .iter_mut()
+            .filter(|(_, link)| link.placed() && now_ms.saturating_sub(link.at_ms) >= LINK_FRESH_MS)
+            .map(|(key, link)| {
+                link.hop_count = None;
+                link.rssi_dbm = None;
+                link.snr_centibels = None;
+                *key
+            })
+            .collect();
+        for key in lapsed {
+            self.shown_changed(&PublicKey(key), events);
+        }
+    }
+
+    /// What is shown of `key` changed: their row, when they are a saved
+    /// peer, and their chat.
+    fn shown_changed(&self, key: &PublicKey, events: &mut dyn FnMut(NodeEvent)) {
+        if let Ok(Some(kept)) = self.store.peer(key)
+            && kept.saved
+        {
+            events(NodeEvent::PeerChanged(kept.id.0));
+        }
+        if let Some(chat) = self.store.chat_for(&ConversationKey::Direct { peer: *key }) {
+            events(NodeEvent::ChatChanged(chat.0));
+        }
     }
 
     /// Takes a node's identity, as it claims it.
@@ -95,7 +151,7 @@ impl<S: ChatStore> Chats<S> {
         time: Option<u32>,
         events: &mut dyn FnMut(NodeEvent),
     ) {
-        self.hear(&key, rx, now_ms);
+        self.hear(&key, rx, now_ms, events);
         let before = self.store.peer(&key).ok().flatten();
         let kind = [identity.role.as_byte(), identity.capabilities.bits()];
         let heard = PeerChange::Heard {
@@ -130,7 +186,7 @@ impl<S: ChatStore> Chats<S> {
         now_ms: u64,
         events: &mut dyn FnMut(NodeEvent),
     ) {
-        self.hear(&peer, rx, now_ms);
+        self.hear(&peer, rx, now_ms, events);
         if !self.pings.contains_key(&peer.0) && self.pings.len() >= PINGS_KEPT {
             self.pings.pop_first();
         }
@@ -335,6 +391,61 @@ impl<S: ChatStore> Chats<S> {
         {
             events(NodeEvent::PeerChanged(peer));
         }
+        if on {
+            self.keep_secrecy(kept.key);
+        } else if let Some(was) = self.secrecy.remove(&kept.key.0) {
+            self.commands.push_back(Command::EndSecrecy {
+                peer: kept.key,
+                options: secrecy_options(),
+            });
+            if was == Session::Held {
+                self.shown_changed(&kept.key, events);
+            }
+        }
+    }
+
+    /// Whether what is sent in `conversation` now goes under a session
+    /// with forward secrecy.
+    pub fn holds_secrecy(&self, conversation: &ConversationKey) -> bool {
+        match conversation {
+            ConversationKey::Direct { peer } => self.secrecy.get(&peer.0) == Some(&Session::Held),
+            _ => false,
+        }
+    }
+
+    /// Asks `peer` for a session with forward secrecy when they prefer one
+    /// and none is asked for or held.
+    pub(super) fn keep_secrecy(&mut self, peer: PublicKey) {
+        let prefers = self
+            .store
+            .peer(&peer)
+            .ok()
+            .flatten()
+            .is_some_and(|kept| kept.saved && kept.forward_secrecy);
+        if prefers && !self.secrecy.contains_key(&peer.0) {
+            self.secrecy.insert(peer.0, Session::Asked);
+            self.commands.push_back(Command::StartSecrecy {
+                peer,
+                options: secrecy_options(),
+            });
+        }
+    }
+
+    /// Takes word of a session with forward secrecy with `peer`. One that
+    /// was held and ended is asked for again while they prefer it; one
+    /// that could not be had is asked for again when next needed.
+    pub fn secrecy(&mut self, peer: PublicKey, change: Secrecy, events: &mut dyn FnMut(NodeEvent)) {
+        let was = match change {
+            Secrecy::Established => self.secrecy.insert(peer.0, Session::Held),
+            Secrecy::Ended | Secrecy::Failed => self.secrecy.remove(&peer.0),
+        };
+        let held = change == Secrecy::Established;
+        if held != (was == Some(Session::Held)) {
+            self.shown_changed(&peer, events);
+        }
+        if change == Secrecy::Ended && was == Some(Session::Held) {
+            self.keep_secrecy(peer);
+        }
     }
 
     /// Asks the device node to ping `peer`.
@@ -349,6 +460,20 @@ impl<S: ChatStore> Chats<S> {
             .with_trace_signal()
             .with_mic_size(PING_MIC_SIZE);
         self.commands.push_back(Command::Ping {
+            peer: kept.key,
+            options,
+        });
+    }
+
+    /// Asks the saved peer `peer` for their identity, which arrives as
+    /// any identity does.
+    pub fn request_peer_identity(&mut self, peer: model::PeerId) {
+        let Some(kept) = self.saved_peer(peer) else {
+            return;
+        };
+        // By full key, in case the peer has not registered us.
+        let options = with_flood_reach(SendOptions::default(), FLOOD_HOPS).with_full_source();
+        self.commands.push_back(Command::AskPeer {
             peer: kept.key,
             options,
         });
@@ -615,4 +740,10 @@ fn long_age(seconds: u32) -> String<12> {
         _ => _ = write!(age, "{} wk ago", seconds / WEEK),
     }
     age
+}
+
+/// How a session with forward secrecy is asked for and ended: by full key,
+/// in case the peer has not registered us.
+fn secrecy_options() -> SendOptions {
+    with_flood_reach(SendOptions::default(), FLOOD_HOPS).with_full_source()
 }

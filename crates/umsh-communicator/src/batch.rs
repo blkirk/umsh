@@ -58,6 +58,20 @@ pub enum Change<'b> {
         fragment: Option<u8>,
         state: DeliveryState,
     },
+    /// That an outbound message goes under a session with forward
+    /// secrecy, or never does.
+    Secrecy {
+        message: Subject,
+        forward_secret: bool,
+    },
+}
+
+/// The message a change is to: one the engine knows by its handle, as one
+/// composed in the same commit is, or one the store keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Subject {
+    Handle(MessageHandle),
+    Kept(MessageId),
 }
 
 // Most entries are messages, so the mutation is kept inline rather than
@@ -72,6 +86,10 @@ enum Entry {
         handle: MessageHandle,
         fragment: Option<u8>,
         state: DeliveryState,
+    },
+    Secrecy {
+        message: Subject,
+        forward_secret: bool,
     },
 }
 
@@ -248,6 +266,15 @@ impl<'a> Batch<'a> {
         self.entries.push(Entry::Message { mutation, link });
     }
 
+    /// Take that the outbound message `message` goes under a session with
+    /// forward secrecy, or never does.
+    pub fn secrecy(&mut self, message: Subject, forward_secret: bool) {
+        self.entries.push(Entry::Secrecy {
+            message,
+            forward_secret,
+        });
+    }
+
     fn delivery(&mut self, handle: MessageHandle, fragment: Option<u8>, state: DeliveryState) {
         self.entries.push(Entry::Delivery {
             handle,
@@ -296,6 +323,13 @@ impl<'a> Batch<'a> {
                 handle: *handle,
                 fragment: *fragment,
                 state: *state,
+            },
+            Entry::Secrecy {
+                message,
+                forward_secret,
+            } => Change::Secrecy {
+                message: *message,
+                forward_secret: *forward_secret,
             },
         })
     }

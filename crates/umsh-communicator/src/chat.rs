@@ -3,10 +3,9 @@
 //! say.
 //!
 //! A channel is held while the device holds it (`PROP_DEV_CHANNEL_KEYS`).
-//! The device reports only its channels' tags, so the facade learns a
-//! key where it can: `public` and `EMERGENCY` are known by name, and any
-//! other channel's key is the one that authenticated a frame received on
-//! it.
+//! The device reports only its channels' tags: the keys of `public` and
+//! `EMERGENCY` are known by name, a channel joined here brings its own,
+//! and the device node hands over the rest.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
@@ -34,18 +33,25 @@ use umsh_ux_communicator::model::{
 };
 use umsh_ux_communicator::text::{DraftText, SharedText, TextHeap};
 
-use crate::batch::{Batch, Committed};
+use crate::batch::{Batch, Committed, Subject};
 use crate::ids::{ChatId, MessageId};
 use crate::record::{
-    BODY_MAX, BuiltinChannel, ChannelAccess, ChannelChange, ChatChange, ChatRecord, LinkInfo,
+    self, BODY_MAX, BuiltinChannel, ChannelAccess, ChannelChange, ChatChange, ChatRecord, LinkInfo,
     MessageRecord,
 };
 use crate::store::ChatStore;
 use crate::task::Command;
 
+mod channels;
 mod peers;
 
+pub(crate) use channels::Joined;
+
 use peers::{Link, shape, short_age};
+
+/// The most of a message a reply's quote keeps, in octets: more than one
+/// line of a bubble shows.
+const QUOTED_MAX: usize = 96;
 
 /// How many outbound checkpoints seed the engine when the chats start.
 const RESTORED_CHECKPOINTS: usize = 32;
@@ -76,6 +82,10 @@ pub struct ChannelCrypto {
     /// A channel's tag, as `umsh_crypto::CryptoEngine::derive_channel_tag`
     /// derives it.
     pub tag: fn(&ChannelKey) -> ChannelTag,
+    /// A named channel's key, as
+    /// `umsh_crypto::CryptoEngine::derive_named_channel_key` derives it, or
+    /// `None` for a name that names no channel.
+    pub named: fn(&str) -> Option<ChannelKey>,
 }
 
 impl ChannelCrypto {
@@ -90,15 +100,19 @@ impl ChannelCrypto {
     /// The software crypto back end's derivations.
     #[cfg(feature = "software-crypto")]
     pub fn software() -> Self {
+        fn engine() -> umsh_crypto::CryptoEngine<
+            umsh_crypto::software::SoftwareAes,
+            umsh_crypto::software::SoftwareSha256,
+        > {
+            umsh_crypto::CryptoEngine::new(
+                umsh_crypto::software::SoftwareAes,
+                umsh_crypto::software::SoftwareSha256,
+            )
+        }
         Self {
             well_known: WellKnownChannels::derive(),
-            tag: |key| {
-                umsh_crypto::CryptoEngine::new(
-                    umsh_crypto::software::SoftwareAes,
-                    umsh_crypto::software::SoftwareSha256,
-                )
-                .derive_channel_tag(key)
-            },
+            tag: |key| engine().derive_channel_tag(key),
+            named: |name| engine().derive_named_channel_key(name).ok(),
         }
     }
 
@@ -138,6 +152,8 @@ pub(crate) struct Chats<S> {
     links: BTreeMap<[u8; 32], Link>,
     /// The round trip of each peer's last answered ping, in milliseconds.
     pings: BTreeMap<[u8; 32], u64>,
+    /// Sessions with forward secrecy, asked for or held, by peer.
+    secrecy: BTreeMap<[u8; 32], peers::Session>,
     /// What the chats ask of the device node besides sending frames.
     commands: VecDeque<Command>,
     /// The saved peers, as last taken from the device.
@@ -168,6 +184,7 @@ impl<S: ChatStore> Chats<S> {
             retrying: BTreeSet::new(),
             links: BTreeMap::new(),
             pings: BTreeMap::new(),
+            secrecy: BTreeMap::new(),
             commands: VecDeque::new(),
             saved: Vec::new(),
             body: RefCell::new(vec![0; BODY_MAX]),
@@ -246,6 +263,23 @@ impl<S: ChatStore> Chats<S> {
         }
     }
 
+    /// Whether the device holds a channel the chats have no key for: one
+    /// joined elsewhere, whose key the device node has.
+    pub fn misses_keys(&self) -> bool {
+        self.facade
+            .as_ref()
+            .is_some_and(|facade| self.held.iter().any(|tag| !facade.channels().contains(tag)))
+    }
+
+    /// Takes `key`, the key of a channel the device node holds, for the
+    /// channel the device lists under its tag.
+    pub fn learn_key(&mut self, key: ChannelKey, events: &mut dyn FnMut(NodeEvent)) {
+        let tag = (self.crypto.tag)(&key);
+        if self.held.contains(&tag) {
+            self.register(tag, key, events);
+        }
+    }
+
     /// Holds the channel `key` names in the facade, and keeps a chat for
     /// it.
     fn register(&mut self, tag: ChannelTag, key: ChannelKey, events: &mut dyn FnMut(NodeEvent)) {
@@ -264,20 +298,13 @@ impl<S: ChatStore> Chats<S> {
         {
             let builtin = self.crypto.builtin(&key);
             let (name, access) = match builtin {
-                Some(BuiltinChannel::Public) => (
-                    String::<32>::try_from(WellKnownChannels::PUBLIC_NAME).unwrap_or_default(),
-                    ChannelAccess::Named,
-                ),
-                Some(BuiltinChannel::Emergency) => (
-                    String::try_from("EMERGENCY").unwrap_or_default(),
-                    ChannelAccess::Clear,
-                ),
-                None => {
-                    let mut name = String::new();
-                    let encoded = address(&key.0);
-                    _ = write!(name, "Channel {}", encoded.get(..4).unwrap_or_default());
-                    (name, ChannelAccess::Private)
+                Some(builtin @ BuiltinChannel::Public) => {
+                    (record::name(builtin.name()), ChannelAccess::Named)
                 }
+                Some(builtin @ BuiltinChannel::Emergency) => {
+                    (record::name(builtin.name()), ChannelAccess::Clear)
+                }
+                None => (channels::default_name(&key), ChannelAccess::Private),
             };
             let change = ChannelChange::Add {
                 name: name.as_str(),
@@ -323,7 +350,7 @@ impl<S: ChatStore> Chats<S> {
             return;
         };
         if let Some(key) = source.full_key() {
-            self.hear(&key, &inbound.rx, now_ms);
+            self.hear(&key, &inbound.rx, now_ms, events);
         }
         let Some(facade) = &mut self.facade else {
             return;
@@ -348,6 +375,7 @@ impl<S: ChatStore> Chats<S> {
         };
         facade.tick(now_ms);
         self.settle(None, now_ms, time, events);
+        self.lapse_links(now_ms, events);
     }
 
     /// Commits what the facade produced and answers what it asked. `link`
@@ -481,12 +509,16 @@ impl<S: ChatStore> Chats<S> {
 
     /// Keeps `text`, in reply to `reply_to` if it is one, as the newest
     /// message of `chat`, and queues it to go. A reply whose original
-    /// can no longer be named goes as a plain message.
+    /// can no longer be named goes as a plain message. With
+    /// `forward_secret`, as the composer showed it, it goes to the chat's
+    /// peer under a session with forward secrecy or not at all; without,
+    /// never under one.
     pub fn send(
         &mut self,
         chat: model::ChatId,
         text: &str,
         reply_to: Option<model::MessageId>,
+        forward_secret: bool,
         now_ms: u64,
         time: Option<u32>,
         events: &mut dyn FnMut(NodeEvent),
@@ -503,7 +535,12 @@ impl<S: ChatStore> Chats<S> {
                 status: false,
             },
         };
-        let committed = self.compose(conversation, intent, now_ms, time, events)?;
+        // A peer who prefers forward secrecy has a session asked for
+        // before anything is said, when none is.
+        if let ConversationKey::Direct { peer } = conversation {
+            self.keep_secrecy(peer);
+        }
+        let committed = self.compose(conversation, intent, forward_secret, now_ms, time, events)?;
         let &(_, id) = committed.inserted.first()?;
         _ = self
             .store
@@ -535,7 +572,35 @@ impl<S: ChatStore> Chats<S> {
             regarding,
             status: true,
         };
-        _ = self.compose(conversation, intent, now_ms, time, events);
+        let forward_secret = self.holds_secrecy(&conversation);
+        _ = self.compose(conversation, intent, forward_secret, now_ms, time, events);
+    }
+
+    /// Sends `message` in `chat`, which was to go under a session with
+    /// forward secrecy and went unacknowledged, again without one, as the
+    /// user chose to. Returns whether it is on its way.
+    pub fn retry_without_secrecy(
+        &mut self,
+        chat: model::ChatId,
+        message: model::MessageId,
+        now_ms: u64,
+        time: Option<u32>,
+        events: &mut dyn FnMut(NodeEvent),
+    ) -> bool {
+        let Ok(Some(record)) = self.store.message(MessageId(message)) else {
+            return false;
+        };
+        if record.chat.0 != chat || !record.flags.forward_secret {
+            return false;
+        }
+        let resolve = |_| None;
+        let mut batch = Batch::new(time, &resolve);
+        batch.secrecy(Subject::Kept(record.id), false);
+        let Ok(committed) = self.store.commit(&batch) else {
+            return false;
+        };
+        self.announce(&committed, &[], events);
+        self.retry(chat, message, now_ms, time, events)
     }
 
     /// Sends again each fragment of `message` in `chat` that went
@@ -561,6 +626,12 @@ impl<S: ChatStore> Chats<S> {
         };
         if record.chat.0 != chat || record.direction != engine::Direction::Outbound {
             return false;
+        }
+        // One to go under forward secrecy asks for a session, if none is.
+        if let ConversationKey::Direct { peer } = conversation
+            && record.flags.forward_secret
+        {
+            self.keep_secrecy(peer);
         }
         let known = self.handle_of(record.id);
         let Some(facade) = &mut self.facade else {
@@ -625,6 +696,7 @@ impl<S: ChatStore> Chats<S> {
         &mut self,
         conversation: ConversationKey,
         intent: ComposeIntent<'_>,
+        forward_secret: bool,
         now_ms: u64,
         time: Option<u32>,
         events: &mut dyn FnMut(NodeEvent),
@@ -642,6 +714,14 @@ impl<S: ChatStore> Chats<S> {
             let resolve = |handle| handles.get(&handle).copied();
             let mut batch = Batch::new(time, &resolve);
             batch.push_composed(&composed);
+            // Kept with the message, so that it is never found without.
+            if forward_secret && matches!(conversation, ConversationKey::Direct { .. }) {
+                for mutation in &composed.mutations {
+                    if matches!(mutation.change, Change::Insert(_)) {
+                        batch.secrecy(Subject::Handle(mutation.handle), true);
+                    }
+                }
+            }
             self.store.commit(&batch)
         };
         let Ok(committed) = kept else {
@@ -697,13 +777,32 @@ impl<S: ChatStore> Chats<S> {
         loop {
             let facade = self.facade.as_mut()?;
             match self.outbox.depart(facade.channels(), &self.policy)? {
-                Ok(departure) => return Some(departure),
+                Ok(mut departure) => {
+                    self.bind_secrecy(&mut departure);
+                    return Some(departure);
+                }
                 Err(undeliverable) => {
                     undeliverable.fail(facade, now_ms);
                     self.settle(None, now_ms, time, events);
                 }
             }
         }
+    }
+
+    /// Holds a frame to a peer to what was decided when its message was
+    /// sent: under a session with forward secrecy, or never under one.
+    fn bind_secrecy(&self, departure: &mut Departure) {
+        if departure.peer().is_none() {
+            return;
+        }
+        let Some(record) = departure
+            .message()
+            .and_then(|handle| self.handles.get(&handle))
+            .and_then(|&id| self.store.message(id).ok().flatten())
+        else {
+            return;
+        };
+        departure.require_forward_secrecy(record.flags.forward_secret);
     }
 
     /// Takes how the device node took `departure`. Returns whether it has
@@ -844,11 +943,14 @@ impl<S: ChatStore> Chats<S> {
         }
     }
 
+    /// How `message` reached this device, and who reacted to it: this
+    /// node drawn as `mine`.
     pub fn details(
         &self,
         chat: model::ChatId,
         message: model::MessageId,
         utc_offset_min: i16,
+        mine: &AvatarStyle,
     ) -> Option<Details> {
         let record = self.store.message(MessageId(message)).ok()??;
         if record.chat.0 != chat {
@@ -871,7 +973,75 @@ impl<S: ChatStore> Chats<S> {
             details.snr = link.snr_centibels;
             details.authenticated = link.authenticated;
         }
+        let conversation = self.conversation(chat)?;
+        let reactors: Vec<_> = self.store.reactors(MessageId(message)).collect();
+        // The latest, as many as are shown.
+        let skip = reactors.len().saturating_sub(model::MAX_REACTORS);
+        for reactor in &reactors[skip..] {
+            let shown = if reactor.mine {
+                Some((None, mine.clone()))
+            } else {
+                self.reactor(reactor.sender, &conversation)
+                    .and_then(|(name, avatar)| {
+                        Some((Some(SharedText::new(self.heap, &name)?), avatar))
+                    })
+            };
+            if let Some((name, avatar)) = shown {
+                _ = details.reactors.push(model::Reactor {
+                    name,
+                    avatar,
+                    reaction: reaction(reactor.reaction),
+                });
+            }
+        }
         Some(details)
+    }
+
+    /// Who reacted to a message in `conversation`, as its details show
+    /// them: the peer of a direct chat as the chat shows them; a channel's
+    /// member by the name they are known by, or else by their address.
+    fn reactor(
+        &self,
+        sender: SenderScope,
+        conversation: &ConversationKey,
+    ) -> Option<(String<32>, AvatarStyle)> {
+        let ConversationKey::ChannelGroup { channel } = conversation else {
+            let chat = self.store.chat_for(conversation)?;
+            let record = self
+                .store
+                .chats()
+                .flatten()
+                .find(|record| record.id == chat)?;
+            let (name, avatar, _) = self.face(&record)?;
+            return Some((name, avatar));
+        };
+        let (hint, key) = match sender {
+            SenderScope::Peer(key) => (key.hint(), Some(key)),
+            SenderScope::ClaimedMember(hint) => (
+                hint,
+                self.facade
+                    .as_ref()
+                    .and_then(|facade| facade.member_key(channel, &hint))
+                    .or_else(|| self.only_peer_with(hint)),
+            ),
+            SenderScope::Local => return None,
+        };
+        let mut lettering = String::<8>::new();
+        let shape = match key {
+            Some(key) => {
+                _ = lettering.push_str(address(&key.0).get(..4).unwrap_or_default());
+                PeerShape::Circle
+            }
+            None => {
+                _ = write!(lettering, "{hint}");
+                PeerShape::Hexagon
+            }
+        };
+        let named = key
+            .and_then(|key| self.store.peer(&key).ok().flatten())
+            .and_then(|kept| kept.name.as_deref().map(cut));
+        let name = named.unwrap_or_else(|| cut(&unnamed_member(&lettering)));
+        Some((name, AvatarStyle::peer(hint.0, &lettering, shape)))
     }
 
     pub fn member(
@@ -918,6 +1088,7 @@ impl<S: ChatStore> Chats<S> {
         summary.unread = record.unread > 0;
         summary.muted = record.muted;
         summary.last_activity = record.last_activity;
+        summary.forward_secret = self.holds_secrecy(&record.conversation);
         let last = self.store.messages(record.id, None).flatten().next();
         if let Some(last) = last.and_then(|last| self.message_of(&last, &record.conversation)) {
             summary.preview(&last);
@@ -942,7 +1113,13 @@ impl<S: ChatStore> Chats<S> {
                     .channels()
                     .flatten()
                     .find(|kept| kept.tag == channel)?;
-                let name = record.name.as_deref().unwrap_or(kept.name.as_str());
+                // A built-in channel is shown by its own name, whatever was
+                // kept for it.
+                let name = record
+                    .name
+                    .as_deref()
+                    .or(kept.builtin.map(BuiltinChannel::name))
+                    .unwrap_or(kept.name.as_str());
                 let builtin = kept.builtin.map(|builtin| match builtin {
                     BuiltinChannel::Public => avatar::BuiltinChannel::Public,
                     BuiltinChannel::Emergency => avatar::BuiltinChannel::Emergency,
@@ -987,10 +1164,13 @@ impl<S: ChatStore> Chats<S> {
         record: &MessageRecord,
         conversation: &ConversationKey,
     ) -> Option<Message> {
-        let text = {
+        let (text, invite) = {
             let mut body = self.body.borrow_mut();
             let body = self.store.body(record.id, &mut body[..]).ok()??;
-            SharedText::new(self.heap, body)?
+            let invite = (record.message_type == MessageType::Basic && !record.flags.deleted)
+                .then(|| self.invite_in(body))
+                .flatten();
+            (SharedText::new(self.heap, body)?, invite)
         };
         let direction = match record.direction {
             engine::Direction::Inbound => model::Direction::Inbound,
@@ -1035,16 +1215,61 @@ impl<S: ChatStore> Chats<S> {
             text,
             delivery,
             reactions,
-            invite: None,
-            reply_to: record
+            invite,
+            reply: record
                 .regarding
                 .filter(|_| record.message_type == MessageType::Basic)
-                .map(|regarding| regarding.0),
+                .and_then(|regarding| self.quote(regarding, conversation)),
             time: record.time,
             presence,
             edited: record.flags.edited,
             deleted: record.flags.deleted,
+            late: record.flags.late,
+            forward_secret: record.flags.forward_secret,
+            parts: match record.status {
+                engine::CompletionStatus::Complete => None,
+                engine::CompletionStatus::Partial {
+                    present,
+                    count,
+                    finalized,
+                } => {
+                    let all = 1u16
+                        .checked_shl(u32::from(count))
+                        .map_or(u16::MAX, |bit| bit - 1);
+                    Some(model::Parts {
+                        count,
+                        received: present,
+                        lost: if finalized { all & !present } else { 0 },
+                    })
+                }
+            },
         })
+    }
+
+    /// What a reply quotes of `id`, in `conversation`: who sent it, and
+    /// as much of what it says as one line shows.
+    fn quote(&self, id: MessageId, conversation: &ConversationKey) -> Option<model::Quote> {
+        let record = self.store.message(id).ok()??;
+        let text = {
+            let mut body = self.body.borrow_mut();
+            let body = self.store.body(id, &mut body[..]).ok()??;
+            SharedText::new(self.heap, record::clip(body, QUOTED_MAX))?
+        };
+        let name = match record.direction {
+            engine::Direction::Outbound => None,
+            engine::Direction::Inbound => {
+                let name = match self.sender(&record, conversation) {
+                    Some(sender) => cut::<32>(&sender.name),
+                    None => {
+                        let chat = self.store.chat_for(conversation)?;
+                        let kept = self.store.chats().flatten().find(|kept| kept.id == chat)?;
+                        self.face(&kept)?.0
+                    }
+                };
+                Some(SharedText::new(self.heap, &name)?)
+            }
+        };
+        Some(model::Quote { name, text })
     }
 
     /// The hint an incoming channel message names its sender by, and the

@@ -61,12 +61,40 @@ pub enum Arrival {
         round_trip_ms: u64,
         rx: RxSummary,
     },
+    /// A session with forward secrecy began, ended, or could not be had.
+    Secrecy { peer: PublicKey, change: Secrecy },
 }
+
+/// What became of a session with forward secrecy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secrecy {
+    Established,
+    Ended,
+    Failed,
+}
+
+/// How long a session with forward secrecy is asked to last, in minutes.
+pub const SECRECY_MINUTES: u16 = 60;
 
 /// What the chats ask of the device node besides sending their frames.
 pub enum Command {
     /// Ping a peer.
     Ping {
+        peer: PublicKey,
+        options: SendOptions,
+    },
+    /// Begin a session with forward secrecy with a peer.
+    StartSecrecy {
+        peer: PublicKey,
+        options: SendOptions,
+    },
+    /// End one.
+    EndSecrecy {
+        peer: PublicKey,
+        options: SendOptions,
+    },
+    /// Ask a peer for their identity.
+    AskPeer {
         peer: PublicKey,
         options: SendOptions,
     },
@@ -127,8 +155,9 @@ impl<R: RawMutex> Default for Inbox<R> {
 }
 
 /// Copies what `node`, the device identity `local_key`'s node, receives
-/// for the chats into `inbox`: text frames, other nodes' identities, and
-/// answers to pings. It wakes the inbox on word of a frame sent. The
+/// for the chats into `inbox`: text frames, other nodes' identities,
+/// answers to pings, and the course of sessions with forward secrecy. It
+/// wakes the inbox on word of a frame sent. The
 /// channel rules for `public` and `EMERGENCY` are applied here: a frame
 /// they refuse is left for any other listener.
 ///
@@ -143,7 +172,7 @@ where
     M: MacBackend + 'static,
     R: RawMutex + 'static,
 {
-    vec![
+    let subscriptions = vec![
         node.on_receive(
             move |packet| match inbound_text(packet, &local_key, &well_known) {
                 Some(Inbound::Text(text)) => {
@@ -190,7 +219,19 @@ where
         node.on_transmitted(|_| inbox.wake()),
         node.on_ack_received(|_, _| inbox.wake()),
         node.on_ack_timeout(|_, _| inbox.wake()),
-    ]
+    ];
+    #[cfg(feature = "software-crypto")]
+    let subscriptions = {
+        let mut subscriptions = subscriptions;
+        let secrecy = move |peer, change| inbox.push(Arrival::Secrecy { peer, change });
+        subscriptions.extend([
+            node.on_pfs_established(move |peer| secrecy(peer, Secrecy::Established)),
+            node.on_pfs_ended(move |peer| secrecy(peer, Secrecy::Ended)),
+            node.on_pfs_failed(move |peer, _| secrecy(peer, Secrecy::Failed)),
+        ]);
+        subscriptions
+    };
+    subscriptions
 }
 
 /// Feeds what reaches `inbox` to `node`, sends its frames through `mesh`,
@@ -216,6 +257,13 @@ where
         while let Some(arrival) = inbox.take() {
             node.arrive(arrival);
         }
+        // A channel joined elsewhere is listed by its tag; its key is the
+        // device node's.
+        if node.misses_channel_keys() {
+            let mut keys = Vec::new();
+            mesh.for_each_channel(&mut |key| keys.push(*key)).await;
+            node.learn_channel_keys(&keys);
+        }
         node.service();
         if node.clock().now_ms() >= tick_at {
             node.tick();
@@ -225,7 +273,9 @@ where
             notify();
         }
         while let Some(command) = node.command() {
-            execute(mesh, command).await;
+            if let Some(arrival) = execute(mesh, command).await {
+                node.arrive(arrival);
+            }
         }
         // Until the device node is full; word of a frame sent makes room.
         while let Some(departure) = node.depart() {
@@ -242,8 +292,10 @@ where
 }
 
 /// Carries out `command`. One the device node cannot take now is dropped:
-/// each is asked for again as easily as it was asked for.
-async fn execute<M: MacBackend>(mesh: &LocalNode<M>, command: Command) {
+/// each is asked for again as easily as it was asked for. A session with
+/// forward secrecy that cannot be asked for is reported, as one refused
+/// later would be.
+async fn execute<M: MacBackend>(mesh: &LocalNode<M>, command: Command) -> Option<Arrival> {
     match command {
         Command::Ping { peer, options } => {
             if let Ok(connection) = mesh.peer(peer).await {
@@ -252,12 +304,69 @@ async fn execute<M: MacBackend>(mesh: &LocalNode<M>, command: Command) {
                     .await;
             }
         }
+        Command::StartSecrecy { peer, options } => {
+            if !start_secrecy(mesh, &peer, &options).await {
+                return Some(Arrival::Secrecy {
+                    peer,
+                    change: Secrecy::Failed,
+                });
+            }
+        }
+        Command::EndSecrecy { peer, options } => end_secrecy(mesh, &peer, &options).await,
+        Command::AskPeer { peer, options } => {
+            if let Ok(connection) = mesh.peer(peer).await {
+                _ = connection.request_identity(&options).await;
+            }
+        }
         Command::AskChannel {
             channel,
             hint,
             options,
         } => ask_channel(mesh, &channel, &hint, &options).await,
     }
+    None
+}
+
+/// Asks `peer` for a session with forward secrecy. Returns whether the
+/// request went.
+#[cfg(feature = "software-crypto")]
+async fn start_secrecy<M: MacBackend>(
+    mesh: &LocalNode<M>,
+    peer: &PublicKey,
+    options: &SendOptions,
+) -> bool {
+    let Ok(connection) = mesh.peer(*peer).await else {
+        return false;
+    };
+    connection
+        .request_pfs(SECRECY_MINUTES, options)
+        .await
+        .is_ok()
+}
+
+#[cfg(feature = "software-crypto")]
+async fn end_secrecy<M: MacBackend>(mesh: &LocalNode<M>, peer: &PublicKey, options: &SendOptions) {
+    if let Ok(connection) = mesh.peer(*peer).await {
+        _ = connection.end_pfs(options).await;
+    }
+}
+
+/// Forward secrecy is the software crypto back end's alone.
+#[cfg(not(feature = "software-crypto"))]
+async fn start_secrecy<M: MacBackend>(
+    _mesh: &LocalNode<M>,
+    _peer: &PublicKey,
+    _options: &SendOptions,
+) -> bool {
+    false
+}
+
+#[cfg(not(feature = "software-crypto"))]
+async fn end_secrecy<M: MacBackend>(
+    _mesh: &LocalNode<M>,
+    _peer: &PublicKey,
+    _options: &SendOptions,
+) {
 }
 
 #[cfg(feature = "software-crypto")]

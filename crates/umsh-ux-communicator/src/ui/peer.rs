@@ -24,6 +24,7 @@ pub fn view(
     summary: &PeerSummary,
     detail: &PeerDetail,
     confirm: bool,
+    requested: bool,
 ) -> impl View<Rgb565, State> + use<> {
     let mut about: String<48> = String::new();
     _ = about.push_str("Saved peer");
@@ -84,6 +85,18 @@ pub fn view(
                 keys::PEER_PING,
                 State::ping_peer,
                 detail.ping.as_deref().map_or(End::Chevron, End::value),
+                false,
+                ROW,
+            ),
+            row(
+                "Refresh identity",
+                keys::PEER_IDENTITY,
+                State::request_peer_identity,
+                if requested {
+                    End::value("Requested")
+                } else {
+                    End::Nothing
+                },
                 false,
                 ROW,
             ),

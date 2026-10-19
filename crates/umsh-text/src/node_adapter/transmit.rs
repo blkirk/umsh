@@ -11,6 +11,7 @@ use umsh_node::{BoundChannel, Transport};
 use umsh_node::{LocalNode, MacBackend, SendProgressTicket};
 
 use crate::chat::{ChannelRegistry, ChatFacade, Outbound, TransmitUpdate};
+use crate::engine::sequence::MessageHandle;
 use crate::engine::{Destination, Transmission};
 use crate::node_adapter::WellKnownChannels;
 use crate::validate::TextProfile;
@@ -272,6 +273,7 @@ impl TransmitQueue {
             gate_peer,
             route,
             payload,
+            forward_secret: None,
         }))
     }
 
@@ -423,12 +425,41 @@ pub struct Departure {
     route: Route,
     /// The frame, with its payload-type byte.
     payload: Vec<u8>,
+    /// Whether a frame to a peer goes under a session with forward secrecy
+    /// or never does; `None` leaves it to whether one is held.
+    forward_secret: Option<bool>,
 }
 
 impl Departure {
     /// The frame's payload, after its payload-type byte.
     pub fn payload(&self) -> &[u8] {
         self.payload.get(1..).unwrap_or_default()
+    }
+
+    /// The message of ours the frame carries, when its delivery is
+    /// tracked.
+    pub fn message(&self) -> Option<MessageHandle> {
+        self.queued.transmission.message
+    }
+
+    /// Sends the frame, when it goes to a peer, under the session with
+    /// forward secrecy held with them, failing without one; or, without
+    /// `forward_secret`, never under one.
+    pub fn require_forward_secrecy(&mut self, forward_secret: bool) {
+        self.forward_secret = Some(forward_secret);
+    }
+
+    /// What [`Departure::require_forward_secrecy`] holds the frame to.
+    pub fn forward_secrecy(&self) -> Option<bool> {
+        self.forward_secret
+    }
+
+    /// The peer the frame is addressed to, when it goes to one alone.
+    pub fn peer(&self) -> Option<PublicKey> {
+        match self.route {
+            Route::Peer { peer, .. } => Some(peer),
+            Route::Channel { .. } | Route::ChannelPeer { .. } => None,
+        }
     }
 }
 
@@ -511,13 +542,57 @@ pub async fn transmit<M: MacBackend>(node: &LocalNode<M>, departure: &Departure)
             let Ok(connection) = node.peer(*peer).await else {
                 return Sent::Unsendable;
             };
-            connection.send(payload, options).await.into()
+            match departure.forward_secret {
+                None => connection.send(payload, options).await.into(),
+                Some(forward_secret) => {
+                    send_with_secrecy(node, peer, payload, options, forward_secret).await
+                }
+            }
         }
         Route::Channel { key, options } => send_on_channel(node, key, None, payload, options).await,
         Route::ChannelPeer { key, peer, options } => {
             send_on_channel(node, key, Some(peer), payload, options).await
         }
     }
+}
+
+/// A unicast to `peer` under a session with forward secrecy, or never
+/// under one. One meant to go under a session that is no longer held
+/// cannot go: it never goes without.
+#[cfg(feature = "software-crypto")]
+async fn send_with_secrecy<M: MacBackend>(
+    node: &LocalNode<M>,
+    peer: &PublicKey,
+    payload: &[u8],
+    options: &SendOptions,
+    forward_secret: bool,
+) -> Sent {
+    match node
+        .send_with_secrecy(peer, payload, options, forward_secret)
+        .await
+    {
+        Ok(ticket) => Sent::Ticket(ticket),
+        Err(umsh_node::NodeError::PfsSessionMissing) => Sent::Unsendable,
+        Err(_) => Sent::Busy,
+    }
+}
+
+/// Forward secrecy is the software crypto back end's alone: a frame meant
+/// to go under it cannot go.
+#[cfg(not(feature = "software-crypto"))]
+async fn send_with_secrecy<M: MacBackend>(
+    node: &LocalNode<M>,
+    peer: &PublicKey,
+    payload: &[u8],
+    options: &SendOptions,
+    forward_secret: bool,
+) -> Sent {
+    if forward_secret {
+        return Sent::Unsendable;
+    }
+    umsh_node::Transport::send(node, peer, payload, options)
+        .await
+        .into()
 }
 
 /// A multicast on the channel `key` names, or with `peer` a blind unicast

@@ -72,8 +72,9 @@ pub mod keys {
     pub const PEER_SECRECY: FocusKey = FocusKey(0x0C00_0003);
     pub const PEER_PING: FocusKey = FocusKey(0x0C00_0004);
     pub const PEER_FORGET: FocusKey = FocusKey(0x0C00_0005);
-    pub const FORGET_CONFIRM: FocusKey = FocusKey(0x0C00_0006);
-    pub const FORGET_CANCEL: FocusKey = FocusKey(0x0C00_0007);
+    pub const PEER_IDENTITY: FocusKey = FocusKey(0x0C00_0006);
+    pub const FORGET_CONFIRM: FocusKey = FocusKey(0x0C00_0007);
+    pub const FORGET_CANCEL: FocusKey = FocusKey(0x0C00_0008);
     /// The Channels screen's Add channel, which heads it; the channels
     /// under it are named as the Chats list names them.
     pub const ADD_CHANNEL: FocusKey = FocusKey(0x1000_0000);
@@ -121,6 +122,11 @@ pub mod keys {
             _ => None,
         }
     }
+    /// The choices of how to send again a message that was to go under
+    /// forward secrecy.
+    pub const RESEND: FocusKey = FocusKey(0x1900_0000);
+    pub const RESEND_WITHOUT_SECRECY: FocusKey = FocusKey(0x1900_0001);
+    pub const RESEND_CANCEL: FocusKey = FocusKey(0x1900_0002);
     /// Shut down's confirmation.
     pub const SHUT_DOWN_CONFIRM: FocusKey = FocusKey(0x1600_0000);
     pub const SHUT_DOWN_CANCEL: FocusKey = FocusKey(0x1600_0001);
@@ -310,6 +316,9 @@ pub enum Screen {
         actions: Option<MessageId>,
         /// The message the draft replies to.
         reply: Option<MessageId>,
+        /// The unconfirmed message, which was to go under forward secrecy,
+        /// whose choices of how to send it again are open.
+        unsent: Option<MessageId>,
     },
     /// How a message reached this device.
     Details {
@@ -331,6 +340,8 @@ pub enum Screen {
         detail: PeerDetail,
         /// Forget is asking to be confirmed.
         confirm: bool,
+        /// Their identity has been asked for.
+        requested: bool,
         focus: FocusState,
     },
     /// One of the screens under Device.
@@ -599,6 +610,7 @@ impl State {
             focus: FocusState::requesting(keys::COMPOSER),
             actions: None,
             reply: None,
+            unsent: None,
         });
     }
 
@@ -683,6 +695,7 @@ impl State {
             peer,
             detail,
             confirm: false,
+            requested: false,
             focus: FocusState::requesting(keys::PEER_MESSAGE),
         });
     }
@@ -737,6 +750,17 @@ impl State {
         if let Some(peer) = self.shown_peer() {
             self.node.ping(peer);
             self.refresh_peer();
+        }
+    }
+
+    /// Asks the saved peer shown for their identity.
+    pub fn request_peer_identity(&mut self) {
+        if let Some(Screen::Peer {
+            peer, requested, ..
+        }) = self.screens.last_mut()
+        {
+            self.node.request_peer_identity(*peer);
+            *requested = true;
         }
     }
 

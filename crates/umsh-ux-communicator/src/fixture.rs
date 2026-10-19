@@ -9,10 +9,10 @@ use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
     Bluetooth, ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Chats, Delivery,
     Details, Direction, EventQueue, Gnss, Heard, Invite, KeyboardSettings, MAX_CHATS, MAX_HEARD,
-    MAX_PEERS, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, NodeEvent, PeerDetail,
-    PeerEntry, PeerId, PeerSummary, Peers, Presence, Profile, RadioSettings, Reacted, Reaction,
-    Reactions, Sender, Setting, ShareUri, Shareable, State, StatusStrip, TRANSMIT_POWER,
-    brightness_at, push_newest, word_match,
+    MAX_PEERS, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, NodeEvent, Parts,
+    PeerDetail, PeerEntry, PeerId, PeerSummary, Peers, Presence, Profile, Quote, RadioSettings,
+    Reacted, Reaction, Reactions, Reactor, Sender, Setting, ShareUri, Shareable, State,
+    StatusStrip, TRANSMIT_POWER, brightness_at, push_newest, word_match,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -128,13 +128,14 @@ fn quiet_for(chat: ChatId) -> u32 {
         3 => 41 * 60,
         4 => 60 * 60,
         5 => 3 * 60 * 60,
-        _ => 5 * 60 * 60,
+        6 => 5 * 60 * 60,
+        _ => 6 * 60 * 60,
     }
 }
 
 /// The mockup's chats, most recently active first, with their drafts kept
 /// on `heap`.
-fn mockup_chats(heap: TextHeap) -> [ChatRow; 6] {
+fn mockup_chats(heap: TextHeap) -> [ChatRow; 7] {
     let row = |id, avatar, name, kind, unread, muted, draft: &str| ChatRow {
         id,
         avatar,
@@ -179,8 +180,8 @@ fn mockup_chats(heap: TextHeap) -> [ChatRow; 6] {
         ),
         row(
             4,
-            AvatarStyle::channel(Some(BuiltinChannel::Public), "public", [0, 0, 0]),
-            "public",
+            AvatarStyle::channel(Some(BuiltinChannel::Public), "Public", [0, 0, 0]),
+            "Public",
             channel(ChannelAccess::Named),
             false,
             true,
@@ -204,8 +205,21 @@ fn mockup_chats(heap: TextHeap) -> [ChatRow; 6] {
             false,
             "",
         ),
+        row(
+            STATES,
+            AvatarStyle::peer([218, 50, 133], "j3DC", PeerShape::Circle),
+            "Sam",
+            peer(1),
+            false,
+            false,
+            "",
+        ),
     ]
 }
+
+/// The chat that shows what can become of a message on its way: since
+/// yesterday, with Sam.
+const STATES: ChatId = 7;
 
 /// Who sent a message.
 #[derive(Clone, Copy)]
@@ -258,6 +272,21 @@ fn messages(chat: ChatId) -> &'static [(From, &'static str)] {
             ),
             (From::Peer, "Thanks!"),
         ],
+        STATES => &[
+            (From::Me, "Leaving at 7"),
+            (From::Peer, "Stove is lit"),
+            (From::Peer, "Coffee in ten"),
+            // Taken back.
+            (From::Peer, ""),
+            // Asked for again.
+            (From::Peer, ""),
+            (From::Peer, "It covers the north side now"),
+            // Not to come.
+            (From::Peer, ""),
+            (From::Me, "How is the trail past the creek?"),
+            (From::Peer, "Washed out past the second crossing"),
+            (From::Peer, "Snow starts above the hut, so bring boots"),
+        ],
         _ => &[],
     }
 }
@@ -273,15 +302,19 @@ fn invite(heap: TextHeap, chat: ChatId, index: usize) -> Option<(Invite, ShareUr
         builtin: None,
         tint: [46, 125, 196],
         access: ChannelAccess::Private,
+        key: umsh_core::base58::decode(JOINED_KEY.as_bytes()).ok()?,
     };
     Some((invite, private_uri(JOINED_KEY, "Base Camp")?))
 }
 
 /// Others' reactions to a message of the fixture's, one each.
-fn their_reactions(chat: ChatId, index: usize) -> &'static [Reaction] {
+fn their_reactions(chat: ChatId, index: usize) -> &'static [(From, Reaction)] {
     match (chat, index) {
-        (1, 1) => &[Reaction::Heart],
-        (2, 1) => &[Reaction::ThumbsUp, Reaction::Exclaim],
+        (1, 1) => &[(From::Peer, Reaction::Heart)],
+        (2, 1) => &[
+            (From::Member("Sam"), Reaction::ThumbsUp),
+            (From::Member("Member 4Fz*"), Reaction::Exclaim),
+        ],
         _ => &[],
     }
 }
@@ -299,11 +332,69 @@ const ARRIVALS: [(ChatId, From, &str); 3] = [
 
 /// How far a message of the fixture's got.
 fn delivery(chat: ChatId, index: usize) -> Delivery {
-    if chat == 3 && index == 2 {
+    if (chat, index) == (3, 2) || (chat, index) == (STATES, 7) {
         Delivery::Unconfirmed
     } else {
         Delivery::Delivered
     }
+}
+
+/// What became of one of the fixture's messages, besides arriving whole.
+#[derive(Clone, Copy)]
+struct Condition {
+    presence: Presence,
+    edited: bool,
+    deleted: bool,
+    late: bool,
+    forward_secret: bool,
+    /// The message it replies to, by its place.
+    reply: Option<usize>,
+    parts: Option<Parts>,
+}
+
+fn condition(chat: ChatId, index: usize) -> Condition {
+    let mut condition = Condition {
+        presence: Presence::Present,
+        edited: false,
+        deleted: false,
+        late: false,
+        forward_secret: false,
+        reply: None,
+        parts: None,
+    };
+    if chat == STATES {
+        match index {
+            2 => condition.edited = true,
+            3 => condition.deleted = true,
+            4 => condition.presence = Presence::PendingRepair,
+            5 => condition.late = true,
+            6 => condition.presence = Presence::Unavailable,
+            7 => condition.forward_secret = true,
+            8 => condition.reply = Some(7),
+            9 => {
+                condition.parts = Some(Parts {
+                    count: 3,
+                    received: 0b011,
+                    lost: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+    condition
+}
+
+/// What a reply quotes of `message`, in the chat called `chat_name`.
+fn quote_of(heap: TextHeap, message: &Message, chat_name: &str) -> Option<Quote> {
+    let name = match (message.direction, &message.sender) {
+        (Direction::Outbound, _) => None,
+        (Direction::Inbound, Some(sender)) => Some(SharedText::new(heap, &sender.name)?),
+        (Direction::Inbound, None) => Some(SharedText::new(heap, chat_name)?),
+    };
+    Some(Quote {
+        name,
+        text: message.text.clone(),
+    })
 }
 
 /// Where the fixture's own messages are numbered: by chat, then by place.
@@ -324,8 +415,25 @@ fn mockup_message(
 ) -> Option<Message> {
     assert!(text.len() <= MESSAGE_LEN, "fixture message fits");
     let count = messages(chat).len();
-    // A minute apart, the last when its chat was last active.
-    let time = STARTED - quiet_for(chat) - 60 * (count - 1 - index) as u32;
+    // A minute apart, the last when its chat was last active, but for the
+    // first of the states, the evening before.
+    let mut time = STARTED - quiet_for(chat) - 60 * (count - 1 - index) as u32;
+    if chat == STATES && index == 0 {
+        time -= 13 * 60 * 60;
+    }
+    let condition = condition(chat, index);
+    let reply = match condition.reply {
+        Some(quoted) => {
+            let message = mockup_message(heap, chat, quoted, *messages(chat).get(quoted)?)?;
+            let chat_name = mockup_chats(heap)
+                .into_iter()
+                .find(|row| row.id == chat)
+                .map(|row| row.name)
+                .unwrap_or_default();
+            quote_of(heap, &message, &chat_name)
+        }
+        None => None,
+    };
     let (invite, text) = match invite(heap, chat, index) {
         Some((invite, uri)) => (Some(invite), SharedText::new(heap, &uri)?),
         None => (None, SharedText::new(heap, text)?),
@@ -344,18 +452,21 @@ fn mockup_message(
         delivery: delivery(chat, index),
         reactions: their_reactions(chat, index)
             .iter()
-            .map(|&reaction| Reacted {
+            .map(|&(_, reaction)| Reacted {
                 reaction,
                 count: 1,
                 mine: false,
             })
             .collect::<Reactions>(),
         invite,
-        reply_to: None,
+        reply,
         time: Some(time),
-        presence: Presence::Present,
-        edited: false,
-        deleted: false,
+        presence: condition.presence,
+        edited: condition.edited,
+        deleted: condition.deleted,
+        late: condition.late,
+        forward_secret: condition.forward_secret,
+        parts: condition.parts,
     })
 }
 
@@ -363,7 +474,7 @@ fn mockup_message(
 /// across all chats, and how many of each thing made since.
 const KEPT: usize = 8;
 /// How many chats the fixture keeps: its own, and those made since.
-const CHATS: usize = 6 + 2 * KEPT;
+const CHATS: usize = 7 + 2 * KEPT;
 /// How many events wait for the interface before they overflow.
 const EVENTS: usize = 16;
 
@@ -380,8 +491,10 @@ pub struct Store {
     arrived: Cell<usize>,
     /// My reactions, by message.
     mine: RefCell<Vec<(MessageId, Reaction), KEPT>>,
-    /// Unconfirmed messages sent again.
+    /// Unconfirmed messages sent again, and those of them sent again
+    /// without forward secrecy.
     retried: RefCell<Vec<MessageId, KEPT>>,
+    without_secrecy: RefCell<Vec<MessageId, KEPT>>,
     next: Cell<MessageId>,
     /// The unidentified member's identity has been asked for, and has
     /// arrived.
@@ -427,6 +540,7 @@ impl Store {
             arrived: Cell::new(0),
             mine: RefCell::new(Vec::new()),
             retried: RefCell::new(Vec::new()),
+            without_secrecy: RefCell::new(Vec::new()),
             next: Cell::new(FIRST_KEPT),
             asked: Cell::new(false),
             identified: Cell::new(false),
@@ -740,7 +854,7 @@ impl Store {
     /// Keeps `text`, from `from`, as the newest message of `chat`, which is
     /// unread now, and announces it.
     fn receive(&self, chat: ChatId, from: From, text: &str) {
-        let Some(message) = self.keep(chat, from, text, None) else {
+        let Some(message) = self.keep(chat, from, text, None, false) else {
             return;
         };
         if let Some(mut row) = self.touch(chat) {
@@ -855,6 +969,8 @@ impl Store {
         summary.unread = row.unread;
         summary.muted = row.muted;
         summary.last_activity = Some(row.activity);
+        // The chat of message states holds a session with forward secrecy.
+        summary.forward_secret = row.id == STATES;
         if let Some(last) = self.last_message(row.id) {
             summary.preview(&last);
         }
@@ -893,6 +1009,9 @@ impl Store {
         if self.retried.borrow().contains(&message.id) {
             message.delivery = Delivery::Sending;
         }
+        if self.without_secrecy.borrow().contains(&message.id) {
+            message.forward_secret = false;
+        }
         if self.identified.get()
             && let Some(sender) = message.sender.as_mut().filter(|s| s.name == UNIDENTIFIED)
         {
@@ -908,7 +1027,16 @@ impl Store {
         from: From,
         text: &str,
         reply_to: Option<MessageId>,
+        forward_secret: bool,
     ) -> Option<Message> {
+        let reply = match reply_to {
+            Some(id) => {
+                let quoted = self.message(chat, id)?;
+                let chat_name = self.chat(chat).map(|chat| chat.name).unwrap_or_default();
+                quote_of(self.heap, &quoted, &chat_name)
+            }
+            None => None,
+        };
         let message = Message {
             id: self.next.get(),
             direction: match from {
@@ -928,11 +1056,14 @@ impl Store {
             },
             reactions: Reactions::new(),
             invite: None,
-            reply_to,
+            reply,
             time: Some(self.time()),
             presence: Presence::Present,
             edited: false,
             deleted: false,
+            late: false,
+            forward_secret,
+            parts: None,
         };
         self.next.set(message.id + 1);
         let mut kept = self.kept.borrow_mut();
@@ -1055,8 +1186,14 @@ impl Node for Store {
         }
     }
 
-    fn send(&self, chat: ChatId, text: &str, reply_to: Option<MessageId>) -> Option<Message> {
-        let message = self.keep(chat, From::Me, text, reply_to)?;
+    fn send(
+        &self,
+        chat: ChatId,
+        text: &str,
+        reply_to: Option<MessageId>,
+        forward_secret: bool,
+    ) -> Option<Message> {
+        let message = self.keep(chat, From::Me, text, reply_to, forward_secret)?;
         if let Some(mut row) = self.touch(chat) {
             row.draft = None;
         }
@@ -1088,6 +1225,18 @@ impl Node for Store {
         drop(retried);
         self.queue(NodeEvent::MessageChanged { chat, message });
         true
+    }
+
+    fn retry_without_secrecy(&self, chat: ChatId, message: MessageId) -> bool {
+        let mut without = self.without_secrecy.borrow_mut();
+        if !without.contains(&message) {
+            if without.is_full() {
+                without.remove(0);
+            }
+            _ = without.push(message);
+        }
+        drop(without);
+        self.retry(chat, message)
     }
 
     fn member(&self, chat: ChatId, message: MessageId) -> Option<Member> {
@@ -1173,6 +1322,16 @@ impl Node for Store {
         }
         drop(pinged);
         self.queue(NodeEvent::PingAnswered(peer));
+    }
+
+    fn utc_offset_min(&self) -> i16 {
+        0
+    }
+
+    /// Saved peers' identities are what the fixture has: asking changes
+    /// nothing.
+    fn request_peer_identity(&self, peer: PeerId) {
+        self.queue(NodeEvent::PeerChanged(peer));
     }
 
     fn forget_peer(&self, peer: PeerId) {
@@ -1492,7 +1651,7 @@ impl Node for Store {
                 From::Peer | From::Member(_) => (false, "14:29"),
             }
         };
-        Some(if outbound {
+        let mut details = if outbound {
             Details {
                 time: s(time),
                 ..Details::default()
@@ -1505,8 +1664,43 @@ impl Node for Store {
                 rssi: Some(-97),
                 snr: Some(65),
                 authenticated: true,
+                ..Details::default()
             }
-        })
+        };
+        let index = (message & 0xFF) as usize;
+        let theirs = if message < FIRST_KEPT {
+            their_reactions(chat, index)
+        } else {
+            &[]
+        };
+        for &(from, reaction) in theirs {
+            let (name, avatar) = match from {
+                From::Member(name) => (name, member(name).avatar),
+                From::Me | From::Peer => {
+                    let summary = self.chat(chat)?;
+                    let name = SharedText::new(self.heap, &summary.name)?;
+                    _ = details.reactors.push(Reactor {
+                        name: Some(name),
+                        avatar: summary.avatar,
+                        reaction,
+                    });
+                    continue;
+                }
+            };
+            _ = details.reactors.push(Reactor {
+                name: Some(SharedText::new(self.heap, name)?),
+                avatar,
+                reaction,
+            });
+        }
+        if let Some(&(_, reaction)) = self.mine.borrow().iter().find(|(id, _)| *id == message) {
+            _ = details.reactors.push(Reactor {
+                name: None,
+                avatar: self.avatar(),
+                reaction,
+            });
+        }
+        Some(details)
     }
 }
 

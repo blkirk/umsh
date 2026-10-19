@@ -128,6 +128,8 @@ pub struct ChatSummary {
     pub unread: bool,
     pub muted: bool,
     pub kind: ChatKind,
+    /// What is sent now goes under a session with forward secrecy.
+    pub forward_secret: bool,
     /// The unsent message, kept until it is sent or erased.
     pub draft: Draft,
 }
@@ -145,6 +147,7 @@ impl ChatSummary {
             unread: false,
             muted: false,
             kind: ChatKind::Peer { hops: None },
+            forward_secret: false,
             draft: EditBuffer::with_text(DraftText::new(heap)),
         };
         push_cut(&mut summary.name, name);
@@ -539,8 +542,8 @@ pub struct Message {
     /// The channel it invites to, when its whole text is the channel's
     /// link: an invitation says nothing besides.
     pub invite: Option<Invite>,
-    /// The message it replies to.
-    pub reply_to: Option<MessageId>,
+    /// What it replies to, as it quotes it.
+    pub reply: Option<Quote>,
     /// When it was sent or received, in Unix seconds, when the clock was
     /// known.
     pub time: Option<u32>,
@@ -549,6 +552,30 @@ pub struct Message {
     pub edited: bool,
     /// Its sender took it back: what it said is gone.
     pub deleted: bool,
+    /// It came after messages sent later than it.
+    pub late: bool,
+    /// Mine, and sent under a session with forward secrecy.
+    pub forward_secret: bool,
+    /// How far it has come, while it is still arriving in parts.
+    pub parts: Option<Parts>,
+}
+
+/// A reply's quote of the message it answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Quote {
+    /// Who sent it, or `None` for this node.
+    pub name: Option<SharedText>,
+    /// What it says, or as much of it as one line shows.
+    pub text: SharedText,
+}
+
+/// A message arriving in parts: how many, which have come, and which will
+/// not, each a bit by its index.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Parts {
+    pub count: u8,
+    pub received: u16,
+    pub lost: u16,
 }
 
 /// An invitation to a channel. Every message carries room for one, so it
@@ -561,6 +588,8 @@ pub struct Invite {
     /// Who can read it: those given the invitation, or anyone who knows
     /// the name.
     pub access: ChannelAccess,
+    /// The channel's key, which joining it under another name still needs.
+    pub key: [u8; 32],
 }
 
 impl Invite {
@@ -620,6 +649,20 @@ pub struct Details {
     pub snr: Option<i16>,
     /// Its sender's signature checked out.
     pub authenticated: bool,
+    /// Who reacted to it, and how, in the order they did.
+    pub reactors: Vec<Reactor, MAX_REACTORS>,
+}
+
+/// The most reactions a message's details list: the latest.
+pub const MAX_REACTORS: usize = 8;
+
+/// Someone's reaction to a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reactor {
+    /// Who reacted, or `None` for this node.
+    pub name: Option<SharedText>,
+    pub avatar: AvatarStyle,
+    pub reaction: Reaction,
 }
 
 /// The newest messages of the open chat, oldest first.
@@ -639,6 +682,30 @@ impl Conversation {
     /// Adds `message` as the newest, dropping the oldest when full.
     pub fn push(&mut self, message: Message) {
         push_newest(&mut self.messages, message);
+    }
+
+    /// Takes in `message` where it belongs among those listed: in place of
+    /// what is listed for it, or in the order of its ID, which is the order
+    /// the node keeps a chat's messages in. One older than everything
+    /// listed while the list is full is not among the newest, and stays out.
+    pub fn place(&mut self, message: Message) {
+        if let Some(listed) = self.messages.iter_mut().find(|m| m.id == message.id) {
+            *listed = message;
+            return;
+        }
+        let mut index = self
+            .messages
+            .iter()
+            .position(|m| m.id > message.id)
+            .unwrap_or(self.messages.len());
+        if self.messages.is_full() {
+            if index == 0 {
+                return;
+            }
+            self.messages.remove(0);
+            index -= 1;
+        }
+        _ = self.messages.insert(index, message);
     }
 }
 
@@ -793,6 +860,7 @@ pub trait Node {
     fn peers(&self, peers: &mut Peers);
 
     /// Fills `messages`, which is empty, with the newest messages of `chat`.
+    /// A chat's messages are in the order of their IDs.
     fn load(&self, chat: ChatId, messages: &mut Messages);
 
     /// The message `message` of `chat`. `None` once it is gone.
@@ -807,8 +875,15 @@ pub trait Node {
 
     /// Keeps `text`, sent now in reply to `reply_to` if it is a reply, as the
     /// newest message of `chat`, and returns the message as kept, or `None`
-    /// when there is no room for it.
-    fn send(&self, chat: ChatId, text: &str, reply_to: Option<MessageId>) -> Option<Message>;
+    /// when there is no room for it. With `forward_secret` it goes under a
+    /// session with forward secrecy or not at all; without, never under one.
+    fn send(
+        &self,
+        chat: ChatId,
+        text: &str,
+        reply_to: Option<MessageId>,
+        forward_secret: bool,
+    ) -> Option<Message>;
 
     /// Keeps `reaction` as my reaction to `message` in `chat`; `None`
     /// withdraws it.
@@ -840,6 +915,13 @@ pub trait Node {
     /// Pings `peer`. Its answer shows in their detail.
     fn ping(&self, peer: PeerId);
 
+    /// Local time's offset from UTC, in minutes.
+    fn utc_offset_min(&self) -> i16;
+
+    /// Asks `peer` for their identity. What they answer comes as
+    /// [`NodeEvent::PeerChanged`].
+    fn request_peer_identity(&self, peer: PeerId);
+
     /// Forgets the saved peer `peer`.
     fn forget_peer(&self, peer: PeerId);
 
@@ -855,6 +937,11 @@ pub trait Node {
     /// Sends `message` in `chat`, which is unconfirmed, again. Returns whether
     /// it is on its way.
     fn retry(&self, chat: ChatId, message: MessageId) -> bool;
+
+    /// Sends `message` in `chat`, which was to go under a session with
+    /// forward secrecy and is unconfirmed, again without one. Returns
+    /// whether it is on its way.
+    fn retry_without_secrecy(&self, chat: ChatId, message: MessageId) -> bool;
 
     /// What `text`, typed as a channel's name or invitation, names so far.
     fn inspect_channel(&self, text: &str) -> ChannelEntry;
@@ -1160,9 +1247,10 @@ impl State {
             }) if *shown == chat => *reply,
             _ => None,
         };
-        let Some(message) = self
-            .node
-            .send(chat, self.chats[index].draft.text(), reply_to)
+        let summary = &self.chats[index];
+        let Some(message) =
+            self.node
+                .send(chat, summary.draft.text(), reply_to, summary.forward_secret)
         else {
             return;
         };
@@ -1184,6 +1272,12 @@ impl State {
     #[must_use]
     pub fn age(&self, chat: &ChatSummary) -> Age {
         age(chat.last_activity, self.wall_time)
+    }
+
+    /// Local time's offset from UTC, in minutes.
+    #[must_use]
+    pub fn utc_offset_min(&self) -> i16 {
+        self.node.utc_offset_min()
     }
 
     /// The board read its clock: `time`, in Unix seconds, or not known.
@@ -1288,18 +1382,21 @@ impl State {
         }
     }
 
-    /// Reads `message` of the open chat from the node again.
+    /// Reads `message` of the open chat from the node again, taking it in
+    /// when it is new among the newest: a placeholder for a missing message,
+    /// or one still arriving in parts.
     fn refresh_message(&mut self, chat: ChatId, message: MessageId) {
         let node = self.node;
         let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) else {
             return;
         };
-        let Some(index) = conversation.messages.iter().position(|m| m.id == message) else {
-            return;
-        };
         match node.message(chat, message) {
-            Some(fresh) => conversation.messages[index] = fresh,
-            None => _ = conversation.messages.remove(index),
+            Some(fresh) => conversation.place(fresh),
+            None => {
+                if let Some(index) = conversation.messages.iter().position(|m| m.id == message) {
+                    conversation.messages.remove(index);
+                }
+            }
         }
     }
 
@@ -1375,23 +1472,79 @@ impl State {
     }
 
     /// Sends `message` in the open chat again, if it is unconfirmed and
-    /// airtime allows.
+    /// airtime allows. One that was to go under forward secrecy asks
+    /// first whether to go without it.
     pub fn retry(&mut self, message: MessageId) {
         if self.airtime_wait.is_some() {
             return;
         }
-        let Some(conversation) = self.conversation.as_mut() else {
+        let Some(target) = self.unconfirmed(message) else {
             return;
         };
-        let Some(target) = conversation
+        if target.forward_secret {
+            if let Some(Screen::Conversation { unsent, focus, .. }) = self.screens.last_mut() {
+                *unsent = Some(message);
+                focus.request(keys::RESEND);
+            }
+            return;
+        }
+        self.resend_now(message, false);
+    }
+
+    /// The unconfirmed `message` of the open chat.
+    fn unconfirmed(&mut self, message: MessageId) -> Option<&mut Message> {
+        self.conversation
+            .as_mut()?
             .messages
             .iter_mut()
             .find(|m| m.id == message && m.delivery == Delivery::Unconfirmed)
-        else {
+    }
+
+    /// Closes the choices of how to send again, focusing the message they
+    /// were opened on, and returns that message.
+    pub fn cancel_resend(&mut self) -> Option<MessageId> {
+        let Some(Screen::Conversation { unsent, focus, .. }) = self.screens.last_mut() else {
+            return None;
+        };
+        let message = unsent.take()?;
+        focus.request(keys::message(message));
+        Some(message)
+    }
+
+    /// Sends the message whose choices are open again, as it was to go.
+    pub fn resend(&mut self) {
+        if let Some(message) = self.cancel_resend() {
+            self.resend_now(message, false);
+        }
+    }
+
+    /// Sends the message whose choices are open again, without forward
+    /// secrecy.
+    pub fn resend_without_secrecy(&mut self) {
+        if let Some(message) = self.cancel_resend() {
+            self.resend_now(message, true);
+        }
+    }
+
+    fn resend_now(&mut self, message: MessageId, without_secrecy: bool) {
+        if self.airtime_wait.is_some() {
+            return;
+        }
+        let node = self.node;
+        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
             return;
         };
-        if self.node.retry(conversation.chat, message) {
+        let Some(target) = self.unconfirmed(message) else {
+            return;
+        };
+        let queued = if without_secrecy {
+            node.retry_without_secrecy(chat, message)
+        } else {
+            node.retry(chat, message)
+        };
+        if queued {
             target.delivery = Delivery::Sending;
+            target.forward_secret &= !without_secrecy;
         }
     }
 
@@ -1417,10 +1570,8 @@ impl State {
         summary.unread = !reading;
         let muted = summary.muted;
         _ = self.chats.insert(0, summary);
-        if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat)
-            && !conversation.messages.iter().any(|m| m.id == message.id)
-        {
-            conversation.push(message.clone());
+        if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
+            conversation.place(message.clone());
         }
         if reading || muted {
             return false;
@@ -1554,5 +1705,71 @@ fn push_cut<const N: usize>(into: &mut String<N>, s: &str) {
         if into.push(c).is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+
+    static HEAP: std::alloc::System = std::alloc::System;
+
+    fn message(id: MessageId, text: &str) -> Message {
+        Message {
+            id,
+            direction: Direction::Inbound,
+            sender: None,
+            text: SharedText::new(&HEAP, text).unwrap(),
+            delivery: Delivery::Sent,
+            reactions: Reactions::new(),
+            invite: None,
+            reply: None,
+            time: None,
+            presence: Presence::Present,
+            edited: false,
+            deleted: false,
+            late: false,
+            forward_secret: false,
+            parts: None,
+        }
+    }
+
+    fn ids(conversation: &Conversation) -> std::vec::Vec<MessageId> {
+        conversation.messages.iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn a_message_takes_its_place_among_the_newest() {
+        let mut conversation = Conversation {
+            chat: 1,
+            messages: Messages::new(),
+            sent: 0,
+        };
+        for id in [10, 12, 13] {
+            conversation.place(message(id, "listed"));
+        }
+        // A missing message's placeholder, then its late arrival.
+        conversation.place(Message {
+            presence: Presence::PendingRepair,
+            ..message(11, "")
+        });
+        assert_eq!(ids(&conversation), [10, 11, 12, 13]);
+        conversation.place(message(11, "late"));
+        assert_eq!(ids(&conversation), [10, 11, 12, 13]);
+        assert_eq!(conversation.messages[1].text.as_str(), "late");
+        assert_eq!(conversation.messages[1].presence, Presence::Present);
+
+        // Full, a newer message drops the oldest; an older one stays out.
+        for id in 20..20 + MAX_MESSAGES as MessageId - 4 {
+            conversation.place(message(id, "newer"));
+        }
+        assert!(conversation.messages.is_full());
+        conversation.place(message(14, "between"));
+        assert_eq!(conversation.messages[0].id, 11);
+        assert_eq!(conversation.messages[3].id, 14);
+        conversation.place(message(5, "old"));
+        assert!(conversation.messages.iter().all(|m| m.id != 5));
     }
 }

@@ -12,7 +12,7 @@ use umsh_text::engine::{CompletionStatus, DeliveryState, Direction, Presence};
 use umsh_text::{ConversationKey, MessageType, REASSEMBLED_BODY_MAX, SenderScope};
 
 use crate::ids::{ChatId, MessageId, PeerId};
-use crate::reaction::Reactions;
+use crate::reaction::{Reaction, Reactions};
 
 /// The longest name the store keeps, in octets of UTF-8. A longer one is
 /// cut at the last whole character that fits.
@@ -82,6 +82,9 @@ pub struct MessageFlags {
     /// Its sender withdrew it. The record stays, with no body, for as long
     /// as its wire alias does.
     pub deleted: bool,
+    /// To go under a session with forward secrecy, as it was sent: its
+    /// frames go under one or not at all. Without, they never do.
+    pub forward_secret: bool,
 }
 
 /// How each fragment of an outbound message fared, as bitmaps over
@@ -200,6 +203,15 @@ impl MessageRecord {
     }
 }
 
+/// Someone's latest reaction to a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReactorRecord {
+    pub sender: SenderScope,
+    /// It is this node's.
+    pub mine: bool,
+    pub reaction: Reaction,
+}
+
 /// A message's coordinates on the wire, by which a reference that has
 /// outlived the engine's handles finds it. Wire IDs recycle, so the
 /// newest message that matches is the one meant.
@@ -299,6 +311,16 @@ pub enum ChannelAccess {
 pub enum BuiltinChannel {
     Public,
     Emergency,
+}
+
+impl BuiltinChannel {
+    /// The name it is shown by.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Public => "Public",
+            Self::Emergency => "EMERGENCY",
+        }
+    }
 }
 
 /// A channel the store knows. Its key is security state, kept elsewhere.

@@ -116,6 +116,12 @@ pub fn parse_umsh_uri<'a>(uri: &'a UriRef) -> Result<UmshUri<'a>, Error> {
     }
 }
 
+/// Parse `text` as a `umsh:` URI.
+pub fn parse_umsh_str(text: &str) -> Result<UmshUri<'_>, Error> {
+    let uri = UriRef::from_str(text).map_err(|_| Error::InvalidUri)?;
+    parse_umsh_uri(uri)
+}
+
 fn parse_channel_params<'a>(uri: &'a UriRef) -> Result<ChannelParams<'a>, Error> {
     let mut display_name = None;
     let mut max_flood_hops = None;

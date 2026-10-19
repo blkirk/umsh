@@ -122,6 +122,9 @@ pub struct Transmission {
     /// When present, the platform should archive this payload as resendable
     /// material under this key (control frames carry `None`).
     pub archive: Option<ArchiveKey>,
+    /// The message of ours the frame carries, when it is one whose
+    /// delivery is tracked: each time it is sent, not only the first.
+    pub message: Option<MessageHandle>,
     /// Encoded text-message payload (without the payload-type byte).
     pub payload: heapless::Vec<u8, MAX_FRAME>,
 }
@@ -2562,6 +2565,7 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
             transmission_id,
             destination,
             archive,
+            message: track.map(|(handle, _)| handle),
             payload,
         }));
         transmission_id

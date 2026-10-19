@@ -22,12 +22,12 @@ use umsh_text::engine::{
 use umsh_text::validate::{DeliveryPath, DirectChannelProfile, Envelope};
 use umsh_text::{ConversationKey, SenderScope};
 
-use crate::batch::{Batch, CommitStep, Committed};
+use crate::batch::{Batch, CommitStep, Committed, Subject};
 use crate::ids::{ChatId, MessageId};
 use crate::reaction::{Reacted, Reaction};
 use crate::record::{
     ChannelAccess, ChannelChange, ChannelRecord, ChatChange, ChatRecord, LinkInfo, MessageRecord,
-    PeerChange, PeerFilter, PeerRecord, StoreError, Usage, WireAlias,
+    PeerChange, PeerFilter, PeerRecord, ReactorRecord, StoreError, Usage, WireAlias,
 };
 use crate::store::ChatStore;
 
@@ -470,6 +470,21 @@ pub fn delivery<H: Harness>(harness: &mut H) {
         record(&store, id).delivery.state(None),
         Some(DeliveryState::Acked)
     );
+
+    // Whether it went under forward secrecy is kept, and kept again.
+    let secrecy = |store: &mut H::Store, forward_secret| {
+        let resolve = |_| None;
+        let mut batch = Batch::new(None, &resolve);
+        batch.secrecy(Subject::Kept(id), forward_secret);
+        store.commit(&batch).unwrap()
+    };
+    assert!(!record(&store, id).flags.forward_secret);
+    assert_eq!(secrecy(&mut store, true).messages, [id]);
+    assert!(secrecy(&mut store, true).messages.is_empty(), "unchanged");
+    harness.power_on(&mut store);
+    assert!(record(&store, id).flags.forward_secret);
+    secrecy(&mut store, false);
+    assert!(!record(&store, id).flags.forward_secret);
 }
 
 /// A new session fails what the last one left awaited: a direct message
@@ -607,13 +622,25 @@ pub fn reactions<H: Harness>(harness: &mut H) {
             mine: true
         }]
     );
+    // Each is kept with who sent it.
+    let theirs: Vec<ReactorRecord> = store.reactors(mine).collect();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].reaction, Reaction::Heart);
+    assert!(!theirs[0].mine);
+    assert!(matches!(theirs[0].sender, SenderScope::Peer(_)));
+    let ours: Vec<ReactorRecord> = store.reactors(heard).collect();
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].reaction, Reaction::ThumbsUp);
+    assert!(ours[0].mine);
 
     // The latest from a sender replaces their earlier one, and an empty
     // one withdraws it.
     rig.hear(&mut store, direct(), about_mine("lol"));
     assert_eq!(record(&store, mine).reactions[0].reaction, Reaction::Laugh);
+    assert_eq!(store.reactors(mine).count(), 1);
     rig.hear(&mut store, direct(), about_mine(""));
     assert!(record(&store, mine).reactions.is_empty());
+    assert_eq!(store.reactors(mine).count(), 0);
 }
 
 /// An edit changes its original in place, and its resend material with

@@ -146,6 +146,11 @@ pub trait MacBackend: Clone {
         let _ = f;
     }
 
+    /// Invoke `f` with the key of every channel registered in the MAC.
+    async fn for_each_channel(&self, f: &mut dyn FnMut(&umsh_core::ChannelKey)) {
+        let _ = f;
+    }
+
     /// Invoke `f` for each peer with established crypto state for `from`.
     /// Arguments are `(peer public key, last-accepted RX counter, persisted RX boundary)`.
     async fn for_each_peer_counter(
@@ -410,6 +415,10 @@ impl<
 
     async fn for_each_peer(&self, f: &mut dyn FnMut(umsh_core::PublicKey)) {
         self.for_each_peer(f).await
+    }
+
+    async fn for_each_channel(&self, f: &mut dyn FnMut(&umsh_core::ChannelKey)) {
+        self.for_each_channel(f).await
     }
 
     async fn for_each_peer_counter(

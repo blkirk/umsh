@@ -44,7 +44,7 @@ mod wire;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 
-pub use batch::{Batch, Change, CommitStep, Committed};
+pub use batch::{Batch, Change, CommitStep, Committed, Subject};
 pub use durable::{Durable, Volatile};
 #[cfg(feature = "flash")]
 pub use flash::{FlashMap, FlashMapStore, RamFlash, RamFlashError};
@@ -54,7 +54,7 @@ pub use reaction::{Reacted, Reaction, Reactions};
 pub use record::{
     BODY_MAX, BuiltinChannel, ChannelAccess, ChannelChange, ChannelRecord, ChatChange, ChatRecord,
     Delivery, IDENTITY_MAX, LinkInfo, MessageFlags, MessageRecord, NAME_MAX, Name, PeerChange,
-    PeerFilter, PeerRecord, ROUTE_MAX, StoreError, Usage, WireAlias,
+    PeerFilter, PeerRecord, ROUTE_MAX, ReactorRecord, StoreError, Usage, WireAlias,
 };
 pub use store::ChatStore;
 

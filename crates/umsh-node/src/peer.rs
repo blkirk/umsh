@@ -414,6 +414,21 @@ impl<M: crate::mac::MacBackend> PeerConnection<LocalNode<M>> {
             .await
     }
 
+    /// Sends `payload` under the session with forward secrecy held with
+    /// this peer, or, without `forward_secret`, never under one: see
+    /// [`LocalNode::send_with_secrecy`].
+    #[cfg(feature = "software-crypto")]
+    pub async fn send_with_secrecy(
+        &self,
+        payload: &[u8],
+        options: &SendOptions,
+        forward_secret: bool,
+    ) -> Result<SendProgressTicket, NodeError<M>> {
+        self.transport
+            .send_with_secrecy(&self.peer, payload, options, forward_secret)
+            .await
+    }
+
     #[cfg(feature = "software-crypto")]
     pub async fn end_pfs(&self, options: &SendOptions) -> Result<(), NodeError<M>> {
         self.transport.end_pfs(&self.peer, options).await
