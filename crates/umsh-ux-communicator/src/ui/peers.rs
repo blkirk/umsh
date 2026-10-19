@@ -3,11 +3,12 @@
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
+use buoyant::view::Lazy;
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::{String, Vec};
 
-use super::{RAIL, label};
+use super::{RAIL, line};
 use crate::model::{MAX_PEERS, PeerSummary, State};
 use crate::nav::keys;
 use crate::{font, icon, theme};
@@ -61,11 +62,11 @@ pub fn view(peers: &Vec<PeerSummary, MAX_PEERS>) -> impl View<Rgb565, State> + u
 
 /// A row's focused look, under its content: filled, with the accent at its
 /// leading edge, as the Chats list's rows are. `width` is the list's.
-pub(super) fn focused_row<V: View<Rgb565, State>>(
+pub(super) fn focused_row<C, V: View<Rgb565, C>>(
     content: V,
     focused: bool,
     width: u32,
-) -> impl View<Rgb565, State> + use<V> {
+) -> impl View<Rgb565, C> + use<C, V> {
     content
         .hint_background_color(if focused {
             theme::FOCUS
@@ -128,51 +129,57 @@ fn row(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
     let id = peer.id;
     Button::new(
         move |s: &mut State| s.open_peer(id),
-        move |button: ButtonState| {
-            focused_row(
-                VStack::new((
-                    HStack::new((
-                        label::<32>(&peer.name, &font::SEMIBOLD, theme::BODY, theme::TEXT),
-                        Spacer::default(),
-                        label::<6>(
-                            &peer.heard,
-                            &font::SEMIBOLD,
-                            theme::SMALL,
-                            theme::TEXT_TERTIARY,
-                        )
-                        .fixed_size(true, false),
-                    ))
-                    .with_spacing(4)
-                    .padding(Edges::Trailing, 10)
-                    .frame()
-                    .with_height(NAME_LINE),
-                    // A peer not known to be anywhere has its name alone,
-                    // in the middle.
-                    peer.hops
-                        .is_some()
-                        .then(|| route_line(&peer).frame().with_height(ROUTE_LINE)),
-                ))
-                .with_spacing(0)
-                .with_alignment(HorizontalAlignment::Leading)
-                .padding(Edges::Leading, TEXT_X)
-                .flex_infinite_width(HorizontalAlignment::Leading)
+        move |button: ButtonState| Lazy::new((peer.clone(), button.is_focused()), row_look),
+    )
+}
+
+/// A peer's row: their avatar, then their name over how far away they are.
+///
+/// Built from the peer each time it is drawn ([`Lazy`]): kept in the
+/// render trees, every row's would outweigh the rest of the screen.
+fn row_look((peer, focused): &(PeerSummary, bool)) -> impl View<Rgb565, ()> + use<> {
+    focused_row(
+        VStack::new((
+            HStack::new((
+                line(peer.name.clone(), &font::SEMIBOLD, theme::BODY, theme::TEXT),
+                Spacer::default(),
+                line(
+                    peer.heard.clone(),
+                    &font::SEMIBOLD,
+                    theme::SMALL,
+                    theme::TEXT_TERTIARY,
+                )
+                .fixed_size(true, false),
+            ))
+            .with_spacing(4)
+            .padding(Edges::Trailing, 10)
+            .frame()
+            .with_height(NAME_LINE),
+            // A peer not known to be anywhere has its name alone, in the
+            // middle.
+            peer.hops
+                .is_some()
+                .then(|| route_line(peer).frame().with_height(ROUTE_LINE)),
+        ))
+        .with_spacing(0)
+        .with_alignment(HorizontalAlignment::Leading)
+        .padding(Edges::Leading, TEXT_X)
+        .flex_infinite_width(HorizontalAlignment::Leading)
+        .frame()
+        .with_height(ROW)
+        .overlay(
+            Alignment::Leading,
+            super::avatar::view(&peer.avatar, AVATAR)
                 .frame()
-                .with_height(ROW)
-                .overlay(
-                    Alignment::Leading,
-                    super::avatar::view(&peer.avatar, AVATAR)
-                        .frame()
-                        .with_width(TEXT_X),
-                ),
-                button.is_focused(),
-                LIST_WIDTH,
-            )
-        },
+                .with_width(TEXT_X),
+        ),
+        *focused,
+        LIST_WIDTH,
     )
 }
 
 /// How far away the peer is, with how strongly they are heard when direct.
-fn route_line(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
+fn route_line(peer: &PeerSummary) -> impl View<Rgb565, ()> + use<> {
     let mut route: String<12> = String::new();
     match peer.hops {
         Some(0) => _ = route.push_str("Direct"),
@@ -182,8 +189,8 @@ fn route_line(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
     }
     HStack::new((
         peer.signal.filter(|_| peer.hops == Some(0)).map(bars),
-        label::<12>(
-            &route,
+        line(
+            route,
             &font::REGULAR,
             theme::SECONDARY,
             theme::TEXT_TERTIARY,
@@ -194,7 +201,7 @@ fn route_line(peer: &PeerSummary) -> impl View<Rgb565, State> + use<> {
 }
 
 /// `lit` of four bars, rising.
-fn bars(lit: u8) -> impl View<Rgb565, State> + use<> {
+fn bars(lit: u8) -> impl View<Rgb565, ()> + use<> {
     let bar = move |i: u8| {
         RoundedRectangle::new(1)
             .foreground_color(if i < lit {
