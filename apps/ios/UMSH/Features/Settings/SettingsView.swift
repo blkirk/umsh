@@ -689,13 +689,13 @@ struct RadioDetailView: View {
     @State private var confirmsReboot = false
     @State private var showsRadioPicker = false
     @State private var radioAccessories = RadioAccessories.shared
-    #if DEBUG
+    #if DEBUG && targetEnvironment(simulator)
     @AppStorage("debug.radioLan.enabled") private var lanRadioEnabled = false
     #endif
 
     var body: some View {
         List {
-            #if DEBUG
+            #if DEBUG && targetEnvironment(simulator)
             Section {
                 Toggle("Local network", isOn: $lanRadioEnabled)
             }

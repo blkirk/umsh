@@ -146,7 +146,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, ObservableObject {
            ) {
             return .tcp(endpoint)
         }
+        // On a phone the LAN radio needs its network extension, which the
+        // app does not embed until Apple grants the entitlement.
+        #if targetEnvironment(simulator)
         if defaults.bool(forKey: "debug.radioLan.enabled") { return .lan }
+        #endif
         #endif
         return .live
     }

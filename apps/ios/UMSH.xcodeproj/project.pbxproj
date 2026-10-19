@@ -478,12 +478,10 @@
 				300000000000000000000001 /* Frameworks */,
 				600000000000000000000002 /* Resources */,
 				600000000000000000000003 /* Stage the region database */,
-				E1A000000000000000000024 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				E1A000000000000000000042 /* UMSHLanRadio dependency */,
 			);
 			name = UMSH;
 			packageProductDependencies = (
