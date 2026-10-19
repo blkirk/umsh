@@ -54,12 +54,17 @@
             <h3><span class="flasher__num">1</span> Choose your board</h3>
             <select id="flasher-board" aria-label="Board">
               <option value="">Choose a board…</option>
-              {% for board in data.boards %}
+              {# Sorted the way the options read: vendor, then name. Tera's sort is
+                 stable, so sorting by name first leaves ties in name order. #}
+              {% for board in data.boards | sort(attribute="name") | sort(attribute="vendor") %}
                 {% if board.flash %}
                   <option value="{{ board.id }}">{{ board.vendor }} {{ board.name }}</option>
                 {% endif %}
               {% endfor %}
             </select>
+            {# main.js shows the chosen board here, so nobody flashes the wrong one. #}
+            <img class="flasher__photo" id="flasher-photo" alt=""
+                 data-base="{{ get_url(path='images/boards/', trailing_slash=false) }}" hidden />
           </li>
 
           <li class="flasher__step" id="flasher-step-firmware" hidden>

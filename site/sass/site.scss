@@ -1248,6 +1248,25 @@ th:first-child {
   font-size: 0.95rem;
 }
 
+// Light in both themes, like `.board__media`: the vendor photos are shot on
+// white.
+.flasher__photo {
+  display: block;
+  width: 100%;
+  max-width: 30rem;
+  height: 180px;
+  margin-top: 0.85rem;
+  padding: 0.9rem;
+  object-fit: contain;
+  background: #f4f5f7;
+  border-radius: 8px;
+  box-sizing: border-box;
+
+  &[hidden] {
+    display: none;
+  }
+}
+
 .flasher__image {
   margin-bottom: 0.6rem;
 }
