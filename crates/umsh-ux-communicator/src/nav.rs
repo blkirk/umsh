@@ -259,14 +259,7 @@ pub mod keys {
 
 /// How far away a peer is, as Find says it.
 fn distance(hops: Option<u8>) -> String<12> {
-    let mut text = String::new();
-    match hops {
-        Some(0) => _ = text.push_str("Direct"),
-        Some(1) => _ = text.push_str("1 hop"),
-        Some(n) => _ = core::fmt::write(&mut text, format_args!("{n} hops")),
-        None => {}
-    }
-    text
+    hops.map(crate::model::hops_text).unwrap_or_default()
 }
 
 /// A screen under Device.

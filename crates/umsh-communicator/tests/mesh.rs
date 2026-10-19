@@ -187,7 +187,7 @@ async fn a_direct_message_is_delivered() {
             assert_eq!(&*message.text, "Meet at the ridge");
             assert_eq!(
                 bob.node.chat(chat).unwrap().kind,
-                ChatKind::Peer { hops: Some(0) }
+                ChatKind::Peer { hops: Some(1) }
             );
 
             // The answer goes back the same way.

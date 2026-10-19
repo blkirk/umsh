@@ -1037,7 +1037,7 @@ fn a_heard_node_is_found_by_name() {
         .direct_chat(&address_of(&robin), "Robin Ridge", &avatar)
         .unwrap();
     assert_eq!(chat.name, "Robin Ridge");
-    assert_eq!(chat.kind, ChatKind::Peer { hops: Some(0) });
+    assert_eq!(chat.kind, ChatKind::Peer { hops: Some(1) });
 }
 
 /// A member saved is kept by the device, listed among the peers, and let
@@ -1097,7 +1097,8 @@ fn a_peer_saved_elsewhere_is_listed() {
 }
 
 /// A saved peer's row says how they were heard as soon as a message from
-/// them arrives, and stops saying where they are once that is old.
+/// them arrives, counting hops as the protocol does, and stops saying
+/// where they are once that is old.
 #[test]
 fn a_saved_peers_row_follows_how_they_are_heard() {
     let sim = device();
@@ -1117,8 +1118,23 @@ fn a_saved_peers_row_follows_how_they_are_heard() {
     clock.set(5_000);
     node.arrive(Arrival::Text(inbound));
     assert!(events(&node).contains(&NodeEvent::PeerChanged(peer)));
-    assert_eq!(peers(&node)[0].hops, Some(0));
+    assert_eq!(peers(&node)[0].hops, Some(1));
     assert!(peers(&node)[0].signal.is_some());
+    let route = node.peer_detail(peer).unwrap().route.unwrap();
+    assert!(route.starts_with("Direct \u{B7} "), "{route}");
+
+    // Through one repeater: two hops, and no signal of theirs to show.
+    let payload = composed(robin, public, "Robin", "Past the ridge now");
+    let mut relayed = received(&public, robin, &payload);
+    relayed.rx.hop_count = Some(2);
+    node.arrive(Arrival::Text(relayed));
+    assert_eq!(peers(&node)[0].hops, Some(2));
+    assert_eq!(peers(&node)[0].signal, None);
+    assert_eq!(
+        node.peer_detail(peer).unwrap().route.as_deref(),
+        Some("2 hops")
+    );
+    events(&node);
 
     clock.set(5_000 + 29 * 60 * 1_000);
     node.tick();

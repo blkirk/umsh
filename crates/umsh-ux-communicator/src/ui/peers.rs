@@ -6,10 +6,10 @@ use buoyant::focus::BoundaryBehavior;
 use buoyant::view::Lazy;
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
-use heapless::{String, Vec};
+use heapless::Vec;
 
 use super::{RAIL, line};
-use crate::model::{MAX_PEERS, PeerSummary, State};
+use crate::model::{MAX_PEERS, PeerSummary, State, hops_text};
 use crate::nav::keys;
 use crate::{font, icon, theme};
 
@@ -180,15 +180,9 @@ fn row_look((peer, focused): &(PeerSummary, bool)) -> impl View<Rgb565, ()> + us
 
 /// How far away the peer is, with how strongly they are heard when direct.
 fn route_line(peer: &PeerSummary) -> impl View<Rgb565, ()> + use<> {
-    let mut route: String<12> = String::new();
-    match peer.hops {
-        Some(0) => _ = route.push_str("Direct"),
-        Some(1) => _ = route.push_str("1 hop"),
-        Some(n) => _ = core::fmt::write(&mut route, format_args!("{n} hops")),
-        None => {}
-    }
+    let route = peer.hops.map(hops_text).unwrap_or_default();
     HStack::new((
-        peer.signal.filter(|_| peer.hops == Some(0)).map(bars),
+        peer.signal.filter(|_| peer.hops == Some(1)).map(bars),
         line(
             route,
             &font::REGULAR,

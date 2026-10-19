@@ -20,7 +20,7 @@ use super::setting::{card, choice};
 use crate::avatar::{AvatarStyle, BuiltinChannel};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId,
-    Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State,
+    Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State, hops_text,
 };
 use crate::nav::{Screen, keys};
 use crate::text::{DraftText, SharedText};
@@ -242,11 +242,7 @@ pub(super) fn header(
         })
     );
     match kind {
-        Some(ChatKind::Peer { hops: Some(0) }) => _ = distance.push_str("Direct"),
-        Some(ChatKind::Peer { hops: Some(1) }) => _ = distance.push_str("1 hop"),
-        Some(ChatKind::Peer { hops: Some(n) }) => {
-            _ = core::fmt::write(&mut distance, format_args!("{n} hops"));
-        }
+        Some(ChatKind::Peer { hops: Some(hops) }) => _ = distance.push_str(&hops_text(hops)),
         Some(ChatKind::Channel {
             access: ChannelAccess::Clear,
         }) => _ = distance.push_str("Not encrypted"),

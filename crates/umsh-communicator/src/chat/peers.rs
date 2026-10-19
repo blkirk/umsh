@@ -60,10 +60,9 @@ pub(crate) struct Link {
 }
 
 impl Link {
-    /// How many hops away the node is, as the interface counts them: 0 is
-    /// direct.
+    /// How many hops away the node is: one when heard directly.
     pub fn hops(&self) -> Option<u8> {
-        self.hop_count.map(|count| count.saturating_sub(1))
+        self.hop_count
     }
 
     fn direct(&self) -> bool {
@@ -692,31 +691,25 @@ fn bars(snr_centibels: i16) -> u8 {
 /// How a node is reached, such as `Direct · −97 dBm` or `3 hops`.
 fn route(link: &Link) -> Option<String<24>> {
     let mut route = String::new();
-    match (link.hops()?, link.rssi_dbm) {
-        (0, Some(rssi)) => {
-            _ = write!(route, "Direct \u{B7} ");
-            if rssi < 0 {
-                _ = route.push('\u{2212}');
-            }
-            _ = write!(route, "{} dBm", rssi.unsigned_abs());
+    let hops = link.hops()?;
+    _ = route.push_str(&model::hops_text(hops));
+    if let Some(rssi) = link.rssi_dbm.filter(|_| link.direct()) {
+        _ = route.push_str(" \u{B7} ");
+        if rssi < 0 {
+            _ = route.push('\u{2212}');
         }
-        (0, None) => _ = route.push_str("Direct"),
-        (1, _) => _ = route.push_str("1 hop"),
-        (hops, _) => _ = write!(route, "{hops} hops"),
+        _ = write!(route, "{} dBm", rssi.unsigned_abs());
     }
     Some(route)
 }
 
 /// How far away a heard node is, as Find says it.
 fn distance(hops: Option<u8>) -> String<12> {
-    let mut text = String::new();
     match hops {
-        Some(0) => _ = text.push_str("Nearby"),
-        Some(1) => _ = text.push_str("1 hop"),
-        Some(hops) => _ = write!(text, "{hops} hops"),
-        None => {}
+        Some(1) => String::try_from("Nearby").unwrap_or_default(),
+        Some(hops) => model::hops_text(hops),
+        None => String::new(),
     }
-    text
 }
 
 /// `seconds` ago, as a list says it, such as `5m`.

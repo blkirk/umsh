@@ -11,7 +11,7 @@ use heapless::String;
 use super::label;
 use super::member::detail_head;
 use super::setting::{End, card, choice, row};
-use crate::model::{PeerDetail, PeerSummary, State};
+use crate::model::{PeerDetail, PeerSummary, State, hops_text};
 use crate::nav::keys;
 use crate::{font, theme};
 
@@ -28,11 +28,9 @@ pub fn view(
 ) -> impl View<Rgb565, State> + use<> {
     let mut about: String<48> = String::new();
     _ = about.push_str("Saved peer");
-    match summary.hops {
-        Some(0) => _ = about.push_str(" \u{B7} Direct"),
-        Some(1) => _ = about.push_str(" \u{B7} 1 hop"),
-        Some(n) => _ = core::fmt::write(&mut about, format_args!(" \u{B7} {n} hops")),
-        None => {}
+    if let Some(hops) = summary.hops {
+        _ = about.push_str(" \u{B7} ");
+        _ = about.push_str(&hops_text(hops));
     }
     let name = summary.name.clone();
     super::list(

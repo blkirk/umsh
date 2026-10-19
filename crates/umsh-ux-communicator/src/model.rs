@@ -373,13 +373,25 @@ pub enum PeerEntry {
 /// Names a saved peer.
 pub type PeerId = u32;
 
+/// How far away a node `hops` hops away is, such as `3 hops`; a node
+/// heard directly, one hop away, is `Direct`.
+#[must_use]
+pub fn hops_text(hops: u8) -> String<12> {
+    let mut text = String::new();
+    match hops {
+        1 => _ = text.push_str("Direct"),
+        n => _ = core::fmt::write(&mut text, format_args!("{n} hops")),
+    }
+    text
+}
+
 /// A saved peer, as the Peers list shows them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerSummary {
     pub id: PeerId,
     pub avatar: AvatarStyle,
     pub name: String<32>,
-    /// How many hops away they are, when known; 0 is direct.
+    /// How many hops away they are, when known: one when heard directly.
     pub hops: Option<u8>,
     /// Of four bars, how strongly they are heard, when direct.
     pub signal: Option<u8>,
@@ -390,7 +402,7 @@ pub struct PeerSummary {
 /// Whom a chat is with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatKind {
-    /// One peer, and how far away it is when that is known.
+    /// One peer, and how many hops away it is when that is known.
     Peer { hops: Option<u8> },
     /// Everyone holding the channel's key.
     Channel { access: ChannelAccess },
@@ -640,6 +652,7 @@ impl Message {
 pub struct Details {
     /// When it was received or sent, already formatted, such as `14:29`.
     pub time: String<8>,
+    /// How many hops it took: one when heard directly.
     pub hops: Option<u8>,
     /// The routers it came through, already formatted.
     pub route: String<24>,
