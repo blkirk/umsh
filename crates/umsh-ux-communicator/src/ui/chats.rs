@@ -3,13 +3,16 @@
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
+use buoyant::view::Lazy;
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
-use heapless::Vec;
+use heapless::{String, Vec};
 
-use super::{RAIL, label};
+use super::{RAIL, line};
+use crate::avatar::AvatarStyle;
 use crate::model::{Age, ChatSummary, Chats, MAX_CHATS, State, age};
 use crate::nav::keys;
+use crate::text::DraftText;
 use crate::{font, icon, theme};
 
 const ROW: u32 = 44;
@@ -68,116 +71,149 @@ pub fn view(chats: &Chats, now: Option<u32>) -> impl View<Rgb565, State> + use<>
 }
 
 fn row(chat: &ChatSummary, age: Age) -> impl View<Rgb565, State> + use<> {
-    let chat = chat.clone();
     let id = chat.id;
+    let look = Row {
+        avatar: chat.avatar.clone(),
+        name: chat.name.clone(),
+        preview: chat.preview.clone(),
+        draft: (!chat.draft.is_empty()).then(|| chat.draft.storage().clone()),
+        age,
+        unread: chat.unread,
+        muted: chat.muted,
+        focused: false,
+    };
     Button::new(
         move |s: &mut State| s.open_chat(id),
         move |button: ButtonState| {
-            let focused = button.is_focused();
-            let background = if focused {
-                theme::FOCUS
-            } else {
-                theme::BACKGROUND
-            };
-            // Each line has a fixed height and the avatar is an overlay, so
-            // no stack nests in another: every size a stack probes a line
-            // with is the same, and its text is measured once. A chat with
-            // nothing in it has its name alone, in the middle.
-            let previewed = !chat.preview.is_empty() || !chat.draft.is_empty();
-            VStack::new((
-                name_line(&chat, &age).frame().with_height(NAME_LINE),
-                previewed.then(|| preview_line(&chat).frame().with_height(PREVIEW_LINE)),
-            ))
-            .with_spacing(0)
-            .with_alignment(HorizontalAlignment::Leading)
-            .padding(Edges::Leading, TEXT_X)
-            .flex_infinite_width(HorizontalAlignment::Leading)
-            .frame()
-            .with_height(ROW)
-            // Inside the background, so its edges blend into the row's color.
-            .overlay(
-                Alignment::Leading,
-                super::avatar::view(&chat.avatar, AVATAR)
-                    .frame()
-                    .with_width(TEXT_X),
-            )
-            // Only the focused row is filled: the others show the screen's
-            // background, and painting it again is most of what a frame
-            // would cost on the device.
-            .hint_background_color(background)
-            .background(
-                Alignment::Center,
-                focused.then(|| Rectangle.foreground_color(theme::FOCUS)),
-            )
-            .overlay(
-                Alignment::Leading,
-                focused.then(|| {
-                    Rectangle
-                        .foreground_color(theme::ACCENT)
-                        .frame_sized(4, ROW)
-                }),
-            )
-            .overlay(
-                Alignment::BottomTrailing,
-                (!focused).then(|| {
-                    Rectangle
-                        .foreground_color(theme::LINE)
-                        .frame_sized(LIST_WIDTH - TEXT_X, 1)
-                }),
-            )
+            let mut look = look.clone();
+            look.focused = button.is_focused();
+            Lazy::new(look, row_look)
         },
     )
 }
 
+/// What a chat's row draws.
+#[derive(Clone)]
+struct Row {
+    avatar: AvatarStyle,
+    name: String<32>,
+    preview: String<64>,
+    draft: Option<DraftText>,
+    age: Age,
+    unread: bool,
+    muted: bool,
+    focused: bool,
+}
+
+/// A chat's row: its avatar, then its name over its last message.
+///
+/// Built from its data each time it is drawn ([`Lazy`]): kept in the
+/// render trees, every row's would outweigh the rest of the screen.
+fn row_look(row: &Row) -> impl View<Rgb565, ()> + use<> {
+    let background = if row.focused {
+        theme::FOCUS
+    } else {
+        theme::BACKGROUND
+    };
+    // Each line has a fixed height and the avatar is an overlay, so no
+    // stack nests in another: every size a stack probes a line with is the
+    // same, and its text is measured once. A chat with nothing in it has
+    // its name alone, in the middle.
+    let previewed = !row.preview.is_empty() || row.draft.is_some();
+    VStack::new((
+        name_line(row).frame().with_height(NAME_LINE),
+        previewed.then(|| preview_line(row).frame().with_height(PREVIEW_LINE)),
+    ))
+    .with_spacing(0)
+    .with_alignment(HorizontalAlignment::Leading)
+    .padding(Edges::Leading, TEXT_X)
+    .flex_infinite_width(HorizontalAlignment::Leading)
+    .frame()
+    .with_height(ROW)
+    // Inside the background, so its edges blend into the row's color.
+    .overlay(
+        Alignment::Leading,
+        super::avatar::view(&row.avatar, AVATAR)
+            .frame()
+            .with_width(TEXT_X),
+    )
+    // Only the focused row is filled: the others show the screen's
+    // background, and painting it again is most of what a frame would
+    // cost on the device.
+    .hint_background_color(background)
+    .background(
+        Alignment::Center,
+        row.focused
+            .then(|| Rectangle.foreground_color(theme::FOCUS)),
+    )
+    .overlay(
+        Alignment::Leading,
+        row.focused.then(|| {
+            Rectangle
+                .foreground_color(theme::ACCENT)
+                .frame_sized(4, ROW)
+        }),
+    )
+    .overlay(
+        Alignment::BottomTrailing,
+        (!row.focused).then(|| {
+            Rectangle
+                .foreground_color(theme::LINE)
+                .frame_sized(LIST_WIDTH - TEXT_X, 1)
+        }),
+    )
+}
+
 /// The chat's name, then its age at the trailing edge.
-fn name_line(chat: &ChatSummary, age: &str) -> impl View<Rgb565, State> + use<> {
-    let age_color = if chat.unread {
+fn name_line(row: &Row) -> impl View<Rgb565, ()> + use<> {
+    let age_color = if row.unread {
         theme::ACCENT
     } else {
         theme::TEXT_TERTIARY
     };
-    let name_face = if chat.unread {
+    let name_face = if row.unread {
         &font::BOLD
     } else {
         &font::SEMIBOLD
     };
-    let name_color = if chat.name.as_str() == "EMERGENCY" {
+    let name_color = if row.name.as_str() == "EMERGENCY" {
         theme::RED
     } else {
         theme::TEXT
     };
     HStack::new((
-        label::<32>(&chat.name, name_face, theme::BODY, name_color),
+        line(row.name.clone(), name_face, theme::BODY, name_color),
         Spacer::default(),
-        chat.muted.then(|| {
+        row.muted.then(|| {
             Image::new(&icon::BELL_SLASH)
                 .as_template()
                 .foreground_color(theme::TEXT_TERTIARY)
         }),
-        label::<6>(age, &font::SEMIBOLD, theme::SMALL, age_color).fixed_size(true, false),
+        line(row.age.clone(), &font::SEMIBOLD, theme::SMALL, age_color).fixed_size(true, false),
     ))
     .with_spacing(4)
     .padding(Edges::Trailing, 10)
 }
 
 /// The last message, or the draft, with the unread dot at the trailing edge.
-fn preview_line(chat: &ChatSummary) -> impl View<Rgb565, State> + use<> {
-    let color = if chat.unread {
+fn preview_line(row: &Row) -> impl View<Rgb565, ()> + use<> {
+    let color = if row.unread {
         theme::TEXT_SECONDARY
     } else {
         theme::TEXT_TERTIARY
     };
-    let draft = (!chat.draft.is_empty()).then(|| chat.draft.storage().clone());
     HStack::new((
-        draft.is_some().then(|| {
-            label::<8>("Draft", &font::BOLD, theme::SECONDARY, theme::AMBER).fixed_size(true, false)
+        row.draft.is_some().then(|| {
+            line("Draft", &font::BOLD, theme::SECONDARY, theme::AMBER).fixed_size(true, false)
         }),
-        draft.map(|draft| super::line(draft, &font::REGULAR, theme::SECONDARY, color)),
-        chat.draft
-            .is_empty()
-            .then(|| label::<64>(&chat.preview, &font::REGULAR, theme::SECONDARY, color)),
+        row.draft
+            .clone()
+            .map(|draft| line(draft, &font::REGULAR, theme::SECONDARY, color)),
+        row.draft
+            .is_none()
+            .then(|| line(row.preview.clone(), &font::REGULAR, theme::SECONDARY, color)),
         Spacer::default(),
-        chat.unread
+        row.unread
             .then(|| Circle.foreground_color(theme::ACCENT).frame_sized(10, 10)),
     ))
     .with_spacing(6)

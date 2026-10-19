@@ -241,12 +241,12 @@ fn label<const N: usize>(
 
 /// One line of `text`, which the view holds as it is given: shared text
 /// is shown without being copied.
-fn line<T: AsRef<str> + Clone>(
+fn line<T: AsRef<str> + Clone, C>(
     text: T,
     face: &'static PrerenderedFont,
     size: u32,
     color: Rgb565,
-) -> impl View<Rgb565, State> + use<T> {
+) -> impl View<Rgb565, C> + use<T, C> {
     Text::new(text, face)
         .with_font_size(size)
         .with_line_limit(1)

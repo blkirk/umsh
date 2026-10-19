@@ -6,20 +6,21 @@
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
+use buoyant::primitives::Size;
 use buoyant::view::prelude::*;
 use buoyant::view::scroll_view::ScrollBarVisibility;
 use buoyant::view::text_field::TextFieldStatus;
-use buoyant::view::{Lazy, TextArea};
+use buoyant::view::{GeometryReader, Lazy, TextArea};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
 use heapless::Vec;
 
 use super::label;
 use super::setting::{card, choice};
-use crate::avatar::AvatarStyle;
+use crate::avatar::{AvatarStyle, BuiltinChannel};
 use crate::model::{
-    ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, Invite, MAX_MESSAGES, Message,
-    MessageId, Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State,
+    ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId,
+    Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State,
 };
 use crate::nav::{Screen, keys};
 use crate::text::{DraftText, SharedText};
@@ -47,8 +48,9 @@ const BODY_LINE: u32 = theme::BODY * 6 / 5;
 const BUBBLE_RADIUS: u16 = 14;
 /// The corner on the sender's side, at the bottom.
 const TAIL_RADIUS: u16 = 5;
-/// The focus ring, outside the bubble.
+/// The focus ring, outside the bubble, and its line.
 const RING_GAP: u32 = 4;
+const RING_LINE: u32 = 2;
 /// Between messages from the same sender, and from different ones.
 const GAP_SAME: u32 = 3;
 const GAP_CHANGE: u32 = 8;
@@ -404,23 +406,13 @@ fn item(
         }
         None => None,
     };
+    let head = (separator.is_some() || sender.is_some()).then(|| Head {
+        stamp: separator,
+        sender: sender.map(|sender| sender.name),
+        beside_avatar,
+    });
     VStack::new((
-        separator.map(|day| {
-            Lazy::new(day, separator_line)
-                .flex_infinite_width(HorizontalAlignment::Center)
-                .padding(Edges::Bottom, GAP_SEPARATOR)
-        }),
-        sender.map(|sender| {
-            label::<24>(
-                &sender.name,
-                &font::BOLD,
-                theme::SMALL,
-                theme::TEXT_SECONDARY,
-            )
-            .frame()
-            .with_height(SENDER_LINE)
-            .padding(Edges::Leading, lead + 4)
-        }),
+        head.map(|head| Lazy::new(head, head_view)),
         shown.then(|| {
             bubble(message, acting_on == Some(message.id), open)
                 .padding(Edges::Leading, lead - SIDE)
@@ -433,6 +425,39 @@ fn item(
     // Received messages have no delivery line, so the bottom is the bubble's.
     .overlay(Alignment::BottomLeading, avatar)
     .padding(Edges::Top, gap + reserve)
+}
+
+/// What goes over a message: when the conversation picked up again, and
+/// who sent it, over the first of a run of a member's messages.
+#[derive(Clone)]
+struct Head {
+    stamp: Option<Stamp>,
+    sender: Option<heapless::String<24>>,
+    beside_avatar: bool,
+}
+
+/// A message's head, its sender's name set in from its side as its bubble
+/// is.
+///
+/// Built from its data each time it is drawn ([`Lazy`]), as a bubble's
+/// contents are.
+fn head_view(head: &Head) -> impl View<Rgb565, ()> + use<> {
+    let lead = if head.beside_avatar { IN_X } else { SIDE };
+    VStack::new((
+        head.stamp.as_ref().map(|stamp| {
+            separator_line(stamp)
+                .flex_infinite_width(HorizontalAlignment::Center)
+                .padding(Edges::Bottom, GAP_SEPARATOR)
+        }),
+        head.sender.clone().map(|name| {
+            super::line(name, &font::BOLD, theme::SMALL, theme::TEXT_SECONDARY)
+                .frame()
+                .with_height(SENDER_LINE)
+                .padding(Edges::Leading, lead + 4)
+        }),
+    ))
+    .with_spacing(0)
+    .with_alignment(HorizontalAlignment::Leading)
 }
 
 /// What goes with a message besides its bubble: what stands in its place
@@ -481,51 +506,26 @@ fn notes_view(
 /// forward secrecy.
 fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, State> + use<> {
     let id = message.id;
-    let reactions = message.reactions.clone();
     let outbound = message.direction == Direction::Outbound;
-    let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
-    if outbound {
-        corners.bottom_right = TAIL_RADIUS;
+    let side = if outbound {
+        HorizontalAlignment::Trailing
     } else {
-        corners.bottom_left = TAIL_RADIUS;
-    }
-    let (fill, color, side) = if outbound {
-        (
-            if open {
-                theme::OUTBOUND_OPEN
-            } else if message.forward_secret {
-                theme::OUTBOUND_SECRET
-            } else {
-                theme::OUTBOUND
-            },
-            Rgb565::WHITE,
-            HorizontalAlignment::Trailing,
-        )
-    } else {
-        (theme::INBOUND, theme::TEXT, HorizontalAlignment::Leading)
+        HorizontalAlignment::Leading
     };
-    let body = Body {
+    let look = Look {
         text: message.text.clone(),
         reply: message.reply.clone(),
-        // Parts still to come go after the text: amber once one will not.
-        to_come: message.parts.map(|parts| {
-            if parts.lost == 0 {
-                theme::TEXT_TERTIARY
-            } else {
-                theme::AMBER
-            }
+        invite: message.invite.as_ref().map(|invite| Card {
+            name: invite.name.clone(),
+            builtin: invite.builtin,
+            tint: invite.tint,
         }),
-        invite: message.invite.clone(),
-        fill,
-        color,
-        corners,
+        reactions: message.reactions.clone(),
+        to_come: message.parts.map(|parts| parts.lost != 0),
         outbound,
+        open,
         forward_secret: message.forward_secret,
-    };
-    let corner = if outbound {
-        Alignment::TopLeading
-    } else {
-        Alignment::TopTrailing
+        ringed: acting_on,
     };
     // Pressing a message opens its actions; pressing an unconfirmed one
     // sends it again.
@@ -539,22 +539,17 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
             }
         },
         move |button: ButtonState| {
-            Lazy::new(body.clone(), body_view)
-                .padding(Edges::All, RING_GAP)
-                .overlay(
-                    Alignment::Center,
-                    (button.is_focused() || acting_on).then(|| {
-                        RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
-                            .stroked(2)
-                            .foreground_color(theme::ACCENT)
-                    }),
-                )
-                // Over the ring, so a chip cuts it as it cuts the bubble.
-                .overlay(
-                    corner,
-                    (!reactions.is_empty())
-                        .then(|| Lazy::new((reactions.clone(), outbound, open), chips)),
-                )
+            let mut look = look.clone();
+            look.ringed |= button.is_focused();
+            // The room around the bubble, where its ring and chips stand,
+            // that the look does not hold.
+            let (corner, rest) = look.held();
+            let (outer, inner) = look.sides();
+            Lazy::new(look, bubble_look)
+                .padding(Edges::Top, RING_GAP - corner)
+                .padding(outer, RING_GAP - corner)
+                .padding(Edges::Bottom, RING_GAP - rest)
+                .padding(inner, RING_GAP - rest)
                 // Text wraps to fit; a short bubble keeps to its side.
                 .flex_frame()
                 .with_max_width(BUBBLE_MAX + 2 * RING_GAP)
@@ -564,36 +559,136 @@ fn bubble(message: &Message, acting_on: bool, open: bool) -> impl View<Rgb565, S
     .padding(Edges::Horizontal, SIDE - RING_GAP)
 }
 
-/// What a bubble holds, and how it is drawn.
+/// What a bubble draws: its contents, its reactions, and whether it is
+/// ringed. Its colors follow from whose it is and who can read it.
 #[derive(Clone)]
-struct Body {
+struct Look {
     text: SharedText,
     reply: Option<Quote>,
-    /// The color of the dots for parts still to come.
-    to_come: Option<Rgb565>,
-    invite: Option<Invite>,
-    fill: Rgb565,
-    color: Rgb565,
-    corners: CornerRadii<u16>,
+    invite: Option<Card>,
+    reactions: Reactions,
+    /// Parts are still to come, and whether one will not.
+    to_come: Option<bool>,
     outbound: bool,
+    /// In a channel anyone can read, where mine are green.
+    open: bool,
+    /// Mine, sent under a session with forward secrecy.
     forward_secret: bool,
+    /// Focused, or its actions are open.
+    ringed: bool,
+}
+
+impl Look {
+    /// How much of the room around the bubble its look holds, which is
+    /// what focus keeps in view with it: what its ring takes while it is
+    /// ringed, out to the middle of the ring's line, and the corner its
+    /// chips hang from while it has reactions. As the room at its top and
+    /// outer side, then at its bottom and inner side.
+    fn held(&self) -> (u32, u32) {
+        let ring = if self.ringed {
+            RING_GAP - RING_LINE / 2
+        } else {
+            0
+        };
+        let chips = if self.reactions.is_empty() {
+            0
+        } else {
+            RING_GAP
+        };
+        (ring.max(chips), ring)
+    }
+
+    /// Its outer side, then its inner side: mine keep to the trailing side.
+    fn sides(&self) -> (Edges, Edges) {
+        if self.outbound {
+            (Edges::Leading, Edges::Trailing)
+        } else {
+            (Edges::Trailing, Edges::Leading)
+        }
+    }
+}
+
+/// The channel an invitation's card shows.
+#[derive(Clone)]
+struct Card {
+    name: SharedText,
+    builtin: Option<BuiltinChannel>,
+    tint: [u8; 3],
+}
+
+/// A bubble, ringed while it is focused, with its reactions as chips over
+/// its outer top corner: both outside it, in the room around it, of which
+/// it holds what [`Look::held`] says.
+///
+/// Built from its data each time it is drawn ([`Lazy`]): kept in the
+/// render trees, every bubble's would outweigh the rest of the screen.
+fn bubble_look(look: &Look) -> impl View<Rgb565, ()> + use<> {
+    let gap = RING_GAP as i32;
+    let (corner, out) = if look.outbound {
+        (Alignment::TopLeading, -gap)
+    } else {
+        (Alignment::TopTrailing, gap)
+    };
+    let (held_corner, held_rest) = look.held();
+    let (outer, inner) = look.sides();
+    body_view(look)
+        .overlay(
+            Alignment::Center,
+            look.ringed.then(|| {
+                GeometryReader::new(move |size: Size| {
+                    RoundedRectangle::new(BUBBLE_RADIUS + RING_GAP as u16)
+                        .stroked(RING_LINE)
+                        .foreground_color(theme::ACCENT)
+                        .frame_sized(size.width + 2 * RING_GAP, size.height + 2 * RING_GAP)
+                        .offset(-gap, -gap)
+                })
+            }),
+        )
+        // Over the ring, so a chip cuts it as it cuts the bubble.
+        .overlay(
+            corner,
+            (!look.reactions.is_empty())
+                .then(|| chips(&look.reactions, look.outbound, look.open).offset(out, -gap)),
+        )
+        .padding(Edges::Top, held_corner)
+        .padding(outer, held_corner)
+        .padding(Edges::Bottom, held_rest)
+        .padding(inner, held_rest)
 }
 
 /// A message's text, under the quote of what it answers and before the
 /// dots for parts still to come; or an invitation, which is its card
 /// alone: its text is only the channel's link.
-///
-/// Built from its data each time it is drawn ([`Lazy`]): kept in the
-/// render trees, every bubble's would outweigh the rest of the screen.
-fn body_view(body: &Body) -> impl View<Rgb565, ()> + use<> {
-    let Body {
-        fill,
-        color,
-        corners,
+fn body_view(look: &Look) -> impl View<Rgb565, ()> + use<> {
+    let Look {
         outbound,
+        open,
         forward_secret,
         ..
-    } = *body;
+    } = *look;
+    let mut corners = CornerRadii::equal(BUBBLE_RADIUS);
+    let (fill, color) = if outbound {
+        corners.bottom_right = TAIL_RADIUS;
+        let fill = if open {
+            theme::OUTBOUND_OPEN
+        } else if forward_secret {
+            theme::OUTBOUND_SECRET
+        } else {
+            theme::OUTBOUND
+        };
+        (fill, Rgb565::WHITE)
+    } else {
+        corners.bottom_left = TAIL_RADIUS;
+        (theme::INBOUND, theme::TEXT)
+    };
+    // Parts still to come go after the text: amber once one will not.
+    let to_come = look.to_come.map(|lost| {
+        if lost {
+            theme::AMBER
+        } else {
+            theme::TEXT_TERTIARY
+        }
+    });
     let quote_colors = match (outbound, forward_secret) {
         (true, true) => (
             theme::QUOTE_BAR_SECRET,
@@ -608,14 +703,14 @@ fn body_view(body: &Body) -> impl View<Rgb565, ()> + use<> {
         (false, _) => (theme::ACCENT, theme::ACCENT, theme::TEXT_SECONDARY),
     };
     VStack::new((
-        body.invite.is_none().then(|| {
+        look.invite.is_none().then(|| {
             VStack::new((
-                body.reply.as_ref().map(|reply| quoted(reply, quote_colors)),
+                look.reply.as_ref().map(|reply| quoted(reply, quote_colors)),
                 HStack::new((
-                    Text::new(body.text.clone(), &font::REGULAR)
+                    Text::new(look.text.clone(), &font::REGULAR)
                         .with_font_size(theme::BODY)
                         .foreground_color(color),
-                    body.to_come.map(to_come_dots),
+                    to_come.map(to_come_dots),
                 ))
                 .with_spacing(4)
                 .with_alignment(VerticalAlignment::Bottom)
@@ -627,7 +722,7 @@ fn body_view(body: &Body) -> impl View<Rgb565, ()> + use<> {
             .padding(Edges::Vertical, BUBBLE_PAD_Y)
             .background_color(fill, RoundedRectangle::with_radii(corners))
         }),
-        body.invite
+        look.invite
             .as_ref()
             .map(|invite| invite_card(invite, fill, color, corners)),
     ))
@@ -691,13 +786,14 @@ const CARD_AVATAR: u32 = 44;
 /// The channel an invitation is to, in a card that a press can take: a link
 /// inside text could not be focused.
 fn invite_card(
-    invite: &Invite,
+    invite: &Card,
     fill: Rgb565,
     color: Rgb565,
     corners: CornerRadii<u16>,
 ) -> impl View<Rgb565, ()> + use<> {
+    let avatar = AvatarStyle::channel(invite.builtin, &invite.name, invite.tint);
     HStack::new((
-        super::avatar::view(&invite.avatar(), CARD_AVATAR),
+        super::avatar::view(&avatar, CARD_AVATAR),
         VStack::new((
             Text::new(invite.name.clone(), &font::BOLD)
                 .with_font_size(theme::BODY)
@@ -748,13 +844,9 @@ fn chip_reserve(reactions: &[Reacted]) -> u32 {
 /// hand of cards: mine frontmost at the corner, with one dot trail falling
 /// outside the bubble. Placed from the corner outward and inward: offsets
 /// here are from the corner of the ring around the bubble.
-///
-/// Built from its data each time it is drawn ([`Lazy`]): kept in the render
-/// trees, every bubble's chips would outweigh the rest of the screen.
-fn chips((reactions, outbound, open): &(Reactions, bool, bool)) -> impl View<Rgb565, ()> + use<> {
-    let outbound = *outbound;
+fn chips(reactions: &Reactions, outbound: bool, open: bool) -> impl View<Rgb565, ()> + use<> {
     // Mine takes the color of my bubbles.
-    let (mine_fill, mine_pad) = if *open {
+    let (mine_fill, mine_pad) = if open {
         (theme::OUTBOUND_OPEN, icon::Pad::MineOpen)
     } else {
         (theme::OUTBOUND, icon::Pad::Mine)
