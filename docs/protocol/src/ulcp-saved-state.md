@@ -38,7 +38,9 @@ if it is a repeater.
   moment it is installed or generated (see [`PROP_DEV_PRIVATE_KEY`](ulcp-device.md#prop-dev-private-key)) and is
   changed only by explicit provisioning or `CMD_CLEAR`—neither
   `CMD_RESTORE` nor a reboot can revert the device identity to an earlier
-  key.
+  key. Device lists a device's own store keeps are excluded on the same
+  grounds (see [Lists Held by the Device's
+  Store](ulcp-device.md#lists-held-by-the-devices-store)).
 
   Traffic statistics (`PROP_STAT_*`) are also excluded. They are live
   hardware history since boot or the last explicit counter reset, not
@@ -84,7 +86,8 @@ if it is a repeater.
   It is observable either as a protocol reset (`STATUS_RESET_RESTORED`) or
   as a series of property-update publications; hosts handle both.
 * [`CMD_CLEAR`](ulcp-saved-state.md#cmd-clear) erases the snapshot and all other
-  persisted provisioning, including the device identity private key. It
+  persisted provisioning, including the device identity private key and
+  any device lists the device's own store keeps. It
   does not modify live (in-RAM) state; a subsequent `CMD_RST` completes a
   factory reset. Transport-level state such as BLE bonds is not affected.
 * [`PROP_SAVED`](ulcp-saved-state.md#prop-saved) reports the state of the stored
@@ -93,8 +96,8 @@ if it is a repeater.
 
 Saving is explicit rather than automatic: nothing a host or an
 administrator changes is written to non-volatile storage until it asks
-(the device identity and `PROP_BLE_PAIRING_PIN` are persisted as they are
-set). This gives the host control over flash wear and a well-defined
+(the device identity, `PROP_BLE_PAIRING_PIN`, and device lists a device's
+own store keeps are persisted as they are set). This gives the host control over flash wear and a well-defined
 "known good" configuration, and it means a radio never persists
 provisioning its host did not deliberately ask to keep. A change made at
 the device follows its own rules (see [Changes Made at the
@@ -222,9 +225,12 @@ Figure: Structure of `CMD_CLEAR`
 
 Clear saved state. Commands the device to erase from non-volatile storage the
 saved snapshot and all other persisted provisioning, including the device
-identity private key. Live (in-RAM) state is unaffected; transport-level
-state such as BLE bonds and `PROP_BLE_PAIRING_PIN` is also unaffected. A
-`CMD_CLEAR` followed by `CMD_RST` restores factory protocol behavior.
+identity private key and any device lists its own store keeps (see [Lists
+Held by the Device's Store](ulcp-device.md#lists-held-by-the-devices-store)).
+Live (in-RAM) state is unaffected; transport-level state such as BLE bonds
+and `PROP_BLE_PAIRING_PIN` is also unaffected, as are the conversations of a
+device's own messaging interface. A `CMD_CLEAR` followed by `CMD_RST`
+restores factory protocol behavior.
 
 Because a device identity always exists (see [The Device Identity](ulcp-device.md#device-identity)), the
 `CMD_RST` that completes the sequence **MUST** generate and persist a new
@@ -268,7 +274,8 @@ the same:
   per-peer replay baselines, filters and delegation policy all survive
   unconditionally;
 * independently persisted state outside the snapshot—the device
-  identity keypair and `PROP_BLE_PAIRING_PIN`—is not affected; and
+  identity keypair, `PROP_BLE_PAIRING_PIN`, and device lists the device's
+  own store keeps—is not affected; and
 * the saved snapshot itself is not modified.
 
 **A restore never enables the PHY under an identity the snapshot was not
@@ -340,14 +347,15 @@ Figure: Structure of `CMD_FACTORY_RESET`
 Return the radio to a blank factory state. Commands the device to erase
 **every** piece of mutable state it holds—both the persisted state
 `CMD_CLEAR` erases (the saved snapshot, all persisted provisioning, and
-the device identity private key) **and** the transport-level state
-`CMD_CLEAR` deliberately preserves: all BLE bonds and the configured
-`PROP_BLE_PAIRING_PIN`—and then reboot. After the reboot the radio is
+the device identity private key) **and** the state `CMD_CLEAR`
+deliberately preserves: all BLE bonds, the configured
+`PROP_BLE_PAIRING_PIN`, and the conversations of a device's own messaging
+interface—and then reboot. After the reboot the radio is
 indistinguishable from one that has never been provisioned or paired.
 
 This differs from `CMD_CLEAR` + `CMD_RST` in two ways: it also clears
-transport-level pairing state (bonds and PIN), and it performs a hardware
-reboot rather than only a protocol-session reset.
+transport-level pairing state (bonds and PIN) and conversations, and it
+performs a hardware reboot rather than only a protocol-session reset.
 
 The command payload SHOULD be empty and MUST be ignored. Unlike every
 other command, `CMD_FACTORY_RESET` **has no response**: the device wipes its

@@ -239,7 +239,7 @@ umsh-radio-loraphy = { path = "../../../crates/umsh-radio-loraphy", default-feat
 umsh-ux-tracker = { path = "../../../crates/umsh-ux-tracker" }
 umsh-ux-display-tracker = { path = "../../../crates/umsh-ux-display-tracker", features = ["screen"] }
 umsh-ux-communicator = { path = "../../../crates/umsh-ux-communicator", optional = true }
-umsh-communicator = { path = "../../../crates/umsh-communicator", optional = true, features = ["software-crypto"] }
+umsh-communicator = { path = "../../../crates/umsh-communicator", optional = true, features = ["software-crypto", "flash"] }
 umsh-ulcp-admin = { path = "../../../crates/umsh-ulcp-admin", optional = true, features = ["driver"] }
 # The device node: a full on-board MAC/node stack for the device
 # identity (device_node.rs), sharing the radio through the mux.

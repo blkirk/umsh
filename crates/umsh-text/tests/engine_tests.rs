@@ -3176,6 +3176,104 @@ fn fully_unavailable_run_renders_unavailable_before_settling() {
     ));
 }
 
+/// A stream displaced past what the engine remembers continues from the
+/// stored checkpoint it is given at compose, rather than resetting.
+#[test]
+fn a_recalled_checkpoint_continues_a_forgotten_stream() {
+    let mut engine = engine();
+    let forgotten = ConversationKey::Direct {
+        peer: PublicKey([0xEE; 32]),
+    };
+    let text = |body| ComposeIntent::Text {
+        body,
+        status: false,
+    };
+    // More conversations than the 8 active and 24 cold streams together.
+    for index in 0..40u8 {
+        let conversation = ConversationKey::Direct {
+            peer: PublicKey([index + 1; 32]),
+        };
+        engine
+            .compose(conversation, u32::from(index), text("x"), u64::from(index))
+            .unwrap();
+        drain(&mut engine);
+    }
+    let stored = umsh_text::engine::StreamCheckpoint {
+        conversation: forgotten,
+        next_id: 42,
+        epoch: 7,
+    };
+    engine.recall(&stored);
+    engine.compose(forgotten, 99, text("again"), 1_000).unwrap();
+    let outputs = drain(&mut engine);
+    let Drained::Transmit { payload, .. } = outputs
+        .iter()
+        .find(|output| matches!(output, Drained::Transmit { .. }))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let message = parse_payload(payload);
+    assert_eq!(message.sequence, Some(MessageSequence::unfragmented(42)));
+    assert!(!message.sequence_reset, "the stored sequence goes on");
+
+    // A conversation the engine still remembers ignores a stale hint.
+    engine.recall(&umsh_text::engine::StreamCheckpoint {
+        next_id: 3,
+        ..stored
+    });
+    engine.compose(forgotten, 100, text("more"), 1_001).unwrap();
+    let outputs = drain(&mut engine);
+    let Drained::Transmit { payload, .. } = outputs
+        .iter()
+        .find(|output| matches!(output, Drained::Transmit { .. }))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        parse_payload(payload).sequence,
+        Some(MessageSequence::unfragmented(43))
+    );
+}
+
+/// An engine started again takes back one of its messages by wire ID
+/// only while the restored stream still maps it: in the same epoch, with
+/// no more messages since than the stream maps, and once.
+#[test]
+fn a_restored_stream_takes_back_its_recent_messages() {
+    let conversation = ConversationKey::Direct {
+        peer: PublicKey([0x44; 32]),
+    };
+    let mut engine = engine();
+    engine.restore(
+        &[umsh_text::engine::StreamCheckpoint {
+            conversation,
+            next_id: 20,
+            epoch: 3,
+        }],
+        0,
+    );
+    assert_eq!(engine.adopt(conversation, 19, 2, 0), None, "another epoch");
+    assert_eq!(engine.adopt(conversation, 20, 3, 0), None, "never sent");
+    assert_eq!(engine.adopt(conversation, 3, 3, 0), None, "too far back");
+    let handle = engine
+        .adopt(conversation, 4, 3, 0)
+        .expect("the oldest mapped");
+    assert_eq!(engine.adopt(conversation, 4, 3, 0), None, "already held");
+    let key = umsh_text::engine::ArchiveKey {
+        conversation,
+        message_id: 4,
+        fragment: None,
+    };
+    assert!(engine.retransmit(&key, handle, b"archived"));
+
+    let unknown = ConversationKey::Direct {
+        peer: PublicKey([0x45; 32]),
+    };
+    assert_eq!(engine.adopt(unknown, 255, 0, 0), None, "no continuity");
+}
+
 #[test]
 fn outbound_continuity_survives_eviction_and_deep_restore() {
     let mut engine = engine();

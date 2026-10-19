@@ -36,10 +36,12 @@
 //!
 //! [`MultiCoreStrategy::Error`]: esp_storage::MultiCoreStrategy
 
+use core::cell::RefCell;
 use core::ops::Range;
 
 use embassy_embedded_hal::adapter::BlockingAsync;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
 use esp_bootloader_esp_idf::partitions::{self, PARTITION_TABLE_MAX_LEN};
 use esp_hal::peripherals::FLASH;
 use esp_storage::{FlashStorage, FlashStorageError};
@@ -153,21 +155,130 @@ pub fn open_partition(
 /// Split out from [`new_storage`] so the partition-table buffer is
 /// released before the store is built.
 fn storage_range(flash: &mut FlashStorage<'static>) -> Result<Range<u32>, StorageInitError> {
-    let mut buf = [0u8; PARTITION_TABLE_MAX_LEN];
-    let table = partitions::read_partition_table(flash, &mut buf)
-        .map_err(StorageInitError::PartitionTable)?;
-
-    let entry = table
-        .iter()
-        .find(|e| e.label_as_str() == STORAGE_PARTITION_LABEL)
-        .ok_or(StorageInitError::PartitionNotFound)?;
-
-    let offset = entry.offset();
-    let len = entry.len();
+    let range = find_partition(flash, STORAGE_PARTITION_LABEL)?;
+    let len = range.end - range.start;
     // The map needs at least two pages to garbage-collect, after the
     // journal reservation is carved off the top.
     if len < 2 * FlashStorage::SECTOR_SIZE + JOURNAL_RESERVED {
         return Err(StorageInitError::TooSmall { len });
     }
-    Ok(offset..offset + len)
+    Ok(range)
 }
+
+/// The absolute flash range of the partition labeled `label`, as the
+/// partition table gives it.
+pub fn find_partition(
+    flash: &mut FlashStorage<'static>,
+    label: &str,
+) -> Result<Range<u32>, StorageInitError> {
+    let mut buf = [0u8; PARTITION_TABLE_MAX_LEN];
+    let table = partitions::read_partition_table(flash, &mut buf)
+        .map_err(StorageInitError::PartitionTable)?;
+    let entry = table
+        .iter()
+        .find(|e| e.label_as_str() == label)
+        .ok_or(StorageInitError::PartitionNotFound)?;
+    Ok(entry.offset()..entry.offset() + entry.len())
+}
+
+// ─── One driver, lent per operation ─────────────────────────────────────
+
+/// The flash driver, lent for one operation at a time.
+///
+/// Every operation is a blocking call that finishes before anything else
+/// runs, so lending the driver for each one is all the sharing it needs.
+/// The journals' handles, which are asynchronous, and the chat store's,
+/// which is not, reach the one driver this way, and none holds it across
+/// an await.
+pub struct Flash {
+    driver: RefCell<FlashStorage<'static>>,
+    bounce: RefCell<Bounce>,
+}
+
+/// One piece of a [`Bounced`] transfer, in internal RAM.
+#[repr(align(4))]
+struct Bounce([u8; BOUNCE]);
+
+/// How much of a [`Bounced`] transfer goes at once: a whole number of
+/// words.
+const BOUNCE: usize = 256;
+
+impl Flash {
+    pub fn new(driver: FlashStorage<'static>) -> Self {
+        Self {
+            driver: RefCell::new(driver),
+            bounce: RefCell::new(Bounce([0; BOUNCE])),
+        }
+    }
+
+    /// Lends the driver for one operation.
+    pub fn with<R>(&self, operation: impl FnOnce(&mut FlashStorage<'static>) -> R) -> R {
+        operation(&mut self.driver.borrow_mut())
+    }
+}
+
+/// [`Flash`] for a caller whose buffers may be in PSRAM, as the chat
+/// store's are.
+///
+/// A flash operation cannot reach external RAM, so each transfer passes
+/// through a buffer in internal RAM, a piece at a time, without the
+/// driver's sector-sized copy on the stack. An erase goes a sector at a
+/// time, the driver lent for each, so that interrupts are taken between
+/// sectors rather than held off for a whole block.
+pub struct Bounced(&'static Flash);
+
+impl Bounced {
+    pub fn new(flash: &'static Flash) -> Self {
+        Self(flash)
+    }
+}
+
+impl ErrorType for Bounced {
+    type Error = FlashStorageError;
+}
+
+impl ReadNorFlash for Bounced {
+    const READ_SIZE: usize = FlashStorage::READ_SIZE;
+
+    async fn read(&mut self, mut offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        let mut bounce = self.0.bounce.borrow_mut();
+        for piece in bytes.chunks_mut(BOUNCE) {
+            let staged = &mut bounce.0[..piece.len()];
+            self.0.with(|driver| driver.read_nor(offset, staged))?;
+            piece.copy_from_slice(staged);
+            offset += piece.len() as u32;
+        }
+        Ok(())
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.with(|driver| driver.capacity())
+    }
+}
+
+impl NorFlash for Bounced {
+    const WRITE_SIZE: usize = FlashStorage::WRITE_SIZE;
+    const ERASE_SIZE: usize = FlashStorage::ERASE_SIZE;
+
+    async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        let sector = FlashStorage::SECTOR_SIZE;
+        for start in (from..to).step_by(sector as usize) {
+            self.0
+                .with(|driver| driver.erase(start, (start + sector).min(to)))?;
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, mut offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        let mut bounce = self.0.bounce.borrow_mut();
+        for piece in bytes.chunks(BOUNCE) {
+            let staged = &mut bounce.0[..piece.len()];
+            staged.copy_from_slice(piece);
+            self.0.with(|driver| driver.write_nor(offset, staged))?;
+            offset += piece.len() as u32;
+        }
+        Ok(())
+    }
+}
+
+impl MultiwriteNorFlash for Bounced {}

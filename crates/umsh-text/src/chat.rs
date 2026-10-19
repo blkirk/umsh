@@ -631,16 +631,22 @@ impl<P: TextProfile + Clone, const SLOTS: usize, const PAGES: usize> ChatFacade<
         self.stage();
     }
 
-    /// Compose a message into `conversation`.
+    /// Compose a message into `conversation`. `stored` is the checkpoint
+    /// storage holds for it, if any, which the engine continues from when it
+    /// no longer remembers the conversation itself (see [`Engine::recall`]).
     pub fn compose(
         &mut self,
         conversation: ConversationKey,
         client_token: u32,
         intent: ComposeIntent<'_>,
+        stored: Option<&StreamCheckpoint>,
         now_ms: u64,
     ) -> Result<PendingBatch, ChatComposeError> {
         if self.pending_batch.is_some() {
             return Err(ChatComposeError::BatchPending);
+        }
+        if let Some(stored) = stored.filter(|stored| stored.conversation == conversation) {
+            self.engine.recall(stored);
         }
         if let Err(error) = self
             .engine
@@ -777,6 +783,26 @@ impl<P: TextProfile + Clone, const SLOTS: usize, const PAGES: usize> ChatFacade<
         let queued = self.engine.retransmit(key, handle, payload);
         self.stage();
         queued
+    }
+
+    /// Take back one of our messages sent before this session, as the
+    /// store keeps it (see [`Engine::adopt`]), with `stored` the
+    /// conversation's checkpoint as for [`ChatFacade::compose`]. Returns
+    /// the handle it goes by now.
+    pub fn adopt(
+        &mut self,
+        conversation: ConversationKey,
+        message_id: u8,
+        epoch: u16,
+        stored: Option<&StreamCheckpoint>,
+        now_ms: u64,
+    ) -> Option<MessageHandle> {
+        if let Some(stored) = stored.filter(|stored| stored.conversation == conversation) {
+            self.engine.recall(stored);
+        }
+        let handle = self.engine.adopt(conversation, message_id, epoch, now_ms);
+        self.stage();
+        handle
     }
 
     /// Advance timers: reassembly expiry, notify deadlines, repair.

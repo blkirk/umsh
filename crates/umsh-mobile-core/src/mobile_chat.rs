@@ -512,7 +512,7 @@ impl MobileChatState {
         };
         let batch = self
             .facade
-            .compose(conversation, client_token, intent, now_ms)
+            .compose(conversation, client_token, intent, None, now_ms)
             .map_err(|error| match error {
                 ChatComposeError::BatchPending => ComposeFailure::Pending,
                 ChatComposeError::Engine(_) | ChatComposeError::Incomplete => {

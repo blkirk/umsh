@@ -1,7 +1,8 @@
 //! A [`SoftPlatform`] for a real device with no hardware of its own.
 //!
 //! State lives in a directory: the saved configuration in `snapshot.bin`,
-//! the identity secret in `identity.key`. Identities come from the
+//! the identity secret in `identity.key`, and, on a device whose store
+//! keeps them, the device lists in `lists.bin`. Identities come from the
 //! operating system's generator, and the wall clock is the system's,
 //! which a host may read but not set. The device makes its identity as it
 //! first comes up, as firmware does.
@@ -19,10 +20,12 @@ use crate::soft::{DeviceSession, SoftPlatform};
 
 const SNAPSHOT_FILE: &str = "snapshot.bin";
 const IDENTITY_FILE: &str = "identity.key";
+const LISTS_FILE: &str = "lists.bin";
 
 /// Files under one directory, the OS generator, and the system clock.
 pub struct HostPlatform {
     dir: PathBuf,
+    held_lists: Option<&'static [[u8; 32]]>,
 }
 
 impl HostPlatform {
@@ -30,7 +33,18 @@ impl HostPlatform {
     pub fn new(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+            held_lists: None,
+        })
+    }
+
+    /// Keep the device lists in their own file rather than the snapshot,
+    /// as a communicator's store does, with `defaults` the channel keys
+    /// they hold after a reset with none kept.
+    pub fn holding_lists(mut self, defaults: &'static [[u8; 32]]) -> Self {
+        self.held_lists = Some(defaults);
+        self
     }
 
     /// The directory state is kept in.
@@ -94,6 +108,18 @@ impl SoftPlatform for HostPlatform {
 
     fn store_identity(&mut self, secret: Option<&[u8; 32]>) -> Result<(), ()> {
         self.write(IDENTITY_FILE, secret.map(|secret| &secret[..]))
+    }
+
+    fn held_lists(&self) -> Option<&'static [[u8; 32]]> {
+        self.held_lists
+    }
+
+    fn load_lists(&mut self) -> Option<Vec<u8>> {
+        self.read(LISTS_FILE)
+    }
+
+    fn store_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        self.write(LISTS_FILE, record)
     }
 
     fn generate_secret(&mut self) -> [u8; 32] {

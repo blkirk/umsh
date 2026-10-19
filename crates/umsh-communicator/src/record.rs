@@ -108,6 +108,26 @@ impl Delivery {
         }
     }
 
+    /// Whether word is still to come: nothing has failed, a fragment sent
+    /// is unacknowledged or none was sent, and, for a `multicast`, which
+    /// no acknowledgment follows, nothing was sent yet.
+    pub fn awaited(&self, multicast: bool) -> bool {
+        let delivered = self.acked != 0 && self.sent & !self.acked == 0;
+        self.failed == 0 && !delivered && !(multicast && self.sent != 0)
+    }
+
+    /// Fails what was awaited of a message whose frames went with a
+    /// session that is gone: each fragment sent but unacknowledged, or the
+    /// first when none was sent. Returns whether anything was awaited.
+    pub fn interrupt(&mut self, multicast: bool) -> bool {
+        if !self.awaited(multicast) {
+            return false;
+        }
+        let open = self.sent & !self.acked;
+        self.failed |= if open == 0 { 1 } else { open };
+        true
+    }
+
     /// The latest word on one fragment.
     pub fn state(&self, fragment: Option<u8>) -> Option<DeliveryState> {
         let bit = 1u16 << fragment.unwrap_or(0).min(15);

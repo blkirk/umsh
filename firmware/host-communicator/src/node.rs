@@ -1,19 +1,24 @@
 //! The communicator's node behind the window, as the Pager runs it: its
 //! settings served by a soft device on this host, which keeps its saved
-//! state and identity in a directory.
+//! state and identity in a directory, and its chats kept in a flash
+//! partition that is a file in the same directory.
 
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use umsh_communicator::{ChannelCrypto, Clock, CommunicatorNode, MemoryStore, Seeds};
+use umsh_communicator::{
+    ChannelCrypto, Clock, CommunicatorNode, FlashMap, FlashMapStore, Quota, Seeds,
+};
 use umsh_ulcp::profiles;
 use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
 use umsh_ulcp_simdev::host::HostPlatform;
 use umsh_ulcp_simdev::soft::SoftDevice;
 use umsh_ulcp_simdev::{DutyLedger, LanBearerRole, RadioSettings, SessionConfig};
 use umsh_ux_communicator::model::{Node as _, State, brightness_at};
+
+use crate::flash::{self, FileFlash};
 
 /// A soft device's own interface, on the host's clock.
 pub struct Port {
@@ -42,7 +47,7 @@ impl LocalPort for Port {
     }
 }
 
-pub type Node = CommunicatorNode<Port>;
+pub type Node = CommunicatorNode<Port, FlashMapStore<FileFlash>>;
 
 /// The host's clocks. Local time is UTC.
 struct HostClock(Instant);
@@ -119,16 +124,25 @@ fn config() -> SessionConfig {
 }
 
 /// A node over a soft device keeping its state under `dir`, with its
-/// settings read.
+/// settings read and its chats mounted.
 pub fn open(dir: &Path, start: Instant) -> std::io::Result<&'static Node> {
-    let mut device = SoftDevice::new(config(), HostPlatform::new(dir)?);
+    let starting_keys = Box::leak(Box::new(ChannelCrypto::software().starting_keys()));
+    let platform = HostPlatform::new(dir)?.holding_lists(starting_keys);
+    let mut device = SoftDevice::new(config(), platform);
     device.open_device_interface();
+    let flash = FileFlash::open(&dir.join("chats.flash"))?;
+    let buffer = Box::leak(vec![0u8; 2048].into_boxed_slice());
+    let store = FlashMapStore::mount(
+        FlashMap::new(flash, 0..flash::SIZE as u32, buffer),
+        Quota::DEFAULT,
+    )
+    .map_err(|error| std::io::Error::other(format!("the chats did not mount: {error:?}")))?;
     let node: &'static Node = Box::leak(Box::new(CommunicatorNode::new(
         Port {
             device: Rc::new(RefCell::new(device)),
             start,
         },
-        MemoryStore::new(),
+        store,
         ChannelCrypto::software(),
         &std::alloc::System,
         Box::leak(Box::new(HostClock(start))),

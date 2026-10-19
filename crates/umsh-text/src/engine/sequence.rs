@@ -42,11 +42,14 @@ pub fn classify(last: u8, id: u8) -> SerialClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MessageHandle(pub u32);
 
+/// How many recent wire IDs a [`RefRing`] maps.
+pub const REF_WINDOW: usize = 16;
+
 /// Bounded ring mapping recent wire IDs to message handles within one
 /// stream epoch. When an ID is reused or evicted, the old mapping retires.
 #[derive(Clone, Debug, Default)]
 pub struct RefRing {
-    entries: heapless::Vec<(u8, MessageHandle), 16>,
+    entries: heapless::Vec<(u8, MessageHandle), REF_WINDOW>,
 }
 
 impl RefRing {

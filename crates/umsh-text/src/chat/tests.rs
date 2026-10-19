@@ -90,7 +90,7 @@ fn deliveries(outputs: &[ChatOutput]) -> Vec<Delivery> {
 
 /// The payload of a group message `sender` composes and commits.
 fn group_payload(sender: &mut ChatFacade, body: &str, token: u32) -> Vec<u8> {
-    let batch = sender.compose(group(), token, text(body), 0).unwrap();
+    let batch = sender.compose(group(), token, text(body), None, 0).unwrap();
     let outbound = sender.commit(batch).unwrap();
     outbound.transmissions()[0].payload.to_vec()
 }
@@ -99,7 +99,7 @@ fn group_payload(sender: &mut ChatFacade, body: &str, token: u32) -> Vec<u8> {
 #[test]
 fn committing_a_batch_releases_its_frames() {
     let mut chat = facade(LOCAL, 1);
-    let batch = chat.compose(direct(), 7, text("hello"), 0).unwrap();
+    let batch = chat.compose(direct(), 7, text("hello"), None, 0).unwrap();
     assert_eq!(batch.checkpoint.conversation, direct());
     assert_eq!(batch.archives.len(), 1);
     assert_eq!(batch.transmission_count(), 1);
@@ -126,13 +126,13 @@ fn committing_a_batch_releases_its_frames() {
 #[test]
 fn one_batch_is_outstanding_at_a_time() {
     let mut chat = facade(LOCAL, 1);
-    let first = chat.compose(direct(), 1, text("one"), 0).unwrap();
+    let first = chat.compose(direct(), 1, text("one"), None, 0).unwrap();
     assert_eq!(
-        chat.compose(direct(), 2, text("two"), 0).unwrap_err(),
+        chat.compose(direct(), 2, text("two"), None, 0).unwrap_err(),
         ChatComposeError::BatchPending
     );
     chat.commit(first).unwrap();
-    let second = chat.compose(direct(), 2, text("two"), 1).unwrap();
+    let second = chat.compose(direct(), 2, text("two"), None, 1).unwrap();
     assert_ne!(second.id(), 0);
     chat.commit(second).unwrap();
 }
@@ -142,8 +142,8 @@ fn one_batch_is_outstanding_at_a_time() {
 fn a_foreign_batch_is_refused() {
     let mut chat = facade(LOCAL, 1);
     let mut other = facade(LOCAL, 2);
-    let ours = chat.compose(direct(), 1, text("ours"), 0).unwrap();
-    let theirs = other.compose(direct(), 1, text("theirs"), 0).unwrap();
+    let ours = chat.compose(direct(), 1, text("ours"), None, 0).unwrap();
+    let theirs = other.compose(direct(), 1, text("theirs"), None, 0).unwrap();
     // Both are batch 1 of their facades, but only one is pending here.
     assert_eq!(chat.commit(ours).map(|out| out.len()), Ok(1));
     assert_eq!(chat.commit(theirs).unwrap_err(), BatchMismatch);
@@ -155,11 +155,11 @@ fn a_foreign_batch_is_refused() {
 #[test]
 fn rejecting_fails_frames_and_restores_from_checkpoints() {
     let mut chat = facade(LOCAL, 1);
-    let stored = chat.compose(direct(), 1, text("kept"), 0).unwrap();
+    let stored = chat.compose(direct(), 1, text("kept"), None, 0).unwrap();
     let checkpoint = stored.checkpoint;
     chat.commit(stored).unwrap();
 
-    let lost = chat.compose(direct(), 2, text("lost"), 1).unwrap();
+    let lost = chat.compose(direct(), 2, text("lost"), None, 1).unwrap();
     let lost_handle = lost.mutations[0].handle;
     let lost_wire = insert(&lost.mutations).wire_id;
     let drain = chat.reject(lost, &[checkpoint], seeds(2), 2).unwrap();
@@ -179,7 +179,7 @@ fn rejecting_fails_frames_and_restores_from_checkpoints() {
     assert_eq!(chat.session_id(), 2);
     assert!(!chat.has_pending_batch());
 
-    let next = chat.compose(direct(), 3, text("again"), 3).unwrap();
+    let next = chat.compose(direct(), 3, text("again"), None, 3).unwrap();
     assert_eq!(next.session_id(), 2);
     assert_eq!(insert(&next.mutations).wire_id, lost_wire);
     assert_eq!(next.checkpoint, checkpoint_after(&checkpoint));
@@ -198,12 +198,12 @@ fn checkpoint_after(checkpoint: &StreamCheckpoint) -> StreamCheckpoint {
 fn rejecting_keeps_the_sender_handle() {
     let mut chat = facade(LOCAL, 1);
     chat.set_local_handle("Ada");
-    let lost = chat.compose(group(), 1, text("lost"), 0).unwrap();
+    let lost = chat.compose(group(), 1, text("lost"), None, 0).unwrap();
     let checkpoints = [];
     let _ = chat.reject(lost, &checkpoints, seeds(2), 1).unwrap();
     assert_eq!(chat.local_handle(), "Ada");
 
-    let batch = chat.compose(group(), 2, text("still me"), 2).unwrap();
+    let batch = chat.compose(group(), 2, text("still me"), None, 2).unwrap();
     let outbound = chat.commit(batch).unwrap();
     let payload = &outbound.transmissions()[0].payload;
     let message = codec::parse(payload).unwrap();
@@ -216,13 +216,13 @@ fn rejecting_keeps_the_sender_handle() {
 #[test]
 fn reports_for_a_rejected_session_are_ignored() {
     let mut chat = facade(LOCAL, 1);
-    let batch = chat.compose(direct(), 1, text("first"), 0).unwrap();
+    let batch = chat.compose(direct(), 1, text("first"), None, 0).unwrap();
     let old = chat.commit(batch).unwrap();
     let old_id = old.transmissions()[0].transmission_id;
 
-    let lost = chat.compose(direct(), 2, text("lost"), 1).unwrap();
+    let lost = chat.compose(direct(), 2, text("lost"), None, 1).unwrap();
     let _ = chat.reject(lost, &[], seeds(2), 2).unwrap();
-    let batch = chat.compose(direct(), 3, text("new"), 3).unwrap();
+    let batch = chat.compose(direct(), 3, text("new"), None, 3).unwrap();
     let new = chat.commit(batch).unwrap();
     assert_eq!(new.transmissions()[0].transmission_id, old_id);
 
@@ -315,7 +315,7 @@ fn resolved_members_survive_a_rejected_batch() {
     chat.receive(source, &payload, 0).unwrap();
     assert_eq!(resolutions(&chat.drain().outputs).len(), 1);
 
-    let lost = chat.compose(group(), 1, text("lost"), 1).unwrap();
+    let lost = chat.compose(group(), 1, text("lost"), None, 1).unwrap();
     let _ = chat.reject(lost, &[], seeds(2), 2).unwrap();
     assert_eq!(chat.member_key(&CHANNEL, &hint), Some(PEER));
 
@@ -351,7 +351,13 @@ fn a_channel_not_held_is_refused() {
 fn only_received_content_describes_a_receipt() {
     let mut sender = facade(PEER, 9);
     let batch = sender
-        .compose(ConversationKey::Direct { peer: LOCAL }, 1, text("hi"), 0)
+        .compose(
+            ConversationKey::Direct { peer: LOCAL },
+            1,
+            text("hi"),
+            None,
+            0,
+        )
         .unwrap();
     let payload = sender.commit(batch).unwrap().transmissions()[0]
         .payload
@@ -371,7 +377,7 @@ fn only_received_content_describes_a_receipt() {
         .unwrap();
     assert!(received.describes_receipt());
 
-    let batch = chat.compose(direct(), 1, text("mine"), 1).unwrap();
+    let batch = chat.compose(direct(), 1, text("mine"), None, 1).unwrap();
     assert!(!batch.mutations[0].describes_receipt());
     chat.commit(batch).unwrap();
 }

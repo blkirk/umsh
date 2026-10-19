@@ -670,6 +670,24 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
         }
     }
 
+    /// A stored checkpoint for a conversation about to be composed to. It
+    /// seeds the conversation's continuity only when the engine holds none,
+    /// in an active stream or the cold stash, so that a stream displaced
+    /// past the bound resumes its stored sequence rather than announcing a
+    /// Sequence Reset.
+    pub fn recall(&mut self, checkpoint: &StreamCheckpoint) {
+        let conversation = checkpoint.conversation;
+        if self.outbound.contains_key(&conversation)
+            || self
+                .cold_checkpoints
+                .iter()
+                .any(|(key, _, _)| *key == conversation)
+        {
+            return;
+        }
+        self.stash_checkpoint(conversation, checkpoint.next_id, checkpoint.epoch);
+    }
+
     /// Compose and queue an outbound message. Returns the stable handle of
     /// the affected transcript record.
     pub fn compose(
@@ -1025,6 +1043,46 @@ impl<P: TextProfile, const SLOTS: usize, const PAGES: usize> Engine<P, SLOTS, PA
             Some((handle, key.fragment)),
         );
         true
+    }
+
+    /// Take back one of our messages that an earlier engine sent, as the
+    /// store keeps it: `message_id` in `epoch` of the conversation's
+    /// outbound stream. It gets a handle again, so that
+    /// [`Engine::retransmit`] can send it and word of it is reported.
+    /// `None` when the stream has moved past it—another epoch, a Sequence
+    /// Reset to come, or more messages since than the stream maps—or when
+    /// some message already holds the ID.
+    pub fn adopt(
+        &mut self,
+        conversation: ConversationKey,
+        message_id: u8,
+        epoch: u16,
+        now_ms: u64,
+    ) -> Option<MessageHandle> {
+        let (next_id, current, continues) = match self.outbound.get(&conversation) {
+            Some(stream) => (stream.next_id, stream.epoch, !stream.announce_reset),
+            None => self
+                .cold_checkpoints
+                .iter()
+                .find(|(key, _, _)| *key == conversation)
+                .map(|&(_, next_id, epoch)| (next_id, epoch, true))?,
+        };
+        let behind = usize::from(next_id.wrapping_sub(message_id));
+        if !continues || current != epoch || !(1..=sequence::REF_WINDOW).contains(&behind) {
+            return None;
+        }
+        self.ensure_outbound(conversation, now_ms);
+        let held = self
+            .outbound
+            .get(&conversation)
+            .is_none_or(|stream| stream.refs.lookup(message_id).is_some());
+        if held {
+            return None;
+        }
+        let handle = self.alloc_handle();
+        let stream = self.outbound.get_mut(&conversation)?;
+        stream.refs.record(message_id, handle);
+        Some(handle)
     }
 
     /// What a re-sent frame is tracked against: the original outbound

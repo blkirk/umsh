@@ -1203,6 +1203,16 @@ struct BoardDeviceEnv {
     /// it just will not survive a power-off.
     #[cfg(feature = "external-rtc")]
     rtc: Option<&'static RtcMutex>,
+    /// The flash, and the `umsh` partition every journal lives in, for a
+    /// factory reset to erase.
+    flash: &'static flash_store::Flash,
+    partition: core::ops::Range<u32>,
+    /// The chats, whose store keeps the device lists (spec §Lists Held by
+    /// the Device's Store), and their partition.
+    #[cfg(feature = "communicator")]
+    chats: &'static communicator::Node,
+    #[cfg(feature = "communicator")]
+    chat_partition: core::ops::Range<u32>,
 }
 
 /// One battery reading as the session reports it, taking the reading by
@@ -1382,6 +1392,11 @@ impl DeviceEnv for BoardDeviceEnv {
         self.identity_store.clear().await
     }
 
+    #[cfg(feature = "communicator")]
+    async fn persist_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        heap::in_psram(|| self.chats.keep_device_lists(record)).map_err(|_| ())
+    }
+
     async fn clear_counters(&mut self) {
         clear_node_counters(self.node_counters).await;
     }
@@ -1506,12 +1521,31 @@ impl DeviceEnv for BoardDeviceEnv {
     }
 
     async fn factory_reset(&mut self) -> ! {
-        // TODO: erase the runtime-discovered `umsh` partition span
-        // (`partition.start..partition.end`)—all journals live there—
-        // then esp32 reset. Unlike techo's hardcoded NV region, the span
-        // is not currently held by `BoardDeviceEnv`, so this needs the
-        // partition bounds threaded in first.
-        todo!("Implement factory reset for esp32");
+        debug_log(format_args!("FACTORY RESET: erasing storage + reboot"));
+        // Commanded over the mesh, the MAC acknowledgment of the request
+        // is still in the TX queue; let it out so the administrator hears
+        // the command landed. The counter flush that rides along is
+        // erased below, which is fine—a factory-fresh device has no
+        // admins left to replay at.
+        device_node::quiesce_for_reboot().await;
+        // Every journal lives in the `umsh` partition, the chats in their
+        // own: erased, both remount factory-fresh. The whole partitions,
+        // not the pages in use, so a journal added later is covered too.
+        // Nothing yields from here to the reset, so no task writes behind
+        // the erase. Best-effort: there is no host left to report a
+        // failure to.
+        let erase = |span: &core::ops::Range<u32>| {
+            if let Err(error) = self.flash.with(|driver| driver.erase(span.start, span.end)) {
+                debug_log(format_args!(
+                    "FACTORY RESET: erasing 0x{:06x}: {error:?}",
+                    span.start
+                ));
+            }
+        };
+        erase(&self.partition);
+        #[cfg(feature = "communicator")]
+        erase(&self.chat_partition);
+        esp_hal::system::software_reset()
     }
 
     async fn reboot(&mut self) -> ! {
@@ -2156,6 +2190,10 @@ async fn device_task(
     boot_identity: Option<[u8; 32]>,
     identity_rng: IdentityRng,
     node_counters: &'static NodeCountersMutex,
+    flash: &'static flash_store::Flash,
+    partition: core::ops::Range<u32>,
+    #[cfg(feature = "communicator")] chats: &'static communicator::Node,
+    #[cfg(feature = "communicator")] chat_partition: core::ops::Range<u32>,
     #[cfg(feature = "external-rtc")] rtc: Option<&'static RtcMutex>,
     #[cfg(feature = "ulcp-i2c")] i2c: board::i2c::Buses,
     #[cfg(feature = "chip-esp32s3")] sens: esp_hal::peripherals::SENS<'static>,
@@ -2188,6 +2226,16 @@ async fn device_task(
     #[cfg(feature = "psram")]
     let (session, snapshot_storage) =
         (external::session(config, boot_reason), external::snapshot());
+    // The chat store keeps the device lists, out of the snapshot; with
+    // none kept, the channels are the ones a communicator starts out on.
+    #[cfg(feature = "communicator")]
+    {
+        static STARTING_KEYS: StaticCell<[[u8; 32]; 2]> = StaticCell::new();
+        let defaults =
+            STARTING_KEYS.init(umsh_communicator::ChannelCrypto::software().starting_keys());
+        let kept = chats.device_lists(&mut snapshot_storage[..]).ok().flatten();
+        session.hold_lists(defaults, kept);
+    }
     driver::run_with_storage(
         session,
         snapshot_storage,
@@ -2228,6 +2276,12 @@ async fn device_task(
                 .expect("GNSS announcement receiver slot"),
             #[cfg(feature = "external-rtc")]
             rtc,
+            flash,
+            partition,
+            #[cfg(feature = "communicator")]
+            chats,
+            #[cfg(feature = "communicator")]
+            chat_partition,
         },
     )
     .await
@@ -2950,6 +3004,14 @@ async fn main(spawner: Spawner) {
         "storage: umsh partition 0x{:06x}..0x{:06x}",
         partition.start, partition.end,
     );
+    static FLASH: StaticCell<flash_store::Flash> = StaticCell::new();
+    let flash: &'static flash_store::Flash = FLASH.init(flash_store::Flash::new(flash));
+    // The communicator's chats keep a partition of their own, so that
+    // their churn never crowds the journals.
+    #[cfg(feature = "communicator")]
+    let chat_partition = flash
+        .with(|driver| flash_store::find_partition(driver, communicator::PARTITION))
+        .unwrap_or_else(|e| panic!("chat partition not found: {e:?}"));
     static SHARED_FLASH: StaticCell<journals::SharedFlash> = StaticCell::new();
     let shared: &'static journals::SharedFlash = SHARED_FLASH.init(journals::shared(flash));
 
@@ -3399,6 +3461,13 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "board-tbeam-supreme")]
     bme280::start(spawner, i2c_bus, pmu_bus).await;
 
+    // The communicator's node, made here for the session, whose lists its
+    // chat store keeps, for the chat task the device node's bring-up
+    // starts, and for the interface below.
+    #[cfg(feature = "communicator")]
+    let chat_node =
+        heap::in_psram(|| external::communicator_node(chat_seeds, flash, chat_partition.clone()));
+
     // ── The ULCP session ─────────────────────────────────────────────────
     spawner.spawn(
         device_task(
@@ -3409,6 +3478,12 @@ async fn main(spawner: Spawner) {
             boot_identity,
             identity_rng,
             node_counters,
+            flash,
+            partition,
+            #[cfg(feature = "communicator")]
+            chat_node,
+            #[cfg(feature = "communicator")]
+            chat_partition,
             #[cfg(feature = "external-rtc")]
             wall_clock_rtc,
             #[cfg(feature = "ulcp-i2c")]
@@ -3437,10 +3512,6 @@ async fn main(spawner: Spawner) {
         umsh_radio_loraphy::MAX_PAYLOAD,
         TX_PREAMBLE_SYMBOLS,
     );
-    // The communicator's node, made here for the chat task the device
-    // node's bring-up starts, and for the interface below.
-    #[cfg(feature = "communicator")]
-    let chat_node = heap::in_psram(|| external::communicator_node(chat_seeds));
     spawner.spawn(
         device_node::bring_up(
             spawner,

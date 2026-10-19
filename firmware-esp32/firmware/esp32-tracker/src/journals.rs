@@ -5,9 +5,11 @@
 //! nRF path). This module supplies the Espressif flash primitive, the
 //! two-page rotation policy, and the runtime handles every image
 //! mounts—the analogue of the `JournalFlash` / `ProtoStore` pair in
-//! `techo/src/main.rs`, backed by `esp_storage::FlashStorage` behind an
-//! embassy mutex instead of the MPSL-shared nRF NVMC. The BLE security
-//! journal's handle is the transport's own, in `ble/store.rs`.
+//! `techo/src/main.rs`, backed by the board's one flash driver,
+//! `umsh_bsp_esp32::flash_store::Flash`, borrowed for each operation,
+//! instead of the MPSL-shared nRF NVMC. The communicator's chat store
+//! borrows the same driver. The BLE security journal's handle is the
+//! transport's own, in `ble/store.rs`.
 //!
 //! ## Region placement
 //!
@@ -31,27 +33,25 @@
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
-use esp_storage::FlashStorage;
-use umsh_bsp_esp32::flash_store::JOURNAL_RESERVED;
+use umsh_bsp_esp32::flash_store::{Flash, JOURNAL_RESERVED};
 
 use umsh_journal_store::record::{
     CommitError, PAGE_SIZE, PageEraser, RecordReader, RecordWriter, write_committed_record,
 };
 use umsh_journal_store::seed;
 
-/// Newtype over the flash driver so the foreign journal traits can be
-/// implemented for it (orphan rule—both `RecordWriter` and
-/// `FlashStorage` are foreign). Reads go through the inner driver.
-pub struct JournalFlash(pub FlashStorage<'static>);
+/// The journals' handle on the flash driver, which it borrows for each
+/// operation; a newtype so the foreign journal traits can be implemented
+/// for it (orphan rule).
+pub struct JournalFlash(&'static Flash);
 
-/// The one flash driver, shared by every journal handle. Everything
-/// runs on the single thread-mode executor, so the mutex is uncontended;
-/// it exists to satisfy `'static` sharing, mirroring the nRF
-/// `SharedFlash` shape.
+/// The journals' handle, shared by every journal. Everything runs on the
+/// single thread-mode executor, so the mutex is uncontended; it exists to
+/// satisfy `'static` sharing, mirroring the nRF `SharedFlash` shape.
 pub type SharedFlash = Mutex<NoopRawMutex, JournalFlash>;
 
-/// Wrap the opened flash driver for sharing (place in a `StaticCell`).
-pub fn shared(flash: FlashStorage<'static>) -> SharedFlash {
+/// Wrap the flash driver for the journals (place in a `StaticCell`).
+pub fn shared(flash: &'static Flash) -> SharedFlash {
     Mutex::new(JournalFlash(flash))
 }
 
@@ -59,7 +59,9 @@ impl RecordWriter for JournalFlash {
     type Error = ();
 
     async fn write_record(&mut self, address: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.0.write(address, bytes).map_err(|_| ())?;
+        self.0
+            .with(|driver| driver.write(address, bytes))
+            .map_err(|_| ())?;
         // A seed write waiting for company can go out behind this one.
         crate::entropy::journal_written();
         Ok(())
@@ -70,7 +72,9 @@ impl PageEraser for JournalFlash {
     type Error = ();
 
     async fn erase_page(&mut self, start: u32, end: u32) -> Result<(), Self::Error> {
-        self.0.erase(start, end).map_err(|_| ())
+        self.0
+            .with(|driver| driver.erase(start, end))
+            .map_err(|_| ())
     }
 }
 
@@ -78,7 +82,9 @@ impl RecordReader for JournalFlash {
     type Error = ();
 
     fn read_record(&mut self, address: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        self.0.read(address, bytes).map_err(|_| ())
+        self.0
+            .with(|driver| driver.read(address, bytes))
+            .map_err(|_| ())
     }
 }
 
@@ -139,7 +145,7 @@ impl SeedStore {
             let mut address = page;
             while address < page + PAGE_SIZE {
                 let mut bytes = [0u8; seed::SLOT_SIZE];
-                if flash.0.read(address, &mut bytes).is_ok() {
+                if flash.read_record(address, &mut bytes).is_ok() {
                     latest = seed::consider_record(latest, address, &bytes);
                 }
                 address += seed::SLOT_SIZE as u32;

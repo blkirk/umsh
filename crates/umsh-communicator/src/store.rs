@@ -67,6 +67,21 @@ pub trait ChatStore {
         change: ChannelChange<'_>,
     ) -> Result<(), StoreError>;
 
+    /// The record the device keeps here of its own lists, beside the
+    /// chats: what it persists outside its saved snapshot (spec §Lists
+    /// Held by the Device's Store). Gone with everything else on
+    /// [`ChatStore::erase`].
+    fn device_lists<'b>(&self, out: &'b mut [u8]) -> Result<Option<&'b [u8]>, StoreError>;
+    /// Keeps `record` as the device's lists, or forgets them with `None`.
+    fn keep_device_lists(&mut self, record: Option<&[u8]>) -> Result<(), StoreError>;
+
+    /// Fails what each outbound message still awaited (see
+    /// [`Delivery::interrupt`]), as a new session starts: no word on the
+    /// last one's frames will be taken.
+    ///
+    /// [`Delivery::interrupt`]: crate::Delivery::interrupt
+    fn interrupt(&mut self) -> Result<(), StoreError>;
+
     fn usage(&self) -> Usage;
     /// Forget everything: a factory reset. Identifiers are still never
     /// reused.

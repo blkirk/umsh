@@ -26,6 +26,7 @@ use umsh_ux_communicator::text::TextHeap;
 
 use crate::chat::{ChannelCrypto, Chats as ChatHalf};
 use crate::memory::MemoryStore;
+use crate::record::StoreError;
 use crate::settings::Settings;
 use crate::store::ChatStore;
 use crate::task::{Arrival, Command};
@@ -75,7 +76,7 @@ impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
         seeds: Seeds,
     ) -> Self {
         Self {
-            settings: RefCell::new(Settings::new(port, crypto.well_known)),
+            settings: RefCell::new(Settings::new(port)),
             chats: RefCell::new(ChatHalf::new(store, crypto, heap)),
             events: RefCell::new(EventQueue::new()),
             clock,
@@ -215,6 +216,22 @@ impl<P: LocalPort, S: ChatStore> CommunicatorNode<P, S> {
     /// Runs `f` with the port, such as to wait on it.
     pub fn with_port<R>(&self, f: impl FnOnce(&P) -> R) -> R {
         f(self.settings.borrow().port())
+    }
+
+    /// The device's lists as the store keeps them, laid out in `out`
+    /// (see [`ChatStore::device_lists`]): what the board's device session
+    /// starts from.
+    pub fn device_lists<'b>(&self, out: &'b mut [u8]) -> Result<Option<&'b [u8]>, StoreError> {
+        self.chats.borrow().store().device_lists(out)
+    }
+
+    /// The store keeps `record` as the device's lists, or forgets them
+    /// with `None`, as the board's device session asks.
+    pub fn keep_device_lists(&self, record: Option<&[u8]>) -> Result<(), StoreError> {
+        self.chats
+            .borrow_mut()
+            .store_mut()
+            .keep_device_lists(record)
     }
 
     fn change(&self, setting: Setting, change: impl FnOnce(&mut Settings<P>) -> bool) {

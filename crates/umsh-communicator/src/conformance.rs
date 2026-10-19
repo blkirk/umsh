@@ -51,6 +51,7 @@ pub fn run<H: Harness>(harness: &mut H) {
     transcript(harness);
     paging(harness);
     delivery(harness);
+    interruption(harness);
     wire_aliases(harness);
     reactions(harness);
     edits_and_deletes(harness);
@@ -60,6 +61,7 @@ pub fn run<H: Harness>(harness: &mut H) {
     buffers(harness);
     remount(harness);
     power_cuts(harness);
+    device_lists(harness);
     erase(harness);
 }
 
@@ -198,6 +200,32 @@ impl Rig {
         self.drain(store, None)
             .result
             .expect("the acknowledgments commit");
+    }
+
+    /// Say `text` in `conversation`, and return the message it became, or
+    /// `None` if the store could not keep it or its acknowledgment.
+    #[cfg(all(test, feature = "flash"))]
+    pub(crate) fn try_say<S: ChatStore>(
+        &mut self,
+        store: &mut S,
+        conversation: ConversationKey,
+        text: &str,
+    ) -> Option<MessageId> {
+        let (handle, drained) = self.send(
+            store,
+            conversation,
+            ComposeIntent::Text {
+                body: text,
+                status: false,
+            },
+        );
+        let id = drained.result.as_ref().ok()?.id_of(handle)?;
+        for &transmission in &drained.transmissions {
+            self.engine
+                .transmit_update(transmission, DeliveryState::Acked, self.now_ms);
+        }
+        self.drain(store, None).result.ok()?;
+        Some(id)
     }
 
     /// Say `text` in `conversation`, and return the message it became.
@@ -442,6 +470,51 @@ pub fn delivery<H: Harness>(harness: &mut H) {
         record(&store, id).delivery.state(None),
         Some(DeliveryState::Acked)
     );
+}
+
+/// A new session fails what the last one left awaited: a direct message
+/// sent but unacknowledged, and messages never sent. A channel message
+/// once sent, and a direct one acknowledged, are settled.
+pub fn interruption<H: Harness>(harness: &mut H) {
+    let mut store = harness.fresh();
+    let mut rig = Rig::new();
+    let (_, delivered) = rig.say(&mut store, direct(), "delivered");
+    let mut sent = |store: &mut H::Store, conversation, text| {
+        let (handle, drained) = rig.send(
+            store,
+            conversation,
+            ComposeIntent::Text {
+                body: text,
+                status: false,
+            },
+        );
+        let id = drained.result.as_ref().unwrap().id_of(handle).unwrap();
+        for &transmission in &drained.transmissions {
+            rig.engine
+                .transmit_update(transmission, DeliveryState::Sent, rig.now_ms);
+        }
+        rig.drain(store, None).result.unwrap();
+        id
+    };
+    let awaiting = sent(&mut store, direct(), "awaiting");
+    let broadcast = sent(&mut store, group(), "broadcast");
+    let (handle, drained) = rig.send(
+        &mut store,
+        direct(),
+        ComposeIntent::Text {
+            body: "unsent",
+            status: false,
+        },
+    );
+    let unsent = drained.result.unwrap().id_of(handle).unwrap();
+
+    store.interrupt().unwrap();
+    harness.power_on(&mut store);
+    let state = |id| record(&store, id).delivery.state(None);
+    assert_eq!(state(delivered), Some(DeliveryState::Acked));
+    assert_eq!(state(awaiting), Some(DeliveryState::Failed));
+    assert_eq!(state(broadcast), Some(DeliveryState::Sent));
+    assert_eq!(state(unsent), Some(DeliveryState::Failed));
 }
 
 /// A reference that outlives the engine's handles finds the newest
@@ -990,6 +1063,28 @@ fn lost_edit<H: Harness>(harness: &mut H, step: CommitStep) {
             );
         }
     }
+}
+
+/// The device's lists are kept beside the chats until replaced or
+/// forgotten, and erasing forgets them.
+pub fn device_lists<H: Harness>(harness: &mut H) {
+    let mut store = harness.fresh();
+    let mut out = [0u8; 64];
+    assert_eq!(store.device_lists(&mut out).unwrap(), None);
+    store.keep_device_lists(Some(&[1, 2, 3])).unwrap();
+    harness.power_on(&mut store);
+    assert_eq!(store.device_lists(&mut out).unwrap(), Some(&[1, 2, 3][..]));
+    assert_eq!(
+        store.device_lists(&mut [0u8; 2]),
+        Err(StoreError::BufferTooSmall)
+    );
+    store.keep_device_lists(None).unwrap();
+    harness.power_on(&mut store);
+    assert_eq!(store.device_lists(&mut out).unwrap(), None);
+    store.keep_device_lists(Some(&[4])).unwrap();
+    store.erase().unwrap();
+    harness.power_on(&mut store);
+    assert_eq!(store.device_lists(&mut out).unwrap(), None);
 }
 
 /// Erasing forgets everything, and identifiers are still not given out

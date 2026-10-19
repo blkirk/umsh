@@ -44,8 +44,15 @@ const EMPTY_BLINKS: u8 = 3;
 const EMPTY_LIT: Duration = Duration::from_millis(300);
 const EMPTY_DARK: Duration = Duration::from_millis(200);
 
-/// The communicator's node, over the session's device link.
-pub(crate) type Node = CommunicatorNode<DriverPort<CriticalSectionRawMutex>>;
+/// The communicator's node, over the session's device link, with its
+/// chats kept in the [`PARTITION`].
+pub(crate) type Node = CommunicatorNode<
+    DriverPort<CriticalSectionRawMutex>,
+    umsh_communicator::FlashMapStore<umsh_bsp_esp32::flash_store::Bounced>,
+>;
+
+/// The label of the partition the chats are kept in.
+pub(crate) const PARTITION: &str = "chat";
 
 /// The port into the session for [`Node`].
 pub(crate) const fn port() -> DriverPort<CriticalSectionRawMutex> {
@@ -118,15 +125,17 @@ async fn interface(
     // that only this task touches, and they are the largest thing it
     // holds: kept in the task, they would come out of the main stack.
     let app = external::communicator(|slot| {
-        let app = App::new_in(
+        App::new_in(
             slot,
             state(node),
             embedded_graphics::prelude::Size::new(theme::WIDTH, theme::HEIGHT).into(),
             ui::root_view,
-        );
-        ui::bind(app);
-        app
+        )
     });
+    // Binding lays the interface out again: outside the constructor, so
+    // that its frame, which holds the state and a render tree on their
+    // way into place, is not under that layout too.
+    ui::bind(app);
     debug_log(format_args!(
         "communicator: app={} bytes",
         core::mem::size_of_val(app)

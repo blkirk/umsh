@@ -1,12 +1,17 @@
-//! The store in memory: for tests, the simulator, and anything before
-//! durable storage.
+//! The store in memory, alone or over a durable layer.
 //!
-//! It keeps two parts, as a durable back end does. What it would write to
-//! storage—records, archives, checkpoints, and the counters behind its
-//! identifiers—survives a power cut. Its index—chats by activity, each
-//! chat's messages, wire aliases, peers by hint—is kept up to date as it
-//! goes and rebuilt from the first part when it is mounted again, so a
-//! power cut can be armed and the store remounted to see what survived.
+//! It keeps two parts. Its records—chats, messages, archives, checkpoints,
+//! peers, channels, and the counters behind its identifiers—are what a
+//! power cut leaves. Its index—chats by activity, each chat's messages,
+//! wire aliases, peers by hint—is kept up to date as it goes and rebuilt
+//! from the records when it is mounted again, so a power cut can be armed
+//! and the store remounted to see what survived.
+//!
+//! Alone ([`Volatile`]), the records in memory are what survives, which
+//! serves tests and anything before durable storage. Over a layer that
+//! keeps them ([`Durable`]), the records in memory are a working copy:
+//! each one changed is handed to the layer at the end of every step of a
+//! commit, and mounting reads them all back from it.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -19,6 +24,7 @@ use umsh_text::engine::{ArchiveKey, Direction, Presence, ResolvedRef, StreamChec
 use umsh_text::{ConversationKey, MessageType, SenderScope, WireRef};
 
 use crate::batch::{Batch, Change, CommitStep, Committed};
+use crate::durable::{Durable, Volatile};
 use crate::ids::{ChatId, MessageId, PeerId};
 use crate::reaction::{Reacted, Reaction, Reactions};
 use crate::record::{
@@ -28,6 +34,8 @@ use crate::record::{
 };
 use crate::store::ChatStore;
 use crate::wire::{AliasCode, ArchiveCode, ConversationCode, SenderCode, archive_code};
+
+mod codec;
 
 /// How much a store keeps before it evicts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,11 +106,22 @@ struct PeerEntry {
     heard: u64,
 }
 
+/// The kinds of identifier, as [`Disk::ids`] counts them.
+const CHAT: usize = 0;
+const MESSAGE: usize = 1;
+const PEER: usize = 2;
+
+/// How far ahead of what it has given out a durable store's kept
+/// counters reach.
+const ID_BLOCK: u32 = 64;
+
 #[derive(Clone, Debug, Default)]
 struct Disk {
-    next_chat: u32,
-    next_message: u32,
-    next_peer: u32,
+    /// The next chat, message, and peer identifiers.
+    ids: [u32; 3],
+    /// How far the kept counters reach: no identifier at or past these
+    /// has been given out.
+    reserved: [u32; 3],
     /// Orders everything the store does.
     clock: u64,
     /// Each conversation's outbound checkpoint, and when it was last used.
@@ -112,12 +131,62 @@ struct Disk {
     messages: BTreeMap<u32, MessageEntry>,
     peers: BTreeMap<[u8; 32], PeerEntry>,
     channels: BTreeMap<[u8; 16], ChannelRecord>,
+    /// The record the device keeps here of its own lists.
+    device_lists: Option<Vec<u8>>,
 }
 
 impl Disk {
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
+    }
+
+    /// The next identifier of `kind`. The kept counters reach a block ahead
+    /// of what has been given out, and move on before an identifier past
+    /// them is: a store mounted after a power cut skips the rest of the
+    /// block rather than give any of it out again.
+    fn take_id(&mut self, kind: usize, dirty: &mut Dirty) -> u32 {
+        let id = self.ids[kind];
+        self.ids[kind] += 1;
+        if self.ids[kind] > self.reserved[kind] {
+            self.reserved[kind] = id + ID_BLOCK;
+            dirty.mark(RecordKey::Counters);
+        }
+        id
+    }
+}
+
+/// A record, by what names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RecordKey {
+    Counters,
+    Checkpoint(ConversationCode),
+    Archive(ArchiveCode),
+    Chat(u32),
+    Message(u32),
+    Peer([u8; 32]),
+    Channel([u8; 16]),
+    DeviceLists,
+}
+
+/// Records changed since they were last handed to the durable layer, in
+/// the order they first changed.
+#[derive(Debug, Default)]
+struct Dirty {
+    order: Vec<RecordKey>,
+    seen: BTreeSet<RecordKey>,
+}
+
+impl Dirty {
+    fn mark(&mut self, key: RecordKey) {
+        if self.seen.insert(key) {
+            self.order.push(key);
+        }
+    }
+
+    fn take(&mut self) -> Vec<RecordKey> {
+        self.seen.clear();
+        core::mem::take(&mut self.order)
     }
 }
 
@@ -252,11 +321,15 @@ fn reactions(reactors: &[Reactor]) -> Reactions {
 
 // ─── The store ───────────────────────────────────────────────────────────
 
-/// A [`ChatStore`] in memory.
-pub struct MemoryStore {
+/// A [`ChatStore`] in memory, alone or over a durable layer.
+pub struct MemoryStore<D: Durable = Volatile> {
     disk: Disk,
     index: Index,
     quota: Quota,
+    durable: D,
+    dirty: Dirty,
+    /// Where records are encoded on their way to the durable layer.
+    scratch: Vec<u8>,
     /// Power goes once a commit finishes this step.
     cut: Option<CommitStep>,
     /// Power is gone: nothing more is written until it is back.
@@ -275,13 +348,52 @@ impl MemoryStore {
     }
 
     pub fn with_quota(quota: Quota) -> Self {
+        Self::over(Volatile, quota)
+    }
+}
+
+impl<D: Durable> MemoryStore<D> {
+    fn over(durable: D, quota: Quota) -> Self {
         Self {
             disk: Disk::default(),
             index: Index::default(),
             quota,
+            durable,
+            dirty: Dirty::default(),
+            scratch: Vec::new(),
             cut: None,
             off: false,
         }
+    }
+
+    /// The store `durable` keeps, read back. A record that does not decode
+    /// is left out, and the rest are kept.
+    pub fn mount(durable: D, quota: Quota) -> Result<Self, StoreError> {
+        let mut store = Self::over(durable, quota);
+        store.remount()?;
+        Ok(store)
+    }
+
+    /// [`MemoryStore::mount`], or, when what `durable` keeps cannot be
+    /// read at all, an empty store over it cleared: storage that held
+    /// something else before the store was put there.
+    pub fn mount_or_clear(durable: D, quota: Quota) -> Result<Self, StoreError> {
+        let mut store = Self::over(durable, quota);
+        if store.remount().is_err() {
+            store.durable.clear()?;
+            store.remount()?;
+        }
+        Ok(store)
+    }
+
+    /// The durable layer.
+    pub fn durable(&self) -> &D {
+        &self.durable
+    }
+
+    /// The durable layer, for a test to cut its power or restore it.
+    pub fn durable_mut(&mut self) -> &mut D {
+        &mut self.durable
     }
 
     /// Lose power once the next commit has finished `step`: nothing after
@@ -292,10 +404,57 @@ impl MemoryStore {
 
     /// Mount again from what was written, as after a power cut or a
     /// reboot.
-    pub fn power_on(&mut self) {
+    pub fn power_on(&mut self) -> Result<(), StoreError> {
         self.off = false;
         self.cut = None;
+        self.remount()
+    }
+
+    /// Read the records back from what keeps them, and rebuild the index.
+    fn remount(&mut self) -> Result<(), StoreError> {
+        self.dirty.take();
+        if D::KEEPS {
+            let mut disk = Disk::default();
+            self.durable
+                .read(&mut |key, record| codec::restore(&mut disk, key, record))?;
+            let orphans = codec::settle(&mut disk);
+            self.disk = disk;
+            // What no longer belongs anywhere goes at the next change.
+            for orphan in orphans {
+                self.dirty.mark(orphan);
+            }
+        }
         self.index = Index::build(&self.disk);
+        Ok(())
+    }
+
+    /// Hand the durable layer every record changed since it was last
+    /// handed any, in the order they changed.
+    fn flush(&mut self) -> Result<(), StoreError> {
+        let keys = self.dirty.take();
+        if !D::KEEPS || self.off {
+            return Ok(());
+        }
+        let mut key_bytes = heapless::Vec::<u8, { codec::KEY_MAX }>::new();
+        for key in keys {
+            codec::key(&key, &mut key_bytes);
+            self.scratch.clear();
+            let kept = codec::record(&self.disk, &key, &mut self.scratch);
+            self.durable
+                .write(&key_bytes, kept.then_some(&self.scratch[..]))?;
+        }
+        Ok(())
+    }
+
+    /// Hand over what changed. When the layer refuses, what it kept is
+    /// read back, so the store is as the layer has it and the change it
+    /// was making is undone.
+    fn settle(&mut self) -> Result<(), StoreError> {
+        let flushed = self.flush();
+        if flushed.is_err() {
+            let _ = self.remount();
+        }
+        flushed
     }
 
     fn writable(&self) -> Result<(), StoreError> {
@@ -306,8 +465,14 @@ impl MemoryStore {
         }
     }
 
-    /// `step` is done. Returns whether power went with it.
-    fn reached(&mut self, step: CommitStep) -> bool {
+    /// `step` is done, and handed to the durable layer. Returns whether
+    /// power went with it.
+    fn reached(&mut self, step: CommitStep) -> Result<bool, StoreError> {
+        self.settle()?;
+        Ok(self.reached_cut(step))
+    }
+
+    fn reached_cut(&mut self, step: CommitStep) -> bool {
         if self.cut == Some(step) {
             self.cut = None;
             self.off = true;
@@ -338,11 +503,13 @@ impl MemoryStore {
         for key in keys {
             if let Some(payload) = self.disk.archives.remove(&key) {
                 self.index.bytes -= payload.len();
+                self.dirty.mark(RecordKey::Archive(key));
             }
         }
     }
 
     fn put_archive(&mut self, key: ArchiveCode, payload: &[u8]) {
+        self.dirty.mark(RecordKey::Archive(key));
         if let Some(old) = self.disk.archives.insert(key, payload.to_vec()) {
             self.index.bytes -= old.len();
         }
@@ -355,8 +522,8 @@ impl MemoryStore {
         if let Some(&id) = self.index.chat_for.get(&conversation.into()) {
             return id;
         }
-        let id = self.disk.next_chat;
-        self.disk.next_chat += 1;
+        let id = self.disk.take_id(CHAT, &mut self.dirty);
+        self.dirty.mark(RecordKey::Chat(id));
         let activity = self.disk.tick();
         let chat = ChatEntry {
             record: ChatRecord {
@@ -382,6 +549,7 @@ impl MemoryStore {
         let Some(entry) = self.disk.chats.get_mut(&chat) else {
             return;
         };
+        self.dirty.mark(RecordKey::Chat(chat));
         self.index.by_activity.remove(&entry.activity);
         entry.activity = activity;
         self.index.by_activity.insert(activity, chat);
@@ -400,6 +568,7 @@ impl MemoryStore {
         let Some(mut message) = self.disk.messages.remove(&id) else {
             return false;
         };
+        self.dirty.mark(RecordKey::Message(id));
         self.index.remove_message(id, &message);
         change(&mut message);
         self.index.add_message(id, &message);
@@ -420,6 +589,7 @@ impl MemoryStore {
             self.delete_archives(alias.0, alias.2);
         }
         if let Some(message) = self.disk.messages.remove(&id) {
+            self.dirty.mark(RecordKey::Message(id));
             self.index.remove_message(id, &message);
         }
     }
@@ -513,6 +683,7 @@ impl MemoryStore {
                     if let Some(id) = self.resolve(batch, &committed, handle)
                         && let Some(message) = self.disk.messages.get_mut(&id)
                     {
+                        self.dirty.mark(RecordKey::Message(id));
                         message.record.delivery.set(fragment, state);
                         committed.touch_message(MessageId(id));
                     }
@@ -614,8 +785,8 @@ impl MemoryStore {
                 }
 
                 let chat = self.open_chat(&conversation, None);
-                let id = self.disk.next_message;
-                self.disk.next_message += 1;
+                let id = self.disk.take_id(MESSAGE, &mut self.dirty);
+                self.dirty.mark(RecordKey::Message(id));
                 let body = record::clip(body, BODY_MAX);
                 let message = MessageEntry {
                     record: MessageRecord {
@@ -765,34 +936,35 @@ impl MemoryStore {
                 break;
             };
             if let Some(peer) = self.disk.peers.remove(&key) {
+                self.dirty.mark(RecordKey::Peer(key));
                 self.index.remove_peer(&key, &peer);
             }
         }
     }
 }
 
-impl ChatStore for MemoryStore {
+impl<D: Durable> ChatStore for MemoryStore<D> {
     fn commit(&mut self, batch: &Batch<'_>) -> Result<Committed, StoreError> {
         self.writable()?;
         for checkpoint in batch.checkpoints() {
             let used = self.disk.tick();
-            self.disk
-                .checkpoints
-                .insert((&checkpoint.conversation).into(), (*checkpoint, used));
+            let code = (&checkpoint.conversation).into();
+            self.dirty.mark(RecordKey::Checkpoint(code));
+            self.disk.checkpoints.insert(code, (*checkpoint, used));
         }
-        if self.reached(CommitStep::Checkpoint) {
+        if self.reached(CommitStep::Checkpoint)? {
             return Err(StoreError::Io);
         }
         for (conversation, message_id) in batch.archive_deletes() {
             self.delete_archives(conversation.into(), *message_id);
         }
-        if self.reached(CommitStep::ArchiveDeletes) {
+        if self.reached(CommitStep::ArchiveDeletes)? {
             return Err(StoreError::Io);
         }
         for (key, payload) in batch.archives() {
             self.put_archive(archive_code(key), payload);
         }
-        if self.reached(CommitStep::Archives) {
+        if self.reached(CommitStep::Archives)? {
             return Err(StoreError::Io);
         }
         let committed = self.apply(batch);
@@ -800,7 +972,7 @@ impl ChatStore for MemoryStore {
         self.check_index();
         // Power lost after the transcript loses nothing: the commit is
         // whole.
-        self.reached(CommitStep::Transcript);
+        self.reached(CommitStep::Transcript)?;
         Ok(committed)
     }
 
@@ -921,6 +1093,7 @@ impl ChatStore for MemoryStore {
         if let ChatChange::Open { conversation, name } = change {
             let id = self.open_chat(&conversation, name);
             self.check_index();
+            self.settle()?;
             return Ok(ChatId(id));
         }
         if !self.disk.chats.contains_key(&chat.0) {
@@ -939,14 +1112,17 @@ impl ChatStore for MemoryStore {
                 self.remove_message(id);
             }
             if let Some(entry) = self.disk.chats.remove(&chat.0) {
+                self.dirty.mark(RecordKey::Chat(chat.0));
                 self.index.remove_chat(chat.0, &entry);
             }
             self.check_index();
+            self.settle()?;
             return Ok(chat);
         }
         let Some(entry) = self.disk.chats.get_mut(&chat.0) else {
             return Err(StoreError::NotFound);
         };
+        self.dirty.mark(RecordKey::Chat(chat.0));
         match change {
             ChatChange::Rename(name) => entry.record.name = name.map(record::name),
             ChatChange::Mute(muted) => entry.record.muted = muted,
@@ -960,6 +1136,7 @@ impl ChatStore for MemoryStore {
             ChatChange::Open { .. } | ChatChange::Delete => unreachable!(),
         }
         self.check_index();
+        self.settle()?;
         Ok(chat)
     }
 
@@ -1008,17 +1185,19 @@ impl ChatStore for MemoryStore {
         self.writable()?;
         let existing = self.disk.peers.remove(&key.0);
         if let Some(peer) = &existing {
+            self.dirty.mark(RecordKey::Peer(key.0));
             self.index.remove_peer(&key.0, peer);
         }
         let mut peer = match (existing, change) {
             (Some(peer), PeerChange::Forget) => {
                 self.check_index();
+                self.settle()?;
                 return Ok(peer.record.id);
             }
             (Some(peer), _) => peer,
             (None, PeerChange::Heard { .. } | PeerChange::Save { .. }) => {
-                let id = PeerId(self.disk.next_peer);
-                self.disk.next_peer += 1;
+                let id = PeerId(self.disk.take_id(PEER, &mut self.dirty));
+                self.dirty.mark(RecordKey::Peer(key.0));
                 PeerEntry {
                     record: PeerRecord {
                         id,
@@ -1076,6 +1255,7 @@ impl ChatStore for MemoryStore {
         self.disk.peers.insert(key.0, peer);
         self.forget_unheard();
         self.check_index();
+        self.settle()?;
         Ok(id)
     }
 
@@ -1089,6 +1269,7 @@ impl ChatStore for MemoryStore {
         change: ChannelChange<'_>,
     ) -> Result<(), StoreError> {
         self.writable()?;
+        self.dirty.mark(RecordKey::Channel(tag.0));
         match change {
             ChannelChange::Add {
                 name,
@@ -1119,7 +1300,47 @@ impl ChatStore for MemoryStore {
                     .ok_or(StoreError::NotFound)?;
             }
         }
-        Ok(())
+        self.settle()
+    }
+
+    fn device_lists<'b>(&self, out: &'b mut [u8]) -> Result<Option<&'b [u8]>, StoreError> {
+        let Some(lists) = &self.disk.device_lists else {
+            return Ok(None);
+        };
+        let out = out
+            .get_mut(..lists.len())
+            .ok_or(StoreError::BufferTooSmall)?;
+        out.copy_from_slice(lists);
+        Ok(Some(out))
+    }
+
+    fn keep_device_lists(&mut self, record: Option<&[u8]>) -> Result<(), StoreError> {
+        self.writable()?;
+        self.disk.device_lists = record.map(<[u8]>::to_vec);
+        self.dirty.mark(RecordKey::DeviceLists);
+        self.settle()
+    }
+
+    fn interrupt(&mut self) -> Result<(), StoreError> {
+        self.writable()?;
+        let Disk {
+            chats, messages, ..
+        } = &mut self.disk;
+        for (&id, message) in messages.iter_mut() {
+            if message.record.direction != Direction::Outbound {
+                continue;
+            }
+            let multicast = chats.get(&message.record.chat.0).is_some_and(|chat| {
+                matches!(
+                    chat.record.conversation,
+                    ConversationKey::ChannelGroup { .. }
+                )
+            });
+            if message.record.delivery.interrupt(multicast) {
+                self.dirty.mark(RecordKey::Message(id));
+            }
+        }
+        self.settle()
     }
 
     fn usage(&self) -> Usage {
@@ -1137,15 +1358,24 @@ impl ChatStore for MemoryStore {
 
     fn erase(&mut self) -> Result<(), StoreError> {
         self.writable()?;
+        self.dirty.take();
+        if let Err(error) = self.durable.clear() {
+            let _ = self.remount();
+            return Err(error);
+        }
         self.disk = Disk {
-            next_chat: self.disk.next_chat,
-            next_message: self.disk.next_message,
-            next_peer: self.disk.next_peer,
+            ids: self.disk.ids,
             clock: self.disk.clock,
             ..Disk::default()
         };
         self.index = Index::build(&self.disk);
-        Ok(())
+        // The counters are kept again at once, so that no identifier given
+        // out before is given out again.
+        for kind in [CHAT, MESSAGE, PEER] {
+            self.disk.reserved[kind] = self.disk.ids[kind] + ID_BLOCK;
+        }
+        self.dirty.mark(RecordKey::Counters);
+        self.settle()
     }
 }
 
@@ -1176,11 +1406,228 @@ mod tests {
         }
 
         fn power_on(&mut self, store: &mut MemoryStore) {
-            store.power_on();
+            store.power_on().unwrap();
         }
     }
 
     use crate::conformance::{Rig, archived, direct, group, record};
+
+    /// A durable layer that keeps records in a map, so that every remount
+    /// reads them back through their encoding.
+    #[derive(Default)]
+    struct Kept(BTreeMap<Vec<u8>, Vec<u8>>);
+
+    impl Durable for Kept {
+        const KEEPS: bool = true;
+
+        fn write(&mut self, key: &[u8], record: Option<&[u8]>) -> Result<(), StoreError> {
+            match record {
+                Some(record) => self.0.insert(key.to_vec(), record.to_vec()),
+                None => self.0.remove(key),
+            };
+            Ok(())
+        }
+
+        fn read(&mut self, each: &mut dyn FnMut(&[u8], &[u8])) -> Result<(), StoreError> {
+            for (key, record) in &self.0 {
+                each(key, record);
+            }
+            Ok(())
+        }
+
+        fn clear(&mut self) -> Result<(), StoreError> {
+            self.0.clear();
+            Ok(())
+        }
+    }
+
+    struct Encoded;
+
+    impl Harness for Encoded {
+        type Store = MemoryStore<Kept>;
+
+        fn fresh(&mut self) -> MemoryStore<Kept> {
+            MemoryStore::mount(Kept::default(), Quota::DEFAULT).unwrap()
+        }
+
+        fn cut_power_after(&mut self, store: &mut MemoryStore<Kept>, step: CommitStep) {
+            store.cut_power_after(step);
+        }
+
+        fn power_on(&mut self, store: &mut MemoryStore<Kept>) {
+            store.power_on().unwrap();
+        }
+    }
+
+    /// Every record reads back as it was written: a store mounted from
+    /// what its layer keeps is the store that wrote it.
+    #[test]
+    fn records_read_back_whole() {
+        let mut store = Encoded.fresh();
+        let mut rig = Rig::new();
+        for n in 0..5 {
+            rig.say(&mut store, direct(), &alloc::format!("calm {n:03}"));
+            rig.say(&mut store, group(), &alloc::format!("busy {n:03}"));
+        }
+        let peer = PublicKey([0x42; 32]);
+        store
+            .update_peer(
+                &peer,
+                PeerChange::Heard {
+                    at: Some(1_800_000_000),
+                    name: Some("Juniper"),
+                    identity: Some(&[2, 4]),
+                },
+            )
+            .unwrap();
+        store
+            .update_peer(
+                &peer,
+                PeerChange::Route(Some(&[umsh_core::RouterHint([1, 2])])),
+            )
+            .unwrap();
+        let chat = store.chat_for(&direct()).unwrap();
+        store
+            .update_chat(chat, ChatChange::Draft(Some("half a thought")))
+            .unwrap();
+        store
+            .update_channel(
+                &ChannelTag([7; 16]),
+                ChannelChange::Add {
+                    name: "Ridge",
+                    access: crate::ChannelAccess::Private,
+                    builtin: None,
+                },
+            )
+            .unwrap();
+
+        let before = (
+            store.disk.messages.clone(),
+            store.disk.chats.len(),
+            store.disk.archives.clone(),
+            store.disk.checkpoints.clone(),
+        );
+        let mounted = MemoryStore::mount(Kept(store.durable.0.clone()), Quota::DEFAULT).unwrap();
+        assert_eq!(mounted.disk.messages.len(), before.0.len());
+        for (id, message) in &before.0 {
+            let read = &mounted.disk.messages[id];
+            assert_eq!(read.record, message.record);
+            assert_eq!(read.body, message.body);
+            assert_eq!(read.conversation, message.conversation);
+            assert_eq!(read.revision, message.revision);
+        }
+        assert_eq!(mounted.disk.chats.len(), before.1);
+        for (id, chat) in &store.disk.chats {
+            assert_eq!(mounted.disk.chats[id].record, chat.record);
+            assert_eq!(mounted.disk.chats[id].draft, chat.draft);
+            assert_eq!(mounted.disk.chats[id].activity, chat.activity);
+        }
+        assert_eq!(mounted.disk.archives, before.2);
+        assert_eq!(
+            mounted
+                .disk
+                .checkpoints
+                .values()
+                .map(|(c, u)| (c.next_id, c.epoch, *u))
+                .collect::<Vec<_>>(),
+            before
+                .3
+                .values()
+                .map(|(c, u)| (c.next_id, c.epoch, *u))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mounted.peer(&peer).unwrap(), store.peer(&peer).unwrap());
+        assert_eq!(
+            mounted.channels().collect::<Vec<_>>(),
+            store.channels().collect::<Vec<_>>()
+        );
+        assert_eq!(mounted.index, store.index);
+    }
+
+    /// Identifiers given out before a power cut are not given out again,
+    /// even when the records that held them were not kept.
+    #[test]
+    fn identifiers_outlive_power_cuts() {
+        let mut store = Encoded.fresh();
+        let (_, first) = Rig::new().say(&mut store, direct(), "one");
+        // The message's record is lost, as if power went before it was
+        // written; the counters were kept before it was given out.
+        let mut kept = store.durable.0.clone();
+        kept.retain(|key, _| key[0] != codec::MESSAGE_RECORD);
+        let mut store = MemoryStore::mount(Kept(kept), Quota::DEFAULT).unwrap();
+        let (_, next) = Rig::new().say(&mut store, group(), "two");
+        assert!(next > first);
+    }
+
+    #[test]
+    fn encoded_transcript() {
+        conformance::transcript(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_paging() {
+        conformance::paging(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_delivery() {
+        conformance::delivery(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_interruption() {
+        conformance::interruption(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_device_lists() {
+        conformance::device_lists(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_wire_aliases() {
+        conformance::wire_aliases(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_reactions() {
+        conformance::reactions(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_edits_and_deletes() {
+        conformance::edits_and_deletes(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_chats() {
+        conformance::chats(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_peers() {
+        conformance::peers(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_channels() {
+        conformance::channels(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_remount() {
+        conformance::remount(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_power_cuts() {
+        conformance::power_cuts(&mut Encoded);
+    }
+
+    #[test]
+    fn encoded_erase() {
+        conformance::erase(&mut Encoded);
+    }
 
     /// What one short message costs against the quota, its archive
     /// included.
@@ -1275,6 +1722,16 @@ mod tests {
     #[test]
     fn delivery() {
         conformance::delivery(&mut Memory);
+    }
+
+    #[test]
+    fn interruption() {
+        conformance::interruption(&mut Memory);
+    }
+
+    #[test]
+    fn device_lists() {
+        conformance::device_lists(&mut Memory);
     }
 
     #[test]

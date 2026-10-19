@@ -23,7 +23,8 @@ window = ["embedded-graphics-simulator/with-sdl"]
 
 [dependencies]
 umsh-ux-communicator = { path = "../../crates/umsh-ux-communicator", features = ["fixture"] }
-umsh-communicator = { path = "../../crates/umsh-communicator", features = ["software-crypto"] }
+umsh-communicator = { path = "../../crates/umsh-communicator", features = ["software-crypto", "flash"] }
+embedded-storage-async = "0.4.1"
 umsh-ulcp-admin = { path = "../../crates/umsh-ulcp-admin" }
 umsh-ulcp = { path = "../../crates/umsh-ulcp" }
 umsh-ulcp-simdev = { path = "../../crates/umsh-ulcp-simdev", features = ["host"] }

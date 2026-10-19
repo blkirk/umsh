@@ -79,6 +79,14 @@ pub struct ChannelCrypto {
 }
 
 impl ChannelCrypto {
+    /// The channel keys a communicator's device lists hold after a reset
+    /// with none kept: `public` and `EMERGENCY` (`ulcp-device.md`, Lists
+    /// Held by the Device's Store). The board hands them to the session as
+    /// it holds the lists.
+    pub fn starting_keys(&self) -> [[u8; 32]; 2] {
+        [self.well_known.public.0, self.well_known.emergency.0]
+    }
+
     /// The software crypto back end's derivations.
     #[cfg(feature = "software-crypto")]
     pub fn software() -> Self {
@@ -170,8 +178,17 @@ impl<S: ChatStore> Chats<S> {
         self.facade.is_some()
     }
 
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
+
     /// Starts the chats as `local_key`, the device identity, carrying on
-    /// each outbound stream from where the store left it.
+    /// each outbound stream from where the store left it. What the store
+    /// shows on its way went with the last session, and has failed.
     pub fn start(
         &mut self,
         local_key: PublicKey,
@@ -182,6 +199,8 @@ impl<S: ChatStore> Chats<S> {
         if self.facade.is_some() {
             return;
         }
+        // Left unwritten, those messages read as sending until retried.
+        _ = self.store.interrupt();
         let mut facade = ChatFacade::new(
             DirectChannelProfile,
             local_key,
@@ -520,8 +539,9 @@ impl<S: ChatStore> Chats<S> {
     }
 
     /// Sends again each fragment of `message` in `chat` that went
-    /// unacknowledged, while the engine still knows the message by its
-    /// wire ID. Returns whether any is on its way.
+    /// unacknowledged, while its wire ID is still the message's in its
+    /// stream, before a restart or since. Returns whether any is on its
+    /// way.
     pub fn retry(
         &mut self,
         chat: model::ChatId,
@@ -539,14 +559,30 @@ impl<S: ChatStore> Chats<S> {
         let Some(message_id) = record.wire_id else {
             return false;
         };
-        let Some(handle) = self.handle_of(record.id) else {
-            return false;
-        };
         if record.chat.0 != chat || record.direction != engine::Direction::Outbound {
             return false;
         }
+        let known = self.handle_of(record.id);
         let Some(facade) = &mut self.facade else {
             return false;
+        };
+        // A message sent before a restart is taken back under its wire ID.
+        let handle = match known {
+            Some(handle) => handle,
+            None => {
+                let stored = self.store.checkpoint(&conversation);
+                let Some(handle) = facade.adopt(
+                    conversation,
+                    message_id,
+                    record.epoch,
+                    stored.as_ref(),
+                    now_ms,
+                ) else {
+                    return false;
+                };
+                self.handles.insert(handle, record.id);
+                handle
+            }
         };
         let mut payload = [0u8; MAX_FRAME];
         let mut queued = false;
@@ -595,8 +631,11 @@ impl<S: ChatStore> Chats<S> {
     ) -> Option<Committed> {
         let facade = self.facade.as_mut()?;
         self.token = self.token.wrapping_add(1);
+        // The stored checkpoint carries the conversation's sequence on when
+        // the engine no longer remembers it.
+        let stored = self.store.checkpoint(&conversation);
         let composed = facade
-            .compose(conversation, self.token, intent, now_ms)
+            .compose(conversation, self.token, intent, stored.as_ref(), now_ms)
             .ok()?;
         let kept = {
             let handles = &self.handles;

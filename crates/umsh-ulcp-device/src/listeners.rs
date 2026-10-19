@@ -26,13 +26,20 @@ pub struct Writes {
 
 impl Writes {
     pub fn of(request: &[u8]) -> Self {
+        Self::with(request, is_saved)
+    }
+
+    /// [`Writes::of`] on a device whose snapshot keeps the properties
+    /// `saved` names, such as one that keeps some lists elsewhere (see
+    /// [`Session::snapshots`](crate::Session::snapshots)).
+    pub fn with(request: &[u8], saved: impl Fn(u32) -> bool) -> Self {
         let mut writes = Self::default();
         let Ok(frame) = Frame::parse(request) else {
             return writes;
         };
         let mut note = |key: u32| {
             writes.any = true;
-            writes.saved |= is_saved(key);
+            writes.saved |= saved(key);
         };
         match frame.command() {
             Some(Cmd::PropSet | Cmd::PropInsert | Cmd::PropRemove) => {

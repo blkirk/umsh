@@ -6,6 +6,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash, ReadNorFlash};
+use umsh_communicator::{ChannelCrypto, RamFlash, RamFlashError};
+
 use umsh_ulcp::frame;
 use umsh_ulcp::ids::prop;
 use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
@@ -78,10 +81,16 @@ impl LocalPort for Port {
     }
 }
 
+/// A soft device holding its lists as a communicator's store does.
 pub fn device() -> Rc<RefCell<SimulatedDevice>> {
-    let mut sim = SimulatedDevice::new(config());
+    let mut sim = SimulatedDevice::holding_lists(config(), starting_keys());
     sim.open_device_interface();
     Rc::new(RefCell::new(sim))
+}
+
+/// The channel keys a communicator's lists hold after a reset.
+pub fn starting_keys() -> &'static [[u8; 32]] {
+    Box::leak(Box::new(ChannelCrypto::software().starting_keys()))
 }
 
 /// Gives `sim` the identity `secret` makes, or one it makes itself, as
@@ -93,3 +102,48 @@ pub fn provision(sim: &Rc<RefCell<SimulatedDevice>>, secret: Option<&[u8; 32]>) 
     sim.borrow_mut().device_request(&request[..len], 0);
     while sim.borrow_mut().take_device_frame().is_some() {}
 }
+
+/// One flash that a node started again finds as the last one left it.
+#[derive(Clone)]
+pub struct SharedFlash(pub Rc<RefCell<RamFlash>>);
+
+impl SharedFlash {
+    pub fn new(size: usize) -> Self {
+        Self(Rc::new(RefCell::new(RamFlash::new(size))))
+    }
+}
+
+impl ErrorType for SharedFlash {
+    type Error = RamFlashError;
+}
+
+// The flash in memory finishes every call at once, so no borrow is held
+// across a suspension.
+#[allow(clippy::await_holding_refcell_ref)]
+impl ReadNorFlash for SharedFlash {
+    const READ_SIZE: usize = RamFlash::READ_SIZE;
+
+    async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.0.borrow_mut().read(offset, bytes).await
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.borrow().capacity()
+    }
+}
+
+#[allow(clippy::await_holding_refcell_ref)]
+impl NorFlash for SharedFlash {
+    const WRITE_SIZE: usize = RamFlash::WRITE_SIZE;
+    const ERASE_SIZE: usize = RamFlash::ERASE_SIZE;
+
+    async fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        self.0.borrow_mut().erase(from, to).await
+    }
+
+    async fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.0.borrow_mut().write(offset, bytes).await
+    }
+}
+
+impl MultiwriteNorFlash for SharedFlash {}

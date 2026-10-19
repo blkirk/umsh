@@ -425,6 +425,13 @@ pub struct Departure {
     payload: Vec<u8>,
 }
 
+impl Departure {
+    /// The frame's payload, after its payload-type byte.
+    pub fn payload(&self) -> &[u8] {
+        self.payload.get(1..).unwrap_or_default()
+    }
+}
+
 enum Route {
     Peer {
         peer: PublicKey,

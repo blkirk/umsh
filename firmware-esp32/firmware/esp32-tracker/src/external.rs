@@ -144,17 +144,45 @@ pub fn display_frame() -> &'static mut [u8; umsh_pager_peripherals::display::FRA
 
 /// The communicator's node: its handles and queues, touched only by the
 /// communicator's tasks. The settings it caches and its chats grow on the
-/// heap, and its messages' text is kept here. Never inlined, as
-/// [`communicator`] is not.
+/// heap, and its messages' text is kept here. Its chats are read from
+/// `partition` of `flash`, which is cleared if it holds no chats a store
+/// can read. Never inlined, as [`communicator`] is not.
 #[cfg(feature = "communicator")]
 #[inline(never)]
-pub fn communicator_node(seeds: umsh_communicator::Seeds) -> &'static super::communicator::Node {
+pub fn communicator_node(
+    seeds: umsh_communicator::Seeds,
+    flash: &'static umsh_bsp_esp32::flash_store::Flash,
+    partition: core::ops::Range<u32>,
+) -> &'static super::communicator::Node {
     use super::communicator::{CLOCK, Node, port};
+    use umsh_bsp_esp32::flash_store::Bounced;
+    use umsh_communicator::{FlashMap, FlashMapStore, Quota};
+
+    // Where items are laid out on their way to and from flash: the
+    // largest, a message's record, is about 1.8 KB.
+    let buffer = alloc::boxed::Box::leak(alloc::vec![0u8; 2048].into_boxed_slice());
+    let started = embassy_time::Instant::now();
+    let range = partition.clone();
+    let store = FlashMapStore::mount_or_clear(
+        FlashMap::new(Bounced::new(flash), partition, buffer),
+        Quota::DEFAULT,
+    )
+    .unwrap_or_else(|e| panic!("chat store: {e:?}"));
+    let usage = umsh_communicator::ChatStore::usage(&store);
+    esp_println::println!(
+        "chats: 0x{:06x}..0x{:06x} mounted in {} ms, {} chats, {} messages, {} B",
+        range.start,
+        range.end,
+        started.elapsed().as_millis(),
+        usage.chats,
+        usage.messages,
+        usage.bytes,
+    );
     unsafe {
         let ptr = storage::<Node>();
         ptr.write(Node::new(
             port(),
-            umsh_communicator::MemoryStore::new(),
+            store,
             umsh_communicator::ChannelCrypto::software(),
             &EXTERNAL,
             &CLOCK,

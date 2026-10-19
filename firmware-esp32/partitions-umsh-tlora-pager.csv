@@ -8,8 +8,12 @@
 # sits at the very end of flash, where the application can keep growing
 # toward it without the region ever moving again.
 #
-# `umsh_bsp_esp32::flash_store` finds the `umsh` row by label; nothing
-# hardcodes its offset.
+# The communicator's chats keep the `chat` partition, directly beneath
+# `umsh`, so that their churn never crowds the journals. The application
+# keeps the contiguous 0x800000–0xDF0000 to grow into.
+#
+# `umsh_bsp_esp32::flash_store` finds the `umsh` and `chat` rows by label;
+# nothing hardcodes their offsets.
 #
 # Layout:
 #   0x008000  partition table (0xC00)
@@ -17,10 +21,12 @@
 #   0x00F000  phy_init    4 KB
 #   0x010000  factory  7.94 MB
 #   0x800000  (unused)
+#   0xDF0000  chat        2 MB   <- the communicator's chat store
 #   0xFF0000  umsh       64 KB   <- UMSH sequential-storage region
 #
 # Name,     Type, SubType,   Offset,   Size,     Flags
 nvs,        data, nvs,       0x9000,   0x6000,
 phy_init,   data, phy,       0xF000,   0x1000,
 factory,    app,  factory,   0x10000,  0x7F0000,
+chat,       data, undefined, 0xDF0000, 0x200000,
 umsh,       data, undefined, 0xFF0000, 0x10000,

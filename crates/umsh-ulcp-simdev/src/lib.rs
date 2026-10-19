@@ -62,6 +62,10 @@ pub struct SimulatedDevice {
 /// What stands where a board's hardware and storage would.
 pub struct SimulatedPlatform {
     snapshot: Option<Vec<u8>>,
+    /// The channel keys the device lists hold after a reset, on a device
+    /// whose store keeps the lists outside the snapshot.
+    held_lists: Option<&'static [[u8; 32]]>,
+    lists: Option<Vec<u8>>,
     identity: Option<[u8; 32]>,
     identity_seed: u8,
     pairing_pin: Option<u32>,
@@ -251,6 +255,17 @@ impl SimulatedDevice {
         }
     }
 
+    /// A device whose own store keeps the device lists outside the
+    /// snapshot, as a communicator's does, with `defaults` the channel
+    /// keys they hold after a reset with none kept.
+    pub fn holding_lists(config: SessionConfig, defaults: &'static [[u8; 32]]) -> Self {
+        let mut platform = SimulatedPlatform::new();
+        platform.held_lists = Some(defaults);
+        Self {
+            device: SoftDevice::new(config, platform),
+        }
+    }
+
     /// Append a sensor without changing any existing index or name.
     pub fn append_temperature_sensor(&mut self, name: &str, value: u16) -> Result<usize, Status> {
         self.device
@@ -374,6 +389,8 @@ impl SimulatedPlatform {
     fn new() -> Self {
         Self {
             snapshot: None,
+            held_lists: None,
+            lists: None,
             identity: None,
             identity_seed: 0,
             pairing_pin: None,
@@ -632,6 +649,19 @@ impl SoftPlatform for SimulatedPlatform {
 
     fn load_identity(&mut self) -> Option<[u8; 32]> {
         self.identity
+    }
+
+    fn held_lists(&self) -> Option<&'static [[u8; 32]]> {
+        self.held_lists
+    }
+
+    fn load_lists(&mut self) -> Option<Vec<u8>> {
+        self.lists.clone()
+    }
+
+    fn store_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        self.lists = record.map(<[u8]>::to_vec);
+        Ok(())
     }
 
     fn store_identity(&mut self, secret: Option<&[u8; 32]>) -> Result<(), ()> {
@@ -1187,5 +1217,46 @@ mod tests {
         assert!(!caps.contains(&umsh_ulcp::ids::cap::MAC_BACKHAUL));
         assert!(!caps.contains(&umsh_ulcp::ids::cap::REPEATER));
         assert!(caps.contains(&umsh_ulcp::ids::cap::WRITABLE_RAW_STREAM));
+    }
+
+    /// A device whose store keeps its lists hands each change to the
+    /// platform, saves none in the snapshot, brings them back on
+    /// `CMD_RST`, and forgets them on `CMD_CLEAR`.
+    #[test]
+    fn a_store_keeps_the_lists_the_snapshot_leaves_out() {
+        static DEFAULTS: [[u8; 32]; 1] = [[7; 32]];
+        let mut sim = SimulatedDevice::holding_lists(test_config(), &DEFAULTS);
+        attach(&mut sim);
+        let read = |sim: &mut SimulatedDevice, key: u32| -> Vec<u8> {
+            let mut request = [0; 16];
+            let len = frame::prop_get(&mut request, 6, key).unwrap();
+            let responses = exchange(sim, &request[..len]);
+            let response = Frame::parse(&responses[0]).unwrap();
+            PropPayload::parse(response.payload).unwrap().value.to_vec()
+        };
+        // What the list reports of the keys, not the keys.
+        let defaults = read(&mut sim, prop::DEV_CHANNEL_KEYS);
+        assert!(!defaults.is_empty());
+
+        let mut request = [0; 64];
+        let len = frame::prop_insert(&mut request, 1, prop::DEV_PEERS, &[9; 32]).unwrap();
+        exchange(&mut sim, &request[..len]);
+        assert!(sim.device.platform().lists.is_some());
+        let len = frame::save(&mut request, 2).unwrap();
+        exchange(&mut sim, &request[..len]);
+        let snapshot = sim.device.platform().snapshot.clone().unwrap();
+        assert!(!snapshot.windows(32).any(|window| window == [9; 32]));
+
+        let len = frame::reset(&mut request, 3).unwrap();
+        exchange(&mut sim, &request[..len]);
+        assert_eq!(read(&mut sim, prop::DEV_PEERS), [9; 32]);
+
+        let len = frame::clear(&mut request, 4).unwrap();
+        exchange(&mut sim, &request[..len]);
+        assert!(sim.device.platform().lists.is_none());
+        let len = frame::reset(&mut request, 5).unwrap();
+        exchange(&mut sim, &request[..len]);
+        assert!(read(&mut sim, prop::DEV_PEERS).is_empty());
+        assert_eq!(read(&mut sim, prop::DEV_CHANNEL_KEYS), defaults);
     }
 }

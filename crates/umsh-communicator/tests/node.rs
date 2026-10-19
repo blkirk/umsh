@@ -8,11 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod support;
 
-use support::{Port, config, device, provision};
+use support::{Port, SharedFlash, config, device, provision, starting_keys};
 use umsh_communicator::settings::SAVE_DELAY_MS;
 use umsh_communicator::task::Arrival;
 use umsh_communicator::task::Command;
-use umsh_communicator::{ChannelCrypto, Clock, CommunicatorNode, MemoryStore, Seeds};
+use umsh_communicator::{
+    ChannelCrypto, Clock, CommunicatorNode, FlashMap, FlashMapStore, MemoryStore, Quota, Seeds,
+};
 use umsh_core::{
     ChannelId, ChannelKey, ChannelTag, Fcf, PacketHeader, PacketType, ParsedOptions, PayloadType,
     PublicKey, SourceAddrRef,
@@ -138,6 +140,7 @@ fn composed(from: PublicKey, key: ChannelKey, handle: &str, body: &str) -> Vec<u
                 body,
                 status: false,
             },
+            None,
             0,
         )
         .unwrap();
@@ -257,10 +260,13 @@ fn the_profile_picker_reads_vetted_and_custom() {
 #[test]
 fn a_refused_change_reads_back_what_the_device_kept() {
     // A radio that cannot reach the band above 900 MHz.
-    let mut sim = SimulatedDevice::new(SessionConfig {
-        freq_khz_max: 900_000,
-        ..config()
-    });
+    let mut sim = SimulatedDevice::holding_lists(
+        SessionConfig {
+            freq_khz_max: 900_000,
+            ..config()
+        },
+        starting_keys(),
+    );
     sim.open_device_interface();
     let sim = Rc::new(RefCell::new(sim));
     let (node, clock) = node(&sim);
@@ -361,7 +367,7 @@ fn the_address_and_share_link_come_from_the_device_identity() {
 /// A communicator starts out on `public` and `EMERGENCY`, and its chats
 /// for them are there before anything arrives.
 #[test]
-fn the_first_boot_joins_public_and_emergency() {
+fn a_communicator_starts_out_on_public_and_emergency() {
     let sim = device();
     let (node, _) = started(&sim);
     let names: Vec<String> = chats(&node)
@@ -501,6 +507,109 @@ fn a_direct_message_goes_out_and_can_be_retried() {
     assert!(node.departed(again, Sent::Unsendable));
     assert_eq!(
         node.message(chat.id, message.id).unwrap().delivery,
+        Delivery::Unconfirmed
+    );
+}
+
+/// A node over the store kept on `flash`, started.
+fn node_on(
+    sim: &Rc<RefCell<SimulatedDevice>>,
+    flash: &SharedFlash,
+) -> CommunicatorNode<Port, FlashMapStore<SharedFlash>> {
+    let clock: &'static TestClock = Box::leak(Box::new(TestClock(AtomicU64::new(0))));
+    let buffer = Box::leak(vec![0u8; 2048].into_boxed_slice());
+    let size = flash.0.borrow().bytes().len() as u32;
+    let store = FlashMapStore::mount(
+        FlashMap::new(flash.clone(), 0..size, buffer),
+        Quota::DEFAULT,
+    )
+    .unwrap();
+    let node = CommunicatorNode::new(
+        Port(sim.clone()),
+        store,
+        ChannelCrypto::software(),
+        &std::alloc::System,
+        clock,
+        Seeds {
+            session_id: 1,
+            jitter_seed: 2,
+        },
+    );
+    node.pump();
+    assert!(node.started());
+    while node.next_event().is_some() {}
+    node
+}
+
+/// A node started again over the same flash has its chats, and carries a
+/// conversation's sequence on rather than resetting it.
+#[test]
+fn a_restarted_node_keeps_its_chats_and_its_sequence() {
+    let sim = device();
+    identify(&sim);
+    let flash = SharedFlash::new(64 * 4096);
+    let robin = PublicKey([0x37; 32]);
+
+    let first = node_on(&sim, &flash);
+    let chat = first
+        .direct_chat(&address_of(&robin), "Robin", &first.avatar())
+        .unwrap();
+    let said = first.send(chat.id, "On my way", None).unwrap();
+    let departed = first.depart().unwrap();
+    let before = umsh_text::codec::parse(departed.payload()).unwrap();
+    let before = before.sequence.unwrap().message_id;
+    drop(first);
+
+    let second = node_on(&sim, &flash);
+    let mut kept = Chats::new();
+    second.chats(&mut kept);
+    let chat = kept.iter().find(|kept| kept.name == "Robin").unwrap();
+    let message = second.message(chat.id, said.id).unwrap();
+    assert_eq!(&*message.text, "On my way");
+
+    second.send(chat.id, "Almost there", None).unwrap();
+    let departed = second.depart().unwrap();
+    let after = umsh_text::codec::parse(departed.payload()).unwrap();
+    assert!(!after.sequence_reset, "the stream goes on");
+    assert_eq!(after.sequence.unwrap().message_id, before.wrapping_add(1));
+}
+
+/// A message on its way when the node stopped reads Unconfirmed once it
+/// starts again, and a retry sends it under its wire ID, with word of it
+/// reaching the message.
+#[test]
+fn a_message_cut_off_by_a_restart_can_be_retried() {
+    let sim = device();
+    identify(&sim);
+    let flash = SharedFlash::new(64 * 4096);
+    let robin = PublicKey([0x37; 32]);
+
+    let first = node_on(&sim, &flash);
+    let chat = first
+        .direct_chat(&address_of(&robin), "Robin", &first.avatar())
+        .unwrap();
+    let said = first.send(chat.id, "On my way", None).unwrap();
+    let departed = first.depart().unwrap();
+    let wire = umsh_text::codec::parse(departed.payload()).unwrap();
+    let wire = wire.sequence.unwrap().message_id;
+    drop(first);
+
+    let second = node_on(&sim, &flash);
+    assert_eq!(
+        second.message(chat.id, said.id).unwrap().delivery,
+        Delivery::Unconfirmed
+    );
+    assert!(second.retry(chat.id, said.id));
+    assert_eq!(
+        second.message(chat.id, said.id).unwrap().delivery,
+        Delivery::Sending
+    );
+    let again = second.depart().expect("the message leaves again");
+    let resent = umsh_text::codec::parse(again.payload()).unwrap();
+    assert_eq!(resent.sequence.unwrap().message_id, wire);
+    assert!(second.departed(again, Sent::Unsendable));
+    assert_eq!(
+        second.message(chat.id, said.id).unwrap().delivery,
         Delivery::Unconfirmed
     );
 }

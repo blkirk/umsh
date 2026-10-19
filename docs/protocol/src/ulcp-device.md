@@ -52,6 +52,31 @@ That is the opposite of the host identity, for which the device holds no
 private key and every pairwise key must be provisioned explicitly (see
 [Tethered Host Services](ulcp-host.md)).
 
+### Lists Held by the Device's Store {#lists-held-by-the-devices-store}
+
+A device with a messaging interface of its own keeps a store for its
+conversations, and that store **MAY** also keep the device identity's
+lists, [`PROP_DEV_PEERS`](#prop-dev-peers) and
+[`PROP_DEV_CHANNEL_KEYS`](#prop-dev-channel-keys): whom its carrier talks
+with and on which channels belong with the conversations, not with the
+radio's configuration.
+
+Lists the store keeps are persisted as they change, as the device
+identity is, and are outside the saved snapshot (see [Saved
+State](ulcp-saved-state.md#saved-state)):
+
+* `CMD_SAVE` does not record them, and
+  [`CMD_RESTORE`](ulcp-saved-state.md#cmd-restore) leaves them as they
+  are.
+* `CMD_RST` restores them as last stored.
+* [`CMD_CLEAR`](ulcp-saved-state.md#cmd-clear) erases them with the rest
+  of the persisted provisioning, and leaves the conversations.
+
+With none stored, `PROP_DEV_PEERS` is empty and `PROP_DEV_CHANNEL_KEYS`
+holds the channels the messaging interface starts out on: the
+[default channels](multicast-channels.md#default-channels), `public` and
+`EMERGENCY`.
+
 ## Capabilities
 
 Code | Name               | Requires           | Grants
@@ -333,7 +358,9 @@ requirements as all key provisioning (see [Provisioning Security](ulcp-core.md#p
 * Item Form: 32 octets (the channel key)
 * Reported Form: 16 octets (the derived channel identifier)
 * Remove Selector: the 32-octet channel key
-* Post-Reset Value: Empty, or restored from saved state
+* Post-Reset Value: Empty, or restored from saved state or from the
+  device's store (see [Lists Held by the Device's
+  Store](#lists-held-by-the-devices-store))
 
 The set of [channel keys](multicast-channels.md#channel-keys) belonging to
 the **device identity**—channels the radio's own node participates in
@@ -362,7 +389,9 @@ host only through the host's own filtering.
 * Required: `CAP_DEV_IDENTITY`
 * Item Form: 32 octets (the peer's Ed25519 public key)
 * Remove Selector: the 32-octet public key
-* Post-Reset Value: Empty, or restored from saved state
+* Post-Reset Value: Empty, or restored from saved state or from the
+  device's store (see [Lists Held by the Device's
+  Store](#lists-held-by-the-devices-store))
 
 The **device identity's** peer list: the set of peer public keys the
 device node recognizes and may communicate with securely. Because the device

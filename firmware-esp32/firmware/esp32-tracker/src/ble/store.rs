@@ -6,7 +6,7 @@
 
 use trouble_host::prelude::*;
 use umsh_journal_store::ble::{self, Snapshot};
-use umsh_journal_store::record::{CommitError, PAGE_SIZE, write_committed_record};
+use umsh_journal_store::record::{CommitError, PAGE_SIZE, RecordReader, write_committed_record};
 
 use crate::journals::SharedFlash;
 
@@ -39,7 +39,7 @@ impl BleStore {
             let mut address = page;
             while address < page + PAGE_SIZE {
                 let mut bytes = [0u8; SLOT_SIZE];
-                if flash.0.read(address, &mut bytes).is_ok() {
+                if flash.read_record(address, &mut bytes).is_ok() {
                     latest = ble::consider_snapshot(latest, address, &bytes);
                 }
                 address += SLOT_SIZE as u32;

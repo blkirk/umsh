@@ -47,6 +47,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod flash;
 mod mesh;
 mod node;
 

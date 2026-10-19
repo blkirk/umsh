@@ -88,6 +88,9 @@ pub fn stored_device_identity(payload: Option<&[u8]>) -> proto::StoredIdentity {
 /// every boot would only delay booting bare and reporting the fact.
 pub const SNAPSHOT_FALLBACK_LIMIT: usize = 4;
 
+// The device lists' record is laid out in the snapshot buffer.
+const _: () = assert!(umsh_ulcp_device::HELD_LISTS_MAX <= SNAPSHOT_MAX);
+
 /// Buffer the driver hands `DeviceEnv::sign_identity`: a node-identity
 /// payload plus its 64-octet detached signature, with room for the
 /// descriptive options.
@@ -604,6 +607,14 @@ pub trait DeviceEnv {
     /// Drop persisted frame-counter boundaries after a successful
     /// identity clear. Boards without a device node keep the default.
     async fn clear_counters(&mut self) {}
+    /// Durably keep the device lists, as [`Session::lists_to_keep`] lays
+    /// them out, in the board's own store; `None` erases them
+    /// (CMD_CLEAR). Asked only of a board whose session holds them
+    /// ([`Session::hold_lists`]).
+    async fn persist_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        let _ = record;
+        Err(())
+    }
     /// Fill `secret` from the platform's cryptographic RNG. Fails closed:
     /// an error refuses identity generation rather than degrading.
     fn fill_secret(&mut self, secret: &mut [u8; 32]) -> Result<(), ()>;
@@ -1681,10 +1692,15 @@ where
                 // individually atomic; an interruption
                 // between them reports failure and the
                 // host's retry completes the erase.
-                let result = match env.clear_snapshot().await {
+                let mut result = match env.clear_snapshot().await {
                     Ok(()) => env.clear_identity().await,
                     Err(()) => Err(()),
                 };
+                // The lists the board's own store keeps are
+                // provisioning too.
+                if result.is_ok() && session.holds_lists() {
+                    result = env.persist_lists(None).await;
+                }
                 // With the identity durably gone, its
                 // counter boundaries are dead weight;
                 // drop them with it. (Kept if the
@@ -2289,7 +2305,7 @@ where
                     .await;
                     // A change made at the device keeps an existing
                     // snapshot in step, as a switch flipped there does.
-                    if Writes::of(&frame).saved {
+                    if Writes::with(&frame, |key| session.snapshots(key)).saved {
                         persist_device_change(session, snapshot_buf, &mut env).await;
                     }
                     finish_dfu(&mut env, dfu).await;
@@ -2419,6 +2435,13 @@ where
         // (property mutation, CMD_RST, CMD_RESTORE); one u32
         // compare when they did not.
         sync_dev_domain(&session, &mut dev_domain_synced, &mut env);
+        // The board's own store keeps the device lists as they change.
+        // One it could not take is offered again after the next event.
+        if let Some(len) = session.lists_to_keep(snapshot_buf)
+            && env.persist_lists(Some(&snapshot_buf[..len])).await.is_ok()
+        {
+            session.note_lists_kept();
+        }
         // PROP_MAC_BACKHAUL is session-scoped but its routing lives in
         // the mux, which nothing inside the session can reach. Mirroring
         // it here rather than pushing it from each write is what keeps

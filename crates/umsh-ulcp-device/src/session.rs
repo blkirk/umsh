@@ -465,8 +465,10 @@ pub enum Effect {
     SaveSnapshot { tid: u8 },
     /// `CMD_CLEAR`: erase the stored snapshot and all other persisted
     /// provisioning—including the independently persisted device
-    /// identity—then complete with [`Session::respond_clear`]. Live
-    /// state, BLE bonds, and the pairing PIN are unaffected.
+    /// identity, and the device lists when the device's own store keeps
+    /// them ([`Session::holds_lists`])—then complete with
+    /// [`Session::respond_clear`]. Live state, BLE bonds, and the pairing
+    /// PIN are unaffected.
     ClearSaved { tid: u8 },
     /// A `PROP_DEV_PRIVATE_KEY` write is provisioning the device
     /// identity. Read the staged request with
@@ -1711,6 +1713,69 @@ type DevAdminTable = PublicKeyTable<MAX_DEV_ADMINS>;
 type MutedChannelTable = FixedItemSet<MAX_CHANNEL_KEYS, CHANNEL_TAG_LEN>;
 /// `PROP_HOST_MUTED_PEERS`, keyed by peer public key.
 type MutedPeerTable = PublicKeyTable<MAX_PEER_KEYS>;
+
+/// Largest record [`Session::lists_to_keep`] lays out: a count and the
+/// items of `PROP_DEV_PEERS`, then of `PROP_DEV_CHANNEL_KEYS`.
+pub const HELD_LISTS_MAX: usize =
+    2 + MAX_DEV_PEERS * items::PUBLIC_KEY_LEN + MAX_CHANNEL_KEYS * items::CHANNEL_KEY_LEN;
+
+/// `PROP_DEV_PEERS` and `PROP_DEV_CHANNEL_KEYS` as a device keeps them in
+/// a store of its own, outside the snapshot (spec §Lists Held by the
+/// Device's Store).
+#[derive(Clone, Copy, Default)]
+struct HeldLists {
+    peers: DevPeerTable,
+    channel_keys: FixedItemSet<MAX_CHANNEL_KEYS, { items::CHANNEL_KEY_LEN }>,
+}
+
+impl HeldLists {
+    fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let mut at = 0;
+        put_items(&self.peers, out, &mut at)?;
+        put_items(&self.channel_keys, out, &mut at)?;
+        Some(at)
+    }
+
+    /// The lists `bytes` lay out. Items past a list's capacity are
+    /// dropped, and a record cut short lays out none.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut at = 0;
+        Some(Self {
+            peers: take_items(bytes, &mut at)?,
+            channel_keys: take_items(bytes, &mut at)?,
+        })
+    }
+}
+
+fn put_items<const N: usize, const L: usize>(
+    set: &FixedItemSet<N, L>,
+    out: &mut [u8],
+    at: &mut usize,
+) -> Option<()> {
+    *out.get_mut(*at)? = u8::try_from(set.len).ok()?;
+    *at += 1;
+    for item in set.iter() {
+        out.get_mut(*at..*at + L)?.copy_from_slice(item);
+        *at += L;
+    }
+    Some(())
+}
+
+fn take_items<const N: usize, const L: usize>(
+    bytes: &[u8],
+    at: &mut usize,
+) -> Option<FixedItemSet<N, L>> {
+    let count = usize::from(*bytes.get(*at)?);
+    *at += 1;
+    let mut set = FixedItemSet::default();
+    for _ in 0..count {
+        let item: [u8; L] = bytes.get(*at..*at + L)?.try_into().ok()?;
+        *at += L;
+        // A duplicate collapses, and a full set takes no more.
+        let _ = set.insert(item);
+    }
+    Some(set)
+}
 
 // `[[u8; L]; N]` does not derive `Default` for arbitrary const parameters.
 impl<const N: usize, const L: usize> Default for FixedItemSet<N, L> {
@@ -3199,6 +3264,17 @@ impl PendingNetworkEntry {
 /// chosen a table its own transports cannot carry.
 pub const NETWORK_TABLE_MAX: usize = 512;
 
+/// The device lists on a device whose own store keeps them.
+struct Held {
+    /// The channel keys after a reset with nothing kept.
+    defaults: &'static [[u8; items::CHANNEL_KEY_LEN]],
+    /// The store's copy, which `CMD_RST` reverts to. `None` when it
+    /// keeps none, as after `CMD_CLEAR`.
+    kept: Option<HeldLists>,
+    /// A list has changed since the store last kept them.
+    changed: bool,
+}
+
 pub struct Session<A: AesProvider, S: Sha256Provider, const TX: usize = 1> {
     config: SessionConfig,
     /// Protocol crypto (channel-identifier derivation now; packet
@@ -3239,6 +3315,9 @@ pub struct Session<A: AesProvider, S: Sha256Provider, const TX: usize = 1> {
     /// wipe. Never part of the snapshot: `CMD_RESTORE` cannot revert
     /// the identity.
     dev_key_persisted: Option<[u8; items::PUBLIC_KEY_LEN]>,
+    /// The device lists, when a store of the device's own keeps them
+    /// rather than the snapshot (see [`Session::hold_lists`]).
+    held: Option<Held>,
     last_status: Status,
     /// Monotonic generation of the device-domain node tables
     /// (`PROP_DEV_CHANNEL_KEYS`, `PROP_DEV_PEERS`). Bumped on every
@@ -3505,6 +3584,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             snapshot_rejected: false,
             dev_key: None,
             dev_key_persisted: None,
+            held: None,
             last_status: boot_status,
             dev_domain_version: 0,
             alert: AlertState::None,
@@ -3794,6 +3874,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if self.saved.is_some() {
             self.apply_saved_device();
         }
+        // Lists a store of the device's own keeps revert to its copy, as
+        // the identity does: normally unchanged, their post-reset values
+        // after CMD_CLEAR.
+        self.revert_held_lists();
         self.discard_session_state(SessionResetReason::Reset);
         // The device tables were rebuilt from post-reset (and possibly
         // the saved snapshot); the node must re-sync.
@@ -3867,6 +3951,9 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     prop::PHY_LORA_BW => self.device.settings.bw_hz = saved.settings.bw_hz,
                     prop::PHY_LORA_SF => self.device.settings.sf = saved.settings.sf,
                     prop::PHY_LORA_CR => self.device.settings.cr_denom = saved.settings.cr_denom,
+                    // Kept by the device's own store instead, and left as
+                    // they are.
+                    prop::DEV_CHANNEL_KEYS | prop::DEV_PEERS if self.held.is_some() => {}
                     prop::DEV_CHANNEL_KEYS => self.device.channel_keys = saved.dev_channel_keys,
                     prop::DEV_PEERS => self.device.peers = saved.dev_peers,
                     prop::DEV_ADMINS => self.device.admins = saved.dev_admins,
@@ -5892,7 +5979,18 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// [`Effect::SaveSnapshot`]. `out` must hold [`SNAPSHOT_MAX`]
     /// bytes.
     pub fn encode_snapshot(&self, out: &mut [u8]) -> Option<usize> {
-        SavedState::capture(&self.device, self.config.duty.limit(), self.dev_key).encode(out)
+        self.capture().encode(out)
+    }
+
+    /// What a snapshot taken now holds: the device domain, less the
+    /// lists a store of the device's own keeps.
+    fn capture(&self) -> SavedState {
+        let mut state = SavedState::capture(&self.device, self.config.duty.limit(), self.dev_key);
+        if self.held.is_some() {
+            state.dev_peers = DevPeerTable::default();
+            state.dev_channel_keys = ChannelKeyTable::default();
+        }
+        state
     }
 
     /// Restore a stored snapshot at boot, before any host command is
@@ -5965,11 +6063,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     /// device restoring the values it had at boot and silently undoing
     /// what the operator did.
     pub fn note_snapshot_saved(&mut self) {
-        self.saved = Some(SavedState::capture(
-            &self.device,
-            self.config.duty.limit(),
-            self.dev_key,
-        ));
+        self.saved = Some(self.capture());
     }
 
     /// Complete the durable erase requested via [`Effect::ClearSaved`],
@@ -5981,6 +6075,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             Ok(()) => {
                 self.saved = None;
                 self.dev_key_persisted = None;
+                if let Some(held) = &mut self.held {
+                    held.kept = None;
+                    held.changed = false;
+                }
                 self.snapshot_rejected = false;
                 self.complete(tid, Status::OK, emit);
             }
@@ -6044,6 +6142,103 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
     pub fn set_boot_identity(&mut self, public_key: [u8; items::PUBLIC_KEY_LEN]) {
         self.dev_key = Some(public_key);
         self.dev_key_persisted = Some(public_key);
+    }
+
+    /// Keep `PROP_DEV_PEERS` and `PROP_DEV_CHANNEL_KEYS` out of the
+    /// snapshot, as a device does whose own store keeps them as they
+    /// change (spec §Lists Held by the Device's Store). Called once at
+    /// boot, before any host command.
+    ///
+    /// `stored` is the record the store keeps, as
+    /// [`Session::lists_to_keep`] laid it out, and the lists take its
+    /// values. With none they take their post-reset values: no peers, and
+    /// `defaults` for the channel keys. `CMD_RESTORE` leaves them alone;
+    /// `CMD_RST` returns them to the store's copy.
+    pub fn hold_lists(
+        &mut self,
+        defaults: &'static [[u8; items::CHANNEL_KEY_LEN]],
+        stored: Option<&[u8]>,
+    ) {
+        self.held = Some(Held {
+            defaults,
+            kept: stored.and_then(HeldLists::decode),
+            changed: false,
+        });
+        self.revert_held_lists();
+        self.bump_dev_domain();
+    }
+
+    /// Whether a store of the device's own keeps the device lists.
+    pub fn holds_lists(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// The record to hand the device's store when a list it keeps has
+    /// changed since it last took them: at most [`HELD_LISTS_MAX`] octets
+    /// laid out in `out`. Once the store has it, complete with
+    /// [`Session::note_lists_kept`].
+    pub fn lists_to_keep(&self, out: &mut [u8]) -> Option<usize> {
+        self.held.as_ref().filter(|held| held.changed)?;
+        self.live_lists().encode(out)
+    }
+
+    /// The store keeps the lists as they are now.
+    pub fn note_lists_kept(&mut self) {
+        let live = self.live_lists();
+        if let Some(held) = &mut self.held {
+            held.kept = Some(live);
+            held.changed = false;
+        }
+    }
+
+    /// Whether a write of `key` changes what `CMD_SAVE` keeps: a saved
+    /// property, other than a list the device's own store keeps.
+    pub fn snapshots(&self, key: u32) -> bool {
+        is_saved(key)
+            && !(self.held.is_some() && matches!(key, prop::DEV_PEERS | prop::DEV_CHANNEL_KEYS))
+    }
+
+    fn live_lists(&self) -> HeldLists {
+        let mut lists = HeldLists {
+            peers: self.device.peers,
+            ..HeldLists::default()
+        };
+        for entry in self.device.channel_keys.iter() {
+            let _ = lists.channel_keys.insert(entry.key);
+        }
+        lists
+    }
+
+    /// The held lists return to the store's copy, or to their post-reset
+    /// values when it keeps none.
+    fn revert_held_lists(&mut self) {
+        let Some(held) = &self.held else {
+            return;
+        };
+        let (peers, keys) = match &held.kept {
+            Some(kept) => (
+                kept.peers,
+                &kept.channel_keys.entries[..kept.channel_keys.len],
+            ),
+            None => (DevPeerTable::default(), held.defaults),
+        };
+        let mut channel_keys = ChannelKeyTable::default();
+        for key in keys {
+            let _ = channel_keys.insert(self.channel_entry(key));
+        }
+        self.device.peers = peers;
+        self.device.channel_keys = channel_keys;
+        if let Some(held) = &mut self.held {
+            held.changed = false;
+        }
+    }
+
+    /// A device list changed.
+    fn change_lists(&mut self) {
+        self.bump_dev_domain();
+        if let Some(held) = &mut self.held {
+            held.changed = true;
+        }
     }
 
     /// Complete a deferred write of the write-only BLE pairing PIN.
@@ -7044,14 +7239,14 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     }
                 }
                 self.device.channel_keys = table;
-                self.bump_dev_domain();
+                self.change_lists();
                 Ok(false)
             }
             // Peer public keys carry no secret material, so no
             // secure-link gate—like PROP_HOST_KEY itself.
             prop::DEV_PEERS => {
                 self.device.peers = DevPeerTable::parse_table(value)?;
-                self.bump_dev_domain();
+                self.change_lists();
                 Ok(false)
             }
             // Likewise public keys, and likewise ungated: authorizing a
@@ -7572,7 +7767,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                 });
                 match result {
                     Ok(id) => {
-                        self.bump_dev_domain();
+                        self.change_lists();
                         self.send_prop_inserted(tid, key, &id, emit);
                     }
                     Err(status) => self.complete(tid, status, emit),
@@ -7587,7 +7782,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     });
                 match result {
                     Ok(()) => {
-                        self.bump_dev_domain();
+                        self.change_lists();
                         self.send_prop_inserted(tid, key, item, emit);
                     }
                     Err(status) => self.complete(tid, status, emit),
@@ -7793,7 +7988,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     });
                 match result {
                     Ok(id) => {
-                        self.bump_dev_domain();
+                        self.change_lists();
                         self.send_prop_removed(tid, key, &id, emit);
                     }
                     Err(status) => self.complete(tid, status, emit),
@@ -7808,7 +8003,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     });
                 match result {
                     Ok(()) => {
-                        self.bump_dev_domain();
+                        self.change_lists();
                         self.send_prop_removed(tid, key, selector, emit);
                     }
                     Err(status) => self.complete(tid, status, emit),
@@ -17200,6 +17395,73 @@ mod tests {
         assert_eq!(get(&mut session, prop::DEV_KEY), second);
         let _ = session.reset(Status::RESET_SOFTWARE, &mut |_: &[u8]| {});
         assert!(get(&mut session, prop::DEV_KEY).is_empty());
+    }
+
+    /// On a device whose own store keeps the device lists, they stay out
+    /// of the snapshot: `CMD_RESTORE` leaves them, `CMD_RST` returns them
+    /// to the store's copy, and `CMD_CLEAR` then `CMD_RST` gives them
+    /// their post-reset values.
+    #[test]
+    fn lists_a_store_keeps_stay_out_of_the_snapshot() {
+        static DEFAULTS: [[u8; 32]; 1] = [[0x5A; 32]];
+        let default_id = channel_identifier(&DEFAULTS[0]);
+        let mut session = test_session();
+        session.hold_lists(&DEFAULTS, None);
+        assert_eq!(get(&mut session, prop::DEV_CHANNEL_KEYS), default_id);
+        assert!(get(&mut session, prop::DEV_PEERS).is_empty());
+        let mut record = [0u8; HELD_LISTS_MAX];
+        assert_eq!(session.lists_to_keep(&mut record), None, "nothing changed");
+
+        insert_item(&mut session, prop::DEV_PEERS, &[0xD0; 32]);
+        let len = session.lists_to_keep(&mut record).expect("a list changed");
+        session.note_lists_kept();
+        assert_eq!(session.lists_to_keep(&mut [0u8; HELD_LISTS_MAX]), None);
+        save(&mut session);
+
+        // The snapshot holds no peers.
+        let mut bytes = [0u8; SNAPSHOT_MAX];
+        let snapshot = session.encode_snapshot(&mut bytes).unwrap();
+        let mut plain: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        plain.restore_at_boot(&bytes[..snapshot]).unwrap();
+        plain.attach(true);
+        assert!(get(&mut plain, prop::DEV_PEERS).is_empty());
+
+        // The store's record does.
+        let mut booted: TestSession =
+            Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
+        booted.hold_lists(&DEFAULTS, Some(&record[..len]));
+        booted.attach(true);
+        assert_eq!(get(&mut booted, prop::DEV_PEERS), [0xD0; 32]);
+        assert_eq!(get(&mut booted, prop::DEV_CHANNEL_KEYS), default_id);
+
+        remove_item(&mut session, prop::DEV_PEERS, &[0xD0; 32]);
+        let _ = restore(&mut session);
+        assert!(
+            get(&mut session, prop::DEV_PEERS).is_empty(),
+            "restore leaves it"
+        );
+        let _ = session.reset(Status::RESET_SOFTWARE, &mut |_: &[u8]| {});
+        assert_eq!(
+            get(&mut session, prop::DEV_PEERS),
+            [0xD0; 32],
+            "reset reverts it"
+        );
+
+        let mut buf = [0u8; 4];
+        let len = frame::clear(&mut buf, 4).unwrap();
+        let (_, effect) = dispatch(&mut session, &buf[..len], 0);
+        assert_eq!(effect, Some(Effect::ClearSaved { tid: 4 }));
+        session.respond_clear(4, Ok(()), &mut |_: &[u8]| {});
+        assert_eq!(
+            get(&mut session, prop::DEV_PEERS),
+            [0xD0; 32],
+            "live until reset"
+        );
+        assert_eq!(session.lists_to_keep(&mut record), None);
+        let _ = session.reset(Status::RESET_SOFTWARE, &mut |_: &[u8]| {});
+        assert!(get(&mut session, prop::DEV_PEERS).is_empty());
+        assert_eq!(get(&mut session, prop::DEV_CHANNEL_KEYS), default_id);
     }
 
     #[test]

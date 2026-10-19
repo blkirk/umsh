@@ -29,8 +29,8 @@ use umsh_crypto::{
 use umsh_ulcp::{Frame, Status, hdlc};
 use umsh_ulcp_device::listeners::{Mirrors, Writes};
 use umsh_ulcp_device::{
-    AnnounceRequest, Effect, IdentitySource, RadioRxInfo, SNAPSHOT_MAX, SavedStatus, Session,
-    SessionConfig, TxOutcome,
+    AnnounceRequest, Effect, HELD_LISTS_MAX, IdentitySource, RadioRxInfo, SNAPSHOT_MAX,
+    SavedStatus, Session, SessionConfig, TxOutcome,
 };
 
 pub(crate) const WIRE_CAPACITY: usize = umsh_ulcp::gatt::MAX_FRAME;
@@ -61,6 +61,23 @@ pub trait SoftPlatform {
     /// A host set the wall clock.
     fn set_wall_clock(&mut self, epoch: Option<u32>) {
         let _ = epoch;
+    }
+
+    /// The channel keys the device lists hold after a reset with none
+    /// kept, on a device whose own store keeps them outside the snapshot,
+    /// as a communicator's does (see [`Session::hold_lists`]). `None`, the
+    /// default, leaves them in the snapshot.
+    fn held_lists(&self) -> Option<&'static [[u8; 32]]> {
+        None
+    }
+    /// The record of the device lists the platform keeps, if any.
+    fn load_lists(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+    /// Keep the record of the device lists, or erase it with `None`.
+    fn store_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        let _ = record;
+        Err(())
     }
 
     /// The session was just constructed, before any saved state is
@@ -147,6 +164,10 @@ impl<P: SoftPlatform> SoftDevice<P> {
             CryptoEngine::new(SoftwareAes, SoftwareSha256),
         );
         self.platform.on_boot(&mut self.session);
+        if let Some(defaults) = self.platform.held_lists() {
+            let stored = self.platform.load_lists();
+            self.session.hold_lists(defaults, stored.as_deref());
+        }
         if self.device_interface {
             self.session.open_device_interface();
         }
@@ -262,7 +283,7 @@ impl<P: SoftPlatform> SoftDevice<P> {
     pub fn device_request(&mut self, frame: &[u8], now_ms: u64) {
         debug_assert!(self.device_interface, "the device has no interface");
         self.now_ms = now_ms;
-        let writes = Writes::of(frame);
+        let writes = Writes::with(frame, |key| self.session.snapshots(key));
         let device_ms = self.device_ms();
         let mut emitted = Vec::new();
         let effect = self
@@ -293,6 +314,7 @@ impl<P: SoftPlatform> SoftDevice<P> {
         if writes.saved {
             self.keep_snapshot_in_step();
         }
+        self.keep_lists();
     }
 
     /// The next raw frame for the device's own interface, if any.
@@ -308,6 +330,17 @@ impl<P: SoftPlatform> SoftDevice<P> {
             .toggle_ble(&mut |frame| emitted.push(frame.to_vec()));
         self.queue_emitted(emitted);
         self.keep_snapshot_in_step();
+    }
+
+    /// Hand the platform the device lists when one changed, as the
+    /// firmware driver does after every event.
+    fn keep_lists(&mut self) {
+        let mut buf = [0u8; HELD_LISTS_MAX];
+        if let Some(len) = self.session.lists_to_keep(&mut buf)
+            && self.platform.store_lists(Some(&buf[..len])).is_ok()
+        {
+            self.session.note_lists_kept();
+        }
     }
 
     /// Keep an existing snapshot in step with a change made at the device,
@@ -386,6 +419,7 @@ impl<P: SoftPlatform> SoftDevice<P> {
             });
         self.queue_emitted(emitted);
         self.flush_session_reset_notice();
+        self.keep_lists();
     }
 
     fn execute(&mut self, mut effect: Option<Effect>, emitted: &mut Vec<Vec<u8>>) {
@@ -422,10 +456,13 @@ impl<P: SoftPlatform> SoftDevice<P> {
                 self.session.respond_save(tid, result, &mut emit);
             }
             Effect::ClearSaved { tid } => {
-                let result = self
+                let mut result = self
                     .platform
                     .store_snapshot(None)
                     .and(self.platform.store_identity(None));
+                if result.is_ok() && self.session.holds_lists() {
+                    result = self.platform.store_lists(None);
+                }
                 self.session.respond_clear(tid, result, &mut emit);
             }
             Effect::FactoryReset => {
@@ -433,6 +470,9 @@ impl<P: SoftPlatform> SoftDevice<P> {
                 // reboot drops the link.
                 let _ = self.platform.store_snapshot(None);
                 let _ = self.platform.store_identity(None);
+                if self.session.holds_lists() {
+                    let _ = self.platform.store_lists(None);
+                }
                 self.platform.erase();
                 self.boot_ms = self.now_ms;
                 self.boot();

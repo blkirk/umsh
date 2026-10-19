@@ -2,6 +2,7 @@
 //! sorted maps. Each is the thing's identity laid out as octets: a kind,
 //! then the key material, padded to one length.
 
+use umsh_core::{NodeHint, PublicKey};
 use umsh_text::engine::ArchiveKey;
 use umsh_text::{ConversationKey, SenderScope};
 
@@ -35,6 +36,17 @@ impl From<&ConversationKey> for ConversationCode {
     }
 }
 
+impl ConversationCode {
+    pub(crate) fn as_bytes(&self) -> &[u8; 49] {
+        &self.0
+    }
+
+    /// The code laid out in `bytes`, if they lay one out.
+    pub(crate) fn from_bytes(bytes: [u8; 49]) -> Option<Self> {
+        (1..=4).contains(&bytes[0]).then_some(Self(bytes))
+    }
+}
+
 /// A sender's stream within a conversation, ordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SenderCode([u8; 33]);
@@ -42,6 +54,19 @@ pub(crate) struct SenderCode([u8; 33]);
 impl SenderCode {
     pub(crate) const MIN: Self = Self([0; 33]);
     pub(crate) const MAX: Self = Self([u8::MAX; 33]);
+
+    /// The sender this is the code of.
+    pub(crate) fn scope(&self) -> SenderScope {
+        match self.0[0] {
+            0 => SenderScope::Local,
+            1 => {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&self.0[1..]);
+                SenderScope::Peer(PublicKey(key))
+            }
+            _ => SenderScope::ClaimedMember(NodeHint([self.0[1], self.0[2], self.0[3]])),
+        }
+    }
 }
 
 impl From<&SenderScope> for SenderCode {

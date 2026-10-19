@@ -72,6 +72,7 @@ enum Event {
     Ready,
     Dfu(umsh_ulcp::DfuMode),
     SnapshotPersisted,
+    ListsPersisted(Option<std::vec::Vec<u8>>),
 }
 
 struct Env {
@@ -102,6 +103,12 @@ impl DeviceEnv for Env {
     }
     async fn clear_identity(&mut self) -> Result<(), ()> {
         unreachable!()
+    }
+    async fn persist_lists(&mut self, record: Option<&[u8]>) -> Result<(), ()> {
+        self.events
+            .borrow_mut()
+            .push(Event::ListsPersisted(record.map(<[u8]>::to_vec)));
+        Ok(())
     }
     fn fill_secret(&mut self, _: &mut [u8; 32]) -> Result<(), ()> {
         unreachable!()
@@ -454,6 +461,65 @@ fn device_interface_writes_keep_a_current_snapshot_in_step() {
     assert!(!request(&buf[..len]), "a write the snapshot does not hold");
     let len = frame::prop_set(&mut buf, 3, prop::DEV_NAME, b"Pocket").unwrap();
     assert!(request(&buf[..len]), "a saved setting");
+}
+
+/// On a device whose own store keeps the device lists, a change to one
+/// reaches the store, and the snapshot is not written for it.
+#[test]
+fn held_lists_reach_the_store_and_not_the_snapshot() {
+    use umsh_ulcp::{frame, ids::prop};
+    static DEFAULTS: [[u8; 32]; 1] = [[0x5A; 32]];
+    let mut saved = [0; SNAPSHOT_MAX];
+    let len = session("Saved radio").encode_snapshot(&mut saved).unwrap();
+    let saved = &saved[..len];
+    let link: &'static DeviceLink<NoopRawMutex> = Box::leak(Box::new(DeviceLink::new()));
+    let rt = DeviceRuntime {
+        input: Box::leak(Box::new(InputChannel::<NoopRawMutex>::new())),
+        radio: Box::leak(Box::new(Channels::<NoopRawMutex, 1, 1>::new())),
+        ctl: Box::leak(Box::new(DeviceControl::new())),
+        out: Box::leak(Box::new(TransportChannels::new())),
+        session_gen: Box::leak(Box::new(AtomicU32::new(0))),
+        device: Some(link),
+    };
+    let input = rt.input;
+    let events = Rc::new(RefCell::new(std::vec::Vec::new()));
+    let env = Env {
+        events: events.clone(),
+        older: None,
+        restore_gate: Box::leak(Box::new(Signal::new())),
+        name_gate: None,
+        dfu_result: Err(Status::UNIMPLEMENTED),
+    };
+    let mut session = session("Device change");
+    session.hold_lists(&DEFAULTS, None);
+    let mut storage = [0; SNAPSHOT_MAX];
+    let mut run = core::pin::pin!(run_with_storage(
+        &mut session,
+        &mut storage,
+        Some(saved),
+        Some([0x55; 32]),
+        rt,
+        env
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(run.as_mut().poll(&mut cx).is_pending());
+    events.borrow_mut().clear();
+
+    let mut buf = [0u8; 64];
+    let len = frame::prop_insert(&mut buf, 1, prop::DEV_PEERS, &[0xD0; 32]).unwrap();
+    assert!(
+        input
+            .try_send(InEvent::Device(FrameBuf::from_slice(&buf[..len]).unwrap()))
+            .is_ok()
+    );
+    assert!(run.as_mut().poll(&mut cx).is_pending());
+    let events = events.borrow();
+    assert!(!events.contains(&Event::SnapshotPersisted));
+    let mut record = std::vec![1];
+    record.extend_from_slice(&[0xD0; 32]);
+    record.push(1);
+    record.extend_from_slice(&[0x5A; 32]);
+    assert!(events.contains(&Event::ListsPersisted(Some(record))));
 }
 
 /// The device's own interface is answered on its link and nowhere else,

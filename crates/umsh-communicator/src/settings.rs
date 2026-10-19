@@ -18,11 +18,14 @@
 //! device has none in effect. Brightness and the keyboard never ask for
 //! one.
 //!
-//! **Channels.** A communicator starts out on `public` and `EMERGENCY`:
-//! the first boot joins both before it saves.
+//! **Peers and channels.** The device's store keeps `PROP_DEV_PEERS` and
+//! `PROP_DEV_CHANNEL_KEYS` outside the snapshot, so changing them asks for
+//! no save. A communicator starts out on `public` and `EMERGENCY`: they are
+//! what its channel keys hold after a reset (`ulcp-device.md`, Lists Held
+//! by the Device's Store; see
+//! [`ChannelCrypto::starting_keys`](crate::ChannelCrypto::starting_keys)).
 
 use umsh_core::ChannelTag;
-use umsh_text::node_adapter::WellKnownChannels;
 use umsh_ulcp::ids::{keyboard_aids, prop, saved};
 use umsh_ulcp::profiles::VETTED;
 use umsh_ulcp_admin::descriptor::Value;
@@ -61,8 +64,6 @@ const PEER_WRITES_KEPT: usize = 8;
 pub struct Settings<P> {
     model: Model,
     exchange: LocalExchange<P>,
-    /// The channels the first boot joins.
-    well_known: WellKnownChannels,
     /// The setting each recent write changed, oldest first.
     writes: Deque<(WriteId, Setting), WRITES_KEPT>,
     /// Peers saved, or with `false` forgotten, that the device has yet to
@@ -80,13 +81,12 @@ pub struct Settings<P> {
 impl<P: LocalPort> Settings<P> {
     /// Settings read over `port`. Nothing is known until the first
     /// [`Settings::pump`] has asked and the device has answered.
-    pub fn new(port: P, well_known: WellKnownChannels) -> Self {
+    pub fn new(port: P) -> Self {
         let mut model = Model::new();
         model.refresh();
         Self {
             model,
             exchange: LocalExchange::new(port),
-            well_known,
             writes: Deque::new(),
             peer_writes: Deque::new(),
             save_at: None,
@@ -151,9 +151,6 @@ impl<P: LocalPort> Settings<P> {
             Event::Written { id, outcome, .. } => {
                 if self.peer_writes.iter().any(|(write, ..)| *write == id) {
                     self.peer_writes.retain(|(write, ..)| *write != id);
-                    if matches!(outcome, WriteOutcome::Applied | WriteOutcome::Adjusted) {
-                        self.save_if_unsaved();
-                    }
                     events(NodeEvent::SettingsChanged);
                     return;
                 }
@@ -182,9 +179,8 @@ impl<P: LocalPort> Settings<P> {
         }
     }
 
-    /// At first boot nothing is saved: join the channels a communicator
-    /// starts out on, and save, so that a snapshot is in effect from then
-    /// on. Returns whether a save was asked for.
+    /// At first boot nothing is saved: save, so that a snapshot is in
+    /// effect from then on. Returns whether a save was asked for.
     fn check_boot(&mut self) -> bool {
         if self.boot_checked
             || !matches!(self.model.freshness(prop::SAVED), Freshness::Fresh { .. })
@@ -192,14 +188,7 @@ impl<P: LocalPort> Settings<P> {
             return false;
         }
         self.boot_checked = true;
-        if self.model.saved() != Some(saved::NONE) {
-            return false;
-        }
-        for key in [self.well_known.public, self.well_known.emergency] {
-            // Refused only where the device has no identity to join with.
-            _ = self.model.join_channel(&key.0);
-        }
-        self.model.save().is_ok()
+        self.model.saved() == Some(saved::NONE) && self.model.save().is_ok()
     }
 
     /// A change that would matter if it were lost is saved, unless the

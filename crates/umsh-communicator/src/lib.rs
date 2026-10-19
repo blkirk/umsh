@@ -7,8 +7,10 @@
 //!   commits them in.
 //! - [`Batch`]: one commit's worth of the text engine's outputs, in the
 //!   order the store writes them.
-//! - [`MemoryStore`]: the back end for tests, the simulator, and anything
-//!   before durable storage.
+//! - [`MemoryStore`]: the store worked on in memory, alone for tests, or
+//!   over a [`Durable`] layer that keeps its records.
+//! - [`FlashMapStore`] (feature `flash`): the store kept in a
+//!   `sequential-storage` map on flash.
 //! - [`conformance`]: the suite every back end passes, power cut between
 //!   each step of the commit order included.
 //! - [`CommunicatorNode`] (feature `node`): the node behind the interface,
@@ -23,6 +25,9 @@ extern crate alloc;
 mod batch;
 #[cfg(feature = "node")]
 mod chat;
+mod durable;
+#[cfg(feature = "flash")]
+mod flash;
 mod ids;
 mod memory;
 #[cfg(feature = "node")]
@@ -40,6 +45,9 @@ mod wire;
 pub mod conformance;
 
 pub use batch::{Batch, Change, CommitStep, Committed};
+pub use durable::{Durable, Volatile};
+#[cfg(feature = "flash")]
+pub use flash::{FlashMap, FlashMapStore, RamFlash, RamFlashError};
 pub use ids::{ChatId, MessageId, PeerId};
 pub use memory::{MemoryStore, Quota};
 pub use reaction::{Reacted, Reaction, Reactions};

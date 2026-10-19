@@ -2980,6 +2980,7 @@ version = "7.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "574e5a379bf43653079b34cb4cf32958404b5f42e0ed5b5adcdff02c2de04d4d"
 dependencies = [
+ "defmt",
  "embedded-storage-async",
  "heapless 0.8.0",
 ]
@@ -3513,6 +3514,7 @@ dependencies = [
  "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-hal-async",
+ "embedded-storage-async",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
@@ -3651,7 +3653,9 @@ version = "0.1.0"
 dependencies = [
  "embassy-futures",
  "embassy-sync 0.8.0",
+ "embedded-storage-async",
  "heapless 0.8.0",
+ "sequential-storage",
  "umsh-core",
  "umsh-crypto",
  "umsh-mac",

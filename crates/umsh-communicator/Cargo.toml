@@ -24,6 +24,8 @@ node = [
     "dep:embassy-futures",
     "umsh-text/node",
 ]
+# `FlashMapStore`: the store kept in a `sequential-storage` map on flash.
+flash = ["dep:sequential-storage", "dep:embedded-storage-async"]
 # `ChannelCrypto::software`: the node's channel derivations on the software
 # crypto back end.
 software-crypto = [
@@ -46,9 +48,11 @@ umsh-uri = { path = "../umsh-uri", default-features = false, features = ["alloc"
 embassy-sync = { version = "0.8", default-features = false, optional = true }
 embassy-futures = { version = "0.1", default-features = false, optional = true }
 umsh-crypto = { path = "../umsh-crypto", default-features = false, optional = true }
+sequential-storage = { version = "7.2", default-features = false, features = ["alloc"], optional = true }
+embedded-storage-async = { version = "0.4.1", optional = true }
 
 [dev-dependencies]
-umsh-communicator = { path = ".", features = ["software-crypto"] }
+umsh-communicator = { path = ".", features = ["software-crypto", "flash"] }
 # The node's settings are tried against the soft device's real session.
 umsh-ulcp-device = { path = "../umsh-ulcp-device" }
 umsh-ulcp-simdev = { path = "../umsh-ulcp-simdev" }
@@ -61,4 +65,5 @@ umsh-mac = { path = "../umsh-mac" }
 umsh = { path = "../../umsh", default-features = false, features = ["std", "software-crypto", "tokio-support"] }
 umsh-sync = { path = "../umsh-sync" }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
+embedded-storage-async = "0.4.1"
 rand = { workspace = true, features = ["std", "thread_rng"] }
