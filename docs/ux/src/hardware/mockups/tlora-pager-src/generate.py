@@ -31,8 +31,10 @@ C = dict(
     text2="#9AA3AE",
     text3="#7F8995",
     accent="#4DA3FF",
+    secret="#A585FF",  # the accent where what is sent has forward secrecy
     focus="#18304D",
     out="#2A62C9",
+    out_secret="#7045CC",
     inb="#23272E",
     green="#3DD68C",
     amber="#F5B544",
@@ -779,12 +781,16 @@ def layout_items(items):
 QUOTE_H = 42
 
 
-def quote_block(x, y, w, outbound, who, snippet):
+def quote_block(x, y, w, outbound, who, snippet, secret=False):
     """The answered message's sender and the start of its text, behind a
-    bar, as the composer's Replying-to strip draws them."""
-    bar = "#CFE0FF" if outbound else C["accent"]
-    name = "#E4EDFF" if outbound else C["accent"]
-    body = "#C9D8F5" if outbound else C["text2"]
+    bar, as the composer's Replying-to strip draws them. In my bubbles, in
+    tints of the bubble: violet under forward secrecy."""
+    if not outbound:
+        bar, name, body = C["accent"], C["accent"], C["text2"]
+    elif secret:
+        bar, name, body = "#DDD0FF", "#ECE4FF", "#D6CCF5"
+    else:
+        bar, name, body = "#CFE0FF", "#E4EDFF", "#C9D8F5"
     return [R(x, y + 5, 3, QUOTE_H - 9, bar, rx=1.5),
             T(x + 10, y + 19, fit(who, F_SMALL, w - 10, True), F_SMALL, name,
               700),
@@ -897,7 +903,7 @@ def transcript(items, top, bottom, channel=False):
             if k == "out":
                 bx = W - 8 - bw
                 d = rrect(bx, by, bw, bh, 14, 14, 5, 14)
-                fill = C["out"]
+                fill = C["out_secret"] if it.get("secret") else C["out"]
             else:
                 bx = in_x
                 d = rrect(bx, by, bw, bh, 14, 14, 14, 5)
@@ -910,7 +916,7 @@ def transcript(items, top, bottom, channel=False):
             o.append(P(d, fill=fill))
             if qh:
                 o += quote_block(bx + B_PX, by, bw - 2 * B_PX, k == "out",
-                                 *it["quote"])
+                                 *it["quote"], secret=it.get("secret"))
             for li, line in enumerate(lines):
                 o.append(T(bx + B_PX, by + qh + B_PY + 18 + li * B_LH, line,
                            B_FS, "#fff" if k == "out" else C["text"]))
@@ -951,13 +957,16 @@ def screen_header(name, kind=None, sub=None, y=STRIP, col=None, back=True):
 # A text field is focused-but-inactive until typing or Enter activates it;
 # active shows the cursor, and the wheel then moves that cursor.
 ACTIVE_FIELD = "#1A2333"
+ACTIVE_FIELD_SECRET = "#221A36"
 
 
-def field_frame(fx, fy, fw, fh, mode, rx=14):
-    """mode: 'active', 'inactive' (focused, no cursor) or 'away'."""
+def field_frame(fx, fy, fw, fh, mode, rx=14, secret=False):
+    """mode: 'active', 'inactive' (focused, no cursor) or 'away'. secret:
+    violet while active, as what it sends goes under forward secrecy."""
     if mode == "active":
-        return [R(fx, fy, fw, fh, ACTIVE_FIELD, rx=rx, stroke=C["accent"],
-                  sw=2.2)]
+        fill, ring = ((ACTIVE_FIELD_SECRET, C["secret"]) if secret
+                      else (ACTIVE_FIELD, C["accent"]))
+        return [R(fx, fy, fw, fh, fill, rx=rx, stroke=ring, sw=2.2)]
     if mode == "inactive":
         return [R(fx, fy, fw, fh, C["field"], rx=rx, stroke=C["accent"],
                   sw=1.3)]
@@ -965,26 +974,29 @@ def field_frame(fx, fy, fw, fh, mode, rx=14):
               sw=1.2)]
 
 
-def caret(x, top, h=20):
-    return R(x, top, 2.5, h, C["accent"])
+def caret(x, top, h=20, col=None):
+    return R(x, top, 2.5, h, col or C["accent"])
 
 
 def composer(text=None, placeholder=None, mode="active", y=COMP_Y,
-             dim_text=False, at=None):
-    """at: cursor position as a character index into text (default: end)."""
+             dim_text=False, at=None, secret=False):
+    """at: cursor position as a character index into text (default: end).
+    secret: the chat holds a session with forward secrecy."""
     o = [R(0, y, W, H - y, C["bg"])]
     fx, fw, fy, fh = 8, W - 16, y + 3, COMP_H - 6
-    o += field_frame(fx, fy, fw, fh, mode)
+    o += field_frame(fx, fy, fw, fh, mode, secret=secret)
+    ink = C["secret"] if secret else None
     if text:
         col = C["text3"] if dim_text else C["text"]
         o.append(T(fx + 12, fy + 20.5, fit(text, F_BODY, fw - 24), F_BODY,
                    col))
         if mode == "active":
             k = len(text) if at is None else at
-            o.append(caret(fx + 12 + tw(text[:k], F_BODY) + 0.5, fy + 4))
+            o.append(caret(fx + 12 + tw(text[:k], F_BODY) + 0.5, fy + 4,
+                           col=ink))
     else:
         if mode == "active":
-            o.append(caret(fx + 12, fy + 4))
+            o.append(caret(fx + 12, fy + 4, col=ink))
         o.append(T(fx + 16, fy + 20.5, placeholder, F_BODY, C["text3"]))
     return o
 
@@ -1103,12 +1115,12 @@ def ridge_header():
     return screen_header("Ridge Medic", "peer", RIDGE_SUB)
 
 
-def screen_conversation(mode="active"):
+def screen_conversation(mode="active", secret=False):
     o = [R(0, 0, W, H, C["bg"])]
     tr, _ = transcript(ridge_items(), TOP, COMP_Y)
     o += tr
     o += ridge_header()
-    o += composer(DRAFT, mode=mode, at=DRAFT_AT)
+    o += composer(DRAFT, mode=mode, at=DRAFT_AT, secret=secret)
     o += status()
     return o
 
@@ -1524,6 +1536,49 @@ def screen_parts(missing=False):
     o += tr
     o += ridge_header()
     o += composer(placeholder="Message", mode="inactive")
+    o += status()
+    return o
+
+
+# ---------------------------------------------------------------- forward secrecy
+def screen_secret_sent():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = [
+        {"k": "in", "who": "po", "text": "Can you grab the big map?"},
+        {"k": "out", "who": "me", "text": "Leaving the trailhead now"},
+        {"k": "out", "who": "me", "text": "Bringing the map", "secret": True,
+         "quote": ("Pat Okafor", "Can you grab the big map?")},
+        {"k": "status", "text": "Delivered"},
+    ]
+    tr, _ = transcript(items, TOP, COMP_Y)
+    o += tr
+    o += screen_header("Pat Okafor", "peer", "Direct")
+    o += composer(placeholder="Message", mode="inactive")
+    o += status()
+    return o
+
+
+def choice_card(labels, mw, focus=0, ih=34):
+    """Choices on a card centered over a screen, below the status strip."""
+    mh = len(labels) * ih + 10
+    mx = (W - mw) / 2
+    my = STRIP + (H - STRIP - mh) / 2
+    return (menu_card(mx, my, mw, mh)
+            + menu_items(mx, my + 5, mw, labels, focus, ih))
+
+
+def screen_resend():
+    o = [R(0, 0, W, H, C["bg"])]
+    items = ridge_items() + [
+        {"k": "out", "who": "me", "text": DRAFT, "secret": True},
+        {"k": "status", "text": "Unconfirmed", "tone": "amber"},
+    ]
+    tr, _ = transcript(items, TOP, COMP_Y)
+    o += tr
+    o += ridge_header()
+    o += composer(placeholder="Message", mode="away")
+    o += choice_card(["Try again", "Send without forward secrecy", "Cancel"],
+                     360)
     o += status()
     return o
 
@@ -2430,6 +2485,22 @@ def main(path, native_dir=None):
              "A part that never came: the message is shown without it, the "
              "ellipsis and its dot turn amber, and the message no longer "
              "waits."),
+        ]),
+        ("Forward secrecy", [
+            ("Typing under forward secrecy",
+             screen_conversation(secret=True),
+             "In a chat that holds a session with forward secrecy, the "
+             "composer is violet while you edit: what it sends goes under "
+             "the session. Not typing, it is the usual blue."),
+            ("Sent under forward secrecy", screen_secret_sent(),
+             "A message sent while the composer was violet stays violet, "
+             "and a reply’s quote takes its tints. Those sent before the "
+             "session stay blue."),
+            ("Sending again", screen_resend(),
+             "Pressing an unconfirmed violet message asks how to send it "
+             "again. Try again keeps forward secrecy; only the second "
+             "choice sends without it, and the message turns blue. "
+             "Backspace cancels."),
         ]),
         ("Channels", [
             ("Channel", screen_channel(),
