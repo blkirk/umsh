@@ -136,6 +136,14 @@ async fn interface(
     // that its frame, which holds the state and a render tree on their
     // way into place, is not under that layout too.
     ui::bind(app);
+    // The least stack left free so far: bring-up, and building the app.
+    #[cfg(feature = "debug-log")]
+    debug_log(format_args!(
+        "communicator: app={} bytes free={}",
+        core::mem::size_of_val(app),
+        memory_probe::stack().margin
+    ));
+    #[cfg(not(feature = "debug-log"))]
     debug_log(format_args!(
         "communicator: app={} bytes",
         core::mem::size_of_val(app)
@@ -189,6 +197,7 @@ async fn interface(
             ),
         )
         .await;
+        mark(app.state(), Phase::Idle);
         // Whatever this changes animates from now, not from the last frame.
         app.set_time((Instant::now() - start).into());
         let mut transition = match woken {
@@ -204,6 +213,7 @@ async fn interface(
                     next = UI_INPUT_CH.try_receive().ok();
                 }
                 costs.layout = costs.layout.max(Instant::now() - began);
+                mark(app.state(), Phase::Input);
                 // Shut down, confirmed.
                 if app.state().ending.is_some() {
                     SHUTDOWN_REQUEST.signal(ShutdownCause::Asked);
@@ -231,6 +241,7 @@ async fn interface(
         // What an input changed goes out, and what the session sent comes
         // in as events, taken just below.
         node.pump();
+        mark(app.state(), Phase::Pump);
         if minute <= Instant::now() {
             let mut state = app.state_mut();
             state.set_wall_time(umsh_hal::wall_clock::now());
@@ -253,6 +264,7 @@ async fn interface(
                 transition = Some(woke);
             }
         }
+        mark(app.state(), Phase::Events);
         // A key, or the node, may have changed the lights.
         let set = (brightness_level(node.brightness()), node.keyboard().light);
         if set != lights {
@@ -470,24 +482,184 @@ impl Costs {
             return;
         }
         // Frames, animating, the worst layout, paint, and flush in
-        // ms, the least stack left free so far, and the CPU clock.
+        // ms, the least stack left free so far, and the CPU clock. A
+        // screen's stack, when it has changed, takes every other line.
         #[cfg(feature = "debug-log")]
-        debug_log(format_args!(
-            "ui f={} a={} l={} p={} s={} free={} mhz={}",
-            self.frames,
-            u8::from(animating),
-            self.layout.as_millis(),
-            self.paint.as_millis(),
-            self.flush.as_millis(),
-            memory_probe::stack().margin,
-            esp_hal::clock::cpu_clock().as_mhz(),
-        ));
+        if !report_stack() {
+            debug_log(format_args!(
+                "ui f={} a={} l={} p={} s={} free={} mhz={}",
+                self.frames,
+                u8::from(animating),
+                self.layout.as_millis(),
+                self.paint.as_millis(),
+                self.flush.as_millis(),
+                memory_probe::stack().margin,
+                esp_hal::clock::cpu_clock().as_mhz(),
+            ));
+        }
         #[cfg(not(feature = "debug-log"))]
         let _ = animating;
         *self = Self {
             since: Some(Instant::now()),
             ..Self::default()
         };
+    }
+}
+
+/// The parts of a pass whose stack is measured.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// Inputs applied.
+    Input,
+    /// The node pumped.
+    Pump,
+    /// Its events taken, and the strip brought up to date.
+    Events,
+    /// The view built and laid out.
+    Layout,
+    /// The frame painted.
+    Paint,
+    /// Waiting: the other tasks, and interrupts.
+    Idle,
+}
+
+/// The stack left free since the last mark, counted to `phase` on the
+/// screen `state` shows.
+#[cfg_attr(not(feature = "debug-log"), allow(unused_variables))]
+fn mark(state: &State, phase: Phase) {
+    #[cfg(feature = "debug-log")]
+    {
+        // Painted again outside the lock: it is most of the stack.
+        let free = memory_probe::take();
+        let screen = screen(state);
+        DEPTHS.lock(|depths| depths.borrow_mut().record(screen, phase, free));
+    }
+}
+
+/// Reports the least stack each phase has left free on the screen shown,
+/// or on another whose least has fallen, unless the last report was this
+/// one. Returns whether it reported.
+#[cfg(feature = "debug-log")]
+fn report_stack() -> bool {
+    let Some((screen, least)) = DEPTHS.lock(|depths| depths.borrow_mut().due()) else {
+        return false;
+    };
+    // Input, pump, events, layout, paint, idle.
+    debug_log(format_args!(
+        "stk {} {} {} {} {} {} {}",
+        SCREENS[screen], least[0], least[1], least[2], least[3], least[4], least[5],
+    ));
+    true
+}
+
+#[cfg(feature = "debug-log")]
+const PHASES: usize = 6;
+
+/// What the stack's report calls each screen.
+#[cfg(feature = "debug-log")]
+const SCREENS: [&str; 15] = [
+    "chats", "find", "peers", "device", "conv", "menu", "resend", "details", "member", "peer",
+    "page", "setup", "add", "join", "wake",
+];
+
+/// The screen `state` shows, as an index into [`SCREENS`].
+#[cfg(feature = "debug-log")]
+fn screen(state: &State) -> usize {
+    use umsh_ux_communicator::model::Section;
+    use umsh_ux_communicator::nav::{Screen, keys};
+    match state.screen() {
+        Screen::Chats { find, focus, .. } => {
+            match focus
+                .current()
+                .and_then(keys::section)
+                .unwrap_or(state.section)
+            {
+                Section::Chats if find.is_some() => 1,
+                Section::Chats => 0,
+                Section::Peers => 2,
+                Section::Device => 3,
+            }
+        }
+        Screen::Conversation {
+            actions, unsent, ..
+        } => match (actions, unsent) {
+            (Some(_), _) => 5,
+            (_, Some(_)) => 6,
+            _ => 4,
+        },
+        Screen::Details { .. } => 7,
+        Screen::Member { .. } => 8,
+        Screen::Peer { .. } => 9,
+        Screen::Device { .. } => 10,
+        Screen::Setup { .. } => 11,
+        Screen::AddPeer { .. } => 12,
+        Screen::Join { .. } => 13,
+        Screen::Wake { .. } => 14,
+    }
+}
+
+/// The least stack each phase has left free on each screen. Kept apart
+/// from the interface's task, whose future holds two sets of costs.
+#[cfg(feature = "debug-log")]
+static DEPTHS: embassy_sync::blocking_mutex::Mutex<
+    CriticalSectionRawMutex,
+    core::cell::RefCell<Depths>,
+> = embassy_sync::blocking_mutex::Mutex::new(core::cell::RefCell::new(Depths::new()));
+
+#[cfg(feature = "debug-log")]
+struct Depths {
+    /// Bytes, or `NONE` for a phase not seen on a screen.
+    least: [[u16; PHASES]; SCREENS.len()],
+    /// The screens whose least has fallen since they were reported.
+    fallen: u16,
+    /// The screen last measured.
+    shown: usize,
+    /// The last report was of the stack.
+    reported: bool,
+}
+
+#[cfg(feature = "debug-log")]
+impl Depths {
+    const NONE: u16 = u16::MAX;
+    /// Less than this below a screen's least is not news.
+    const STEP: u16 = 128;
+
+    const fn new() -> Self {
+        Self {
+            least: [[Self::NONE; PHASES]; SCREENS.len()],
+            fallen: 0,
+            shown: 0,
+            reported: false,
+        }
+    }
+
+    fn record(&mut self, screen: usize, phase: Phase, free: usize) {
+        let free = u16::try_from(free).unwrap_or(Self::NONE - 1);
+        let least = &mut self.least[screen][phase as usize];
+        if *least == Self::NONE || free < least.saturating_sub(Self::STEP) {
+            self.fallen |= 1 << screen;
+        }
+        *least = (*least).min(free);
+        self.shown = screen;
+    }
+
+    /// The screen to report, and its least for each phase: the one shown,
+    /// or another whose least has fallen, never twice running.
+    fn due(&mut self) -> Option<(usize, [u16; PHASES])> {
+        if core::mem::take(&mut self.reported) || self.fallen == 0 {
+            return None;
+        }
+        let screen = if self.fallen & 1 << self.shown != 0 {
+            self.shown
+        } else {
+            self.fallen.trailing_zeros() as usize
+        };
+        self.fallen &= !(1 << screen);
+        self.reported = true;
+        Some((
+            screen,
+            self.least[screen].map(|free| if free == Self::NONE { 0 } else { free }),
+        ))
     }
 }
 
@@ -503,10 +675,12 @@ where
     V: View<embedded_graphics::pixelcolor::Rgb565, State>,
     F: Fn(&State) -> V,
 {
+    mark(app.state(), Phase::Idle);
     let began = Instant::now();
     app.set_time((began - start).into());
     app.finalize_view();
     let laid_out = Instant::now();
+    mark(app.state(), Phase::Layout);
     let animating = {
         let mut target =
             EmbeddedGraphicsRenderTarget::new_hinted(display.color(), theme::BACKGROUND);
@@ -518,10 +692,12 @@ where
         target.clear_animation_status()
     };
     let painted = Instant::now();
+    mark(app.state(), Phase::Paint);
     // A failed transfer leaves the panel's history invalid, so the next
     // frame resends everything; there is nothing more to do here.
     let _ = display.flush().await;
     let sent = Instant::now();
+    mark(app.state(), Phase::Idle);
     costs.frames += 1;
     costs.layout = costs.layout.max(laid_out - began);
     costs.paint = costs.paint.max(painted - laid_out);
