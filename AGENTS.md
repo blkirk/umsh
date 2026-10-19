@@ -84,6 +84,7 @@ schema, and the hardware checklist: `docs/firmware-releases.md`.
 - **UI copy is terse**: a section footer or explanatory label is one line, two at most, and only when the control is not self-explanatory. Never explain mechanism, rationale, or current defaults in UI text—it bakes in assumptions that change. This has been a recurring problem.
 - **Git**: commit only when asked; batch changes. Board bringup status, storage decisions, and many hardware gotchas live in the persistent memory index (`memory/MEMORY.md`)—consult it for board-specific detail.
 - **Questions are not calls to action**: Do not assume that the user asking a question implies that you should take action. Answer the question. Do not make code changes unless that was explicitly requested by the user.
+- **Reply buttons say only their label**: When offering the user answer buttons, a button sends only what its label says. Never add an instruction or next step to its message that the user didn't choose; ask about the next step separately.
 - **Remember your current directory**: Avoid unnecessarily prepending `cd <PROJECTDIR> &&` to bash commands,  as this causes unnecessary permission prompts.
 - **Use the label `LLM: ...` instead of `Co-Authored-By: ...` in commit logs**: `Co-Authored-By` attributions cause a Claude logo to appear on our GitHub project which is unacceptable.
 - **Don't take credit for stuff you aren't sure you wrote**: Unless you are absolutely certain the changes are yours, DO NOT add a "LLM: ..." line in the git commit log.
