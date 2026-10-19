@@ -777,6 +777,12 @@ fn format_mac_command(command: &umsh::node::OwnedMacCommand) -> String {
                     .unwrap_or_else(|| String::from("?"))
             )
         }
+        umsh::node::OwnedMacCommand::VerifyFrame { nonce } => {
+            format!("VerifyFrame nonce=0x{nonce:08x}")
+        }
+        umsh::node::OwnedMacCommand::FrameVerified { nonce } => {
+            format!("FrameVerified nonce=0x{nonce:08x}")
+        }
     }
 }
 
