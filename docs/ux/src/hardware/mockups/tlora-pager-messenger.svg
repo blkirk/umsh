@@ -732,7 +732,7 @@
 <text x="466.0" y="76.0" font-size="17" fill="#9AA3AE" text-anchor="end">14:29</text>
 <path d="M12.0 87.5 L480.0 87.5" stroke="#20252C" stroke-width="1"/>
 <text x="12.0" y="113.0" font-size="20" fill="#EEF1F5">Hops</text>
-<text x="466.0" y="112.0" font-size="17" fill="#9AA3AE" text-anchor="end">2</text>
+<text x="466.0" y="112.0" font-size="17" fill="#9AA3AE" text-anchor="end">3</text>
 <path d="M12.0 123.5 L480.0 123.5" stroke="#20252C" stroke-width="1"/>
 <text x="12.0" y="149.0" font-size="20" fill="#EEF1F5">Route</text>
 <text x="466.0" y="148.0" font-size="17" fill="#9AA3AE" text-anchor="end">Gh* → 4Tn</text>

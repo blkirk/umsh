@@ -1209,7 +1209,7 @@ def screen_details():
     o = [R(0, 0, W, H, C["bg"])]
     body = []
     y = TOP
-    for label, val in [("Received", "14:29"), ("Hops", "2"),
+    for label, val in [("Received", "14:29"), ("Hops", "3"),
                        ("Route", "Gh* → 4Tn"),
                        ("Signal", "−97 dBm"),
                        ("Signal-to-noise", "6.5 dB"),
