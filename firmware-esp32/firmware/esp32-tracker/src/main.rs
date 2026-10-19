@@ -55,7 +55,7 @@
 #![no_std]
 #![no_main]
 #![cfg_attr(
-    all(feature = "wifi", feature = "debug-log"),
+    any(feature = "communicator", all(feature = "wifi", feature = "debug-log")),
     feature(asm_experimental_arch)
 )]
 

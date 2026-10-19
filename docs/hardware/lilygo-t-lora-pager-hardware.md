@@ -378,22 +378,26 @@ Meshtastic generic power behavior:
 | Top expansion connector | Not fully specified by Meshtastic | LilyGoLib has nRF24 pins 44/9/43 and schematic likely has connector | Treat full connector pinout as unresolved pending schematic inspection. |
 | BHI260AP/RTC interrupt pins | LilyGoLib uses `SENSOR_INT` and `RTC_INT` symbols | Meshtastic variant lines inspected do not define numeric values | Verify in schematic or board package before using interrupts. |
 
-## UMSH display-tracker implementation
+## UMSH firmware implementation
 
 The `firmware-tlora-pager` image targets the **SX1262** version. It shares
-the ESP32 tracker runtime and enables PSRAM, Wi-Fi, and the bridge client in
-normal builds. Build with `make build-tlora-pager`; upload with
+the ESP32 tracker runtime and enables PSRAM, Wi-Fi, the bridge client, and
+the communicator interface in normal builds. Build with
+`make build-tlora-pager`; upload with
 `make flash-tlora-pager ESPFLASH_PORT=/dev/cu.usbmodem101` (substitute the
 actual port). The flash target uses native-USB bootloader entry and a watchdog
 reset after uploading, then exits. If the board remains
 in the ROM downloader, tap RESET with BOOT released.
 
-The 480×222 landscape screen uses the existing tracker menus. Turn the wheel
-to move, press it to select, and use keyboard **Backspace** to return or
-cancel. BOOT held for four seconds requests shutdown. Other keyboard keys
-have no navigation action outside locate alerts; text composition, media playback, SD, NFC, and
-expansion features are deferred. Backspace is TCA8418 raw FIFO key **30**,
-not the zero-based matrix index `0x1D`.
+The 480×222 landscape screen runs the communicator interface
+(`umsh-ux-communicator`): chats, peers, and the device's settings, with text
+typed on the keyboard. Turn the wheel to move, press it to select, and use
+keyboard **Backspace** to return or cancel. BOOT held for four seconds
+requests shutdown. An image built without the `communicator` feature uses
+the tracker menus instead, where other keyboard keys have no navigation
+action outside locate alerts. Media playback, SD, NFC, and expansion
+features are deferred. Backspace is TCA8418 raw FIFO key **30**, not the
+zero-based matrix index `0x1D`.
 
 ### UMSH temperature telemetry
 
