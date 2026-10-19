@@ -135,6 +135,10 @@ actor FakeRadioConnection: RadioConnection {
         AsyncStream { _ in }
     }
 
+    func localDestinationHints() -> AsyncStream<[Data]> {
+        AsyncStream { _ in }
+    }
+
     func advertiseIdentity(name: String?) async throws {
         throw RadioConnectionError.identityUnavailable
     }
@@ -369,6 +373,9 @@ actor FakeRadioConnection: RadioConnection {
     /// app reads them back—they steer a sound a simulated radio does not
     /// make—so the fake accepts them and keeps nothing.
     func reconcileHostMutes(channelIdentifiers: [Data], peerKeys: [Data]) async throws {}
+
+    /// A simulated radio filters nothing, so there is nothing to admit.
+    func reconcileHostDestinationHints(_ hints: [Data]) async throws {}
 
     func setHostAutoAcknowledgement(_ enabled: Bool) async throws {
         guard var provisioning = snapshot.provisioning,

@@ -3730,6 +3730,23 @@ public protocol MobileUlcpSessionProtocol: AnyObject, Sendable {
     func reconcileHostChannelKeys(keys: [Data]) throws  -> UlcpSessionUpdateRecord
 
     /**
+     * Make the radio's destination-hint receive filters (the
+     * `FILTER_DEST_HINT` entries of `PROP_HOST_RX_FILTERS`) match the
+     * supplied 3-byte node hints: the addresses this phone answers to
+     * besides its host key, which are the local halves of its sessions with
+     * forward secrecy. Without them the radio passes nothing addressed to
+     * those sessions.
+     *
+     * Only destination-hint entries are this call's to manage; filters of
+     * any other type stay as they are. Host domain, so nothing is saved and
+     * reconciling on attach is what makes it stick. Requires an attached,
+     * otherwise-idle session on a device advertising `CAP_HOST_FILTER`.
+     * Returns without any frames when the device already holds exactly the
+     * requested set.
+     */
+    func reconcileHostDestinationHints(hints: [Data]) throws  -> UlcpSessionUpdateRecord
+
+    /**
      * Tell the radio which conversations to take in quietly
      * (`PROP_HOST_MUTED_CHANNELS`, `PROP_HOST_MUTED_PEERS`).
      *
@@ -4429,6 +4446,31 @@ open func reconcileHostChannelKeys(keys: [Data])throws  -> UlcpSessionUpdateReco
     uniffi_umsh_mobile_core_fn_method_mobileulcpsession_reconcile_host_channel_keys(
             self.uniffiCloneHandle(),
         FfiConverterSequenceData.lower(keys),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Make the radio's destination-hint receive filters (the
+     * `FILTER_DEST_HINT` entries of `PROP_HOST_RX_FILTERS`) match the
+     * supplied 3-byte node hints: the addresses this phone answers to
+     * besides its host key, which are the local halves of its sessions with
+     * forward secrecy. Without them the radio passes nothing addressed to
+     * those sessions.
+     *
+     * Only destination-hint entries are this call's to manage; filters of
+     * any other type stay as they are. Host domain, so nothing is saved and
+     * reconciling on attach is what makes it stick. Requires an attached,
+     * otherwise-idle session on a device advertising `CAP_HOST_FILTER`.
+     * Returns without any frames when the device already holds exactly the
+     * requested set.
+     */
+open func reconcileHostDestinationHints(hints: [Data])throws  -> UlcpSessionUpdateRecord  {
+    return try  FfiConverterTypeUlcpSessionUpdateRecord_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_method_mobileulcpsession_reconcile_host_destination_hints(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceData.lower(hints),uniffiCallStatus
     )
 })
 }
@@ -8009,6 +8051,14 @@ public struct MobileMeshSessionUpdateRecord: Equatable, Hashable {
      */
     public var chatSenderResolutions: [MobileChatSenderResolutionRecord]
     public var chatDiagnostics: [String]
+    /**
+     * The 3-byte node hints of the addresses this phone answers to besides
+     * its own, when they changed since the last poll: one per session with
+     * forward secrecy. The radio's receive filter must admit each of them
+     * (see `MobileUlcpSession::reconcile_host_destination_hints`), or it
+     * passes nothing those sessions carry.
+     */
+    public var localDestinationHints: [Data]?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8029,7 +8079,14 @@ public struct MobileMeshSessionUpdateRecord: Equatable, Hashable {
         /**
          * Channel members whose claimed hint has resolved to a full address. The
          * platform should upgrade rows it stored anonymously under that hint.
-         */chatSenderResolutions: [MobileChatSenderResolutionRecord], chatDiagnostics: [String]) {
+         */chatSenderResolutions: [MobileChatSenderResolutionRecord], chatDiagnostics: [String],
+        /**
+         * The 3-byte node hints of the addresses this phone answers to besides
+         * its own, when they changed since the last poll: one per session with
+         * forward secrecy. The radio's receive filter must admit each of them
+         * (see `MobileUlcpSession::reconcile_host_destination_hints`), or it
+         * passes nothing those sessions carry.
+         */localDestinationHints: [Data]?) {
         self.outboundFrames = outboundFrames
         self.pingEvents = pingEvents
         self.managementEvents = managementEvents
@@ -8041,6 +8098,7 @@ public struct MobileMeshSessionUpdateRecord: Equatable, Hashable {
         self.chatArchiveLookups = chatArchiveLookups
         self.chatSenderResolutions = chatSenderResolutions
         self.chatDiagnostics = chatDiagnostics
+        self.localDestinationHints = localDestinationHints
     }
 
 
@@ -8069,7 +8127,8 @@ public struct FfiConverterTypeMobileMeshSessionUpdateRecord: FfiConverterRustBuf
                 chatDeliveries: FfiConverterSequenceTypeMobileChatDeliveryRecord.read(from: &buf),
                 chatArchiveLookups: FfiConverterSequenceTypeMobileChatArchiveLookupRecord.read(from: &buf),
                 chatSenderResolutions: FfiConverterSequenceTypeMobileChatSenderResolutionRecord.read(from: &buf),
-                chatDiagnostics: FfiConverterSequenceString.read(from: &buf)
+                chatDiagnostics: FfiConverterSequenceString.read(from: &buf),
+                localDestinationHints: FfiConverterOptionSequenceData.read(from: &buf)
         )
     }
 
@@ -8085,6 +8144,7 @@ public struct FfiConverterTypeMobileMeshSessionUpdateRecord: FfiConverterRustBuf
         FfiConverterSequenceTypeMobileChatArchiveLookupRecord.write(value.chatArchiveLookups, into: &buf)
         FfiConverterSequenceTypeMobileChatSenderResolutionRecord.write(value.chatSenderResolutions, into: &buf)
         FfiConverterSequenceString.write(value.chatDiagnostics, into: &buf)
+        FfiConverterOptionSequenceData.write(value.localDestinationHints, into: &buf)
     }
 }
 
@@ -20830,6 +20890,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_reconcile_host_channel_keys() != 40741) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_reconcile_host_destination_hints() != 10915) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_reconcile_host_mutes() != 39412) {

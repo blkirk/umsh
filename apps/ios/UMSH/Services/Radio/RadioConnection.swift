@@ -10,6 +10,10 @@ protocol RadioConnection: AnyObject, Sendable {
     /// sole signal a beacon produces, so it is what keeps "last heard" honest
     /// for nodes that are reachable but have nothing to say.
     func peerHeardEvents() async -> AsyncStream<RadioPeerHeardEvent>
+    /// The node hints of the addresses the phone answers to besides its own,
+    /// one per session with forward secrecy: the current set first, then
+    /// each change.
+    func localDestinationHints() async -> AsyncStream<[Data]>
     func advertiseIdentity(name: String?) async throws
     /// The same advertisement, sent because the phone's own interval came
     /// round rather than because someone asked for it. Reaches only direct
@@ -184,6 +188,10 @@ protocol RadioConnection: AnyObject, Sendable {
     /// phone's own notification switches; reaches the radio's cue and
     /// nothing else.
     func reconcileHostMutes(channelIdentifiers: [Data], peerKeys: [Data]) async throws
+    /// Make the radio's destination-hint receive filters match `hints`, so
+    /// it passes what is sent to the phone's session addresses. Bookkeeping
+    /// like the reconciles above, never surfaced.
+    func reconcileHostDestinationHints(_ hints: [Data]) async throws
     /// Whether the radio acknowledges queued unicast on the phone's behalf
     /// while the phone is away, using the peer keys provisioned above.
     func setHostAutoAcknowledgement(_ enabled: Bool) async throws

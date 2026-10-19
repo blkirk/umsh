@@ -185,6 +185,7 @@ final class AppRuntime {
         tasks.append(Task { await self.consumeChatUpdates() })
         tasks.append(Task { await self.consumeAdvertisementEvents() })
         tasks.append(Task { await self.consumePeerHeardEvents() })
+        tasks.append(Task { await self.consumeLocalDestinationHints() })
         tasks.append(Task { await self.regionService.load() })
         installObservers()
         rearmSchedules()
@@ -338,6 +339,7 @@ final class AppRuntime {
             await reconcileHostChannels()
             await reconcileHostPeers()
             await reconcileHostMutes()
+            await reconcileHostDestinations()
             await drainOfflineQueueIfNeeded()
         }
     }
@@ -360,6 +362,14 @@ final class AppRuntime {
         for await heard in await radioConnection.peerHeardEvents() {
             guard !Task.isCancelled else { break }
             await applyPeerHeard(heard)
+        }
+    }
+
+    func consumeLocalDestinationHints() async {
+        for await hints in await radioConnection.localDestinationHints() {
+            guard !Task.isCancelled else { break }
+            coordinator.localDestinationHints = hints
+            await reconcileHostDestinations()
         }
     }
 
@@ -2007,6 +2017,31 @@ final class AppRuntime {
             }
         } catch {
             // Retried on the next attach or conversation change.
+        }
+    }
+
+    /// Have the radio pass what is sent to the phone's session addresses.
+    ///
+    /// A session with forward secrecy answers to an address of its own, and
+    /// a filtering radio passes unicast only for the host key and the
+    /// destination hints it is given—without these, a peer's half of every
+    /// such session goes unheard.
+    private func reconcileHostDestinations() async {
+        guard radioSnapshot.linkState == .attached || radioSnapshot.linkState == .ready,
+              radioSnapshot.hostState == .matchesCurrentIdentity,
+              // A filter count is reported exactly when the radio filters.
+              radioSnapshot.provisioning?.filterCount != nil
+        else {
+            coordinator.lastReconciledHostDestinations = nil
+            return
+        }
+        let hints = coordinator.localDestinationHints
+        guard coordinator.lastReconciledHostDestinations != hints else { return }
+        do {
+            try await radioConnection.reconcileHostDestinationHints(hints)
+            coordinator.lastReconciledHostDestinations = hints
+        } catch {
+            // Retried on the next snapshot or session change.
         }
     }
 
@@ -4278,6 +4313,12 @@ private final class AppStateCoordinator {
     var lastReconciledHostPeers: [String]?
     /// The mute lists last written to the radio, gating the same way.
     var lastReconciledHostMutes: HostMuteLists?
+    /// The node hints of the mesh session's own addresses besides the phone
+    /// identity's, as last reported.
+    var localDestinationHints: [Data] = []
+    /// The hints last admitted by the radio's receive filter, gating the
+    /// same way.
+    var lastReconciledHostDestinations: [Data]?
     /// The radio's dropped-frame counter as of the last snapshot, so a rise
     /// across a detached interval can be told from the standing total.
     var lastDroppedFrames: UInt32?

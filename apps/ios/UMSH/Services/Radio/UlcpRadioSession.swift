@@ -210,6 +210,10 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
         [UUID: AsyncStream<RadioAdvertisementEvent>.Continuation] = [:]
     var peerHeardContinuations:
         [UUID: AsyncStream<RadioPeerHeardEvent>.Continuation] = [:]
+    var localHintContinuations: [UUID: AsyncStream<[Data]>.Continuation] = [:]
+    /// The mesh session's latest report of the addresses it answers to
+    /// besides its own. A session starts with none.
+    var latestLocalDestinationHints: [Data] = []
     let ulcpSession = MobileUlcpSession()
     var syncAttempt = UUID()
     private var controlDeadlines = RadioControlDeadlines()
@@ -334,6 +338,35 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 }
                 result.resume(returning: stream)
             }
+        }
+    }
+
+    func localDestinationHints() async -> AsyncStream<[Data]> {
+        await withCheckedContinuation { result in
+            sessionQueue.async { [self] in
+                // Each value is the whole set, so only the newest matters.
+                let stream = AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+                    let id = UUID()
+                    localHintContinuations[id] = continuation
+                    continuation.yield(latestLocalDestinationHints)
+                    continuation.onTermination = { [weak self] _ in
+                        self?.sessionQueue.async { [weak self] in
+                            self?.localHintContinuations[id] = nil
+                        }
+                    }
+                }
+                result.resume(returning: stream)
+            }
+        }
+    }
+
+    /// Record and announce the mesh session's addresses. Runs on
+    /// `sessionQueue`.
+    func publishLocalDestinationHints(_ hints: [Data]) {
+        guard hints != latestLocalDestinationHints else { return }
+        latestLocalDestinationHints = hints
+        for continuation in localHintContinuations.values {
+            continuation.yield(hints)
         }
     }
 
@@ -529,6 +562,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 // suppress a fresh session's first batches.
                 lastYieldedChatBatchID = nil
                 lastChatBatchYield = .distantFuture
+                // Addresses belong to the session that answers to them.
+                publishLocalDestinationHints([])
                 // Push, not poll: the Rust worker announces pending updates
                 // (outbound frames, ping/advertisement events, chat batches)
                 // through this listener, so no polling cadence exists. If
@@ -738,6 +773,12 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
     func reconcileHostPeerKeys(_ entries: [HostPeerKeyEntryRecord]) async throws {
         try await performDevicePeerOperation(requiringDeviceIdentity: false) { session in
             try session.reconcileHostPeerKeys(entries: entries)
+        }
+    }
+
+    func reconcileHostDestinationHints(_ hints: [Data]) async throws {
+        try await performDevicePeerOperation(requiringDeviceIdentity: false) { session in
+            try session.reconcileHostDestinationHints(hints: hints)
         }
     }
 
@@ -2331,6 +2372,9 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 for continuation in advertisementContinuations.values {
                     continuation.yield(advertisement)
                 }
+            }
+            if let hints = update.localDestinationHints {
+                publishLocalDestinationHints(hints)
             }
             for event in update.peerHeardEvents {
                 let heard = RadioPeerHeardEvent(

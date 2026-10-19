@@ -601,6 +601,9 @@ mod tests {
             OwnedMacCommand::PfsSessionRequest { ephemeral_key, .. } => ephemeral_key,
             other => panic!("unexpected request payload: {other:?}"),
         };
+        // A requested session has no address yet: nothing is sent to it
+        // until the response names the peer's half.
+        assert!(node.pfs_local_keys().is_empty());
 
         block_on_ready(node.handle_pfs_command(
             &peer,
@@ -612,6 +615,7 @@ mod tests {
             &options,
         ))
         .unwrap();
+        assert_eq!(node.pfs_local_keys(), vec![request_ephemeral]);
 
         let payload = encode_text_payload("hello over pfs");
         let ticket = block_on_ready(peer_connection.send(&payload, &options)).unwrap();
@@ -620,7 +624,6 @@ mod tests {
         assert_eq!(sent.to, PublicKey([0x44; 32]));
 
         let pairwise_from_pfs = PublicKey([0x44; 32]);
-        let _ = request_ephemeral; // Keeps the request path explicit in the test setup.
         dispatcher.borrow_mut().dispatch_ticket_state(
             sent.from,
             &MacEventRef::AckReceived {
@@ -631,6 +634,52 @@ mod tests {
         );
         assert!(ticket.was_acked());
         assert!(ticket.is_finished());
+    }
+
+    #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]
+    #[test]
+    fn pfs_accepted_session_reports_its_local_address_until_it_ends() {
+        use crate::node::{LocalNode, LocalNodeState, NodeMembership};
+
+        let mac = FakeMac::new(vec![[7u8; 32]]);
+        let dispatcher = Rc::new(RefCell::new(crate::dispatch::EventDispatcher::new()));
+        let membership = Rc::new(RefCell::new(NodeMembership::new()));
+        let state = Rc::new(RefCell::new(LocalNodeState::new()));
+        let node = LocalNode::new(
+            LocalIdentityId(1),
+            mac.clone(),
+            dispatcher,
+            membership,
+            state,
+        );
+
+        let peer = PublicKey([0x55; 32]);
+        let options = SendOptions::default().with_ack_requested(true);
+        block_on_ready(node.handle_pfs_command(
+            &peer,
+            None,
+            &OwnedMacCommand::PfsSessionRequest {
+                ephemeral_key: PublicKey([0x44; 32]),
+                duration_minutes: 60,
+            },
+            &options,
+        ))
+        .unwrap();
+        let response = mac.take_unicasts().pop().expect("response send");
+        let local = match parse_owned_mac_command(&response.payload) {
+            OwnedMacCommand::PfsSessionResponse { ephemeral_key, .. } => ephemeral_key,
+            other => panic!("unexpected response payload: {other:?}"),
+        };
+        assert_eq!(node.pfs_local_keys(), vec![local]);
+
+        block_on_ready(node.handle_pfs_command(
+            &peer,
+            None,
+            &OwnedMacCommand::EndPfsSession,
+            &options,
+        ))
+        .unwrap();
+        assert!(node.pfs_local_keys().is_empty());
     }
 
     #[cfg(all(feature = "software-crypto", feature = "unsafe-advanced"))]

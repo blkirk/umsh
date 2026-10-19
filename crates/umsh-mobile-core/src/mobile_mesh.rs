@@ -688,6 +688,12 @@ pub struct MobileMeshSessionUpdateRecord {
     /// platform should upgrade rows it stored anonymously under that hint.
     pub chat_sender_resolutions: Vec<MobileChatSenderResolutionRecord>,
     pub chat_diagnostics: Vec<String>,
+    /// The 3-byte node hints of the addresses this phone answers to besides
+    /// its own, when they changed since the last poll: one per session with
+    /// forward secrecy. The radio's receive filter must admit each of them
+    /// (see `MobileUlcpSession::reconcile_host_destination_hints`), or it
+    /// passes nothing those sessions carry.
+    pub local_destination_hints: Option<Vec<Vec<u8>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -1315,6 +1321,7 @@ pub struct MobileMeshSession {
     management: Mutex<std_mpsc::Receiver<MobileMeshManagementEventRecord>>,
     advertisements: Mutex<std_mpsc::Receiver<MobileMeshAdvertisementRecord>>,
     peer_heard: Mutex<std_mpsc::Receiver<MobileMeshPeerHeardRecord>>,
+    local_hints: Mutex<std_mpsc::Receiver<Vec<Vec<u8>>>>,
     chat_events: Mutex<std_mpsc::Receiver<MobileChatWorkerEvent>>,
     pending_chat_events: Mutex<Option<PendingChatEventBatch>>,
     next_chat_batch_id: Mutex<u64>,
@@ -2435,6 +2442,12 @@ impl MobileMeshSession {
         if let Ok(receiver) = self.peer_heard.lock() {
             peer_heard_events.extend(receiver.try_iter());
         }
+        // Each report is the whole set, so only the latest matters.
+        let local_destination_hints = self
+            .local_hints
+            .lock()
+            .ok()
+            .and_then(|receiver| receiver.try_iter().last());
         let mut chat_mutations = Vec::new();
         let mut chat_deliveries = Vec::new();
         let mut chat_archive_lookups = Vec::new();
@@ -2483,6 +2496,7 @@ impl MobileMeshSession {
             chat_archive_lookups,
             chat_sender_resolutions,
             chat_diagnostics,
+            local_destination_hints,
         }
     }
 }
@@ -2564,6 +2578,7 @@ impl MobileMeshSession {
         let (management_tx, management) = std_mpsc::channel();
         let (advertisement_tx, advertisements) = std_mpsc::channel();
         let (peer_heard_tx, peer_heard) = std_mpsc::channel();
+        let (local_hints_tx, local_hints) = std_mpsc::channel();
         let (chat_event_tx, chat_events) = std_mpsc::channel();
         let outbound_tx = NotifyingSender {
             tx: outbound_tx,
@@ -2583,6 +2598,10 @@ impl MobileMeshSession {
         };
         let peer_heard_tx = NotifyingSender {
             tx: peer_heard_tx,
+            wake: wake.clone(),
+        };
+        let local_hints_tx = NotifyingSender {
+            tx: local_hints_tx,
             wake: wake.clone(),
         };
         let chat_event_tx = NotifyingSender {
@@ -2634,6 +2653,7 @@ impl MobileMeshSession {
                         management_tx,
                         advertisement_tx,
                         peer_heard_tx,
+                        local_hints_tx,
                         chat_event_tx,
                         ready_tx,
                     )),
@@ -2653,6 +2673,7 @@ impl MobileMeshSession {
             management: Mutex::new(management),
             advertisements: Mutex::new(advertisements),
             peer_heard: Mutex::new(peer_heard),
+            local_hints: Mutex::new(local_hints),
             chat_events: Mutex::new(chat_events),
             pending_chat_events: Mutex::new(None),
             next_chat_batch_id: Mutex::new(1),
@@ -3182,6 +3203,7 @@ async fn run_worker(
     management_events: NotifyingSender<MobileMeshManagementEventRecord>,
     advertisements: NotifyingSender<MobileMeshAdvertisementRecord>,
     peer_heard: NotifyingSender<MobileMeshPeerHeardRecord>,
+    local_hints: NotifyingSender<Vec<Vec<u8>>>,
     chat_events: NotifyingSender<MobileChatWorkerEvent>,
     ready: oneshot::Sender<Result<(), MobileMeshError>>,
 ) {
@@ -3415,11 +3437,29 @@ async fn run_worker(
     let inbound_ready = tokio::sync::Notify::new();
     let timeout_servicer = host.protocol_timeout_servicer();
 
+    // Sessions with forward secrecy begin and end in the pump and lapse in
+    // the timeout service, so both check what the phone answers to after
+    // running. Reported only on change: a session starts with none.
+    let reported_hints = RefCell::new(Vec::<Vec<u8>>::new());
+    let report_local_hints = || {
+        let hints: Vec<Vec<u8>> = node
+            .pfs_local_keys()
+            .iter()
+            .map(|key| key.hint().0.to_vec())
+            .collect();
+        let mut reported = reported_hints.borrow_mut();
+        if *reported != hints {
+            let _ = local_hints.send(hints.clone());
+            *reported = hints;
+        }
+    };
+
     let pump_loop = async {
         loop {
             if host.pump_once().await.is_err() {
                 return;
             }
+            report_local_hints();
             if !inbound_text.borrow().is_empty() {
                 inbound_ready.notify_one();
             }
@@ -4140,6 +4180,7 @@ async fn run_worker(
                 }
                 _ = protocol_timeout_tick.tick() => {
                     timeout_servicer.service().await;
+                    report_local_hints();
                     let now_ms = handle.now_ms().await;
                     service_peer_repeater_pages(&peer_repeater_pages, now_ms);
                     if management.is_some() {
@@ -7228,6 +7269,132 @@ mod tests {
                 bob.acknowledge_chat_batch(batch_id).unwrap();
             }
             assert!(Instant::now() < deadline, "the readable copy never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A peer that opens a session with forward secrecy to this phone is
+    /// answered from a fresh address, and the radio admits only the
+    /// addresses it is told about: the session reports that address's hint
+    /// while it lasts, and an empty set once the peer ends it.
+    #[tokio::test]
+    async fn an_accepted_forward_secret_session_reports_its_address() {
+        use umsh_core::{MicSize, PacketBuilder, PacketHeader, PayloadType};
+        use umsh_crypto::{
+            CryptoEngine, PairwiseKeys,
+            software::{SoftwareAes, SoftwareSha256},
+        };
+        use umsh_node::{MacCommand, mac_command};
+
+        let directory = tempfile::tempdir().unwrap();
+        let alice_identity = identity(75);
+        let alice = MobileMeshSession::new(
+            alice_identity.clone(),
+            MobileCounterStore::new(directory.path().join("pfs-alice").display().to_string())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let alice_key = decode_peer(&address(&alice_identity)).unwrap();
+        let carol_key = *SoftwareIdentity::from_secret_bytes(&[76; 32]).public_key();
+        let carol_ephemeral = *SoftwareIdentity::from_secret_bytes(&[77; 32]).public_key();
+        // Pairwise keys are symmetric, so Alice's export is also Carol's.
+        let entry = alice
+            .host_peer_key_entries(vec![encode_peer_address(&carol_key)])
+            .await
+            .unwrap()
+            .remove(0);
+        let pairwise = PairwiseKeys {
+            k_enc: entry.k_enc.try_into().unwrap(),
+            k_mic: entry.k_mic.try_into().unwrap(),
+        };
+        let engine = CryptoEngine::new(SoftwareAes, SoftwareSha256);
+        let from_carol = |counter: u32, command: &MacCommand<'_>| {
+            let mut body = [0u8; 80];
+            let length = mac_command::encode(command, &mut body).unwrap();
+            let mut payload = vec![PayloadType::MacCommand as u8];
+            payload.extend_from_slice(&body[..length]);
+            let mut buf = [0u8; 256];
+            let mut frame = PacketBuilder::new(&mut buf)
+                .unicast(alice_key.hint())
+                .source_full(&carol_key)
+                .frame_counter(counter)
+                .encrypted()
+                .mic_size(MicSize::Mic16)
+                .payload(&payload)
+                .build()
+                .unwrap();
+            engine.seal_packet(&mut frame, &pairwise).unwrap();
+            MobileMeshRxRecord {
+                data: frame.as_bytes().to_vec(),
+                rssi_dbm: Some(-70),
+                lqi: None,
+                snr_cb: Some(60),
+                was_buffered: false,
+                was_acknowledged: false,
+                age_seconds: 0,
+            }
+        };
+
+        alice
+            .receive(from_carol(
+                1,
+                &MacCommand::PfsSessionRequest {
+                    ephemeral_key: carol_ephemeral,
+                    duration_minutes: 60,
+                },
+            ))
+            .unwrap();
+        let mut answered_from = None;
+        let mut hints = None;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while answered_from.is_none() || hints.is_none() {
+            let update = alice.poll_update();
+            for outbound in update.outbound_frames {
+                alice.complete_outbound_frame(outbound.id, true).unwrap();
+                let mut data = outbound.data;
+                let Ok(header) = PacketHeader::parse(&data) else {
+                    continue;
+                };
+                let Ok(range) = engine.open_packet(&mut data, &header, &pairwise) else {
+                    continue;
+                };
+                let body = &data[range];
+                if body.first() == Some(&(PayloadType::MacCommand as u8))
+                    && let Ok(MacCommand::PfsSessionResponse { ephemeral_key, .. }) =
+                        mac_command::parse(&body[1..])
+                {
+                    answered_from = Some(ephemeral_key);
+                }
+            }
+            if update.local_destination_hints.is_some() {
+                hints = update.local_destination_hints;
+            }
+            assert!(Instant::now() < deadline, "the session was not answered");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            hints.unwrap(),
+            vec![answered_from.unwrap().hint().0.to_vec()]
+        );
+
+        alice
+            .receive(from_carol(2, &MacCommand::EndPfsSession))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let update = alice.poll_update();
+            for outbound in update.outbound_frames {
+                alice.complete_outbound_frame(outbound.id, true).unwrap();
+            }
+            if let Some(hints) = update.local_destination_hints {
+                assert!(hints.is_empty());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the ended session was not reported"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }

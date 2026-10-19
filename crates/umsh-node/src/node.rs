@@ -1391,6 +1391,21 @@ impl<M: MacBackend> LocalNode<M> {
         Ok(PfsStatus::Inactive)
     }
 
+    /// The local ephemeral keys of every active session with forward
+    /// secrecy: the addresses besides this node's own that unicast to it
+    /// names while those sessions last.
+    #[cfg(feature = "software-crypto")]
+    pub fn pfs_local_keys(&self) -> Vec<PublicKey> {
+        self.state
+            .borrow()
+            .pfs
+            .sessions()
+            .iter()
+            .filter(|session| session.state == PfsState::Active)
+            .map(|session| session.local_ephemeral)
+            .collect()
+    }
+
     /// Join a channel. Registers the channel key in the MAC if this is
     /// the first node to join it. Returns the bound channel handle.
     #[cfg(feature = "software-crypto")]

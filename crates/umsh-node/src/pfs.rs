@@ -63,6 +63,9 @@ pub(crate) struct PfsSession {
     pub peer_long_term: PublicKey,
     /// Local ephemeral MAC identity.
     pub local_ephemeral_id: LocalIdentityId,
+    /// Local ephemeral public key: the address the peer sends to while the
+    /// session is active.
+    pub local_ephemeral: PublicKey,
     /// Peer ephemeral public key.
     pub peer_ephemeral: PublicKey,
     /// Absolute expiry time in milliseconds.
@@ -85,6 +88,7 @@ impl core::fmt::Debug for PfsSession {
         f.debug_struct("PfsSession")
             .field("peer_long_term", &self.peer_long_term)
             .field("local_ephemeral_id", &self.local_ephemeral_id)
+            .field("local_ephemeral", &self.local_ephemeral)
             .field("peer_ephemeral", &self.peer_ephemeral)
             .field("expires_ms", &self.expires_ms)
             .field("state", &self.state)
@@ -154,6 +158,7 @@ impl PfsSessionManager {
         mac.fill_random(&mut secret).await;
         let local_ephemeral = SoftwareIdentity::from_secret_bytes(&secret);
         secret.zeroize();
+        let local_public = *local_ephemeral.public_key();
         let now_ms = mac.now_ms().await;
         let receipt = send_pfs_command(
             mac,
@@ -161,7 +166,7 @@ impl PfsSessionManager {
             peer,
             None,
             &MacCommand::PfsSessionRequest {
-                ephemeral_key: *local_ephemeral.public_key(),
+                ephemeral_key: local_public,
                 duration_minutes,
             },
             options,
@@ -170,6 +175,7 @@ impl PfsSessionManager {
         self.sessions.push(PfsSession {
             peer_long_term: *peer,
             local_ephemeral_id: LocalIdentityId(u8::MAX),
+            local_ephemeral: local_public,
             peer_ephemeral: PublicKey([0u8; 32]),
             expires_ms: now_ms.saturating_add(u64::from(duration_minutes) * 60_000),
             state: PfsState::Requested,
@@ -216,7 +222,7 @@ impl PfsSessionManager {
             &peer_long_term,
             channel,
             &MacCommand::PfsSessionResponse {
-                ephemeral_key: active.peer_local_public,
+                ephemeral_key: active.local_public,
                 duration_minutes,
             },
             options,
@@ -225,6 +231,7 @@ impl PfsSessionManager {
         self.sessions.push(PfsSession {
             peer_long_term,
             local_ephemeral_id: active.local_ephemeral_id,
+            local_ephemeral: active.local_public,
             peer_ephemeral,
             expires_ms: active.expires_ms,
             state: PfsState::Active,
@@ -264,6 +271,7 @@ impl PfsSessionManager {
         )
         .await?;
         session.local_ephemeral_id = active.local_ephemeral_id;
+        session.local_ephemeral = active.local_public;
         session.peer_ephemeral = peer_ephemeral;
         session.expires_ms = active.expires_ms;
         session.state = PfsState::Active;
@@ -366,7 +374,7 @@ impl PfsSessionManager {
 #[cfg(feature = "software-crypto")]
 struct ActivatedPfsIdentity {
     local_ephemeral_id: LocalIdentityId,
-    peer_local_public: PublicKey,
+    local_public: PublicKey,
     expires_ms: u64,
 }
 
@@ -379,12 +387,12 @@ async fn activate_identity<M: MacBackend>(
     duration_minutes: u16,
 ) -> Result<ActivatedPfsIdentity, NodeError<M>> {
     let _peer_id = mac.add_peer(peer_ephemeral).await?;
-    let peer_local_public = *local_ephemeral.public_key();
+    let local_public = *local_ephemeral.public_key();
     let local_ephemeral_id = mac.register_ephemeral(parent, local_ephemeral).await?;
     let now_ms = mac.now_ms().await;
     Ok(ActivatedPfsIdentity {
         local_ephemeral_id,
-        peer_local_public,
+        local_public,
         expires_ms: now_ms.saturating_add(u64::from(duration_minutes) * 60_000),
     })
 }

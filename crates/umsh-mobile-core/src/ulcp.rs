@@ -836,6 +836,16 @@ struct HostMuteStep {
     insert: bool,
 }
 
+/// One insert or removal in a destination-hint filter reconciliation. The
+/// item is the unprefixed `FILTER_DEST_HINT` entry, which is also its own
+/// remove selector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostFilterStep {
+    item: Vec<u8>,
+    /// Insert when true, remove when false.
+    insert: bool,
+}
+
 /// Bootloader DFU mode. Support is determined by the device's response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum UlcpDfuMode {
@@ -930,6 +940,12 @@ enum ExpectedResponse {
     HostMute {
         issued: HostMuteStep,
         remaining: VecDeque<HostMuteStep>,
+    },
+    /// One step of the destination-hint filter reconciliation, confirmed by
+    /// the device echoing the filter entry back.
+    HostFilter {
+        issued: HostFilterStep,
+        remaining: VecDeque<HostFilterStep>,
     },
     /// A `CMD_PROP_GET` issued by a local management fetch. Unlike
     /// `Property`, a refusal is an answer to record, never a stage
@@ -2000,6 +2016,86 @@ impl MobileUlcpSession {
         Ok(state.update(vec![frame]))
     }
 
+    /// Make the radio's destination-hint receive filters (the
+    /// `FILTER_DEST_HINT` entries of `PROP_HOST_RX_FILTERS`) match the
+    /// supplied 3-byte node hints: the addresses this phone answers to
+    /// besides its host key, which are the local halves of its sessions with
+    /// forward secrecy. Without them the radio passes nothing addressed to
+    /// those sessions.
+    ///
+    /// Only destination-hint entries are this call's to manage; filters of
+    /// any other type stay as they are. Host domain, so nothing is saved and
+    /// reconciling on attach is what makes it stick. Requires an attached,
+    /// otherwise-idle session on a device advertising `CAP_HOST_FILTER`.
+    /// Returns without any frames when the device already holds exactly the
+    /// requested set.
+    pub fn reconcile_host_destination_hints(
+        &self,
+        hints: Vec<Vec<u8>>,
+    ) -> Result<UlcpSessionUpdateRecord, MobileError> {
+        let mut desired = Vec::with_capacity(hints.len());
+        for hint in hints {
+            let hint: [u8; 3] = hint
+                .as_slice()
+                .try_into()
+                .map_err(|_| MobileError::InvalidUlcpFrame)?;
+            if !desired.contains(&hint) {
+                desired.push(hint);
+            }
+        }
+
+        let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
+        if state.stage != SessionStage::Attached || !state.expected.is_empty() {
+            return Err(MobileError::InvalidUlcpFrame);
+        }
+        if !state.has_capability(cap::HOST_FILTER) {
+            return Err(MobileError::UnsupportedCapability);
+        }
+
+        let current: Vec<[u8; 3]> = state
+            .responses
+            .get(&prop::HOST_RX_FILTERS)
+            .map(|entry| {
+                items::prefixed_items(&entry.value)
+                    .map_while(Result::ok)
+                    .filter_map(|item| match items::Filter::decode(item) {
+                        Ok(items::Filter::DestHint(hint)) => Some(hint),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Removals first, so a full table can be reshaped without
+        // transiently overflowing it.
+        let step = |hint: [u8; 3], insert: bool| {
+            let mut item = [0u8; items::Filter::MAX_WIRE_LEN];
+            let length = items::Filter::DestHint(hint)
+                .encode(&mut item)
+                .expect("a destination-hint filter fits its own maximum");
+            HostFilterStep {
+                item: item[..length].to_vec(),
+                insert,
+            }
+        };
+        let steps: VecDeque<HostFilterStep> = current
+            .iter()
+            .filter(|hint| !desired.contains(hint))
+            .map(|hint| step(*hint, false))
+            .chain(
+                desired
+                    .iter()
+                    .filter(|hint| !current.contains(hint))
+                    .map(|hint| step(*hint, true)),
+            )
+            .collect();
+
+        match state.next_host_filter_operation(steps) {
+            Some(frame) => Ok(state.update(vec![frame])),
+            None => Ok(state.update(Vec::new())),
+        }
+    }
+
     /// Tell the radio which conversations to take in quietly
     /// (`PROP_HOST_MUTED_CHANNELS`, `PROP_HOST_MUTED_PEERS`).
     ///
@@ -2672,6 +2768,54 @@ impl MobileUlcpSession {
                     }
                 }
                 if let Some(frame) = state.next_host_mute_operation(remaining) {
+                    outbound.push(frame);
+                } else {
+                    state.refresh_attached_snapshot(None);
+                }
+            }
+            ExpectedResponse::HostFilter {
+                issued,
+                mut remaining,
+            } => {
+                if response.property_id == prop::LAST_STATUS {
+                    let error = state.refusal(
+                        "provision session address filter".to_owned(),
+                        &response,
+                        Some(prop::HOST_RX_FILTERS),
+                    );
+                    // Either refusal asserts the state that was asked for:
+                    // the entry is already there, or already gone. Anything
+                    // else—NOMEM above all—stops the pass.
+                    let benign = if issued.insert {
+                        umsh_ulcp::Status::ALREADY.0
+                    } else {
+                        umsh_ulcp::Status::ITEM_NOT_FOUND.0
+                    };
+                    if let Some(error) = error
+                        && error.status_code != benign
+                    {
+                        operation_error = Some(error);
+                        state.reread(prop::HOST_RX_FILTERS);
+                        remaining.clear();
+                    }
+                } else {
+                    let expected_command = if issued.insert {
+                        Cmd::PropInserted
+                    } else {
+                        Cmd::PropRemoved
+                    };
+                    if response.property_id != prop::HOST_RX_FILTERS
+                        || response.command != expected_command as u8
+                    {
+                        state.note_mismatch(
+                            "provision session address filter".to_owned(),
+                            &response,
+                        );
+                        state.reread(prop::HOST_RX_FILTERS);
+                        remaining.clear();
+                    }
+                }
+                if let Some(frame) = state.next_host_filter_operation(remaining) {
                     outbound.push(frame);
                 } else {
                     state.refresh_attached_snapshot(None);
@@ -3689,6 +3833,61 @@ impl UlcpSessionState {
             },
         );
         Some(frame)
+    }
+
+    /// Issue the next step of a destination-hint filter reconciliation, one
+    /// frame at a time, patching the cached table as each frame goes out.
+    fn next_host_filter_operation(
+        &mut self,
+        mut steps: VecDeque<HostFilterStep>,
+    ) -> Option<Vec<u8>> {
+        let issued = steps.pop_front()?;
+        let tid = self.allocate_tid();
+        let frame = if issued.insert {
+            ulcp_prop_insert(tid, prop::HOST_RX_FILTERS, &issued.item).ok()?
+        } else {
+            ulcp_prop_remove(tid, prop::HOST_RX_FILTERS, &issued.item).ok()?
+        };
+        self.patch_prefixed_table(prop::HOST_RX_FILTERS, &issued.item, issued.insert);
+        self.expected.insert(
+            tid,
+            ExpectedResponse::HostFilter {
+                issued,
+                remaining: steps,
+            },
+        );
+        Some(frame)
+    }
+
+    /// Patch one item in or out of a cached table whose items carry a
+    /// length prefix. Items after a malformed prefix are dropped from the
+    /// cache, as they are from every count read from it.
+    fn patch_prefixed_table(&mut self, property: u32, item: &[u8], present: bool) {
+        let entry = self
+            .responses
+            .entry(property)
+            .or_insert_with(|| UlcpPropertyFrameRecord {
+                transaction_id: frame::TID_UNSOLICITED,
+                command: Cmd::PropIs as u8,
+                property_id: property,
+                value: Vec::new(),
+            });
+        let mut kept: Vec<&[u8]> = items::prefixed_items(&entry.value)
+            .map_while(Result::ok)
+            .filter(|existing| *existing != item)
+            .collect();
+        if present {
+            kept.push(item);
+        }
+        let mut value = Vec::with_capacity(entry.value.len() + item.len() + 1);
+        for existing in kept {
+            // A PUI length prefix is at most five octets.
+            let mut prefixed = vec![0u8; existing.len() + 5];
+            if let Ok(length) = items::encode_prefixed_item(existing, &mut prefixed) {
+                value.extend_from_slice(&prefixed[..length]);
+            }
+        }
+        entry.value = value;
     }
 
     /// Patch one item in or out of a cached table whose items are their
@@ -10672,6 +10871,147 @@ mod tests {
         // table takes the full sixteen, and nothing in between.
         assert!(matches!(
             session.reconcile_host_mutes(vec![vec![0x11; 2]], Vec::new()),
+            Err(MobileError::InvalidUlcpFrame)
+        ));
+    }
+
+    /// Attach to a filtering radio whose table already holds a packet-type
+    /// filter and a destination hint left behind by an earlier session.
+    fn attach_with_filters(session: &MobileUlcpSession) -> UlcpSessionUpdateRecord {
+        let mut table = Vec::new();
+        for item in [
+            [0x02u8, 0x05].as_slice(),
+            [0x00, 0xD1, 0xD2, 0xD3].as_slice(),
+        ] {
+            let mut prefixed = [0u8; 8];
+            let length = items::encode_prefixed_item(item, &mut prefixed).unwrap();
+            table.extend_from_slice(&prefixed[..length]);
+        }
+        let begin = session.begin(Some(vec![0xAA; 32])).unwrap();
+        drive_reads(
+            session,
+            begin.outbound_frames,
+            move |property| match property {
+                prop::HOST_KEY => (property, vec![0xAA; 32]),
+                prop::HOST_RX_FILTERS => (property, table.clone()),
+                _ => commissionable_value(property),
+            },
+        )
+    }
+
+    #[test]
+    fn destination_hint_reconcile_replaces_hints_and_keeps_other_filters() {
+        let session = MobileUlcpSession::new();
+        let attached = attach_with_filters(&session);
+        assert_eq!(
+            attached
+                .snapshot
+                .provisioning
+                .as_ref()
+                .unwrap()
+                .filter_count,
+            Some(2)
+        );
+
+        // The stale hint goes first, then the new one goes on.
+        let update = session
+            .reconcile_host_destination_hints(vec![vec![0xE1, 0xE2, 0xE3]])
+            .unwrap();
+        assert_eq!(update.outbound_frames.len(), 1);
+        let request = Frame::parse(&update.outbound_frames[0]).unwrap();
+        assert_eq!(request.command(), Some(Cmd::PropRemove));
+        assert_eq!(
+            request.payload,
+            &[prop::HOST_RX_FILTERS as u8, 0x00, 0xD1, 0xD2, 0xD3]
+        );
+        let next = session
+            .consume(removed_response(
+                request.header.tid(),
+                prop::HOST_RX_FILTERS,
+                &[0x00, 0xD1, 0xD2, 0xD3],
+            ))
+            .unwrap();
+        assert_eq!(next.outbound_frames.len(), 1);
+        let request = Frame::parse(&next.outbound_frames[0]).unwrap();
+        assert_eq!(request.command(), Some(Cmd::PropInsert));
+        let done = session
+            .consume(inserted_response(
+                request.header.tid(),
+                prop::HOST_RX_FILTERS,
+                &[0x00, 0xE1, 0xE2, 0xE3],
+            ))
+            .unwrap();
+        assert!(done.outbound_frames.is_empty());
+        assert!(!done.waiting_for_responses);
+        assert_eq!(done.operation_error, None);
+        // The packet-type filter was never this call's to touch.
+        assert_eq!(
+            done.snapshot.provisioning.as_ref().unwrap().filter_count,
+            Some(2)
+        );
+
+        // Asking for the same thing again asks the radio for nothing.
+        let again = session
+            .reconcile_host_destination_hints(vec![vec![0xE1, 0xE2, 0xE3]])
+            .unwrap();
+        assert!(again.outbound_frames.is_empty());
+        assert!(!again.waiting_for_responses);
+
+        // A session ending sheds exactly its hint.
+        let update = session
+            .reconcile_host_destination_hints(Vec::new())
+            .unwrap();
+        assert_eq!(update.outbound_frames.len(), 1);
+        let request = Frame::parse(&update.outbound_frames[0]).unwrap();
+        assert_eq!(request.command(), Some(Cmd::PropRemove));
+        let done = session
+            .consume(removed_response(
+                request.header.tid(),
+                prop::HOST_RX_FILTERS,
+                &[0x00, 0xE1, 0xE2, 0xE3],
+            ))
+            .unwrap();
+        assert!(done.outbound_frames.is_empty());
+        assert_eq!(
+            done.snapshot.provisioning.as_ref().unwrap().filter_count,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_full_filter_table_reports_status_and_stays_attached() {
+        let session = MobileUlcpSession::new();
+        attach_with_filters(&session);
+
+        let update = session
+            .reconcile_host_destination_hints(vec![
+                vec![0xD1, 0xD2, 0xD3],
+                vec![0xE1, 0xE2, 0xE3],
+                vec![0xF1, 0xF2, 0xF3],
+            ])
+            .unwrap();
+        let request = Frame::parse(&update.outbound_frames[0]).unwrap();
+        assert_eq!(request.command(), Some(Cmd::PropInsert));
+        let full = session
+            .consume(property_response(
+                request.header.tid(),
+                prop::LAST_STATUS,
+                &[umsh_ulcp::Status::NOMEM.0 as u8],
+            ))
+            .unwrap();
+        assert_eq!(
+            full.operation_error.as_ref().map(|error| error.kind),
+            Some(UlcpOperationFailureKind::Capacity)
+        );
+        assert_eq!(full.snapshot.phase, UlcpSessionPhase::Attached);
+    }
+
+    #[test]
+    fn a_destination_hint_of_the_wrong_width_is_refused_locally() {
+        let session = MobileUlcpSession::new();
+        attach_with_filters(&session);
+        assert!(matches!(
+            session.reconcile_host_destination_hints(vec![vec![0xE1; 32]]),
             Err(MobileError::InvalidUlcpFrame)
         ));
     }
