@@ -232,7 +232,7 @@ pub const TOPICS: &[Topic] = &[
         name: "time",
         prefix: "TIME",
         gate: |ctx| ctx.has(cap::TIME),
-        keys: |_| vec![prop::TIME, prop::TZ_OFFSET],
+        keys: |_| vec![prop::TIME, prop::TZ_RULE, prop::TIME_24H],
         render: render_time,
         env: env_time,
     },
@@ -1125,7 +1125,6 @@ fn env_gnss(set: &PropSet, _ctx: &Context) -> Vec<Line> {
 // ─── time ────────────────────────────────────────────────────────────
 
 fn render_time(set: &PropSet, _ctx: &Context) -> Vec<Line> {
-    let offset = set.i16(prop::TZ_OFFSET).unwrap_or(0);
     let mut lines = Vec::new();
     match set.u32(prop::TIME) {
         Some(epoch) => {
@@ -1136,7 +1135,12 @@ fn render_time(set: &PropSet, _ctx: &Context) -> Vec<Line> {
         // different answer from a device without a clock at all.
         None => lines.push(("clock".into(), "not set".into())),
     }
-    lines.push(("zone".into(), crate::command::time::format_tz(offset)));
+    if let Some(rule) = set.text(prop::TZ_RULE) {
+        lines.push(("zone".into(), rule));
+    }
+    if let Some(on) = set.bool(prop::TIME_24H) {
+        lines.push(("hours".into(), if on { "24" } else { "12" }.into()));
+    }
     lines
 }
 
@@ -1145,8 +1149,8 @@ fn env_time(set: &PropSet, _ctx: &Context) -> Vec<Line> {
     if let Some(epoch) = set.u32(prop::TIME) {
         env.push(("EPOCH".into(), epoch.to_string()));
     }
-    if let Some(offset) = set.i16(prop::TZ_OFFSET) {
-        env.push(("TZ_MINUTES".into(), offset.to_string()));
+    if let Some(rule) = set.text(prop::TZ_RULE) {
+        env.push(("TZ_RULE".into(), rule));
     }
     env
 }

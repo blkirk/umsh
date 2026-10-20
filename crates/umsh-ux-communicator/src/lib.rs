@@ -9,6 +9,7 @@
 //!
 //! - [`model`]: what the screens show, filled in by the device.
 //! - [`nav`]: moving between screens, and where focus goes.
+//! - [`lock`]: locking, and the lock screen's way back.
 //! - [`ui`]: the screens themselves, as Buoyant views.
 //! - [`input`]: the inputs a board reports, and what they mean.
 //! - [`text`]: message text, shared by the screens rather than copied.
@@ -24,15 +25,19 @@ pub use buoyant;
 pub use heapless;
 
 pub mod avatar;
+pub mod clock;
+pub mod clock_settings;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 pub mod font;
 pub mod icon;
 pub mod input;
 pub mod keyboard;
+pub mod lock;
 pub mod model;
 pub mod nav;
 pub mod qr;
 pub mod text;
 pub mod theme;
 pub mod ui;
+pub mod zones;

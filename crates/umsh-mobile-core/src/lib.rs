@@ -19,6 +19,7 @@ mod counter_store;
 mod mobile_chat;
 mod mobile_mesh;
 mod regions;
+mod time_zone;
 mod ulcp;
 mod virtual_radio;
 
@@ -40,6 +41,7 @@ pub use regions::{
     MobileRegionMembership, MobileRegionOutcomeRecord, MobileRegionPositionRecord,
     MobileRegionProposalRecord, MobileRegionRecord,
 };
+pub use time_zone::{fixed_offset_rule, rule_abbreviation, rule_offset_min, zone_rule};
 pub use ulcp::{
     GattSegmentRecord, MobileGattReassembler, MobileUlcpSession, UlcpAlertState, UlcpAttachMode,
     UlcpBatteryRecord, UlcpChargeState, UlcpDeviceConfigRecord, UlcpDfuMode, UlcpFixKind,
@@ -65,7 +67,7 @@ uniffi::setup_scaffolding!();
 ///
 /// Increment this when a binding-visible operation, record, or error contract
 /// changes incompatibly. It is independent of the UMSH wire version.
-pub const MOBILE_API_VERSION: u16 = 55;
+pub const MOBILE_API_VERSION: u16 = 56;
 
 /// Stable error categories consumed by platform adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Error)]

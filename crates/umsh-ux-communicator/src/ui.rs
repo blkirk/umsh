@@ -23,11 +23,13 @@ mod avatar;
 mod banner;
 mod channels;
 mod chats;
+mod clock;
 mod conversation;
 mod details;
 mod device;
 mod find;
 mod join;
+mod lock;
 mod member;
 mod peer;
 mod peers;
@@ -38,7 +40,6 @@ mod setup;
 mod share;
 mod status;
 mod typing;
-mod wake;
 
 /// Height of the status strip.
 pub const STRIP: u32 = 22;
@@ -83,11 +84,42 @@ where
 #[must_use]
 pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
-        status::view(&state.status, state.in_setup(), state.keyboard.latches()),
+        // Locked, the lock screen stands in for everything else, which is
+        // not built at all until it unlocks.
+        match_view!(state.lock.locked, {
+            true => lock::view(state),
+            false => screens(state),
+        }),
+        // Over everything: one slot, the topmost of what could be here.
+        state.overlay().map(|overlay| overlay_view(state, overlay)),
+    ))
+    .with_alignment(Alignment::TopLeading)
+    .flex_infinite_width(HorizontalAlignment::Leading)
+    .flex_infinite_height(VerticalAlignment::Top)
+    .background_color(theme::BACKGROUND, Rectangle)
+}
+
+/// The strip and the screen on top, while unlocked.
+fn screens(state: &State) -> impl View<Rgb565, State> + use<> {
+    ZStack::new((
+        status::view(
+            &state.status,
+            state.in_setup(),
+            state.keyboard.latches(),
+            state
+                .wall_time
+                .map(|time| state.local(time).time(state.hour24())),
+        ),
         match_view!(state.screen(), {
             Screen::Chats { .. } => chats_screen(state),
             Screen::Conversation { chat, .. } => conversation::view(state, *chat),
-            Screen::Details { message, details, .. } => details::view(details, state.inbound(*message)),
+            Screen::Details { message, details, .. } => details::view(
+                details,
+                state.inbound(*message),
+                details
+                    .time
+                    .map(|time| state.local(time).time(state.hour24())),
+            ),
             Screen::Member {
                 member, requested, ..
             } => member::view(
@@ -112,16 +144,10 @@ pub fn root_view(state: &State) -> impl View<Rgb565, State> + use<> {
                 .map(|summary| peer::view(summary, detail, *confirm, *requested)),
             Screen::Device { page, .. } => device::page(state, page),
             Screen::Setup { page, .. } => setup::view(state, page),
-            Screen::Wake { .. } => wake::view(state),
         })
         .padding(Edges::Top, STRIP),
-        // Over everything: one slot, the topmost of what could be here.
-        state.overlay().map(|overlay| overlay_view(state, overlay)),
     ))
     .with_alignment(Alignment::TopLeading)
-    .flex_infinite_width(HorizontalAlignment::Leading)
-    .flex_infinite_height(VerticalAlignment::Top)
-    .background_color(theme::BACKGROUND, Rectangle)
 }
 
 /// What lies over the screen: a banner, a glance, or the character

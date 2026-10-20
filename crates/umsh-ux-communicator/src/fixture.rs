@@ -7,12 +7,12 @@ use core::cell::{Cell, RefCell, RefMut};
 
 use crate::avatar::{AvatarStyle, BuiltinChannel, PeerShape};
 use crate::model::{
-    Bluetooth, ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Chats, Delivery,
-    Details, Direction, EventQueue, Gnss, Heard, Invite, KeyboardSettings, MAX_CHATS, MAX_HEARD,
-    MAX_PEERS, MESSAGE_LEN, Member, Message, MessageId, Messages, Node, NodeEvent, Parts,
-    PeerDetail, PeerEntry, PeerId, PeerSummary, Peers, Presence, Profile, Quote, RadioSettings,
-    Reacted, Reaction, Reactions, Reactor, Sender, Setting, ShareUri, Shareable, State,
-    StatusStrip, TRANSMIT_POWER, brightness_at, push_newest, word_match,
+    Bluetooth, ChannelAccess, ChannelEntry, ChatId, ChatKind, ChatSummary, Chats, ClockSettings,
+    ClockSource, Delivery, Details, Direction, EventQueue, Gnss, Heard, Invite, KeyboardSettings,
+    MAX_CHATS, MAX_HEARD, MAX_PEERS, MESSAGE_LEN, Member, Message, MessageId, Messages, Node,
+    NodeEvent, Parts, PeerDetail, PeerEntry, PeerId, PeerSummary, Peers, Presence, Profile, Quote,
+    RadioSettings, Reacted, Reaction, Reactions, Reactor, Rule, Sender, Setting, ShareUri,
+    Shareable, State, StatusStrip, TRANSMIT_POWER, brightness_at, push_newest, word_match,
 };
 use crate::text::{DraftText, SharedText, TextHeap};
 use buoyant::view::{EditBuffer, EditText as _};
@@ -406,6 +406,19 @@ fn mockup_id(chat: ChatId, index: usize) -> MessageId {
 /// from, above its own.
 const FIRST_KEPT: MessageId = 0x1_0000;
 
+/// When the fixture's message `index` in `chat` was sent: a minute apart,
+/// the last when its chat was last active, but for the first of the
+/// states, the evening before.
+fn mockup_time(chat: ChatId, index: usize) -> u32 {
+    let count = messages(chat).len();
+    let time = STARTED - quiet_for(chat) - 60 * (count - 1 - index) as u32;
+    if chat == STATES && index == 0 {
+        time - 13 * 60 * 60
+    } else {
+        time
+    }
+}
+
 /// The fixture's message, with its text kept on `heap`, when there is room.
 fn mockup_message(
     heap: TextHeap,
@@ -414,13 +427,7 @@ fn mockup_message(
     (from, text): (From, &str),
 ) -> Option<Message> {
     assert!(text.len() <= MESSAGE_LEN, "fixture message fits");
-    let count = messages(chat).len();
-    // A minute apart, the last when its chat was last active, but for the
-    // first of the states, the evening before.
-    let mut time = STARTED - quiet_for(chat) - 60 * (count - 1 - index) as u32;
-    if chat == STATES && index == 0 {
-        time -= 13 * 60 * 60;
-    }
+    let time = mockup_time(chat, index);
     let condition = condition(chat, index);
     let reply = match condition.reply {
         Some(quoted) => {
@@ -518,11 +525,16 @@ pub struct Store {
     share_location: Cell<bool>,
     transmit_power: Cell<i8>,
     keyboard: Cell<KeyboardSettings>,
+    clock: Cell<ClockSettings>,
     brightness: Cell<u8>,
     events: RefCell<EventQueue<EVENTS>>,
     /// The board's clock, in milliseconds, as it last told the fixture. The
     /// fixture's own clock runs from [`STARTED`] with it.
     now: Cell<u64>,
+    /// How far the clock has been set from where it started, in seconds.
+    set_by: Cell<i64>,
+    /// Where the clock's time came from, and when.
+    clock_source: Cell<(ClockSource, u64)>,
     /// When, on the board's clock, the next arrival and the identity asked
     /// for come.
     arrival_at: Cell<Option<u64>>,
@@ -555,6 +567,11 @@ impl Store {
             forwarding: Cell::new(true),
             share_location: Cell::new(false),
             transmit_power: Cell::new(22),
+            clock: Cell::new(ClockSettings {
+                automatic: Some(true),
+                hour24: true,
+                zone: Rule::UTC,
+            }),
             keyboard: Cell::new(KeyboardSettings {
                 capitalize: true,
                 period: true,
@@ -563,6 +580,8 @@ impl Store {
             brightness: Cell::new(brightness_at(5)),
             events: RefCell::new(EventQueue::new()),
             now: Cell::new(0),
+            set_by: Cell::new(0),
+            clock_source: Cell::new((ClockSource::Gnss, 0)),
             arrival_at: Cell::new(None),
             identity_at: Cell::new(None),
         }
@@ -777,7 +796,7 @@ impl Store {
     /// The fixture's clock: the mockup's time, moved on with the board's.
     #[must_use]
     pub fn time(&self) -> u32 {
-        STARTED + (self.now.get() / 1000) as u32
+        (i64::from(STARTED + (self.now.get() / 1000) as u32) + self.set_by.get()) as u32
     }
 
     /// Milliseconds until the fixture's clock reaches the next minute.
@@ -1324,8 +1343,49 @@ impl Node for Store {
         self.queue(NodeEvent::PingAnswered(peer));
     }
 
-    fn utc_offset_min(&self) -> i16 {
-        0
+    fn clock(&self) -> ClockSettings {
+        self.clock.get()
+    }
+
+    fn set_clock_automatic(&self, on: bool) {
+        self.setting(Setting::Clock, || {
+            let mut clock = self.clock.get();
+            clock.automatic = Some(on);
+            self.clock.set(clock);
+            true
+        });
+    }
+
+    fn set_time(&self, time: u32) {
+        let set_by = i64::from(time) - i64::from(self.time()) + self.set_by.get();
+        self.set_by.set(set_by);
+        self.clock_source.set((ClockSource::Manual, self.now.get()));
+        self.setting(Setting::Time, || true);
+    }
+
+    fn set_zone(&self, rule: &str) {
+        self.setting(Setting::Clock, || {
+            let Ok(zone) = Rule::parse(rule) else {
+                return false;
+            };
+            let mut clock = self.clock.get();
+            clock.zone = zone;
+            self.clock.set(clock);
+            true
+        });
+    }
+
+    fn set_hour24(&self, on: bool) {
+        self.setting(Setting::Clock, || {
+            let mut clock = self.clock.get();
+            clock.hour24 = on;
+            self.clock.set(clock);
+            true
+        });
+    }
+
+    fn clock_source(&self) -> Option<(ClockSource, u64)> {
+        Some(self.clock_source.get())
     }
 
     /// Saved peers' identities are what the fixture has: asking changes
@@ -1643,22 +1703,21 @@ impl Node for Store {
         let (outbound, time) = if message >= FIRST_KEPT {
             let kept = self.kept.borrow();
             let (_, kept) = kept.iter().find(|(_, m)| m.id == message)?;
-            (kept.direction == Direction::Outbound, "14:32")
+            (kept.direction == Direction::Outbound, kept.time)
         } else {
-            let (from, _) = *messages(chat).get((message & 0xFF) as usize)?;
-            match from {
-                From::Me => (true, "14:27"),
-                From::Peer | From::Member(_) => (false, "14:29"),
-            }
+            let index = (message & 0xFF) as usize;
+            let (from, _) = *messages(chat).get(index)?;
+            let time = Some(mockup_time(chat, index));
+            (matches!(from, From::Me), time)
         };
         let mut details = if outbound {
             Details {
-                time: s(time),
+                time,
                 ..Details::default()
             }
         } else {
             Details {
-                time: s(time),
+                time,
                 hops: Some(3),
                 route: s("Gh* \u{203A} 4Tn"),
                 rssi: Some(-97),
@@ -1710,8 +1769,8 @@ pub fn state(store: &'static Store) -> State {
     let mut state = State::new(store);
     state.status = StatusStrip {
         device_name: store.device_name(),
-        time: s("14:32"),
         battery_segments: 3,
+        battery_percent: Some(64),
         charging: false,
         bluetooth: Some(Bluetooth::Connected),
         wifi: None,

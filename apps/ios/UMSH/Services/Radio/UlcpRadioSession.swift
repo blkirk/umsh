@@ -668,7 +668,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
 
     func configurePositioning(
         gnss: UlcpGnssSettingsRecord?,
-        timeZoneOffsetMinutes: Int16?
+        timeZoneRule: String?,
+        time24h: Bool?
     ) async throws {
         try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, any Error>) in
             sessionQueue.async { [self] in
@@ -685,7 +686,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                     try applySessionUpdate(
                         ulcpSession.configurePositioning(
                             gnss: gnss,
-                            tzOffsetMin: timeZoneOffsetMinutes
+                            tzRule: timeZoneRule,
+                            time24h: time24h
                         )
                     )
                 } catch {
@@ -1891,7 +1893,8 @@ class UlcpRadioSession: NSObject, @unchecked Sendable {
                 supportsGnss: $0.supportsGnss,
                 supportsAdvert: $0.supportsAdvert,
                 supportsReboot: $0.supportsReboot,
-                timeZoneOffsetMinutes: $0.tzOffsetMin,
+                timeZoneRule: $0.tzRule,
+                time24h: $0.time24h,
                 gnss: $0.gnss,
                 advert: $0.advert
             )

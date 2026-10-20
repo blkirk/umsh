@@ -1595,7 +1595,10 @@ impl DeviceEnv for BoardDeviceEnv {
         // reach the clock and the receiver by the same path—and
         // neither needs anything to remember to push it.
         #[cfg(feature = "external-rtc")]
-        umsh_hal::wall_clock::set_tz(snapshot.tz_offset_min);
+        {
+            umsh_hal::wall_clock::set_tz_rule(snapshot.tz_rule);
+            umsh_hal::wall_clock::set_hour24(snapshot.time_24h);
+        }
         #[cfg(feature = "gnss")]
         umsh_ulcp_runtime::gnss::configure(
             snapshot.gnss_enabled,

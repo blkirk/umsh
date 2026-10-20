@@ -18,9 +18,10 @@ use umsh_ulcp_admin::LocalPort;
 use umsh_ux_communicator::avatar::AvatarStyle;
 use umsh_ux_communicator::heapless::{String, Vec};
 use umsh_ux_communicator::model::{
-    ChannelEntry, ChatId, ChatSummary, Chats, Details, EventQueue, Heard, Invite, KeyboardSettings,
-    MAX_HEARD, Member, Message, MessageId, Messages, Node, NodeEvent, PeerDetail, PeerEntry,
-    PeerId, PeerSummary, Peers, RadioSettings, Reaction, Setting, ShareUri, Shareable,
+    ChannelEntry, ChatId, ChatSummary, Chats, ClockSettings, ClockSource, Details, EventQueue,
+    Heard, Invite, KeyboardSettings, MAX_HEARD, Member, Message, MessageId, Messages, Node,
+    NodeEvent, PeerDetail, PeerEntry, PeerId, PeerSummary, Peers, RadioSettings, Reaction, Setting,
+    ShareUri, Shareable,
 };
 use umsh_ux_communicator::text::TextHeap;
 
@@ -41,8 +42,11 @@ pub trait Clock {
     fn now_ms(&self) -> u64;
     /// The time in Unix seconds, once it is known.
     fn wall(&self) -> Option<u32>;
-    /// Local time's offset from UTC, in minutes.
-    fn utc_offset_min(&self) -> i16;
+    /// Where the time came from, and when on [`Clock::now_ms`], while it
+    /// is known.
+    fn source(&self) -> Option<(ClockSource, u64)> {
+        None
+    }
 }
 
 /// A communicator's node, over the device's own ULCP session reached
@@ -314,9 +318,7 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
 
     fn details(&self, chat: ChatId, message: MessageId) -> Option<Details> {
         let mine = self.settings.borrow().avatar();
-        self.chats
-            .borrow()
-            .details(chat, message, self.clock.utc_offset_min(), &mine)
+        self.chats.borrow().details(chat, message, &mine)
     }
 
     fn member(&self, chat: ChatId, message: MessageId) -> Option<Member> {
@@ -396,8 +398,28 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
         self.wake();
     }
 
-    fn utc_offset_min(&self) -> i16 {
-        self.clock.utc_offset_min()
+    fn clock(&self) -> ClockSettings {
+        self.settings.borrow().clock()
+    }
+
+    fn set_clock_automatic(&self, on: bool) {
+        self.change(Setting::Clock, |settings| settings.set_clock_automatic(on));
+    }
+
+    fn set_time(&self, time: u32) {
+        self.change(Setting::Time, |settings| settings.set_time(time));
+    }
+
+    fn set_zone(&self, rule: &str) {
+        self.change(Setting::Clock, |settings| settings.set_zone(rule));
+    }
+
+    fn set_hour24(&self, on: bool) {
+        self.change(Setting::Clock, |settings| settings.set_hour24(on));
+    }
+
+    fn clock_source(&self) -> Option<(ClockSource, u64)> {
+        self.clock.source()
     }
 
     fn request_peer_identity(&self, peer: PeerId) {

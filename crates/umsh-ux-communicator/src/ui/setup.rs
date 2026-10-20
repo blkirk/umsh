@@ -1,6 +1,6 @@
-//! First run: what to call this node, then its radio profile. The name may
-//! be left empty, and peers then see the bare hint; the profile is needed
-//! before the radio sends.
+//! First run: what to call this node, its radio profile, and its time
+//! zone. The name may be left empty, and peers then see the bare hint; the
+//! profile is needed before the radio sends.
 
 use buoyant::focus::BoundaryBehavior;
 use buoyant::match_view;
@@ -29,6 +29,7 @@ pub fn view(state: &State, page: &SetupPage) -> impl View<Rgb565, State> + use<>
     match_view!(page, {
         SetupPage::Name { text } => name(state, text),
         SetupPage::Profile => super::profile::view(state, "Radio profile"),
+        SetupPage::Zone { find } => super::clock::zone_list(state, find, "Time zone"),
     })
 }
 

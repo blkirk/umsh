@@ -50,10 +50,6 @@ impl Clock for Since {
     fn wall(&self) -> Option<u32> {
         Some(1_792_247_520 + self.0.elapsed().as_secs() as u32)
     }
-
-    fn utc_offset_min(&self) -> i16 {
-        0
-    }
 }
 
 /// One board: its communicator's node, the soft device it holds its

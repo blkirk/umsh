@@ -413,9 +413,10 @@ pub struct DevDomainSnapshot {
     pub beacon_interval_s: u32,
     /// `PROP_STARTUP_BEACON`: whether one beacon goes out at bring-up.
     pub startup_beacon: bool,
-    /// `PROP_TZ_OFFSET`: minutes east of UTC, for whatever renders a
-    /// local time.
-    pub tz_offset_min: i16,
+    /// `PROP_TZ_RULE`: the zone, for whatever renders a local time.
+    pub tz_rule: umsh_hal::tz::Rule,
+    /// `PROP_TIME_24H`: whether a shown clock writes hours from 0 to 23.
+    pub time_24h: bool,
     /// `PROP_GNSS_ENABLED`: whether the receiver should be powered.
     /// Always false on a board without `CAP_GNSS`.
     ///
@@ -1475,7 +1476,8 @@ fn sync_dev_domain<A, S, const TXQ: usize, E>(
         advert_interval_s: session.advert_interval_s(),
         beacon_interval_s: session.beacon_interval_s(),
         startup_beacon: session.startup_beacon(),
-        tz_offset_min: session.tz_offset_min(),
+        tz_rule: session.tz_rule(),
+        time_24h: session.time_24h(),
         gnss_enabled: session.gnss_enabled(),
         display_motion_wake_enabled: session.display_motion_wake_enabled(),
         gnss_ident_update: session.gnss_ident_update(),

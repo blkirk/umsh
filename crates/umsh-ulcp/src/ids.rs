@@ -375,11 +375,7 @@ pub mod prop {
     /// Unsigned, so the encoding is wrap-free into 2106. Requires
     /// `CAP_TIME`.
     pub const TIME: u32 = 4866;
-    /// Local time-zone offset from UTC (`PROP_TZ_OFFSET`)—`INT16_LE`
-    /// minutes, default 0. Unlike `PROP_TIME` this always has a value:
-    /// where the device is configured to be is known even when what time
-    /// it is is not. Requires `CAP_TIME`.
-    pub const TZ_OFFSET: u32 = 4867;
+    // 4867 is reserved.
     /// Whether position fixes update the advertised node identity
     /// (`PROP_GNSS_IDENT_UPDATE`)—BOOL, default 0. Requires `CAP_GNSS`.
     pub const GNSS_IDENT_UPDATE: u32 = 4868;
@@ -547,6 +543,15 @@ pub mod prop {
     /// device that randomized it would be reporting an address nobody
     /// can use.
     pub const WIFI_MAC: u32 = 4887;
+    /// The local time zone (`PROP_TZ_RULE`)—UTF-8, a POSIX TZ rule such
+    /// as `CET-1CEST,M3.5.0,M10.5.0/3`, default `UTC0`. Unlike
+    /// `PROP_TIME` this always has a value: where the device is configured
+    /// to be is known even when what time it is is not. Requires
+    /// `CAP_TIME`.
+    pub const TZ_RULE: u32 = 4888;
+    /// Whether a clock the device shows writes hours from 0 to 23
+    /// (`PROP_TIME_24H`)—BOOL, default 1. Requires `CAP_TIME`.
+    pub const TIME_24H: u32 = 4889;
 
     /// IPv4 readiness (`PROP_IPV4_STATE`), `UINT8`, read-only, one of
     /// [`crate::ip::FamilyState`]. Requires `CAP_IPV4`.
@@ -766,7 +771,7 @@ pub mod cap {
     /// so an administrator may rely on the multi-property commands.
     pub const ADMIN: u32 = 43;
     /// `CAP_TIME`—the device keeps a wall clock (`PROP_TIME`,
-    /// `PROP_TZ_OFFSET`). It says nothing about where the time comes from
+    /// `PROP_TZ_RULE`, `PROP_TIME_24H`). It says nothing about where the time comes from
     /// or whether it survives a power cycle.
     pub const TIME: u32 = 44;
     /// `CAP_GNSS`—a GNSS receiver is fitted, so the positioning

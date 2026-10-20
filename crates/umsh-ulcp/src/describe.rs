@@ -118,7 +118,6 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::BLE_PAIRING_PIN => "PROP_BLE_PAIRING_PIN",
         prop::DEV_ADMINS => "PROP_DEV_ADMINS",
         prop::TIME => "PROP_TIME",
-        prop::TZ_OFFSET => "PROP_TZ_OFFSET",
         prop::GNSS_IDENT_UPDATE => "PROP_GNSS_IDENT_UPDATE",
         prop::GNSS_IDENT_PRECISION => "PROP_GNSS_IDENT_PRECISION",
         prop::GNSS_TIME_TRUST => "PROP_GNSS_TIME_TRUST",
@@ -143,6 +142,8 @@ pub const fn property_name(key: u32) -> Option<&'static str> {
         prop::WIFI_LINK => "PROP_WIFI_LINK",
         prop::WIFI_RSSI => "PROP_WIFI_RSSI",
         prop::WIFI_MAC => "PROP_WIFI_MAC",
+        prop::TZ_RULE => "PROP_TZ_RULE",
+        prop::TIME_24H => "PROP_TIME_24H",
         prop::IPV4_STATE => "PROP_IPV4_STATE",
         prop::IPV4_CONFIG => "PROP_IPV4_CONFIG",
         prop::IPV4_ADDRESS => "PROP_IPV4_ADDRESS",
@@ -271,7 +272,6 @@ pub const PROPERTIES: &[u32] = &[
     prop::BLE_PAIRING_PIN,
     prop::DEV_ADMINS,
     prop::TIME,
-    prop::TZ_OFFSET,
     prop::GNSS_IDENT_UPDATE,
     prop::GNSS_IDENT_PRECISION,
     prop::GNSS_TIME_TRUST,
@@ -291,6 +291,8 @@ pub const PROPERTIES: &[u32] = &[
     prop::WIFI_LINK,
     prop::WIFI_RSSI,
     prop::WIFI_MAC,
+    prop::TZ_RULE,
+    prop::TIME_24H,
     prop::IPV4_STATE,
     prop::IPV4_CONFIG,
     prop::IPV4_ADDRESS,
@@ -450,7 +452,8 @@ pub const fn property_type(key: u32) -> Option<PropertyType> {
         | prop::STAT_RX_OWN_HINT => U32,
         prop::BLE_PAIRING_PIN => U32,
         prop::TIME => U32,
-        prop::TZ_OFFSET => I16,
+        prop::TZ_RULE => Text,
+        prop::TIME_24H => Bool,
         prop::GNSS_IDENT_UPDATE => Bool,
         prop::GNSS_IDENT_PRECISION => U8,
         prop::GNSS_TIME_TRUST | prop::BLE_ENABLED | prop::BLE_PAIRING => Bool,
@@ -790,7 +793,8 @@ mod tests {
     #[test]
     fn names_time_and_positioning_properties() {
         assert_eq!(property_name(prop::TIME), Some("PROP_TIME"));
-        assert_eq!(property_name(prop::TZ_OFFSET), Some("PROP_TZ_OFFSET"));
+        assert_eq!(property_name(prop::TZ_RULE), Some("PROP_TZ_RULE"));
+        assert_eq!(property_name(prop::TIME_24H), Some("PROP_TIME_24H"));
         assert_eq!(property_name(prop::GNSS_ENABLED), Some("PROP_GNSS_ENABLED"));
         assert_eq!(
             property_name(prop::GNSS_LOCATION),
@@ -941,7 +945,7 @@ mod tests {
         assert_eq!(property_type(prop::PHY_TX_POWER), Some(PropertyType::I8));
         assert_eq!(property_type(prop::DEV_NAME), Some(PropertyType::Text));
         assert_eq!(property_type(prop::DEV_KEY), Some(PropertyType::Key32));
-        assert_eq!(property_type(prop::TZ_OFFSET), Some(PropertyType::I16));
+        assert_eq!(property_type(prop::TZ_RULE), Some(PropertyType::Text));
         assert_eq!(
             property_type(prop::HOST_RX_QUEUE_DROPPED),
             Some(PropertyType::U32)

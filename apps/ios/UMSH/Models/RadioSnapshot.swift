@@ -99,7 +99,8 @@ struct RadioSnapshot: Equatable, Sendable {
             supportsGnss: true,
             supportsAdvert: true,
             supportsReboot: true,
-            timeZoneOffsetMinutes: -420,
+            timeZoneRule: "PST8PDT,M3.2.0,M11.1.0",
+            time24h: false,
             gnss: UlcpGnssSettingsRecord(
                 enabled: true,
                 identUpdate: true,
@@ -490,9 +491,12 @@ struct RadioProvisioningSummary: Equatable, Sendable {
     /// `CAP_REBOOT`: the radio can restart, and so can be restarted, put
     /// into DFU, or factory reset.
     var supportsReboot: Bool = false
-    /// `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when
+    /// `PROP_TZ_RULE`, a POSIX TZ rule. Present exactly when
     /// `supportsTime` and the radio reported it.
-    var timeZoneOffsetMinutes: Int16? = nil
+    var timeZoneRule: String? = nil
+    /// `PROP_TIME_24H`. Present exactly when `supportsTime` and the radio
+    /// reported it.
+    var time24h: Bool? = nil
     /// The positioning policy. Present exactly when `supportsGnss` and
     /// the radio reported the whole of it.
     var gnss: UlcpGnssSettingsRecord? = nil
@@ -545,14 +549,6 @@ func formattedDutyCycle(_ value: UInt16) -> String {
     return percent.formatted(.number.precision(.fractionLength(percent < 1 ? 2 : 1))) + "%"
 }
 
-/// The UTC offsets a device can be given, at the quarter-hour steps the
-/// world's zones actually use.
-///
-/// An offset rather than a zone: the device has no zone database, so what
-/// travels is the offset in effect when it is set. It does not follow
-/// daylight saving on its own.
-let deviceTimeZoneOffsets: [Int16] = stride(from: Int16(-12 * 60), through: 14 * 60, by: 15).map { $0 }
-
 /// An offset in minutes east of UTC as "UTC−07:00".
 func formattedUTCOffset(_ minutes: Int16) -> String {
     let sign = minutes < 0 ? "−" : "+"
@@ -564,6 +560,25 @@ func formattedUTCOffset(_ minutes: Int16) -> String {
 /// effect right now, daylight saving included.
 var phoneUTCOffsetMinutes: Int16 {
     Int16(TimeZone.current.secondsFromGMT() / 60)
+}
+
+/// This iPhone's time zone as a device takes it: the zone's own rule,
+/// daylight saving and all, or failing that the offset in effect now.
+var phoneTimeZoneRule: String {
+    zoneRule(identifier: TimeZone.current.identifier)
+        ?? fixedOffsetRule(minutesEast: phoneUTCOffsetMinutes)
+}
+
+/// A zone rule as what it reads at `date`: "PDT (UTC−07:00)", or just the
+/// offset for a zone named by its offset.
+func formattedTimeZoneRule(_ rule: String, at date: Date = .now) -> String {
+    let instant = Int64(date.timeIntervalSince1970)
+    guard let minutes = ruleOffsetMin(rule: rule, unixSeconds: instant) else { return rule }
+    let offset = formattedUTCOffset(minutes)
+    guard let name = ruleAbbreviation(rule: rule, unixSeconds: instant),
+          name != "UTC", name.allSatisfy(\.isLetter)
+    else { return offset }
+    return "\(name) (\(offset))"
 }
 
 extension UlcpFixKind {

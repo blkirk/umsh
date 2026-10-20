@@ -92,12 +92,6 @@ impl PropSet {
             .map(u16::from_le_bytes)
     }
 
-    pub fn i16(&self, key: u32) -> Option<i16> {
-        <[u8; 2]>::try_from(self.bytes(key)?)
-            .ok()
-            .map(i16::from_le_bytes)
-    }
-
     pub fn u32(&self, key: u32) -> Option<u32> {
         <[u8; 4]>::try_from(self.bytes(key)?)
             .ok()

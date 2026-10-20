@@ -961,16 +961,20 @@ async fn the_wall_clock_starts_unset_and_survives_a_round_trip() {
         Some(None),
         "a device starts not knowing the time"
     );
-    assert_eq!(time.tz_offset_min, Some(0));
+    assert_eq!(time.tz_rule.as_deref(), Some("UTC0"));
+    assert_eq!(time.time_24h, Some(true));
 
     assert_eq!(
         radio.set_time(Some(1_780_000_000)).await.unwrap(),
         Some(1_780_000_000)
     );
-    assert_eq!(radio.set_tz_offset(-480).await.unwrap(), -480);
+    let pacific = "PST8PDT,M3.2.0,M11.1.0";
+    assert_eq!(radio.set_tz_rule(pacific).await.unwrap(), pacific);
+    assert!(!radio.set_time_24h(false).await.unwrap());
     let time = radio.time().await.unwrap().unwrap();
     assert_eq!(time.epoch, Some(Some(1_780_000_000)));
-    assert_eq!(time.tz_offset_min, Some(-480));
+    assert_eq!(time.tz_rule.as_deref(), Some(pacific));
+    assert_eq!(time.time_24h, Some(false));
 
     // Clearing is a legitimate operation, not an error: it returns the
     // device to not knowing.
@@ -978,8 +982,8 @@ async fn the_wall_clock_starts_unset_and_survives_a_round_trip() {
     assert_eq!(radio.time().await.unwrap().unwrap().epoch, Some(None));
     // The zone is configuration and is unaffected by the clock.
     assert_eq!(
-        radio.time().await.unwrap().unwrap().tz_offset_min,
-        Some(-480)
+        radio.time().await.unwrap().unwrap().tz_rule.as_deref(),
+        Some(pacific)
     );
 }
 

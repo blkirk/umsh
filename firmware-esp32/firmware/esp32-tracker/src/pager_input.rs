@@ -27,6 +27,9 @@ static STOPPED: AtomicU32 = AtomicU32::new(0);
 static STOP_PROGRESS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static NAVIGATION: Channel<CriticalSectionRawMutex, UiInput, 64> = Channel::new();
 static NAVIGATION_PENDING: AtomicBool = AtomicBool::new(false);
+/// The lock button (BOOT) was pressed and let go before its hold shuts
+/// the board down. A press that silenced an alert does not count.
+pub(crate) static LOCK_BUTTON: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 pub fn discard_navigation() {
     critical_section::with(|cs| {
@@ -362,6 +365,7 @@ async fn run_button(pin: &mut Input<'static>, boot: bool) {
     let mut debounce = Debounce::new(false);
     let mut press_cycle = PressLatch::default();
     let mut shutdown_at = None;
+    let mut silenced = false;
     let mut debounce_guard = None;
     loop {
         let now = Instant::now();
@@ -375,10 +379,15 @@ async fn run_button(pin: &mut Input<'static>, boot: bool) {
         }
         if let Some(pressed) = debounce.sample(raw, now.as_millis()) {
             if boot {
-                shutdown_at = pressed.then_some(now + Duration::from_secs(4));
-                if pressed && super::alert::active() {
-                    super::alert::cancel();
+                if pressed {
+                    silenced = super::alert::active();
+                    if silenced {
+                        super::alert::cancel();
+                    }
+                } else if shutdown_at.is_some() && !silenced {
+                    LOCK_BUTTON.signal(());
                 }
+                shutdown_at = pressed.then_some(now + Duration::from_secs(4));
             } else if pressed {
                 finish_gesture(UiInput::Select, control(|c| c.policy.press_disposition()));
             } else {

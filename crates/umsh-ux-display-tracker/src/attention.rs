@@ -86,6 +86,16 @@ impl AttentionConfig {
         dim_ramp: Duration::from_secs(1),
     };
 
+    /// A locked emissive panel: lit long enough to read what arrived,
+    /// dimmed at 15 s, and dark three seconds after. Shorter than
+    /// [`EMISSIVE`](Self::EMISSIVE) because a locked screen is glanced
+    /// at, not worked in.
+    pub const LOCKED: Self = Self {
+        timeout: Duration::from_secs(18),
+        dim_margin: Duration::from_secs(3),
+        dim_ramp: Duration::from_secs(1),
+    };
+
     /// E-paper default: menu returns home after 30 s. Longer than the
     /// emissive timeout because nothing is being spent to keep the
     /// screen readable—only stale menu context is at stake—and
@@ -305,6 +315,22 @@ impl Attention {
         self.state = DisplayState::Active;
         self.ramp_step = 0;
         Some(Transition::Woke)
+    }
+
+    /// Let attention lapse now, as a lock button asks.
+    ///
+    /// Returns [`Transition::Lapsed`] when this actually ended it, and
+    /// `None` when it had already lapsed or a hold is pinning the panel
+    /// awake: whatever the hold is showing still has to be readable.
+    #[must_use = "a lapse that is not acted on leaves the panel lit while the policy calls it dark"]
+    pub fn sleep(&mut self, now_ms: u64) -> Option<Transition> {
+        if self.held() || self.is_lapsed() {
+            return None;
+        }
+        self.since_ms = now_ms;
+        self.state = DisplayState::Lapsed;
+        self.ramp_step = 0;
+        Some(Transition::Lapsed)
     }
 
     /// A qualified motion episode only wakes a fully lapsed display. Motion
@@ -769,5 +795,32 @@ mod tests {
             ..AttentionConfig::EMISSIVE
         });
         assert_eq!(a.poll(101_500), Some(Transition::Lapsed));
+    }
+
+    #[test]
+    fn sleep_lapses_at_once_and_a_wake_lights_it_again() {
+        let mut a = oled();
+        assert_eq!(a.sleep(5_000), Some(Transition::Lapsed));
+        assert!(a.is_lapsed());
+        assert_eq!(a.next_deadline(), None);
+        assert_eq!(a.sleep(6_000), None);
+        assert_eq!(a.wake(7_000), Some(Transition::Woke));
+        assert_eq!(a.brightness_permille(), 1_000);
+    }
+
+    #[test]
+    fn a_hold_keeps_sleep_from_darkening_the_panel() {
+        let mut a = oled();
+        let _ = a.set_hold(HoldReason::Pairing, true, 0);
+        assert_eq!(a.sleep(1_000), None);
+        assert!(!a.is_lapsed());
+    }
+
+    #[test]
+    fn a_locked_panel_dims_at_fifteen_seconds_and_goes_dark_at_eighteen() {
+        let mut a = Attention::new(DisplayKind::Emissive, AttentionConfig::LOCKED, 0);
+        assert_eq!(a.next_deadline(), Some(15_000));
+        assert_eq!(a.poll(15_000), Some(Transition::Dimming));
+        assert_eq!(a.poll(18_000), Some(Transition::Lapsed));
     }
 }

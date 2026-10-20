@@ -522,6 +522,8 @@ pub struct ClockModel {
     pub hour: u8,
     /// Local minute, 0–59.
     pub minute: u8,
+    /// Hours are written from 0 to 23; otherwise 1 to 12 with AM or PM.
+    pub hour24: bool,
 }
 
 impl ClockModel {
@@ -529,7 +531,16 @@ impl ClockModel {
     /// beside it—a bare `14:30` on a line of its own reads as a
     /// measurement without a name.
     fn write(&self, out: &mut String<LINE>) {
-        let _ = write!(out, "time {:02}:{:02}", self.hour, self.minute);
+        if self.hour24 {
+            let _ = write!(out, "time {:02}:{:02}", self.hour, self.minute);
+        } else {
+            let hour = match self.hour % 12 {
+                0 => 12,
+                hour => hour,
+            };
+            let half = if self.hour < 12 { "AM" } else { "PM" };
+            let _ = write!(out, "time {hour}:{:02} {half}", self.minute);
+        }
     }
 }
 
@@ -2436,6 +2447,7 @@ mod tests {
             status.clock = Some(ClockModel {
                 hour: 23,
                 minute: 59,
+                hour24: true,
             });
             status.pairing = PairingState::Open { pin: Some(123456) };
             render_frame(&mut about, &layout, &model, &status);
@@ -2780,6 +2792,7 @@ mod tests {
             status.clock = Some(ClockModel {
                 hour: 23,
                 minute: 5,
+                hour24: true,
             });
             render_frame(
                 &mut known,
@@ -2828,13 +2841,37 @@ mod tests {
                     ClockModel {
                         hour: 23,
                         minute: 5,
+                        hour24: true,
                     },
                     "time 23:05",
                 ),
                 // Midnight is a real reading, not an absent one: 00:00
                 // must draw, or the minute a day it is midnight would
                 // look like a device that has forgotten the time.
-                (ClockModel { hour: 0, minute: 0 }, "time 00:00"),
+                (
+                    ClockModel {
+                        hour: 0,
+                        minute: 0,
+                        hour24: true,
+                    },
+                    "time 00:00",
+                ),
+                (
+                    ClockModel {
+                        hour: 0,
+                        minute: 5,
+                        hour24: false,
+                    },
+                    "time 12:05 AM",
+                ),
+                (
+                    ClockModel {
+                        hour: 23,
+                        minute: 5,
+                        hour24: false,
+                    },
+                    "time 11:05 PM",
+                ),
             ] {
                 status.clock = Some(clock);
                 let mut panel = TestPanel::new(layout.size);
@@ -2878,6 +2915,7 @@ mod tests {
             status.clock = Some(ClockModel {
                 hour: 14,
                 minute: 30,
+                hour24: true,
             });
             render_frame(&mut with, &layout, &UiModel::new(MenuItems::all()), &status);
 
@@ -2903,6 +2941,7 @@ mod tests {
         status.clock = Some(ClockModel {
             hour: 14,
             minute: 30,
+            hour24: true,
         });
 
         let mut panel = TestPanel::new(layout.size);

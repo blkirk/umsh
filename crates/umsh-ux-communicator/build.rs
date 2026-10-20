@@ -16,6 +16,8 @@ struct Spec {
     file: &'static str,
     weight: f32,
     sizes: &'static [u16],
+    /// The characters rendered, when not every one the font maps.
+    only: Option<&'static str>,
 }
 
 const SANS: &str = "fonts/MPLUS1[wght]-latin.ttf";
@@ -28,18 +30,21 @@ const SPECS: &[Spec] = &[
         file: SANS,
         weight: 400.0,
         sizes: UI_SIZES,
+        only: None,
     },
     Spec {
         name: "MEDIUM",
         file: SANS,
         weight: 500.0,
         sizes: UI_SIZES,
+        only: None,
     },
     Spec {
         name: "SEMIBOLD",
         file: SANS,
         weight: 600.0,
         sizes: UI_SIZES,
+        only: None,
     },
     // The small and large sizes are for avatar lettering.
     Spec {
@@ -47,24 +52,37 @@ const SPECS: &[Spec] = &[
         file: SANS,
         weight: 700.0,
         sizes: &[10, 13, 16, 17, 20, 26],
+        only: None,
     },
     Spec {
         name: "EXTRABOLD",
         file: SANS,
         weight: 800.0,
         sizes: UI_SIZES,
+        only: None,
     },
     Spec {
         name: "MONO",
         file: MONO,
         weight: 400.0,
         sizes: &[16, 20],
+        only: None,
     },
     Spec {
         name: "MONO_BOLD",
         file: MONO,
         weight: 700.0,
         sizes: &[10, 13, 16, 20],
+        only: None,
+    },
+    // The lock screen's time: digits alone, large, beside the date and
+    // unread chats, and larger in the middle when nothing else is shown.
+    Spec {
+        name: "CLOCK",
+        file: SANS,
+        weight: 700.0,
+        sizes: &[56, 72],
+        only: Some("0123456789:"),
     },
 ];
 
@@ -551,6 +569,52 @@ const ICONS: &[(&str, u32, f32, &[Layer])] = &[
             stroke("M0 -8.5 V-1.5", 1.6),
         ],
     ),
+    // The lock screen's: the padlock before its hint, shut until the wheel
+    // has turned far enough and open while a press unlocks; and the clock
+    // in place of the time while the time is not known.
+    (
+        "PADLOCK",
+        18,
+        1.1,
+        &[
+            stroke(
+                "M-3.5 -0.75 V-3.75 Q-3.5 -7.75 0 -7.75 Q3.5 -7.75 3.5 -3.75 V-0.75",
+                1.4,
+            ),
+            fill(
+                "M-4 -0.75 H4 Q5.5 -0.75 5.5 0.75 V6.25 Q5.5 7.75 4 7.75 H-4 \
+                 Q-5.5 7.75 -5.5 6.25 V0.75 Q-5.5 -0.75 -4 -0.75 Z",
+            ),
+        ],
+    ),
+    (
+        "PADLOCK_OPEN",
+        18,
+        1.1,
+        &[
+            stroke(
+                "M-3.5 -0.75 V-4.75 Q-3.5 -8.75 0 -8.75 Q3.5 -8.75 3.5 -4.75 V-3.25",
+                1.4,
+            ),
+            fill(
+                "M-4 -0.75 H4 Q5.5 -0.75 5.5 0.75 V6.25 Q5.5 7.75 4 7.75 H-4 \
+                 Q-5.5 7.75 -5.5 6.25 V0.75 Q-5.5 -0.75 -4 -0.75 Z",
+            ),
+        ],
+    ),
+    // Under the unlock bar: which way to turn.
+    ("DOWN", 12, 1.0, &[stroke("M-4 -2 L0 2 L4 -2", 1.6)]),
+    // Over and under a part of the date and time being changed.
+    ("UP", 12, 1.0, &[stroke("M-4 2 L0 -2 L4 2", 1.6)]),
+    (
+        "CLOCK",
+        40,
+        2.4,
+        &[
+            stroke("M-7 0 A7 7 0 1 0 7 0 A7 7 0 1 0 -7 0 Z", 1.3),
+            stroke("M0 -4 V0 L3 2", 1.3),
+        ],
+    ),
     // A battery with only its last cell left: the banner's at 22, and the
     // screen's when it is empty at five times that.
     ("BATTERY_LOW", 22, 1.0, BATTERY),
@@ -863,6 +927,7 @@ fn face(
     font.charmap().enumerate(|code, id| {
         if let Some(c) = char::from_u32(code)
             && id != 0
+            && spec.only.is_none_or(|only| only.contains(c))
         {
             chars.push((c, id));
         }

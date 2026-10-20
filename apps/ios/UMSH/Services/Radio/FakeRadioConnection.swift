@@ -1146,11 +1146,13 @@ actor FakeRadioConnection: RadioConnection {
 
     func configurePositioning(
         gnss: UlcpGnssSettingsRecord?,
-        timeZoneOffsetMinutes: Int16?
+        timeZoneRule: String?,
+        time24h: Bool?
     ) async throws {
         var updated = snapshot
         updated.provisioning?.gnss = gnss
-        updated.provisioning?.timeZoneOffsetMinutes = timeZoneOffsetMinutes
+        updated.provisioning?.timeZoneRule = timeZoneRule
+        updated.provisioning?.time24h = time24h
         publish(updated)
     }
 
@@ -1509,7 +1511,8 @@ struct FakeManagedDevice: Sendable {
             // A clock a few seconds behind the phone's, so the Time screen
             // has a drift to state, and Pacific daylight time to state it in.
             id.time: UInt32(Date.now.timeIntervalSince1970 - 4).littleEndianData,
-            id.tzOffset: Int16(-420).littleEndianData,
+            id.tzRule: Data("PST8PDT,M3.2.0,M11.1.0".utf8),
+            id.time24h: Data([0]),
             // The receiver's own view, by property number: these five are
             // read through the decoded fix rather than named individually
             // by any screen, so there is nothing to borrow the numbers

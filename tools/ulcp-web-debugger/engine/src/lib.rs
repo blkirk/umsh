@@ -776,13 +776,23 @@ const PROPERTY_SPECS: &[PropertySpec] = &[
         Some(umsh_ulcp::ids::cap::TIME),
     ),
     spec(
-        prop::TZ_OFFSET,
+        prop::TZ_RULE,
         "Positioning",
-        "Local time-zone offset east of UTC",
+        "Local time zone, as a POSIX TZ rule",
         true,
         true,
-        "integer",
-        Some("min"),
+        "text",
+        None,
+        Some(umsh_ulcp::ids::cap::TIME),
+    ),
+    spec(
+        prop::TIME_24H,
+        "Positioning",
+        "Whether a shown clock writes hours from 0 to 23",
+        true,
+        true,
+        "boolean",
+        None,
         Some(umsh_ulcp::ids::cap::TIME),
     ),
     spec(
@@ -1720,6 +1730,7 @@ fn decode_property(key: u32, value: &[u8]) -> Option<DecodedValue> {
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
         | prop::GNSS_TIME_TRUST
+        | prop::TIME_24H
         | prop::MESHCORE_FORWARDING_ENABLED
             if value.len() == 1 && value[0] <= 1 =>
         {
@@ -1746,19 +1757,7 @@ fn decode_property(key: u32, value: &[u8]) -> Option<DecodedValue> {
                 ),
             )
         }
-        prop::TZ_OFFSET if value.len() == 2 => {
-            let minutes = i16::from_le_bytes(value.try_into().ok()?);
-            let magnitude = minutes.unsigned_abs();
-            (
-                "tz_offset",
-                format!(
-                    "UTC{}{:02}:{:02}",
-                    if minutes < 0 { '-' } else { '+' },
-                    magnitude / 60,
-                    magnitude % 60
-                ),
-            )
-        }
+        prop::TZ_RULE => ("tz_rule", String::from_utf8(value.to_vec()).ok()?),
         prop::GNSS_FIX if !value.is_empty() => (
             "enum",
             match umsh_ulcp::gnss::FixKind::from_wire(value[0]) {
@@ -1927,6 +1926,7 @@ fn editable_property_text(key: u32, value: &[u8]) -> Option<String> {
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
         | prop::GNSS_TIME_TRUST
+        | prop::TIME_24H
         | prop::MESHCORE_FORWARDING_ENABLED
             if value.len() == 1 && value[0] <= 1 =>
         {
@@ -1938,9 +1938,7 @@ fn editable_property_text(key: u32, value: &[u8]) -> Option<String> {
         prop::TIME if value.len() == 4 => {
             Some(u32::from_le_bytes(value.try_into().ok()?).to_string())
         }
-        prop::TZ_OFFSET if value.len() == 2 => {
-            Some(i16::from_le_bytes(value.try_into().ok()?).to_string())
-        }
+        prop::TZ_RULE => String::from_utf8(value.to_vec()).ok(),
         prop::GNSS_IDENT_PRECISION if value.len() == 1 => Some(value[0].to_string()),
         prop::PHY_TX_POWER if value.len() == 1 => Some((value[0] as i8).to_string()),
         prop::PHY_LORA_SF | prop::PHY_LORA_CR if value.len() == 1 => Some(value[0].to_string()),
@@ -1971,6 +1969,7 @@ fn encode_property_text(key: u32, value: &str) -> Result<Vec<u8>, String> {
         | prop::GNSS_ENABLED
         | prop::GNSS_IDENT_UPDATE
         | prop::GNSS_TIME_TRUST
+        | prop::TIME_24H
         | prop::MESHCORE_FORWARDING_ENABLED => {
             let parsed = match value.to_ascii_lowercase().as_str() {
                 "true" | "1" | "on" | "yes" => 1,
@@ -1987,12 +1986,12 @@ fn encode_property_text(key: u32, value: &str) -> Result<Vec<u8>, String> {
                 .to_le_bytes()
                 .to_vec(),
         ),
-        prop::TZ_OFFSET => Ok(parse_integer::<i16>(
-            value,
-            "minutes east of UTC, from -720 to 840",
-        )?
-        .to_le_bytes()
-        .to_vec()),
+        prop::TZ_RULE => {
+            if text.len() > 64 {
+                return Err("a time zone rule is at most 64 octets".into());
+            }
+            Ok(value.as_bytes().to_vec())
+        }
         prop::GNSS_IDENT_PRECISION => Ok(vec![parse_integer::<u8>(
             value,
             "a location precision from 1 to 7 bytes",

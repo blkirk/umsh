@@ -18,9 +18,10 @@ use heapless::Vec;
 use super::label;
 use super::setting::{card, choice};
 use crate::avatar::{AvatarStyle, BuiltinChannel};
+use crate::clock::{Local, MONTHS, WEEKDAYS, civil};
 use crate::model::{
     ChannelAccess, ChatId, ChatKind, Delivery, Direction, Draft, MAX_MESSAGES, Message, MessageId,
-    Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, State, hops_text,
+    Messages, Parts, Presence, Quote, Reacted, Reaction, Reactions, Rule, State, hops_text,
 };
 use crate::nav::{Screen, keys};
 use crate::text::{DraftText, SharedText};
@@ -146,7 +147,8 @@ pub fn view(state: &State, chat: ChatId) -> impl View<Rgb565, State> + use<> {
             open,
             Times {
                 now: state.wall_time,
-                offset_min: state.utc_offset_min(),
+                zone: state.clock.zone,
+                hour24: state.hour24(),
                 // A full window may have more behind it.
                 older: messages.len() == MAX_MESSAGES,
             },
@@ -1098,7 +1100,8 @@ static PART_INDICES: [u16; 16] = {
 struct Times {
     /// Now, in Unix seconds, when the clock is known.
     now: Option<u32>,
-    offset_min: i16,
+    zone: Rule,
+    hour24: bool,
     /// Messages older than those shown may be kept.
     older: bool,
 }
@@ -1118,34 +1121,36 @@ fn separator(messages: &Messages, i: usize, times: Times) -> Option<Stamp> {
     if !lull {
         return None;
     }
-    let local = |time: u32| i64::from(time) + i64::from(times.offset_min) * 60;
+    // Each in the offset the zone kept then: a message from before a
+    // change of daylight time keeps the time it was sent at.
+    let local = |time: u32| Local::at(time, times.zone.offset_at(i64::from(time)));
     Some(Stamp {
-        day: local(time).div_euclid(86_400) as i32,
-        minute: (local(time).rem_euclid(86_400) / 60) as u16,
-        today: times.now.map(|now| local(now).div_euclid(86_400) as i32),
+        at: local(time),
+        today: times.now.map(|now| local(now).day),
+        hour24: times.hour24,
     })
 }
 
-/// When a lull ended, in local time: the day since 1970-01-01 and the
-/// minute of that day, and today when the clock is known.
+/// When a lull ended, in local time, and today when the clock is known.
 #[derive(Clone, Copy)]
 struct Stamp {
-    day: i32,
-    minute: u16,
+    at: Local,
     today: Option<i32>,
+    hour24: bool,
 }
 
 /// A stamp's day: Today, Yesterday, a weekday within the week, or a date.
 fn day_label(stamp: &Stamp) -> heapless::String<16> {
     let mut label = heapless::String::new();
-    match stamp.today.map(|today| today - stamp.day) {
+    let day = stamp.at.day;
+    match stamp.today.map(|today| today - day) {
         Some(0) => _ = label.push_str("Today"),
         Some(1) => _ = label.push_str("Yesterday"),
         // Inside the last week a weekday places a message better than a
         // date does.
-        Some(2..=6) => _ = label.push_str(WEEKDAYS[(stamp.day + 4).rem_euclid(7) as usize]),
+        Some(2..=6) => _ = label.push_str(WEEKDAYS[(day + 4).rem_euclid(7) as usize]),
         _ => {
-            let (year, month, date) = civil(i64::from(stamp.day));
+            let (year, month, date) = civil(i64::from(day));
             _ = core::fmt::write(
                 &mut label,
                 format_args!("{} {date}", MONTHS[month as usize - 1]),
@@ -1162,44 +1167,11 @@ fn day_label(stamp: &Stamp) -> heapless::String<16> {
     label
 }
 
-const WEEKDAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-/// The year, month, and day of the month of `days` since 1970-01-01, in
-/// the proleptic Gregorian calendar.
-fn civil(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    (year, month, day)
-}
-
 /// How far the message after a separator stands below it.
 const GAP_SEPARATOR: u32 = 6;
 
 fn separator_line(stamp: &Stamp) -> impl View<Rgb565, ()> + use<> {
-    let mut clock: heapless::String<8> = heapless::String::new();
-    _ = core::fmt::write(
-        &mut clock,
-        format_args!("{:02}:{:02}", stamp.minute / 60, stamp.minute % 60),
-    );
+    let clock = stamp.at.time(stamp.hour24);
     HStack::new((
         Text::new(day_label(stamp), &font::BOLD)
             .with_font_size(theme::SMALL)

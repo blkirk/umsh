@@ -3,6 +3,7 @@
 
 use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
+use heapless::String;
 
 use super::{STRIP, label};
 use crate::keyboard::Latch;
@@ -11,11 +12,13 @@ use crate::{font, icon, theme};
 
 /// The strip; on first run, the battery alone, there being no name or
 /// time yet to show. Shift's and Alt's states come first among the
-/// indicators, in the keyboard's order.
+/// indicators, in the keyboard's order. The time is the local time, while
+/// the clock is known; the lock screen leaves it out to show it larger.
 pub fn view(
     s: &StatusStrip,
     setup: bool,
     (shift, alt): (Latch, Latch),
+    time: Option<String<8>>,
 ) -> impl View<Rgb565, State> + use<> {
     let shown = !setup;
     ZStack::new((
@@ -52,7 +55,8 @@ pub fn view(
         ))
         .with_spacing(3)
         .padding(Edges::Horizontal, 8),
-        shown.then(|| label::<8>(&s.time, &font::BOLD, theme::SMALL, theme::TEXT)),
+        time.filter(|_| shown)
+            .map(|time| label::<8>(&time, &font::BOLD, theme::SMALL, theme::TEXT)),
     ))
     .frame()
     .with_height(STRIP)

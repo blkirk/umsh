@@ -1,13 +1,14 @@
 //! `time`: read, set, or clear the device's wall clock (`PROP_TIME`,
-//! `PROP_TZ_OFFSET`).
+//! `PROP_TZ_RULE`, `PROP_TIME_24H`).
 //!
 //! The clock is not persisted—an epoch written to flash accumulates
 //! unbounded error while the device is off—so it comes back from a real
 //! source or not at all. The time zone *is* persisted: where a device is
 //! meant to be is known even when the time is not.
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 
+use umsh::hal::tz::Rule;
 use umsh_gnss::DateTime;
 
 use super::persist;
@@ -28,78 +29,64 @@ pub enum TimeOp {
     /// Return the device to not knowing what time it is. A device with a
     /// screen stops showing a clock at all.
     Clear,
-    /// Show or set the local time-zone offset.
+    /// Show or set the time zone.
     Tz {
         #[command(subcommand)]
         op: Option<TzOp>,
+    },
+    /// Show or set whether the device's clock writes hours from 0 to 23
+    /// (24) or 1 to 12 (12).
+    Hours {
+        #[arg(value_parser = ["12", "24"])]
+        hours: Option<String>,
     },
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub enum TzOp {
-    /// Print the configured offset.
+    /// Print the configured zone.
     Show,
-    /// Set the offset, as `±HH:MM`, `±HHMM`, `±H`, or a minute count.
+    /// Set the zone, as a zone name such as `America/Los_Angeles`, read
+    /// from this host's time zone database, or as a POSIX TZ rule such as
+    /// `PST8PDT,M3.2.0,M11.1.0`.
     Set {
-        #[arg(value_name = "±HH:MM|MINUTES", allow_hyphen_values = true)]
-        offset: TzOffsetArg,
+        #[arg(value_name = "ZONE|RULE", allow_hyphen_values = true)]
+        zone: String,
     },
-    /// Set the offset from this host's current time zone.
-    ///
-    /// It is the offset in effect right now that is copied, not the
-    /// zone: a device configured in July under daylight saving keeps
-    /// that offset into the winter, because the device has no zone
-    /// database to shift it with.
+    /// Set the zone to this host's.
     Sync,
 }
 
-/// A time-zone offset in minutes east of UTC.
-///
-/// Accepts the shapes people actually type—`-08:00`, `+0530`, `-8`,
-/// `330`—because the one thing a time-zone argument must not do is
-/// silently mean a different zone than it looks like.
-#[derive(Clone, Copy, Debug)]
-pub struct TzOffsetArg(pub i16);
+/// Where a host keeps its time zone database.
+const ZONEINFO: &str = "/usr/share/zoneinfo";
 
-impl std::str::FromStr for TzOffsetArg {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Err("empty time-zone offset".to_string());
-        }
-        let (sign, rest) = match trimmed.as_bytes()[0] {
-            b'-' => (-1i32, &trimmed[1..]),
-            b'+' => (1, &trimmed[1..]),
-            _ => (1, trimmed),
-        };
-        let minutes = if let Some((hours, minutes)) = rest.split_once(':') {
-            parse_part(hours)? * 60 + parse_part(minutes)?
-        } else if rest.len() == 4 && rest.chars().all(|c| c.is_ascii_digit()) {
-            // `+0530`: hours and minutes run together, the shape RFC 3339
-            // and NMEA both use.
-            parse_part(&rest[..2])? * 60 + parse_part(&rest[2..])?
-        } else {
-            let value = parse_part(rest)?;
-            // A bare number small enough to be an hour count is one; the
-            // zones people name in whole hours vastly outnumber the ones
-            // anybody expresses as 60 minutes.
-            if value <= 14 { value * 60 } else { value }
-        };
-        let minutes = sign * minutes;
-        if !(-12 * 60..=14 * 60).contains(&minutes) {
-            return Err(format!(
-                "{trimmed} is outside the range of real time zones (UTC-12:00 to UTC+14:00)"
-            ));
-        }
-        Ok(Self(minutes as i16))
-    }
+/// The rule a zone follows today, from its TZif file.
+fn tzif_rule(tzif: &[u8]) -> Option<String> {
+    umsh::hal::tz::tzif_rule(tzif).map(str::to_owned)
 }
 
-fn parse_part(text: &str) -> Result<i32, String> {
-    text.parse::<i32>()
-        .map_err(|_| format!("{text} is not a number"))
+/// `zone` as a rule: a zone name read from this host's database, or a
+/// rule given as one.
+fn zone_rule(zone: &str) -> Result<String> {
+    if Rule::parse(zone).is_ok() {
+        return Ok(zone.to_owned());
+    }
+    let path = std::path::Path::new(ZONEINFO).join(zone.trim_start_matches(':'));
+    let tzif = std::fs::read(&path)
+        .with_context(|| format!("{zone} is neither a POSIX TZ rule nor a zone in {ZONEINFO}"))?;
+    tzif_rule(&tzif).with_context(|| format!("{} records no rule", path.display()))
+}
+
+/// This host's zone, as a rule: `TZ` if it is set, else `/etc/localtime`.
+fn host_rule() -> Result<String> {
+    if let Ok(zone) = std::env::var("TZ")
+        && !zone.is_empty()
+    {
+        return zone_rule(&zone);
+    }
+    let tzif = std::fs::read("/etc/localtime")
+        .context("this host has no /etc/localtime; give the zone with `time tz set`")?;
+    tzif_rule(&tzif).context("/etc/localtime records no rule")
 }
 
 pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
@@ -114,11 +101,21 @@ pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
                 Some(Some(epoch)) => {
                     field("time", format_utc(epoch));
                     subfield("epoch", epoch);
-                    match time.tz_offset_min {
-                        Some(offset) => match DateTime::from_unix(epoch).shifted(offset) {
+                    match time
+                        .tz_rule
+                        .as_deref()
+                        .and_then(|rule| Rule::parse(rule).ok())
+                    {
+                        Some(rule) => match DateTime::from_unix(epoch)
+                            .shifted(rule.offset_at(i64::from(epoch)))
+                        {
                             Some(local) => subfield(
                                 "local",
-                                format!("{} {}", format_civil(local), format_tz(offset)),
+                                format!(
+                                    "{} {}",
+                                    format_civil(local),
+                                    format_tz(rule.offset_at(i64::from(epoch)))
+                                ),
                             ),
                             None => subfield("local", "outside the representable range"),
                         },
@@ -128,11 +125,11 @@ pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
                 Some(None) => {
                     field("time", "not set");
                     note("the device does not know what time it is and shows no clock");
-                    subfield("zone", or_unavailable(time.tz_offset_min, format_tz));
+                    subfield("zone", or_unavailable(time.tz_rule, |rule| rule));
                 }
                 None => {
                     field("time", UNAVAILABLE);
-                    subfield("zone", or_unavailable(time.tz_offset_min, format_tz));
+                    subfield("zone", or_unavailable(time.tz_rule, |rule| rule));
                 }
             }
             return Ok(());
@@ -155,20 +152,32 @@ pub async fn run(app: &mut App, op: Option<TimeOp>) -> Result<()> {
                 let Some(time) = device.time().await? else {
                     bail!("device does not advertise CAP_TIME");
                 };
+                println!("time zone {}", or_unavailable(time.tz_rule, |rule| rule));
+                return Ok(());
+            }
+            TzOp::Set { zone } => {
+                let stored = device.set_tz_rule(&zone_rule(&zone)?).await?;
+                println!("time zone {stored}");
+            }
+            TzOp::Sync => {
+                let stored = device.set_tz_rule(&host_rule()?).await?;
+                println!("time zone {stored} (from this host)");
+            }
+        },
+        TimeOp::Hours { hours } => match hours {
+            None => {
+                let Some(time) = device.time().await? else {
+                    bail!("device does not advertise CAP_TIME");
+                };
                 println!(
-                    "time zone {}",
-                    or_unavailable(time.tz_offset_min, format_tz)
+                    "hours {}",
+                    or_unavailable(time.time_24h, |on| if on { "24" } else { "12" }.to_string())
                 );
                 return Ok(());
             }
-            TzOp::Set { offset } => {
-                let stored = device.set_tz_offset(offset.0).await?;
-                println!("time zone {}", format_tz(stored));
-            }
-            TzOp::Sync => {
-                let offset = host_tz_offset()?;
-                let stored = device.set_tz_offset(offset).await?;
-                println!("time zone {} (from this host)", format_tz(stored));
+            Some(hours) => {
+                let on = device.set_time_24h(hours == "24").await?;
+                println!("hours {}", if on { "24" } else { "12" });
             }
         },
     }
@@ -187,33 +196,6 @@ fn host_epoch() -> Result<u32> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
     u32::try_from(now.as_secs())
         .map_err(|_| anyhow::anyhow!("this host's clock is outside the range PROP_TIME can carry"))
-}
-
-/// This host's current UTC offset, in minutes east.
-///
-/// Read through the C library rather than a date crate: `localtime_r`
-/// resolves `TZ`, the zone database, and today's daylight-saving state
-/// the same way every other program on the machine does, which is what
-/// "the system time zone" means to the person typing this.
-#[cfg(unix)]
-fn host_tz_offset() -> Result<i16> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-    let seconds = libc::time_t::try_from(now.as_secs())
-        .map_err(|_| anyhow::anyhow!("this host's clock is outside the range time_t can carry"))?;
-    let mut parts: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: both pointers are to live, correctly typed locals, and
-    // `localtime_r` writes only through the second.
-    if unsafe { libc::localtime_r(&seconds, &mut parts) }.is_null() {
-        bail!("this host has no readable local time zone");
-    }
-    let minutes = parts.tm_gmtoff / 60;
-    i16::try_from(minutes)
-        .map_err(|_| anyhow::anyhow!("this host's UTC offset ({minutes} minutes) is not a zone"))
-}
-
-#[cfg(not(unix))]
-fn host_tz_offset() -> Result<i16> {
-    bail!("this platform exposes no system time zone; give the offset with `time tz set`")
 }
 
 pub fn format_utc(epoch: u32) -> String {
@@ -238,34 +220,14 @@ pub fn format_tz(minutes: i16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
-    fn offsets_parse_in_every_shape_people_write_them() {
-        for (text, expected) in [
-            ("-08:00", -480),
-            ("+05:30", 330),
-            ("+0530", 330),
-            ("-0800", -480),
-            ("-8", -480),
-            ("+14", 840),
-            ("0", 0),
-            ("330", 330),
-            ("-330", -330),
-        ] {
-            assert_eq!(
-                TzOffsetArg::from_str(text).unwrap().0,
-                expected,
-                "parsing {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn offsets_outside_the_real_range_are_refused() {
-        for text in ["+15:00", "-13:00", "900", "nonsense", ""] {
-            assert!(TzOffsetArg::from_str(text).is_err(), "accepted {text}");
-        }
+    fn zones_and_rules_both_name_a_rule() {
+        assert_eq!(
+            zone_rule("EST5EDT,M3.2.0,M11.1.0").unwrap(),
+            "EST5EDT,M3.2.0,M11.1.0"
+        );
+        assert!(zone_rule("Nowhere/Special").is_err());
     }
 
     #[test]
@@ -277,11 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn the_host_zone_is_a_real_zone() {
-        // Whatever the build machine's TZ is, the answer has to be one a
-        // device would accept—the same range `TzOffsetArg` enforces.
-        let minutes = host_tz_offset().expect("a host has a time zone");
-        assert!((-12 * 60..=14 * 60).contains(&minutes), "{minutes}");
+    fn the_host_zone_is_a_rule() {
+        let rule = host_rule().expect("a host has a time zone");
+        assert!(Rule::parse(&rule).is_ok(), "{rule}");
     }
 
     #[test]

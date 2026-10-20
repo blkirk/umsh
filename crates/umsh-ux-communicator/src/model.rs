@@ -3,9 +3,12 @@
 
 use buoyant::view::EditBuffer;
 use heapless::{String, Vec};
+pub use umsh_hal::tz::Rule;
 
 use crate::avatar::{AvatarStyle, BuiltinChannel};
+use crate::clock::Local;
 use crate::keyboard::{Aids, Keyboard};
+use crate::lock::Lock;
 use crate::nav::{Screen, keys};
 use crate::text::{DraftText, SharedText, TextHeap};
 
@@ -67,10 +70,10 @@ pub fn age(since: Option<u32>, now: Option<u32>) -> Age {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct StatusStrip {
     pub device_name: String<24>,
-    /// Local time, already formatted, such as `14:32`.
-    pub time: String<8>,
     /// Remaining charge in thirds, 0 to 3.
     pub battery_segments: u8,
+    /// Remaining charge in percent, when it is known.
+    pub battery_percent: Option<u8>,
     /// External power is charging the battery, or has charged it.
     pub charging: bool,
     /// Bluetooth, while it is on.
@@ -317,6 +320,38 @@ impl KeyboardSettings {
         Aids {
             capitalize: self.capitalize,
             period: self.period,
+        }
+    }
+}
+
+/// The clock's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockSettings {
+    /// The receiver sets the clock, on a board with one.
+    pub automatic: Option<bool>,
+    /// Hours are written from 0 to 23.
+    pub hour24: bool,
+    /// The time zone.
+    pub zone: Rule,
+}
+
+/// Where the clock's time came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockSource {
+    /// Set by hand, here or from a linked phone.
+    Manual,
+    /// The GNSS receiver.
+    Gnss,
+    /// A clock on the board that keeps time while it is off.
+    Rtc,
+}
+
+impl Default for ClockSettings {
+    fn default() -> Self {
+        Self {
+            automatic: None,
+            hour24: true,
+            zone: Rule::UTC,
         }
     }
 }
@@ -650,8 +685,9 @@ impl Message {
 /// How a message reached this device, for its details.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Details {
-    /// When it was received or sent, already formatted, such as `14:29`.
-    pub time: String<8>,
+    /// When it was received or sent, in Unix seconds, when the clock was
+    /// known.
+    pub time: Option<u32>,
     /// How many hops it took: one when heard directly.
     pub hops: Option<u8>,
     /// The routers it came through, already formatted.
@@ -740,6 +776,8 @@ pub enum Setting {
     ShareLocation,
     Keyboard,
     Brightness,
+    Clock,
+    Time,
 }
 
 /// What changed in the node without the interface asking. An event names
@@ -928,8 +966,24 @@ pub trait Node {
     /// Pings `peer`. Its answer shows in their detail.
     fn ping(&self, peer: PeerId);
 
-    /// Local time's offset from UTC, in minutes.
-    fn utc_offset_min(&self) -> i16;
+    /// The clock's settings as they stand.
+    fn clock(&self) -> ClockSettings;
+
+    /// Whether the receiver sets the clock.
+    fn set_clock_automatic(&self, on: bool);
+
+    /// Sets the clock to `time`, in Unix seconds.
+    fn set_time(&self, time: u32);
+
+    /// Sets the time zone to `rule`, a POSIX TZ rule.
+    fn set_zone(&self, rule: &str);
+
+    /// Whether hours are written from 0 to 23.
+    fn set_hour24(&self, on: bool);
+
+    /// Where the clock's time came from, and when on the board's clock in
+    /// milliseconds, while it is known.
+    fn clock_source(&self) -> Option<(ClockSource, u64)>;
 
     /// Asks `peer` for their identity. What they answer comes as
     /// [`NodeEvent::PeerChanged`].
@@ -1053,12 +1107,16 @@ pub enum Notice {
     BatteryLow { percent: u8 },
 }
 
-/// A chat that got a message while the panel was dark.
+/// A chat that got a message while the interface was locked, as the lock
+/// screen lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Arrived {
     pub chat: ChatId,
     /// The newest message, with its sender ahead of it in a channel.
     pub text: SharedText,
+    /// When it arrived, on the board's clock, in milliseconds: its age is
+    /// known even while the time of day is not.
+    pub at: u64,
 }
 
 /// The top-level lists the rail switches between.
@@ -1081,6 +1139,8 @@ pub struct State {
     /// The time, in Unix seconds, as the board last read its clock, when
     /// it is known. Ages are counted to it.
     pub wall_time: Option<u32>,
+    /// The clock's settings, as the node last said.
+    pub clock: ClockSettings,
     /// The open chat's messages, while one is open.
     pub conversation: Option<Conversation>,
     /// The screens, the one shown last. The Chats screen is always first.
@@ -1093,8 +1153,13 @@ pub struct State {
     pub banner: Option<Banner>,
     /// The panel is dark: nothing on it is being read.
     pub dark: bool,
-    /// The chats that got messages while the panel was dark, in the order
-    /// they first did, for the screen the first of them woke it to.
+    /// Whether the interface is locked, and how far toward unlocking.
+    pub lock: Lock,
+    /// The board's clock, in milliseconds, as of the last input, event, or
+    /// change of the panel: what the lock screen counts ages to.
+    pub uptime: u64,
+    /// The chats that got messages while the interface was locked, in the
+    /// order they first did, for the lock screen.
     pub arrived: Vec<Arrived, MAX_CHATS>,
     /// The board is turning off: shown over everything, and the end of
     /// input.
@@ -1154,11 +1219,13 @@ impl core::fmt::Debug for State {
             .field("chats", &self.chats)
             .field("peers", &self.peers)
             .field("wall_time", &self.wall_time)
+            .field("clock", &self.clock)
             .field("conversation", &self.conversation)
             .field("screens", &self.screens)
             .field("airtime_wait", &self.airtime_wait)
             .field("banner", &self.banner)
             .field("dark", &self.dark)
+            .field("lock", &self.lock)
             .field("arrived", &self.arrived)
             .field("ending", &self.ending)
             .field("keyboard", &self.keyboard)
@@ -1181,12 +1248,15 @@ impl State {
             chats: Vec::new(),
             peers: Vec::new(),
             wall_time: None,
+            clock: ClockSettings::default(),
             conversation: None,
             screens,
             node,
             airtime_wait: None,
             banner: None,
             dark: false,
+            lock: Lock::default(),
+            uptime: 0,
             arrived: Vec::new(),
             ending: None,
             keyboard: Keyboard::default(),
@@ -1287,10 +1357,17 @@ impl State {
         age(chat.last_activity, self.wall_time)
     }
 
-    /// Local time's offset from UTC, in minutes.
+    /// `time`, in Unix seconds, in local time: in the offset the zone
+    /// keeps at that moment, which need not be the one it keeps now.
     #[must_use]
-    pub fn utc_offset_min(&self) -> i16 {
-        self.node.utc_offset_min()
+    pub fn local(&self, time: u32) -> Local {
+        Local::at(time, self.clock.zone.offset_at(i64::from(time)))
+    }
+
+    /// Whether times are written on a 24-hour clock.
+    #[must_use]
+    pub fn hour24(&self) -> bool {
+        self.clock.hour24
     }
 
     /// The board read its clock: `time`, in Unix seconds, or not known.
@@ -1429,8 +1506,6 @@ impl State {
         }
         if self.conversation.as_ref().is_some_and(|c| c.chat == chat) {
             self.leave_chats();
-        } else if matches!(self.screen(), Screen::Wake { .. }) && self.arrived.is_empty() {
-            self.back();
         }
         // The row that took its place is focused instead.
         let next = self
@@ -1456,7 +1531,6 @@ impl State {
     fn leave_chats(&mut self) {
         self.screens.truncate(1);
         self.conversation = None;
-        self.arrived.clear();
     }
 }
 
@@ -1564,8 +1638,11 @@ impl State {
     /// Takes in `message`, which arrived in `chat` and is already kept by
     /// the node, at `now` on the board's clock. The chat moves to the top of
     /// the list. Returns whether the message calls for attention: it does
-    /// not while its chat is being read, or when the chat is muted. One that
-    /// does while the panel is dark is listed for the screen it wakes to.
+    /// not while its chat is being read, or when the chat is muted.
+    ///
+    /// One that arrives while the panel is dark, or the interface locked,
+    /// is listed on the lock screen, and locks the interface if the panel
+    /// has only just gone dark: a dark panel lights only to the lock screen.
     fn receive(&mut self, chat: ChatId, message: MessageId, now: u64) -> bool {
         let Some(fresh) = self.node.chat(chat) else {
             return false;
@@ -1586,12 +1663,15 @@ impl State {
         if let Some(conversation) = self.conversation.as_mut().filter(|c| c.chat == chat) {
             conversation.place(message.clone());
         }
+        let away = self.dark || self.lock.locked;
+        if away {
+            self.list_arrival(chat, &message, now);
+            self.lock();
+        }
         if reading || muted {
             return false;
         }
-        if self.dark || matches!(self.screen(), Screen::Wake { .. }) {
-            self.list_arrival(chat, &message);
-        } else if !matches!(self.screen(), Screen::Chats { .. }) {
+        if !away && !matches!(self.screen(), Screen::Chats { .. }) {
             // The list shows it arrive; anywhere else, a banner does.
             self.banner = Some(Banner {
                 notice: Notice::Message(chat),
@@ -1601,9 +1681,9 @@ impl State {
         true
     }
 
-    /// Lists `message`, the newest of `chat`, for the screen the panel wakes
-    /// to, and shows that screen.
-    fn list_arrival(&mut self, chat: ChatId, message: &Message) {
+    /// Lists `message`, the newest of `chat`, on the lock screen, as having
+    /// arrived at `now`. A chat already listed moves to the top.
+    fn list_arrival(&mut self, chat: ChatId, message: &Message, now: u64) {
         let text = message
             .sender
             .as_ref()
@@ -1611,16 +1691,20 @@ impl State {
                 SharedText::joined(message.text.heap(), &[&sender.name, ": ", &message.text])
             })
             .unwrap_or_else(|| message.text.clone());
-        match self.arrived.iter_mut().find(|a| a.chat == chat) {
-            Some(arrived) => arrived.text = text,
-            None => {
-                if self.arrived.is_full() {
-                    self.arrived.remove(0);
-                }
-                _ = self.arrived.push(Arrived { chat, text });
-            }
+        if let Some(index) = self.arrived.iter().position(|a| a.chat == chat) {
+            self.arrived.remove(index);
+        } else if self.arrived.is_full() {
+            self.arrived.pop();
         }
-        self.show_arrivals();
+        self.uptime = now;
+        _ = self.arrived.insert(
+            0,
+            Arrived {
+                chat,
+                text,
+                at: now,
+            },
+        );
     }
 
     /// The battery as the board last read it: its charge in percent, when
@@ -1630,6 +1714,7 @@ impl State {
     /// panel is lit.
     pub fn battery(&mut self, percent: Option<u8>, charging: bool, now: u64) {
         self.status.battery_segments = percent.map_or(0, battery_segments);
+        self.status.battery_percent = percent;
         self.status.charging = charging;
         let was = self.status.battery_low;
         // Low until it charges or climbs clear, so a reading wavering at
@@ -1662,16 +1747,20 @@ impl State {
     /// When the screen next changes by itself, on the board's clock.
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
-        let banner = self.banner.map(|b| b.until);
-        let glance = self.glance.map(Glance::until);
-        match (banner, glance) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [
+            self.banner.map(|b| b.until),
+            self.glance.map(Glance::until),
+            self.lock.deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Lets go of whatever has had its time by `now`.
     pub fn expire(&mut self, now: u64) {
+        self.uptime = now;
+        self.expire_lock(now);
         if self.banner.is_some_and(|b| b.until <= now) {
             self.banner = None;
         }

@@ -64,10 +64,6 @@ fn value(text: &str) -> Value {
 
 /// A row `height` tall: an action, or a readout that takes focus so the
 /// wheel can pass through it. `danger` sets its name in red.
-// Kept out of line: inlined into a screen, its calls make the esp
-// toolchain's Xtensa back end fail with `Cannot select:
-// XtensaISD::PCREL_WRAPPER TargetConstantPool` (rustc 1.95.0-nightly esp).
-#[inline(never)]
 pub(super) fn row<A: Fn(&mut State)>(
     name: &'static str,
     key: FocusKey,
@@ -75,6 +71,25 @@ pub(super) fn row<A: Fn(&mut State)>(
     end: End,
     danger: bool,
     height: u32,
+) -> impl View<Rgb565, State> + use<A> {
+    marked_row(name, key, act, end, danger, height, None)
+}
+
+/// A row as [`row`] draws it, with a column before its name for a check
+/// mark: `Some(true)` checks it, `Some(false)` leaves the room empty, and
+/// `None` leaves no room.
+// Kept out of line: inlined into a screen, its calls make the esp
+// toolchain's Xtensa back end fail with `Cannot select:
+// XtensaISD::PCREL_WRAPPER TargetConstantPool` (rustc 1.95.0-nightly esp).
+#[inline(never)]
+pub(super) fn marked_row<A: Fn(&mut State)>(
+    name: &'static str,
+    key: FocusKey,
+    act: A,
+    end: End,
+    danger: bool,
+    height: u32,
+    checked: Option<bool>,
 ) -> impl View<Rgb565, State> + use<A> {
     let (value, chevron, switch) = match end {
         End::Nothing => (None, false, None),
@@ -88,8 +103,19 @@ pub(super) fn row<A: Fn(&mut State)>(
         let face = if focused { &font::BOLD } else { &font::REGULAR };
         let color = if danger { theme::RED } else { theme::TEXT };
         HStack::new((
-            // Static, so drawn as it is rather than copied.
-            super::line(name, face, theme::BODY, color),
+            (checked == Some(true)).then(|| {
+                Image::new(&icon::CHECK)
+                    .as_template()
+                    .foreground_color(theme::ACCENT)
+                    .frame()
+                    .with_width(CHECK - 8)
+            }),
+            // Static, so drawn as it is rather than copied. Unchecked, the
+            // name keeps the check mark's room and its spacing.
+            super::line(name, face, theme::BODY, color).padding(
+                Edges::Leading,
+                if checked == Some(false) { CHECK } else { 0 },
+            ),
             Spacer::default(),
             value.as_ref().map(|value| {
                 label::<32>(

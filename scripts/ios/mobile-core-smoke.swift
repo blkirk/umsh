@@ -3,8 +3,25 @@ import Foundation
 @main
 struct MobileCoreSmokeTest {
     static func main() throws {
-        precondition(mobileApiVersion() == 55)
+        precondition(mobileApiVersion() == 56)
         precondition(ulcpMaxDevPeers() == 8)
+
+        // The phone's zone as a device takes it.
+        precondition(fixedOffsetRule(minutesEast: -420) == "<-07>7")
+        precondition(fixedOffsetRule(minutesEast: 330) == "<+0530>-5:30")
+        precondition(ruleOffsetMin(rule: "<+0530>-5:30", unixSeconds: 0) == 330)
+        // 2026-07-15 12:00 UTC, in Pacific daylight time.
+        precondition(
+            ruleOffsetMin(rule: "PST8PDT,M3.2.0,M11.1.0", unixSeconds: 1_784_116_800) == -420
+        )
+        precondition(
+            ruleAbbreviation(rule: "PST8PDT,M3.2.0,M11.1.0", unixSeconds: 1_784_116_800) == "PDT"
+        )
+        precondition(ruleOffsetMin(rule: "Pacific", unixSeconds: 0) == nil)
+        precondition(zoneRule(identifier: "../etc/passwd") == nil)
+        if let rule = zoneRule(identifier: "Asia/Kolkata") {
+            precondition(ruleOffsetMin(rule: rule, unixSeconds: 0) == 330)
+        }
 
         let hint = try renderNodeHint(bytes: Data([0xA1, 0xB2, 0x03]))
         precondition(hint.bytes == Data([0xA1, 0xB2, 0x03]))
@@ -117,7 +134,8 @@ struct MobileCoreSmokeTest {
         precondition(sync.repeater == nil)
         precondition(!sync.supportsTime)
         precondition(!sync.supportsGnss)
-        precondition(sync.tzOffsetMin == nil)
+        precondition(sync.tzRule == nil)
+        precondition(sync.time24h == nil)
         precondition(sync.gnss == nil)
 
         // The default identity precision, and what it discloses: a ~38 m
@@ -164,7 +182,8 @@ struct MobileCoreSmokeTest {
                         minSnrDb: -7
                     ),
                     meshcore: nil,
-                    tzOffsetMin: nil,
+                    tzRule: nil,
+                    time24h: nil,
                     gnss: nil,
                     advert: nil
                 )

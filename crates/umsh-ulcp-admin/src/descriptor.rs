@@ -19,6 +19,9 @@ pub enum Access {
     ReadOnly,
     /// Read and written whole.
     ReadWrite,
+    /// Written whole, never read: the clock, which moves on its own, so a
+    /// copy read once is wrong a second later.
+    WriteOnly,
     /// A set of items, read whole and changed an item at a time.
     Table,
 }
@@ -55,7 +58,7 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub const fn writable(&self) -> bool {
-        matches!(self.access, Access::ReadWrite)
+        matches!(self.access, Access::ReadWrite | Access::WriteOnly)
     }
 
     pub const fn is_table(&self) -> bool {
@@ -96,6 +99,9 @@ const fn table(key: u32, gate: u32, item_len: u8, reported_len: u8) -> Descripto
 
 /// Longest `PROP_DEV_NAME`, in octets of UTF-8.
 pub const DEVICE_NAME_MAX: usize = 64;
+
+/// Longest `PROP_TZ_RULE`, in octets.
+pub const TZ_RULE_MAX: usize = 64;
 
 /// Every property the model covers.
 pub const COVERED: &[Descriptor] = &[
@@ -197,6 +203,35 @@ pub const COVERED: &[Descriptor] = &[
     ),
     scalar(
         prop::GNSS_IDENT_UPDATE,
+        PropertyType::Bool,
+        Some(cap::GNSS),
+        Access::ReadWrite,
+        1,
+    ),
+    // The clock.
+    scalar(
+        prop::TIME,
+        PropertyType::U32,
+        Some(cap::TIME),
+        Access::WriteOnly,
+        4,
+    ),
+    scalar(
+        prop::TZ_RULE,
+        PropertyType::Text,
+        Some(cap::TIME),
+        Access::ReadWrite,
+        TZ_RULE_MAX,
+    ),
+    scalar(
+        prop::TIME_24H,
+        PropertyType::Bool,
+        Some(cap::TIME),
+        Access::ReadWrite,
+        1,
+    ),
+    scalar(
+        prop::GNSS_TIME_TRUST,
         PropertyType::Bool,
         Some(cap::GNSS),
         Access::ReadWrite,

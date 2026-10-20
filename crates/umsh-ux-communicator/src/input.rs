@@ -63,6 +63,12 @@ where
     if app.state().ending.is_some() {
         return;
     }
+    app.state_mut().uptime = now;
+    if app.state().lock.locked {
+        locked(app, input, now);
+        app.finalize_view();
+        return;
+    }
     app.state_mut().sync_keyboard();
     if app.state().picker.is_some() {
         pick(app, input, now);
@@ -71,6 +77,35 @@ where
     }
     app.finalize_view();
     app.state_mut().sync_keyboard();
+}
+
+/// An input while locked: the wheel turns toward unlocking and a press
+/// unlocks once it has, and keys do nothing. Turned with Alt held, the
+/// wheel still sets the brightness.
+fn locked<V, F>(app: &mut App<V, State, F>, input: Input, now: u64)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    let mut state = app.state_mut();
+    match input {
+        Input::Turn(detents) => {
+            if state.keyboard.turn() {
+                state.adjust_brightness(detents, now);
+            } else {
+                state.turn_to_unlock(detents, now);
+            }
+        }
+        Input::Press => state.press_to_unlock(now),
+        Input::Modifier { modifier, down } => state.keyboard.modifier(modifier, down, now),
+        Input::Enter
+        | Input::Backspace
+        | Input::Key { .. }
+        | Input::Space
+        | Input::Character(_) => {}
+    }
 }
 
 /// Takes in the events the node has waiting, oldest first, at `now` on the
@@ -87,6 +122,7 @@ where
     F: Fn(&State) -> V,
 {
     let node = app.state().node;
+    app.state_mut().uptime = now;
     let mut attention = false;
     let mut any = false;
     while let Some(event) = node.next_event() {
@@ -111,6 +147,10 @@ where
             // Turned with Alt held, the wheel sets the brightness.
             if app.state_mut().keyboard.turn() {
                 app.state_mut().adjust_brightness(detents, now);
+                return;
+            }
+            // A part of the date and time being changed takes the turn.
+            if app.state_mut().turn_set_time(detents) {
                 return;
             }
             for _ in 0..detents.unsigned_abs() {

@@ -126,10 +126,9 @@ Id   | Mnemonic                                                                 
 4864 | [`PROP_BLE_PAIRING_PIN`](ulcp-ble.md#prop-ble-pairing-pin)                            | Set                        | BLE transport
 4865 | [`PROP_DEV_ADMINS`](app-node-management.md#prop-dev-admins)                           | Get, Set, Insert, Remove   | `CAP_ADMIN`
 4866 | [`PROP_TIME`](ulcp-device.md#prop-time)                                               | Get, Set, Is               | `CAP_TIME`
-4867 | [`PROP_TZ_OFFSET`](ulcp-device.md#prop-tz-offset)                                     | Get, Set                   | `CAP_TIME`
 4868 | [`PROP_GNSS_IDENT_UPDATE`](ulcp-device.md#prop-gnss-ident-update)                     | Get, Set                   | `CAP_GNSS`
 4869 | [`PROP_GNSS_IDENT_PRECISION`](ulcp-device.md#prop-gnss-ident-precision)               | Get, Set                   | `CAP_GNSS`
-4870 | [`PROP_GNSS_TIME_TRUST`](ulcp-device.md#prop-gnss-time-trust)                         | Get, Set                   | `CAP_GNSS`
+4870 | [`PROP_GNSS_TIME_TRUST`](ulcp-device.md#prop-gnss-time-trust)                         | Get, Set, Is               | `CAP_GNSS`
 4871 | [`PROP_BLE_ENABLED`](ulcp-ble.md#prop-ble-enabled)                                    | Get, Set, Is               | `CAP_BLE`
 4872 | [`PROP_BLE_BOND_COUNT`](ulcp-ble.md#prop-ble-bond-count)                              | Get, Set, Is               | `CAP_BLE`
 4873 | [`PROP_BLE_LINK`](ulcp-ble.md#prop-ble-link)                                          | Get, Is                    | `CAP_BLE`
@@ -147,6 +146,8 @@ Id   | Mnemonic                                                                 
 4885 | [`PROP_WIFI_LINK`](ulcp-wifi.md#prop-wifi-link)                                       | Get, Is                    | `CAP_WIFI`
 4886 | [`PROP_WIFI_RSSI`](ulcp-wifi.md#prop-wifi-rssi)                                       | Get                        | `CAP_WIFI`
 4887 | [`PROP_WIFI_MAC`](ulcp-wifi.md#prop-wifi-mac)                                         | Get                        | `CAP_WIFI`
+4888 | [`PROP_TZ_RULE`](ulcp-device.md#prop-tz-rule)                                         | Get, Set, Is               | `CAP_TIME`
+4889 | [`PROP_TIME_24H`](ulcp-device.md#prop-time-24h)                                       | Get, Set, Is               | `CAP_TIME`
 4896 | [`PROP_IPV4_STATE`](ulcp-ip.md#prop-ipv4-state)                                       | Get, Is                    | `CAP_IPV4`
 4897 | [`PROP_IPV4_CONFIG`](ulcp-ip.md#prop-ipv4-config)                                     | Get, Set                   | `CAP_IPV4`
 4898 | [`PROP_IPV4_ADDRESS`](ulcp-ip.md#prop-ipv4-address)                                   | Get, Is                    | `CAP_IPV4`

@@ -34,10 +34,10 @@ use umsh_ulcp::frame;
 use umsh_ulcp::hdlc;
 use umsh_ulcp::ids::prop;
 use umsh_ulcp::profiles::VETTED;
-use umsh_ulcp_simdev::{SessionConfig, SimulatedDevice};
+use umsh_ulcp_simdev::{SessionConfig, SimulatedDevice, TimeConfig};
 use umsh_ux_communicator::model::{
     ChannelAccess, ChannelEntry, ChatKind, Chats, Delivery, Direction, KeyboardSettings, Messages,
-    Node, NodeEvent, PeerEntry, Peers, Profile, Reaction, Setting, Shareable,
+    Node, NodeEvent, PeerEntry, Peers, Profile, Reaction, Rule, Setting, Shareable,
 };
 
 /// 14:32 UTC, when the test clock starts.
@@ -59,10 +59,6 @@ impl Clock for TestClock {
 
     fn wall(&self) -> Option<u32> {
         Some(STARTED + (self.now_ms() / 1_000) as u32)
-    }
-
-    fn utc_offset_min(&self) -> i16 {
-        0
     }
 }
 
@@ -321,6 +317,40 @@ fn brightness_and_the_keyboard_are_device_settings() {
     assert_eq!(node.keyboard(), keyboard);
     // Saved with the rest, as a switch at the device is.
     assert_ne!(sim.borrow().saved_snapshot().unwrap(), &before[..]);
+}
+
+#[test]
+fn the_zone_and_the_hours_are_device_settings() {
+    let mut sim = SimulatedDevice::holding_lists(
+        SessionConfig {
+            time: Some(TimeConfig),
+            ..config()
+        },
+        starting_keys(),
+    );
+    sim.open_device_interface();
+    let sim = Rc::new(RefCell::new(sim));
+    let (node, clock) = node(&sim);
+    events(&node);
+    assert_eq!(Node::clock(&node).zone, Rule::UTC);
+    assert!(Node::clock(&node).hour24);
+    let before = sim.borrow().saved_snapshot().map(<[u8]>::to_vec);
+    node.set_zone("CET-1CEST,M3.5.0,M10.5.0/3");
+    node.set_hour24(false);
+    clock.set(1_000);
+    node.pump();
+    clock.set(4_000);
+    node.pump();
+    assert_eq!(Node::clock(&node).zone.std_offset_min(), 60);
+    assert!(!Node::clock(&node).hour24);
+    assert!(!events(&node).contains(&NodeEvent::SettingRefused(Setting::Clock)));
+    assert_ne!(sim.borrow().saved_snapshot().map(<[u8]>::to_vec), before);
+    // A rule the device cannot read is refused.
+    node.set_zone("PST8PDT,M3.2.0");
+    clock.set(5_000);
+    node.pump();
+    assert!(events(&node).contains(&NodeEvent::SettingRefused(Setting::Clock)));
+    assert_eq!(Node::clock(&node).zone.std_offset_min(), 60);
 }
 
 /// What a phone attached to the device changes, the node hears.
@@ -586,7 +616,7 @@ fn a_public_message_arrives_with_its_sender_and_details() {
     assert_eq!(shown.time, Some(STARTED + 5));
 
     let details = node.details(chat, message).unwrap();
-    assert_eq!(details.time, "14:32");
+    assert_eq!(details.time, Some(STARTED + 5));
     assert_eq!(details.rssi, Some(-97));
     assert_eq!(details.snr, Some(65));
 

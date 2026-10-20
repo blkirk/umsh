@@ -35,7 +35,8 @@ use umsh_ulcp_admin::{
 use umsh_ux_communicator::avatar::{AvatarStyle, PeerShape};
 use umsh_ux_communicator::heapless::{Deque, String, Vec};
 use umsh_ux_communicator::model::{
-    KeyboardSettings, NodeEvent, Profile, RadioSettings, Setting, ShareUri, brightness_at,
+    ClockSettings, KeyboardSettings, NodeEvent, Profile, RadioSettings, Rule, Setting, ShareUri,
+    brightness_at,
 };
 
 use crate::chat::address;
@@ -274,6 +275,26 @@ impl<P: LocalPort> Settings<P> {
         self.written(Setting::Keyboard, write)
     }
 
+    pub fn set_clock_automatic(&mut self, on: bool) -> bool {
+        let write = self.model.set_gnss_time_trust(on);
+        self.written(Setting::Clock, write)
+    }
+
+    pub fn set_time(&mut self, time: u32) -> bool {
+        let write = self.model.set_time(Some(time));
+        self.written(Setting::Time, write)
+    }
+
+    pub fn set_zone(&mut self, rule: &str) -> bool {
+        let write = self.model.set_tz_rule(rule);
+        self.written(Setting::Clock, write)
+    }
+
+    pub fn set_hour24(&mut self, on: bool) -> bool {
+        let write = self.model.set_time_24h(on);
+        self.written(Setting::Clock, write)
+    }
+
     pub fn set_brightness(&mut self, brightness: u8) -> bool {
         let write = self.model.set_brightness(brightness);
         self.written(Setting::Brightness, write)
@@ -449,6 +470,18 @@ impl<P: LocalPort> Settings<P> {
             .unwrap_or(DEFAULT_BRIGHTNESS)
     }
 
+    pub fn clock(&self) -> ClockSettings {
+        let zone = match self.model.intended(prop::TZ_RULE) {
+            Some(Value::Text(rule)) => Rule::parse(rule).ok(),
+            _ => None,
+        };
+        ClockSettings {
+            automatic: self.bool(prop::GNSS_TIME_TRUST),
+            hour24: self.bool(prop::TIME_24H).unwrap_or(true),
+            zone: zone.unwrap_or(Rule::UTC),
+        }
+    }
+
     fn bool(&self, key: u32) -> Option<bool> {
         match self.model.intended(key)? {
             Value::Bool(value) => Some(value),
@@ -472,6 +505,10 @@ impl<P: LocalPort> Settings<P> {
 }
 
 /// Whether losing a change to `setting` would matter enough to save one.
+/// The time is never saved: the board's real-time clock keeps it.
 const fn matters(setting: Setting) -> bool {
-    !matches!(setting, Setting::Keyboard | Setting::Brightness)
+    !matches!(
+        setting,
+        Setting::Keyboard | Setting::Brightness | Setting::Time
+    )
 }

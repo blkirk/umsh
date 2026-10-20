@@ -9,6 +9,7 @@ use buoyant::focus::{FocusKey, FocusState};
 use buoyant::view::EditBuffer;
 use heapless::String;
 
+pub use crate::clock_settings::{ClockPage, DateParts, Part, ZoneFind};
 use crate::keyboard::Field;
 use crate::model::{
     ChannelEntry, ChatId, ChatKind, ChatSummary, Details, Found, FoundKind, Invite,
@@ -44,6 +45,8 @@ pub mod keys {
     const SHARE: u32 = 0x0F00_0000;
     const PROFILE_ROW: u32 = 0x1300_0000;
     const FOUND: u32 = 0x1500_0000;
+    const TIME_PART: u32 = 0x1B00_0000;
+    const ZONE_ROW: u32 = 0x1C00_0000;
     /// Set in a share key that names a channel.
     const SHARE_CHANNEL: u32 = 0x0080_0000;
 
@@ -102,6 +105,15 @@ pub mod keys {
     pub const MAINTENANCE: FocusKey = FocusKey(DEVICE | 6);
     pub const SHUT_DOWN: FocusKey = FocusKey(DEVICE | 7);
     pub const KEYBOARD: FocusKey = FocusKey(DEVICE | 8);
+    pub const CLOCK: FocusKey = FocusKey(DEVICE | 9);
+    /// The Clock screen's rows, in order.
+    pub const CLOCK_AUTOMATIC: FocusKey = FocusKey(0x1A00_0000);
+    pub const CLOCK_TIME: FocusKey = FocusKey(0x1A00_0001);
+    pub const CLOCK_ZONE: FocusKey = FocusKey(0x1A00_0002);
+    pub const CLOCK_24H: FocusKey = FocusKey(0x1A00_0003);
+    pub const CLOCK_SOURCE: FocusKey = FocusKey(0x1A00_0004);
+    /// Date and time's Set.
+    pub const SET_TIME: FocusKey = FocusKey(0x1A00_0005);
     /// The Keyboard screen's switches, in order.
     pub const CAPITALIZE: FocusKey = FocusKey(0x1700_0000);
     pub const PERIOD: FocusKey = FocusKey(0x1700_0001);
@@ -181,6 +193,38 @@ pub mod keys {
     #[must_use]
     pub const fn profile(index: usize) -> FocusKey {
         FocusKey(PROFILE_ROW | (index as u32 & !KIND))
+    }
+
+    /// A part of the date and time being set.
+    #[must_use]
+    pub const fn time_part(part: super::Part) -> FocusKey {
+        FocusKey(TIME_PART | part as u32)
+    }
+
+    /// The part of the date and time `key` names.
+    #[must_use]
+    pub const fn part_of(key: FocusKey) -> Option<super::Part> {
+        if key.0 & KIND == TIME_PART {
+            super::Part::from_index((key.0 & !KIND) as usize)
+        } else {
+            None
+        }
+    }
+
+    /// The row of the time zone at `index` in [`crate::zones::ZONES`].
+    #[must_use]
+    pub const fn zone(index: usize) -> FocusKey {
+        FocusKey(ZONE_ROW | (index as u32 & !KIND))
+    }
+
+    /// The time zone whose row `key` names.
+    #[must_use]
+    pub const fn zone_of(key: FocusKey) -> Option<usize> {
+        if key.0 & KIND == ZONE_ROW {
+            Some((key.0 & !KIND) as usize)
+        } else {
+            None
+        }
     }
 
     /// The place of the radio profile whose row `key` names.
@@ -279,6 +323,8 @@ pub enum DevicePage {
     Keyboard { settings: KeyboardSettings },
     /// The radio's transmit power, being typed.
     TransmitPower { text: PowerText },
+    /// The clock's settings, and the screens they open.
+    Clock { page: ClockPage },
 }
 
 /// A screen a new device starts on.
@@ -288,6 +334,8 @@ pub enum SetupPage {
     Name { text: NameText },
     /// The radio profile, which must be set before the radio sends.
     Profile,
+    /// The time zone.
+    Zone { find: ZoneFind },
 }
 
 /// A screen on the navigation stack.
@@ -351,9 +399,6 @@ pub enum Screen {
         name: JoinName,
         focus: FocusState,
     },
-    /// The chats that got messages while the panel was dark, which the first
-    /// of them woke it to.
-    Wake { focus: FocusState },
 }
 
 impl Screen {
@@ -379,8 +424,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Device { focus, .. }
-            | Self::Setup { focus, .. }
-            | Self::Wake { focus } => focus,
+            | Self::Setup { focus, .. } => focus,
         }
     }
 
@@ -394,8 +438,7 @@ impl Screen {
             | Self::AddPeer { focus, .. }
             | Self::Peer { focus, .. }
             | Self::Device { focus, .. }
-            | Self::Setup { focus, .. }
-            | Self::Wake { focus } => focus,
+            | Self::Setup { focus, .. } => focus,
         }
     }
 }
@@ -855,6 +898,7 @@ impl State {
     pub(crate) fn refresh_settings(&mut self) {
         let node = self.node;
         self.status.device_name = node.device_name();
+        self.clock = node.clock();
         for screen in &mut self.screens {
             match screen {
                 Screen::Device {
@@ -865,6 +909,7 @@ impl State {
                     page: DevicePage::Keyboard { settings },
                     ..
                 } => *settings = node.keyboard(),
+                // The Clock screens read the clock's settings from the state.
                 _ => {}
             }
         }
@@ -995,12 +1040,12 @@ impl State {
         }
     }
 
-    /// Sets the radio to the profile at `index`, and goes on: to the Chats
-    /// screen on first run, back to Radio otherwise.
+    /// Sets the radio to the profile at `index`, and goes on: to the time
+    /// zone on first run, back to Radio otherwise.
     pub fn choose_profile(&mut self, index: usize) {
         self.node.set_profile(index);
         match self.screens.last() {
-            Some(Screen::Setup { .. }) => self.finish_setup(),
+            Some(Screen::Setup { .. }) => self.ask_setup_zone(),
             _ => {
                 self.back();
                 self.refresh_settings();
@@ -1008,7 +1053,8 @@ impl State {
         }
     }
 
-    /// Starts first run: what to call this node, then its radio profile.
+    /// Starts first run: what to call this node, its radio profile, and its
+    /// time zone.
     pub fn start_setup(&mut self) {
         self.close_conversation();
         self.screens.truncate(1);
@@ -1057,7 +1103,7 @@ impl State {
     }
 
     /// Ends first run on the Chats screen.
-    fn finish_setup(&mut self) {
+    pub(crate) fn finish_setup(&mut self) {
         self.screens.truncate(1);
         self.focus_list();
     }
@@ -1392,25 +1438,6 @@ impl State {
         }
     }
 
-    /// Shows the chats that got messages while the panel was dark, the first
-    /// focused, over wherever it went dark.
-    pub(crate) fn show_arrivals(&mut self) {
-        if matches!(self.screen(), Screen::Wake { .. }) || self.screens.is_full() {
-            return;
-        }
-        let first = self.arrived.first().map(|a| keys::chat(a.chat));
-        _ = self.screens.push(Screen::Wake {
-            focus: first.map_or_else(FocusState::new, FocusState::requesting),
-        });
-    }
-
-    /// Opens `chat` from the screen the panel woke to, in place of whatever
-    /// was open under it.
-    pub fn open_arrival(&mut self, chat: ChatId) {
-        self.arrived.clear();
-        self.go_to_chat(chat);
-    }
-
     /// Opens `chat` in place of whatever is shown. The interface holds one
     /// conversation, so whatever was open closes; Back from the chat goes to
     /// the list, at its row.
@@ -1441,10 +1468,8 @@ impl State {
         if self.screens.len() < 2 {
             return false;
         }
-        match self.screens.pop() {
-            Some(Screen::Conversation { .. }) => self.close_conversation(),
-            Some(Screen::Wake { .. }) => self.arrived.clear(),
-            _ => {}
+        if let Some(Screen::Conversation { .. }) = self.screens.pop() {
+            self.close_conversation();
         }
         // Focus returns where it was, unless the screen was left asking for
         // somewhere else.

@@ -310,13 +310,13 @@ struct RemoteGnssScreen: View {
 }
 
 /// The device's wall clock: what time it holds, where it is meant to be,
-/// and whether the receiver may set the clock.
+/// how it writes the hour, and whether the receiver may set the clock.
 ///
 /// The clock itself is live state—set from this phone the moment the
 /// button is tapped, never part of Apply, and never persisted by the
 /// device, which has no bound on how long it spends powered off. The time
-/// zone and the receiver's say over the clock are settings, and go through
-/// Apply like any other.
+/// zone, the clock format, and the receiver's say over the clock are
+/// settings, and go through Apply like any other.
 struct RemoteTimeScreen: View {
     let model: ManageDeviceModel
     @State private var edits = Edits()
@@ -379,19 +379,25 @@ struct RemoteTimeScreen: View {
             }
 
             Section {
-                RemotePicker(
-                    "Time zone",
-                    selection: $edits.tzOffset.edited,
-                    problem: problems[edits.tzOffset.property]
-                ) {
-                    ForEach(deviceTimeZoneOffsets, id: \.self) { minutes in
-                        Text(formattedUTCOffset(minutes)).tag(minutes)
+                LabeledContent {
+                    Text(edits.tzRule.value.map { formattedTimeZoneRule($0) } ?? "Not read")
+                } label: {
+                    RemoteFieldTitle("Time zone", problem: problems[edits.tzRule.property])
+                }
+                if edits.tzRule.isKnown, edits.tzRule.value != phoneTimeZoneRule {
+                    Button("Use This iPhone's Time Zone") {
+                        edits.tzRule.edited = phoneTimeZoneRule
                     }
                 }
-                if edits.tzOffset.isKnown, edits.tzOffset.value != phoneUTCOffsetMinutes {
-                    Button("Use This iPhone's Time Zone") {
-                        edits.tzOffset.edited = phoneUTCOffsetMinutes
+                if edits.time24h.isKnown {
+                    Toggle(isOn: $edits.time24h.edited.replacingNil(with: true)) {
+                        RemoteFieldTitle(
+                            "24-hour clock",
+                            problem: problems[edits.time24h.property]
+                        )
                     }
+                } else {
+                    RemoteReadOnlyToggle("24-hour clock", isOn: nil)
                 }
             } header: {
                 Text("Time zone")
@@ -477,10 +483,11 @@ struct RemoteTimeScreen: View {
         }
     }
 
-    /// The two settings here. The clock is deliberately not among them—
+    /// The settings here. The clock is deliberately not among them—
     /// see the screen comment.
     private struct Edits {
-        var tzOffset = RemoteField<Int16>(0, nil)
+        var tzRule = RemoteField<String>(0, nil)
+        var time24h = RemoteField<Bool>(0, nil)
         var timeTrust = RemoteField<Bool>(0, nil)
         var isEmpty = true
         /// What the device last said, in full.
@@ -491,7 +498,8 @@ struct RemoteTimeScreen: View {
         init(_ reading: RemoteCategoryReading?) {
             let id = ulcpProperties
             held = reading?.properties ?? UlcpDevicePropertiesRecord.empty
-            tzOffset = RemoteField(id.tzOffset, held.tzOffsetMin)
+            tzRule = RemoteField(id.tzRule, held.tzRule)
+            time24h = RemoteField(id.time24h, held.time24h)
             timeTrust = RemoteField(id.gnssTimeTrust, held.gnssTimeTrust)
             isEmpty = reading == nil
         }
@@ -501,13 +509,15 @@ struct RemoteTimeScreen: View {
         init(_ reading: RemoteCategoryReading?, preserving old: Edits) {
             self.init(reading)
             guard !old.isEmpty else { return }
-            tzOffset = tzOffset.preserving(old.tzOffset)
+            tzRule = tzRule.preserving(old.tzRule)
+            time24h = time24h.preserving(old.time24h)
             timeTrust = timeTrust.preserving(old.timeTrust)
         }
 
         var dirty: Set<UInt32> {
             var dirty: Set<UInt32> = []
-            if tzOffset.isDirty { dirty.insert(tzOffset.property) }
+            if tzRule.isDirty { dirty.insert(tzRule.property) }
+            if time24h.isDirty { dirty.insert(time24h.property) }
             if timeTrust.isDirty { dirty.insert(timeTrust.property) }
             return dirty
         }
@@ -517,7 +527,8 @@ struct RemoteTimeScreen: View {
             // carried for completeness and never reaches the air.
             var desired = held
             desired.time = nil
-            desired.tzOffsetMin = tzOffset.value
+            desired.tzRule = tzRule.value
+            desired.time24h = time24h.value
             desired.gnssTimeTrust = timeTrust.value
             return desired
         }

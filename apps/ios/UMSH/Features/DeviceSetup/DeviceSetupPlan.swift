@@ -124,7 +124,7 @@ enum DeviceSetupAssumption: String, Hashable {
         case .mobile: draft.identMobile = true
         case .stationary: draft.identMobile = false
         case .phoneAdministers: draft.setPhoneAdministers(true)
-        case .phoneTimeZone: draft.timeZoneOffsetMinutes = phoneUTCOffsetMinutes
+        case .phoneTimeZone: draft.timeZoneRule = phoneTimeZoneRule
         case .clockFromPhone: break
         }
     }

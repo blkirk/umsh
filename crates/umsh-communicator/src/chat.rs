@@ -949,24 +949,16 @@ impl<S: ChatStore> Chats<S> {
         &self,
         chat: model::ChatId,
         message: model::MessageId,
-        utc_offset_min: i16,
         mine: &AvatarStyle,
     ) -> Option<Details> {
         let record = self.store.message(MessageId(message)).ok()??;
         if record.chat.0 != chat {
             return None;
         }
-        let mut details = Details::default();
-        if let Some(time) = record.time {
-            let local = i64::from(time) + i64::from(utc_offset_min) * 60;
-            let minutes = local.div_euclid(60);
-            _ = write!(
-                details.time,
-                "{:02}:{:02}",
-                minutes.div_euclid(60).rem_euclid(24),
-                minutes.rem_euclid(60)
-            );
-        }
+        let mut details = Details {
+            time: record.time,
+            ..Details::default()
+        };
         if let Some(link) = record.link {
             details.hops = link.hop_count;
             details.rssi = link.rssi_dbm;

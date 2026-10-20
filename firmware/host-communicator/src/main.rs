@@ -12,7 +12,7 @@
 //! LAN bearer.
 //!
 //! Up and Down arrows or the mouse wheel turn the wheel; the Right arrow or
-//! a click presses it. Return, Backspace, Space, and the letters are the
+//! a click presses it. Escape is the lock button. Return, Backspace, Space, and the letters are the
 //! Pager's; Shift is CAP, and Alt the orange key.
 //! With the fixture, Tab brings its next message in, as if it arrived. An
 //! identity asked for arrives two seconds later, as the fixture's own
@@ -30,7 +30,8 @@
 //! fixture's next message arrives), `identify` (the identity asked for
 //! arrives at once), `wait SECONDS` (the board's clock moves on, and the
 //! fixture's with it), `dark` and `lit`
-//! (the panel goes dark and lights again), `battery PERCENT [charging]`,
+//! (the panel goes dark, which locks it a second later, and lights again),
+//! `lock` (the lock button), `battery PERCENT [charging]`,
 //! `battery-empty` (with `off` for the blink's dark half), `first-run`,
 //! `shot NAME`, which writes `NAME.png` into the output directory once
 //! everything has settled, or `peek MS NAME`, which writes it MS
@@ -269,7 +270,16 @@ fn headless(script: &Path, out: &Path, backend: Backend) -> Result<(), String> {
                 down: word == "alt-down",
             }],
             "dark" | "lit" => {
-                app.state_mut().dark = word == "dark";
+                if word == "dark" {
+                    app.state_mut().screen_off(clock);
+                } else {
+                    app.state_mut().screen_on(clock);
+                }
+                app.finalize_view();
+                vec![]
+            }
+            "lock" => {
+                app.state_mut().lock();
                 app.finalize_view();
                 vec![]
             }
@@ -426,6 +436,11 @@ fn window(backend: Backend, mesh: Option<mesh::Mesh>) -> ExitCode {
                     Keycode::Space => Some(Input::Space),
                     Keycode::Tab => {
                         backend.tab();
+                        None
+                    }
+                    Keycode::Escape => {
+                        app.state_mut().lock();
+                        app.finalize_view();
                         None
                     }
                     // The Pager's keyboard does not repeat.

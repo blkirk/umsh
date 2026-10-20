@@ -583,6 +583,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
     typealias FfiType = Double
     typealias SwiftType = Double
@@ -3608,7 +3624,7 @@ public protocol MobileUlcpSessionProtocol: AnyObject, Sendable {
      * The write is echo-verified property by property and closed with a
      * save, like any other configuration pass.
      */
-    func configurePositioning(gnss: UlcpGnssSettingsRecord?, tzOffsetMin: Int16?) throws  -> UlcpSessionUpdateRecord
+    func configurePositioning(gnss: UlcpGnssSettingsRecord?, tzRule: String?, time24h: Bool?) throws  -> UlcpSessionUpdateRecord
 
     /**
      * Consume one complete ULCP frame and advance the session reducer.
@@ -4251,13 +4267,14 @@ open func configureDevice(configuration: UlcpDeviceConfigRecord)throws  -> UlcpS
      * The write is echo-verified property by property and closed with a
      * save, like any other configuration pass.
      */
-open func configurePositioning(gnss: UlcpGnssSettingsRecord?, tzOffsetMin: Int16?)throws  -> UlcpSessionUpdateRecord  {
+open func configurePositioning(gnss: UlcpGnssSettingsRecord?, tzRule: String?, time24h: Bool?)throws  -> UlcpSessionUpdateRecord  {
     return try  FfiConverterTypeUlcpSessionUpdateRecord_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
         uniffiCallStatus in
     uniffi_umsh_mobile_core_fn_method_mobileulcpsession_configure_positioning(
             self.uniffiCloneHandle(),
         FfiConverterOptionTypeUlcpGnssSettingsRecord.lower(gnss),
-        FfiConverterOptionInt16.lower(tzOffsetMin),uniffiCallStatus
+        FfiConverterOptionString.lower(tzRule),
+        FfiConverterOptionBool.lower(time24h),uniffiCallStatus
     )
 })
 }
@@ -10183,14 +10200,19 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
      */
     public var meshcore: UlcpMeshCoreSettingsRecord?
     /**
-     * `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
-     * device advertises `CAP_TIME`.
+     * `PROP_TZ_RULE`, a POSIX TZ rule. Present exactly when the device
+     * advertises `CAP_TIME`.
      *
      * The clock itself is not here: it is live state rather than
      * configuration, is never saved, and is set with
      * [`MobileUlcpSession::set_time`].
      */
-    public var tzOffsetMin: Int16?
+    public var tzRule: String?
+    /**
+     * `PROP_TIME_24H`. Present exactly when the device advertises
+     * `CAP_TIME`.
+     */
+    public var time24h: Bool?
     /**
      * The positioning policy. Present exactly when the device advertises
      * `CAP_GNSS`.
@@ -10232,13 +10254,17 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
          * `CAP_MESHCORE_FORWARDER`.
          */meshcore: UlcpMeshCoreSettingsRecord?,
         /**
-         * `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
-         * device advertises `CAP_TIME`.
+         * `PROP_TZ_RULE`, a POSIX TZ rule. Present exactly when the device
+         * advertises `CAP_TIME`.
          *
          * The clock itself is not here: it is live state rather than
          * configuration, is never saved, and is set with
          * [`MobileUlcpSession::set_time`].
-         */tzOffsetMin: Int16?,
+         */tzRule: String?,
+        /**
+         * `PROP_TIME_24H`. Present exactly when the device advertises
+         * `CAP_TIME`.
+         */time24h: Bool?,
         /**
          * The positioning policy. Present exactly when the device advertises
          * `CAP_GNSS`.
@@ -10253,7 +10279,8 @@ public struct UlcpDeviceConfigRecord: Equatable, Hashable {
         self.devDiscoverable = devDiscoverable
         self.repeater = repeater
         self.meshcore = meshcore
-        self.tzOffsetMin = tzOffsetMin
+        self.tzRule = tzRule
+        self.time24h = time24h
         self.gnss = gnss
         self.advert = advert
     }
@@ -10280,7 +10307,8 @@ public struct FfiConverterTypeUlcpDeviceConfigRecord: FfiConverterRustBuffer {
                 devDiscoverable: FfiConverterOptionBool.read(from: &buf),
                 repeater: FfiConverterOptionTypeUlcpRepeaterSettingsRecord.read(from: &buf),
                 meshcore: FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.read(from: &buf),
-                tzOffsetMin: FfiConverterOptionInt16.read(from: &buf),
+                tzRule: FfiConverterOptionString.read(from: &buf),
+                time24h: FfiConverterOptionBool.read(from: &buf),
                 gnss: FfiConverterOptionTypeUlcpGnssSettingsRecord.read(from: &buf),
                 advert: FfiConverterOptionTypeUlcpAdvertSettingsRecord.read(from: &buf)
         )
@@ -10293,7 +10321,8 @@ public struct FfiConverterTypeUlcpDeviceConfigRecord: FfiConverterRustBuffer {
         FfiConverterOptionBool.write(value.devDiscoverable, into: &buf)
         FfiConverterOptionTypeUlcpRepeaterSettingsRecord.write(value.repeater, into: &buf)
         FfiConverterOptionTypeUlcpMeshCoreSettingsRecord.write(value.meshcore, into: &buf)
-        FfiConverterOptionInt16.write(value.tzOffsetMin, into: &buf)
+        FfiConverterOptionString.write(value.tzRule, into: &buf)
+        FfiConverterOptionBool.write(value.time24h, into: &buf)
         FfiConverterOptionTypeUlcpGnssSettingsRecord.write(value.gnss, into: &buf)
         FfiConverterOptionTypeUlcpAdvertSettingsRecord.write(value.advert, into: &buf)
     }
@@ -10511,7 +10540,11 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
      * has not found the time.
      */
     public var time: UlcpTimeRecord?
-    public var tzOffsetMin: Int16?
+    /**
+     * `PROP_TZ_RULE`, a POSIX TZ rule.
+     */
+    public var tzRule: String?
+    public var time24h: Bool?
     public var repeaterEnabled: Bool?
     public var repeaterRegions: [String]?
     public var repeaterDefaultRegion: Data?
@@ -10642,7 +10675,10 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
          * What the device's clock read when it answered. Present when the
          * clock was asked about; the inner epoch is absent on a device that
          * has not found the time.
-         */time: UlcpTimeRecord?, tzOffsetMin: Int16?, repeaterEnabled: Bool?, repeaterRegions: [String]?, repeaterDefaultRegion: Data?, repeaterMinRssiDbm: Int16?, repeaterMinSnrDb: Int8?, meshcoreForwardingEnabled: Bool?,
+         */time: UlcpTimeRecord?,
+        /**
+         * `PROP_TZ_RULE`, a POSIX TZ rule.
+         */tzRule: String?, time24h: Bool?, repeaterEnabled: Bool?, repeaterRegions: [String]?, repeaterDefaultRegion: Data?, repeaterMinRssiDbm: Int16?, repeaterMinSnrDb: Int8?, meshcoreForwardingEnabled: Bool?,
         /**
          * `PROP_MESHCORE_REGION_POLICY`: 0 open, 1 scoped only, 2 ignore.
          */meshcoreRegionPolicy: UInt8?,
@@ -10724,7 +10760,8 @@ public struct UlcpDevicePropertiesRecord: Equatable, Hashable {
         self.ipDns = ipDns
         self.ipResolvers = ipResolvers
         self.time = time
-        self.tzOffsetMin = tzOffsetMin
+        self.tzRule = tzRule
+        self.time24h = time24h
         self.repeaterEnabled = repeaterEnabled
         self.repeaterRegions = repeaterRegions
         self.repeaterDefaultRegion = repeaterDefaultRegion
@@ -10828,7 +10865,8 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
                 ipDns: FfiConverterOptionSequenceData.read(from: &buf),
                 ipResolvers: FfiConverterOptionSequenceData.read(from: &buf),
                 time: FfiConverterOptionTypeUlcpTimeRecord.read(from: &buf),
-                tzOffsetMin: FfiConverterOptionInt16.read(from: &buf),
+                tzRule: FfiConverterOptionString.read(from: &buf),
+                time24h: FfiConverterOptionBool.read(from: &buf),
                 repeaterEnabled: FfiConverterOptionBool.read(from: &buf),
                 repeaterRegions: FfiConverterOptionSequenceString.read(from: &buf),
                 repeaterDefaultRegion: FfiConverterOptionData.read(from: &buf),
@@ -10918,7 +10956,8 @@ public struct FfiConverterTypeUlcpDevicePropertiesRecord: FfiConverterRustBuffer
         FfiConverterOptionSequenceData.write(value.ipDns, into: &buf)
         FfiConverterOptionSequenceData.write(value.ipResolvers, into: &buf)
         FfiConverterOptionTypeUlcpTimeRecord.write(value.time, into: &buf)
-        FfiConverterOptionInt16.write(value.tzOffsetMin, into: &buf)
+        FfiConverterOptionString.write(value.tzRule, into: &buf)
+        FfiConverterOptionBool.write(value.time24h, into: &buf)
         FfiConverterOptionBool.write(value.repeaterEnabled, into: &buf)
         FfiConverterOptionSequenceString.write(value.repeaterRegions, into: &buf)
         FfiConverterOptionData.write(value.repeaterDefaultRegion, into: &buf)
@@ -11790,7 +11829,8 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
     public var ipDns: UInt32
     public var ipResolvers: UInt32
     public var time: UInt32
-    public var tzOffset: UInt32
+    public var tzRule: UInt32
+    public var time24h: UInt32
     public var alert: UInt32
     public var repeaterEnabled: UInt32
     public var repeaterRegions: UInt32
@@ -11805,7 +11845,7 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, statMeshcoreSeen: UInt32, statMeshcoreForwardedRouted: UInt32, statMeshcoreForwardedFlood: UInt32, statMeshcoreDeclined: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, lanBearerEnabled: UInt32, lanBearerGroup: UInt32, lanBearerIngressLimit: UInt32, lanBearerState: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzOffset: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, meshcoreForwardingEnabled: UInt32, meshcoreRegionPolicy: UInt32, meshcoreRegions: UInt32, devPeers: UInt32, devAdmins: UInt32) {
+    public init(caps: UInt32, deviceVersion: UInt32, deviceModel: UInt32, deviceName: UInt32, battery: UInt32, illuminance: UInt32, temperatures: UInt32, temperatureNames: UInt32, batteryCurrent: UInt32, batteryRemainingCapacity: UInt32, batteryFullCapacity: UInt32, batteryDesignCapacity: UInt32, batteryExtPowerPresent: UInt32, batteryPresent: UInt32, batteryGaugeFull: UInt32, batteryGaugeInitialized: UInt32, batteryGaugeSmoothing: UInt32, batteryChargeVoltageRequest: UInt32, batteryGaugeFormat: UInt32, batteryGaugeStatus: UInt32, batteryGaugeOperationStatus: UInt32, phyEnabled: UInt32, frequency: UInt32, transmitPower: UInt32, loraBandwidth: UInt32, loraSpreadingFactor: UInt32, loraCodingRate: UInt32, dutyCycleNow: UInt32, dutyCycleLimit: UInt32, statTxPackets: UInt32, statTxChannelBusy: UInt32, statRxPackets: UInt32, statRxBadCrc: UInt32, statRxNonUmsh: UInt32, statRxAccepted: UInt32, statForwarded: UInt32, statForwardDropped: UInt32, statForwardCancelled: UInt32, statMeshcoreSeen: UInt32, statMeshcoreForwardedRouted: UInt32, statMeshcoreForwardedFlood: UInt32, statMeshcoreDeclined: UInt32, identRole: UInt32, identMobile: UInt32, identLocation: UInt32, identAltitude: UInt32, devDiscoverable: UInt32, gnssIdentUpdate: UInt32, gnssIdentPrecision: UInt32, uptime: UInt32, advertInterval: UInt32, beaconInterval: UInt32, startupBeacon: UInt32, gnssEnabled: UInt32, displayMotionWakeEnabled: UInt32, gnssTimeTrust: UInt32, bleEnabled: UInt32, bleBondCount: UInt32, bleLink: UInt32, blePairing: UInt32, wifiEnabled: UInt32, bridgeEnabled: UInt32, bridgeHost: UInt32, bridgePort: UInt32, bridgeServerKey: UInt32, bridgeLink: UInt32, lanBearerEnabled: UInt32, lanBearerGroup: UInt32, lanBearerIngressLimit: UInt32, lanBearerState: UInt32, devKey: UInt32, wifiNetworks: UInt32, wifiNetwork: UInt32, wifiScanning: UInt32, wifiScanResults: UInt32, wifiLink: UInt32, wifiRssi: UInt32, wifiMac: UInt32, ipv4State: UInt32, ipv4Config: UInt32, ipv4Address: UInt32, ipv6State: UInt32, ipv6Config: UInt32, ipv6Addresses: UInt32, ipDns: UInt32, ipResolvers: UInt32, time: UInt32, tzRule: UInt32, time24h: UInt32, alert: UInt32, repeaterEnabled: UInt32, repeaterRegions: UInt32, repeaterDefaultRegion: UInt32, repeaterMinRssi: UInt32, repeaterMinSnr: UInt32, meshcoreForwardingEnabled: UInt32, meshcoreRegionPolicy: UInt32, meshcoreRegions: UInt32, devPeers: UInt32, devAdmins: UInt32) {
         self.caps = caps
         self.deviceVersion = deviceVersion
         self.deviceModel = deviceModel
@@ -11893,7 +11933,8 @@ public struct UlcpManagedPropertyIds: Equatable, Hashable {
         self.ipDns = ipDns
         self.ipResolvers = ipResolvers
         self.time = time
-        self.tzOffset = tzOffset
+        self.tzRule = tzRule
+        self.time24h = time24h
         self.alert = alert
         self.repeaterEnabled = repeaterEnabled
         self.repeaterRegions = repeaterRegions
@@ -12010,7 +12051,8 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
                 ipDns: FfiConverterUInt32.read(from: &buf),
                 ipResolvers: FfiConverterUInt32.read(from: &buf),
                 time: FfiConverterUInt32.read(from: &buf),
-                tzOffset: FfiConverterUInt32.read(from: &buf),
+                tzRule: FfiConverterUInt32.read(from: &buf),
+                time24h: FfiConverterUInt32.read(from: &buf),
                 alert: FfiConverterUInt32.read(from: &buf),
                 repeaterEnabled: FfiConverterUInt32.read(from: &buf),
                 repeaterRegions: FfiConverterUInt32.read(from: &buf),
@@ -12113,7 +12155,8 @@ public struct FfiConverterTypeUlcpManagedPropertyIds: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.ipDns, into: &buf)
         FfiConverterUInt32.write(value.ipResolvers, into: &buf)
         FfiConverterUInt32.write(value.time, into: &buf)
-        FfiConverterUInt32.write(value.tzOffset, into: &buf)
+        FfiConverterUInt32.write(value.tzRule, into: &buf)
+        FfiConverterUInt32.write(value.time24h, into: &buf)
         FfiConverterUInt32.write(value.alert, into: &buf)
         FfiConverterUInt32.write(value.repeaterEnabled, into: &buf)
         FfiConverterUInt32.write(value.repeaterRegions, into: &buf)
@@ -13337,14 +13380,19 @@ public struct UlcpSyncRecord: Equatable, Hashable {
      */
     public var devDiscoverable: Bool?
     /**
-     * `PROP_TZ_OFFSET` in minutes east of UTC. Present when
-     * `supports_time` and the device reported it.
+     * `PROP_TZ_RULE`, a POSIX TZ rule. Present when `supports_time` and
+     * the device reported it.
      *
      * The zone is configuration and the epoch is not: where a device is
      * meant to be is known even when what time it is is not, which is
      * why this is here and the clock reading is on the session snapshot.
      */
-    public var tzOffsetMin: Int16?
+    public var tzRule: String?
+    /**
+     * `PROP_TIME_24H`: whether a clock the device shows writes hours
+     * 0–23. Present when `supports_time` and the device reported it.
+     */
+    public var time24h: Bool?
     /**
      * The positioning policy. Present when `supports_gnss` and the
      * device reported the whole of it.
@@ -13477,13 +13525,17 @@ public struct UlcpSyncRecord: Equatable, Hashable {
          * device reported it.
          */devDiscoverable: Bool?,
         /**
-         * `PROP_TZ_OFFSET` in minutes east of UTC. Present when
-         * `supports_time` and the device reported it.
+         * `PROP_TZ_RULE`, a POSIX TZ rule. Present when `supports_time` and
+         * the device reported it.
          *
          * The zone is configuration and the epoch is not: where a device is
          * meant to be is known even when what time it is is not, which is
          * why this is here and the clock reading is on the session snapshot.
-         */tzOffsetMin: Int16?,
+         */tzRule: String?,
+        /**
+         * `PROP_TIME_24H`: whether a clock the device shows writes hours
+         * 0–23. Present when `supports_time` and the device reported it.
+         */time24h: Bool?,
         /**
          * The positioning policy. Present when `supports_gnss` and the
          * device reported the whole of it.
@@ -13547,7 +13599,8 @@ public struct UlcpSyncRecord: Equatable, Hashable {
         self.identMobile = identMobile
         self.identPosition = identPosition
         self.devDiscoverable = devDiscoverable
-        self.tzOffsetMin = tzOffsetMin
+        self.tzRule = tzRule
+        self.time24h = time24h
         self.gnss = gnss
         self.advert = advert
         self.unreadableProperties = unreadableProperties
@@ -13614,7 +13667,8 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
                 identMobile: FfiConverterOptionBool.read(from: &buf),
                 identPosition: FfiConverterOptionTypeUlcpIdentPositionRecord.read(from: &buf),
                 devDiscoverable: FfiConverterOptionBool.read(from: &buf),
-                tzOffsetMin: FfiConverterOptionInt16.read(from: &buf),
+                tzRule: FfiConverterOptionString.read(from: &buf),
+                time24h: FfiConverterOptionBool.read(from: &buf),
                 gnss: FfiConverterOptionTypeUlcpGnssSettingsRecord.read(from: &buf),
                 advert: FfiConverterOptionTypeUlcpAdvertSettingsRecord.read(from: &buf),
                 unreadableProperties: FfiConverterSequenceUInt32.read(from: &buf)
@@ -13667,7 +13721,8 @@ public struct FfiConverterTypeUlcpSyncRecord: FfiConverterRustBuffer {
         FfiConverterOptionBool.write(value.identMobile, into: &buf)
         FfiConverterOptionTypeUlcpIdentPositionRecord.write(value.identPosition, into: &buf)
         FfiConverterOptionBool.write(value.devDiscoverable, into: &buf)
-        FfiConverterOptionInt16.write(value.tzOffsetMin, into: &buf)
+        FfiConverterOptionString.write(value.tzRule, into: &buf)
+        FfiConverterOptionBool.write(value.time24h, into: &buf)
         FfiConverterOptionTypeUlcpGnssSettingsRecord.write(value.gnss, into: &buf)
         FfiConverterOptionTypeUlcpAdvertSettingsRecord.write(value.advert, into: &buf)
         FfiConverterSequenceUInt32.write(value.unreadableProperties, into: &buf)
@@ -19830,6 +19885,56 @@ public func ulcpRecordsFromAnswers(answers: [MobileMeshManagementAnswerRecord]) 
 })
 }
 /**
+ * A rule for a zone that keeps `minutes_east` all year, named by its
+ * offset: −420 is `<-07>7`, 330 is `<+0530>-5:30`, and 0 is `UTC0`.
+ */
+public func fixedOffsetRule(minutesEast: Int16) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_fixed_offset_rule(
+        FfiConverterInt16.lower(minutesEast),uniffiCallStatus
+    )
+})
+}
+/**
+ * The abbreviation `rule` uses at `unix_seconds`, such as `PDT` or
+ * `+0530`.
+ */
+public func ruleAbbreviation(rule: String, unixSeconds: Int64) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_rule_abbreviation(
+        FfiConverterString.lower(rule),
+        FfiConverterInt64.lower(unixSeconds),uniffiCallStatus
+    )
+})
+}
+/**
+ * The offset `rule` keeps at `unix_seconds`, in minutes east of UTC.
+ */
+public func ruleOffsetMin(rule: String, unixSeconds: Int64) -> Int16?  {
+    return try!  FfiConverterOptionInt16.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_rule_offset_min(
+        FfiConverterString.lower(rule),
+        FfiConverterInt64.lower(unixSeconds),uniffiCallStatus
+    )
+})
+}
+/**
+ * The rule a zone such as `America/Los_Angeles` follows now, from the
+ * system's zone database. `None` when the zone is not there or its rule
+ * is not one a device accepts.
+ */
+public func zoneRule(identifier: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_umsh_mobile_core_fn_func_zone_rule(
+        FfiConverterString.lower(identifier),uniffiCallStatus
+    )
+})
+}
+/**
  * Summarize a frame's header for a diagnostic log.
  *
  * Deliberately structural: transaction, command, property, and lengths,
@@ -20496,6 +20601,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_func_ulcp_records_from_answers() != 35471) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_umsh_mobile_core_checksum_func_fixed_offset_rule() != 4700) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_rule_abbreviation() != 28818) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_rule_offset_min() != 22021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_umsh_mobile_core_checksum_func_zone_rule() != 8037) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_umsh_mobile_core_checksum_func_describe_ulcp_frame() != 25764) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20862,7 +20979,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_configure_device() != 28904) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_configure_positioning() != 64359) {
+    if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_configure_positioning() != 22011) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_umsh_mobile_core_checksum_method_mobileulcpsession_consume() != 10958) {

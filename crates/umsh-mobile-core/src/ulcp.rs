@@ -29,6 +29,7 @@ use crate::{
     mobile_mesh::{
         HostPeerKeyEntryRecord, MobileMeshManagementAnswerRecord, MobileMeshPropertyWriteRecord,
     },
+    time_zone,
 };
 
 /// Item width of `PROP_HOST_MUTED_CHANNELS`: the full channel
@@ -423,13 +424,16 @@ pub struct UlcpSyncRecord {
     /// Identity Requests. Present when `supports_device_identity` and the
     /// device reported it.
     pub dev_discoverable: Option<bool>,
-    /// `PROP_TZ_OFFSET` in minutes east of UTC. Present when
-    /// `supports_time` and the device reported it.
+    /// `PROP_TZ_RULE`, a POSIX TZ rule. Present when `supports_time` and
+    /// the device reported it.
     ///
     /// The zone is configuration and the epoch is not: where a device is
     /// meant to be is known even when what time it is is not, which is
     /// why this is here and the clock reading is on the session snapshot.
-    pub tz_offset_min: Option<i16>,
+    pub tz_rule: Option<String>,
+    /// `PROP_TIME_24H`: whether a clock the device shows writes hours
+    /// 0–23. Present when `supports_time` and the device reported it.
+    pub time_24h: Option<bool>,
     /// The positioning policy. Present when `supports_gnss` and the
     /// device reported the whole of it.
     pub gnss: Option<UlcpGnssSettingsRecord>,
@@ -522,13 +526,16 @@ pub struct UlcpDeviceConfigRecord {
     /// MeshCore forwarding. Present exactly when the device advertises
     /// `CAP_MESHCORE_FORWARDER`.
     pub meshcore: Option<UlcpMeshCoreSettingsRecord>,
-    /// `PROP_TZ_OFFSET` in minutes east of UTC. Present exactly when the
-    /// device advertises `CAP_TIME`.
+    /// `PROP_TZ_RULE`, a POSIX TZ rule. Present exactly when the device
+    /// advertises `CAP_TIME`.
     ///
     /// The clock itself is not here: it is live state rather than
     /// configuration, is never saved, and is set with
     /// [`MobileUlcpSession::set_time`].
-    pub tz_offset_min: Option<i16>,
+    pub tz_rule: Option<String>,
+    /// `PROP_TIME_24H`. Present exactly when the device advertises
+    /// `CAP_TIME`.
+    pub time_24h: Option<bool>,
     /// The positioning policy. Present exactly when the device advertises
     /// `CAP_GNSS`.
     pub gnss: Option<UlcpGnssSettingsRecord>,
@@ -1536,13 +1543,19 @@ impl MobileUlcpSession {
     pub fn configure_positioning(
         &self,
         gnss: Option<UlcpGnssSettingsRecord>,
-        tz_offset_min: Option<i16>,
+        tz_rule: Option<String>,
+        time_24h: Option<bool>,
     ) -> Result<UlcpSessionUpdateRecord, MobileError> {
         let mut state = self.inner.lock().expect("ULCP session mutex poisoned");
         if state.stage != SessionStage::Attached {
             return Err(MobileError::InvalidUlcpFrame);
         }
-        let values = positioning_values(gnss, tz_offset_min, DeviceCapabilities::read(&state)?)?;
+        let values = positioning_values(
+            gnss,
+            tz_rule.as_deref(),
+            time_24h,
+            DeviceCapabilities::read(&state)?,
+        )?;
         // A radio with neither capability has nothing here to configure,
         // which is a caller mistake rather than an empty success.
         if values.is_empty() {
@@ -4411,7 +4424,7 @@ pub fn ulcp_inspection_properties(capabilities: Vec<u8>) -> Result<Vec<u32>, Mob
         // here for the same reason the alert is: a phone that just
         // attached should know whether the device knows the time, not
         // wait for the next announcement to find out.
-        properties.extend([prop::TIME, prop::TZ_OFFSET]);
+        properties.extend([prop::TIME, prop::TZ_RULE, prop::TIME_24H]);
     }
     if has(cap::GNSS) {
         properties.extend([
@@ -4632,7 +4645,8 @@ pub fn inspect_ulcp_sync(
     })();
     let dev_discoverable = expected.read(dev_identity, prop::DEV_DISCOVERABLE, decode_bool);
 
-    let tz_offset_min = expected.read(has(cap::TIME), prop::TZ_OFFSET, decode_i16);
+    let tz_rule = expected.read(has(cap::TIME), prop::TZ_RULE, decode_tz_rule);
+    let time_24h = expected.read(has(cap::TIME), prop::TIME_24H, decode_bool);
 
     // Read whole, like the forwarding policy above and for the same
     // reason: this is written as a set.
@@ -4716,7 +4730,8 @@ pub fn inspect_ulcp_sync(
         ident_mobile,
         ident_position,
         dev_discoverable,
-        tz_offset_min,
+        tz_rule,
+        time_24h,
         gnss,
         advert,
         unreadable_properties,
@@ -4861,7 +4876,8 @@ pub struct UlcpManagedPropertyIds {
     pub ip_dns: u32,
     pub ip_resolvers: u32,
     pub time: u32,
-    pub tz_offset: u32,
+    pub tz_rule: u32,
+    pub time_24h: u32,
     pub alert: u32,
     pub repeater_enabled: u32,
     pub repeater_regions: u32,
@@ -4966,7 +4982,8 @@ pub fn ulcp_managed_property_ids() -> UlcpManagedPropertyIds {
         ip_dns: prop::IP_DNS,
         ip_resolvers: prop::IP_RESOLVERS,
         time: prop::TIME,
-        tz_offset: prop::TZ_OFFSET,
+        tz_rule: prop::TZ_RULE,
+        time_24h: prop::TIME_24H,
         alert: prop::ALERT,
         repeater_enabled: prop::MAC_REPEATER_ENABLED,
         repeater_regions: prop::MAC_REPEATER_REGIONS,
@@ -5116,7 +5133,10 @@ pub fn ulcp_category_properties(
         UlcpManageCategory::Time => {
             // Uptime is every device's, so it rides with the clock rather
             // than offering a Time screen on a device that keeps no time.
-            when(has(cap::TIME), &[prop::UPTIME, prop::TIME, prop::TZ_OFFSET]);
+            when(
+                has(cap::TIME),
+                &[prop::UPTIME, prop::TIME, prop::TZ_RULE, prop::TIME_24H],
+            );
             // Whether the receiver may set the clock is the clock's
             // business, so it lives here rather than with the receiver.
             when(has(cap::GNSS), &[prop::GNSS_TIME_TRUST]);
@@ -5652,7 +5672,9 @@ pub struct UlcpDevicePropertiesRecord {
     /// clock was asked about; the inner epoch is absent on a device that
     /// has not found the time.
     pub time: Option<UlcpTimeRecord>,
-    pub tz_offset_min: Option<i16>,
+    /// `PROP_TZ_RULE`, a POSIX TZ rule.
+    pub tz_rule: Option<String>,
+    pub time_24h: Option<bool>,
     pub repeater_enabled: Option<bool>,
     pub repeater_regions: Option<Vec<String>>,
     pub repeater_default_region: Option<Vec<u8>>,
@@ -5899,7 +5921,8 @@ pub fn inspect_ulcp_properties(
                 epoch_seconds: decode_optional(value, decode_u32)?,
             })
         }),
-        tz_offset_min: optional_value(at, prop::TZ_OFFSET, decode_i16),
+        tz_rule: optional_value(at, prop::TZ_RULE, decode_tz_rule),
+        time_24h: optional_value(at, prop::TIME_24H, decode_bool),
         repeater_enabled: optional_value(at, prop::MAC_REPEATER_ENABLED, decode_bool),
         repeater_regions: optional_value(at, prop::MAC_REPEATER_REGIONS, decode_region_list),
         repeater_default_region: optional_value(
@@ -6137,11 +6160,8 @@ pub fn ulcp_dirty_writes(
                 .epoch_seconds
                 .map(|epoch| epoch.to_le_bytes().to_vec())
                 .unwrap_or_default(),
-            prop::TZ_OFFSET => desired
-                .tz_offset_min
-                .ok_or_else(missing)?
-                .to_le_bytes()
-                .to_vec(),
+            prop::TZ_RULE => encode_tz_rule(desired.tz_rule.as_deref().ok_or_else(missing)?)?,
+            prop::TIME_24H => vec![desired.time_24h.ok_or_else(missing)? as u8],
             prop::ADVERT_INTERVAL => desired
                 .advert_interval_seconds
                 .ok_or_else(missing)?
@@ -6757,7 +6777,8 @@ fn validate_device_settings(
 
     values.extend(positioning_values(
         configuration.gnss,
-        configuration.tz_offset_min,
+        configuration.tz_rule.as_deref(),
+        configuration.time_24h,
         capabilities,
     )?);
     values.extend(advert_values(configuration.advert, capabilities)?);
@@ -6819,23 +6840,21 @@ fn advert_values(
 /// state a whole desired setting rather than a patch.
 fn positioning_values(
     gnss: Option<UlcpGnssSettingsRecord>,
-    tz_offset_min: Option<i16>,
+    tz_rule: Option<&str>,
+    time_24h: Option<bool>,
     capabilities: DeviceCapabilities,
 ) -> Result<Vec<(u32, Vec<u8>)>, MobileError> {
     let mut values = Vec::new();
 
     let keeps_time = capabilities.time;
-    if tz_offset_min.is_some() != keeps_time {
+    if tz_rule.is_some() != keeps_time || time_24h.is_some() != keeps_time {
         return Err(MobileError::InvalidUlcpFrame);
     }
-    if let Some(minutes) = tz_offset_min {
-        // The extremes of the zone database, not of the encoding: a
-        // fourteen-hour offset is Kiritimati, and anything past it is a
-        // caller mistake rather than a place.
-        if !(-12 * 60..=14 * 60).contains(&minutes) {
-            return Err(MobileError::InvalidUlcpFrame);
-        }
-        values.push((prop::TZ_OFFSET, minutes.to_le_bytes().to_vec()));
+    if let (Some(rule), Some(time_24h)) = (tz_rule, time_24h) {
+        values.extend([
+            (prop::TZ_RULE, encode_tz_rule(rule)?),
+            (prop::TIME_24H, vec![time_24h as u8]),
+        ]);
     }
 
     let positioning = capabilities.gnss;
@@ -6893,6 +6912,23 @@ fn validate_radio_settings(
         return Err(MobileError::InvalidUlcpFrame);
     }
     Ok(())
+}
+
+/// A zone rule as the device reports it. Only the encoding is checked:
+/// a rule this phone cannot evaluate is still the device's setting.
+fn decode_tz_rule(value: &[u8]) -> Result<String, MobileError> {
+    core::str::from_utf8(value)
+        .map(str::to_owned)
+        .map_err(|_| MobileError::InvalidUlcpFrame)
+}
+
+/// A zone rule the device will accept. It refuses the rest too; catching
+/// them here fails the write before any of it has been sent.
+fn encode_tz_rule(rule: &str) -> Result<Vec<u8>, MobileError> {
+    if !time_zone::device_accepts(rule) {
+        return Err(MobileError::InvalidUlcpFrame);
+    }
+    Ok(rule.as_bytes().to_vec())
 }
 
 /// A device name, which is UTF-8 and may be empty—a device that has not
@@ -8915,7 +8951,8 @@ mod tests {
                     min_snr_db: None,
                 }),
                 meshcore: None,
-                tz_offset_min: None,
+                tz_rule: None,
+                time_24h: None,
                 gnss: None,
                 advert: None,
             })
@@ -8971,7 +9008,8 @@ mod tests {
                     min_snr_db: Some(-7),
                 }),
                 meshcore: None,
-                tz_offset_min: None,
+                tz_rule: None,
+                time_24h: None,
                 gnss: None,
                 advert: None,
             })
@@ -9063,7 +9101,8 @@ mod tests {
                 dev_discoverable,
                 repeater,
                 meshcore: None,
-                tz_offset_min: None,
+                tz_rule: None,
+                time_24h: None,
                 gnss: None,
                 advert: None,
             })
@@ -9243,7 +9282,8 @@ mod tests {
                 min_snr_db: None,
             }),
             meshcore,
-            tz_offset_min: None,
+            tz_rule: None,
+            time_24h: None,
             gnss: None,
             advert: None,
         };
@@ -10107,7 +10147,8 @@ mod tests {
                 min_snr_db: None,
             }),
             meshcore: None,
-            tz_offset_min: None,
+            tz_rule: None,
+            time_24h: None,
             gnss: None,
             advert: None,
         };
@@ -10170,7 +10211,8 @@ mod tests {
                 min_snr_db: None,
             }),
             meshcore: None,
-            tz_offset_min: None,
+            tz_rule: None,
+            time_24h: None,
             gnss: None,
             advert: None,
         };
@@ -11375,9 +11417,8 @@ mod tests {
                 prop::CAPS => (property, encoded_capabilities(&capabilities)),
                 prop::HOST_KEY => (property, vec![0xAA; 32]),
                 prop::TIME => (property, 1_754_000_000u32.to_le_bytes().to_vec()),
-                // Pacific daylight time, which is an offset and not a zone
-                //—the device has no database to shift itself with.
-                prop::TZ_OFFSET => (property, (-420i16).to_le_bytes().to_vec()),
+                prop::TZ_RULE => (property, b"PST8PDT,M3.2.0,M11.1.0".to_vec()),
+                prop::TIME_24H => (property, vec![0]),
                 prop::GNSS_ENABLED | prop::GNSS_IDENT_UPDATE | prop::GNSS_TIME_TRUST => {
                     (property, vec![1])
                 }
@@ -11580,7 +11621,8 @@ mod tests {
 
         let sync = attached.snapshot.provisioning.clone().expect("described");
         assert!(sync.supports_time && sync.supports_gnss);
-        assert_eq!(sync.tz_offset_min, Some(-420));
+        assert_eq!(sync.tz_rule.as_deref(), Some("PST8PDT,M3.2.0,M11.1.0"));
+        assert_eq!(sync.time_24h, Some(false));
         assert_eq!(
             sync.gnss,
             Some(UlcpGnssSettingsRecord {
@@ -11782,7 +11824,7 @@ mod tests {
             .provisioning
             .expect("described");
         assert!(!sync.supports_time && !sync.supports_gnss);
-        assert_eq!((sync.tz_offset_min, sync.gnss), (None, None));
+        assert_eq!((sync.tz_rule, sync.time_24h, sync.gnss), (None, None, None));
     }
 
     #[test]
@@ -11813,7 +11855,8 @@ mod tests {
                     min_snr_db: None,
                 }),
                 meshcore: None,
-                tz_offset_min: Some(60),
+                tz_rule: Some("CET-1CEST,M3.5.0,M10.5.0/3".to_owned()),
+                time_24h: Some(true),
                 gnss: Some(UlcpGnssSettingsRecord {
                     enabled: true,
                     ident_update: false,
@@ -11825,9 +11868,10 @@ mod tests {
             .unwrap();
         let (written, order, _) = drive_configuration(&session, configured.outbound_frames);
         assert_eq!(
-            written.get(&prop::TZ_OFFSET),
-            Some(&60i16.to_le_bytes().to_vec())
+            written.get(&prop::TZ_RULE),
+            Some(&b"CET-1CEST,M3.5.0,M10.5.0/3".to_vec())
         );
+        assert_eq!(written.get(&prop::TIME_24H), Some(&vec![1]));
         assert_eq!(written.get(&prop::GNSS_IDENT_UPDATE), Some(&vec![0]));
         assert_eq!(written.get(&prop::GNSS_IDENT_PRECISION), Some(&vec![3]));
         assert_eq!(written.get(&prop::GNSS_TIME_TRUST), Some(&vec![0]));
@@ -11863,7 +11907,8 @@ mod tests {
                     ident_precision: 3,
                     time_trust: false,
                 }),
-                Some(0),
+                Some("UTC0".to_owned()),
+                Some(false),
             )
             .unwrap();
         let (written, order, save_tid) = drive_configuration(&session, configured.outbound_frames);
@@ -11871,7 +11916,8 @@ mod tests {
         assert_eq!(
             written,
             HashMap::from([
-                (prop::TZ_OFFSET, 0i16.to_le_bytes().to_vec()),
+                (prop::TZ_RULE, b"UTC0".to_vec()),
+                (prop::TIME_24H, vec![0]),
                 (prop::GNSS_IDENT_UPDATE, vec![0]),
                 (prop::GNSS_IDENT_PRECISION, vec![3]),
                 (prop::GNSS_TIME_TRUST, vec![0]),
@@ -11910,11 +11956,15 @@ mod tests {
         };
         // The same presence rule as the whole-domain write.
         assert_eq!(
-            session.configure_positioning(Some(whole), None),
+            session.configure_positioning(Some(whole.clone()), None, None),
             Err(MobileError::InvalidUlcpFrame)
         );
         assert_eq!(
-            session.configure_positioning(None, Some(0)),
+            session.configure_positioning(Some(whole), Some("UTC0".to_owned()), None),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+        assert_eq!(
+            session.configure_positioning(None, Some("UTC0".to_owned()), Some(true)),
             Err(MobileError::InvalidUlcpFrame)
         );
 
@@ -11923,7 +11973,7 @@ mod tests {
         let plain = MobileUlcpSession::new();
         attach_commissionable(&plain, Some(vec![0xAA; 32]), vec![0xAA; 32]);
         assert_eq!(
-            plain.configure_positioning(None, None),
+            plain.configure_positioning(None, None, None),
             Err(MobileError::UnsupportedCapability)
         );
     }
@@ -11955,7 +12005,8 @@ mod tests {
                 min_snr_db: None,
             }),
             meshcore: None,
-            tz_offset_min: Some(0),
+            tz_rule: Some("UTC0".to_owned()),
+            time_24h: Some(true),
             gnss: Some(UlcpGnssSettingsRecord {
                 enabled: true,
                 ident_update: false,
@@ -11965,10 +12016,17 @@ mod tests {
             advert: None,
         };
 
-        // Both gated fields are required on a device that has them.
+        // Every gated field is required on a device that has them.
         assert_eq!(
             session.configure_device(UlcpDeviceConfigRecord {
-                tz_offset_min: None,
+                tz_rule: None,
+                ..whole.clone()
+            }),
+            Err(MobileError::InvalidUlcpFrame)
+        );
+        assert_eq!(
+            session.configure_device(UlcpDeviceConfigRecord {
+                time_24h: None,
                 ..whole.clone()
             }),
             Err(MobileError::InvalidUlcpFrame)
@@ -11991,14 +12049,18 @@ mod tests {
             }),
             Err(MobileError::InvalidUlcpFrame)
         );
-        // And an offset no zone on Earth uses.
-        assert_eq!(
-            session.configure_device(UlcpDeviceConfigRecord {
-                tz_offset_min: Some(15 * 60),
-                ..whole.clone()
-            }),
-            Err(MobileError::InvalidUlcpFrame)
-        );
+        // And a rule that does not parse, or keeps an offset no zone on
+        // Earth uses, in either half of the year.
+        for rule in ["Pacific", "<+15>-15", "UTC0<+15>-15,M3.2.0,M11.1.0"] {
+            assert_eq!(
+                session.configure_device(UlcpDeviceConfigRecord {
+                    tz_rule: Some(rule.to_owned()),
+                    ..whole.clone()
+                }),
+                Err(MobileError::InvalidUlcpFrame),
+                "{rule}"
+            );
+        }
     }
 
     #[test]
@@ -12019,7 +12081,8 @@ mod tests {
                     vec![umsh_ulcp::Status::PROP_NOT_FOUND.0 as u8],
                 ),
                 prop::TIME => (property, Vec::new()),
-                prop::TZ_OFFSET => (property, 0i16.to_le_bytes().to_vec()),
+                prop::TZ_RULE => (property, b"UTC0".to_vec()),
+                prop::TIME_24H => (property, vec![1]),
                 prop::GNSS_ENABLED | prop::GNSS_IDENT_UPDATE => (property, vec![0]),
                 prop::GNSS_IDENT_PRECISION => (property, vec![5]),
                 prop::GNSS_LOCATION | prop::GNSS_ALTITUDE | prop::GNSS_PRECISION => {
@@ -12067,7 +12130,8 @@ mod tests {
                     min_snr_db: None,
                 }),
                 meshcore: None,
-                tz_offset_min: Some(0),
+                tz_rule: Some("UTC0".to_owned()),
+                time_24h: Some(true),
                 gnss: Some(UlcpGnssSettingsRecord {
                     enabled: true,
                     ident_update: true,
@@ -12087,10 +12151,7 @@ mod tests {
             assert!(!written.contains_key(&property), "property {property}");
         }
         // The zone is its own property and is unaffected.
-        assert_eq!(
-            written.get(&prop::TZ_OFFSET),
-            Some(&0i16.to_le_bytes().to_vec())
-        );
+        assert_eq!(written.get(&prop::TZ_RULE), Some(&b"UTC0".to_vec()));
     }
 
     #[test]
@@ -12102,7 +12163,8 @@ mod tests {
             ulcp_inspection_properties(encoded_capabilities(&[cap::TIME, cap::GNSS])).unwrap();
         for property in [
             prop::TIME,
-            prop::TZ_OFFSET,
+            prop::TZ_RULE,
+            prop::TIME_24H,
             prop::GNSS_ENABLED,
             prop::GNSS_LOCATION,
             prop::GNSS_FIX,
@@ -12666,6 +12728,34 @@ mod tests {
             inspect_ulcp_properties(vec![response(prop::IPV4_ADDRESS, &[])]).ipv4_address,
             None
         );
+    }
+
+    #[test]
+    fn zone_edits_write_the_rule_and_the_clock_style() {
+        let ids = vec![prop::TZ_RULE, prop::TIME_24H];
+        let mut desired = UlcpDevicePropertiesRecord {
+            tz_rule: Some("<+0530>-5:30".into()),
+            time_24h: Some(false),
+            ..Default::default()
+        };
+        let writes = ulcp_dirty_writes(desired.clone(), ids.clone()).unwrap();
+        let written: HashMap<u32, Vec<u8>> = writes
+            .into_iter()
+            .map(|write| (write.property_id, write.value))
+            .collect();
+        assert_eq!(written.get(&prop::TZ_RULE), Some(&b"<+0530>-5:30".to_vec()));
+        assert_eq!(written.get(&prop::TIME_24H), Some(&vec![0]));
+        desired.tz_rule = Some("<-13>13".into());
+        assert!(ulcp_dirty_writes(desired.clone(), ids.clone()).is_err());
+        desired.tz_rule = None;
+        assert!(ulcp_dirty_writes(desired, ids).is_err());
+
+        let read = inspect_ulcp_properties(vec![
+            response(prop::TZ_RULE, b"PST8PDT,M3.2.0,M11.1.0"),
+            response(prop::TIME_24H, &[1]),
+        ]);
+        assert_eq!(read.tz_rule.as_deref(), Some("PST8PDT,M3.2.0,M11.1.0"));
+        assert_eq!(read.time_24h, Some(true));
     }
 
     #[test]

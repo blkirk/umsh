@@ -548,8 +548,8 @@ mod tests {
         );
         assert_eq!(encode_value(prop::PHY_TX_POWER, "-9").unwrap(), vec![0xF7]);
         assert_eq!(
-            encode_value(prop::TZ_OFFSET, "-480").unwrap(),
-            (-480i16).to_le_bytes()
+            encode_value(prop::MAC_REPEATER_MIN_RSSI, "-120").unwrap(),
+            (-120i16).to_le_bytes()
         );
         assert_eq!(
             encode_value(prop::DEV_NAME, "Repeater 3").unwrap(),

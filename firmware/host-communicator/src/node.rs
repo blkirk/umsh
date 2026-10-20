@@ -15,7 +15,7 @@ use umsh_ulcp::profiles;
 use umsh_ulcp_admin::{LocalPort, PortBusy, PortFrame};
 use umsh_ulcp_simdev::host::HostPlatform;
 use umsh_ulcp_simdev::soft::SoftDevice;
-use umsh_ulcp_simdev::{DutyLedger, LanBearerRole, RadioSettings, SessionConfig};
+use umsh_ulcp_simdev::{DutyLedger, LanBearerRole, RadioSettings, SessionConfig, TimeConfig};
 use umsh_ux_communicator::model::{Node as _, State, brightness_at};
 
 use crate::flash::{self, FileFlash};
@@ -49,7 +49,7 @@ impl LocalPort for Port {
 
 pub type Node = CommunicatorNode<Port, FlashMapStore<FileFlash>>;
 
-/// The host's clocks. Local time is UTC.
+/// The host's clocks.
 struct HostClock(Instant);
 
 impl Clock for HostClock {
@@ -62,10 +62,6 @@ impl Clock for HostClock {
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|since| since.as_secs() as u32)
-    }
-
-    fn utc_offset_min(&self) -> i16 {
-        0
     }
 }
 
@@ -96,7 +92,7 @@ fn config() -> SessionConfig {
         battery_diagnostics: Default::default(),
         battery: None,
         alert: None,
-        time: None,
+        time: Some(TimeConfig),
         gnss: None,
         display_motion_wake: false,
         display_brightness: Some(brightness_at(5)),

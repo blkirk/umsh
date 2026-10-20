@@ -269,8 +269,11 @@ fn ui_status<'a>(name: &'a DeviceName, identity: &'a IdentityText) -> screen::St
         #[cfg(not(feature = "external-rtc"))]
         clock: None,
         #[cfg(feature = "external-rtc")]
-        clock: umsh_hal::wall_clock::local_hhmm()
-            .map(|(hour, minute)| screen::ClockModel { hour, minute }),
+        clock: umsh_hal::wall_clock::local_hhmm().map(|(hour, minute)| screen::ClockModel {
+            hour,
+            minute,
+            hour24: umsh_hal::wall_clock::hour24(),
+        }),
     }
 }
 

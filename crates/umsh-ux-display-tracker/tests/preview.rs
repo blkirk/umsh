@@ -174,6 +174,7 @@ fn status(
         clock: Some(ClockModel {
             hour: 14,
             minute: 30,
+            hour24: true,
         }),
         settings: SettingsModel {
             radio: Some(true),

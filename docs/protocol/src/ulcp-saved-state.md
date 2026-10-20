@@ -50,8 +50,8 @@ if it is a repeater.
   a stored epoch is wrong by however long the device was off, by an amount
   nothing can bound, so restoring one would be restoring a confidently
   incorrect clock. A device recovers the time from a real source or
-  reports that it does not know it. Its time *zone* is ordinary
-  configuration and is saved.
+  reports that it does not know it. Its time zone and how it writes hours
+  are ordinary configuration and are saved.
 
   What a network link is currently doing is excluded on the statistics'
   reasoning. [`PROP_WIFI_SCANNING`](ulcp-wifi.md#prop-wifi-scanning),

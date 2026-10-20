@@ -32,14 +32,22 @@ static INDICES: [usize; MAX_REACTORS] = {
     a
 };
 
-pub fn view(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
+/// `time` is when the message was sent or received, in local time.
+pub fn view(
+    details: &Details,
+    inbound: bool,
+    time: Option<String<8>>,
+) -> impl View<Rgb565, State> + use<> {
     let details = details.clone();
     VStack::new((
         header("Message details", None, None),
         super::list(
             // One focusable block, which the wheel scrolls a row at a time.
-            Button::new(|_: &mut State| {}, move |_| rows(&details, inbound))
-                .focus_key(keys::DETAIL_LIST),
+            Button::new(
+                |_: &mut State| {},
+                move |_| rows(&details, inbound, time.as_ref()),
+            )
+            .focus_key(keys::DETAIL_LIST),
         )
         .with_scroll_step(ROW),
     ))
@@ -55,7 +63,11 @@ pub fn view(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<
 }
 
 /// The rows for what is known.
-fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
+fn rows(
+    details: &Details,
+    inbound: bool,
+    time: Option<&String<8>>,
+) -> impl View<Rgb565, State> + use<> {
     let text = |value: core::fmt::Arguments| {
         let mut s: String<24> = String::new();
         _ = core::fmt::write(&mut s, value);
@@ -64,13 +76,7 @@ fn rows(details: &Details, inbound: bool) -> impl View<Rgb565, State> + use<> {
     // A true minus, as the mockup sets it.
     let minus = |negative: bool| if negative { "\u{2212}" } else { "" };
     VStack::new((
-        (!details.time.is_empty()).then(|| {
-            row(
-                if inbound { "Received" } else { "Sent" },
-                &text(format_args!("{}", details.time)),
-                false,
-            )
-        }),
+        time.map(|time| row(if inbound { "Received" } else { "Sent" }, time, false)),
         details
             .hops
             .map(|hops| row("Hops", &text(format_args!("{hops}")), false)),

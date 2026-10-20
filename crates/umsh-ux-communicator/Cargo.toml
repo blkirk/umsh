@@ -33,6 +33,7 @@ libm = "0.2"
 qrcodegen-no-heap = "1.8"
 umsh-core = { path = "../umsh-core", default-features = false, optional = true }
 umsh-ulcp = { path = "../umsh-ulcp", optional = true }
+umsh-hal = { path = "../umsh-hal", default-features = false }
 
 [dev-dependencies]
 # The tests drive the fixture's chats.

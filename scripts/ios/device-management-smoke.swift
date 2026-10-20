@@ -23,14 +23,15 @@ struct DeviceManagementSmokeTest {
         reading.absorb([
             id.time: bytes(UInt32(1_800_000_000)),
             id.uptime: bytes(UInt32(600)),
-            id.tzOffset: bytes(Int16(0)),
+            id.tzRule: Data("UTC0".utf8),
         ], at: start, fromAir: true)
 
         // Apply's setting echoes and periodic pushes must not rewind either
         // extrapolated clock, even when they arrive repeatedly.
         for seconds in 1...60 {
             reading.absorb([
-                id.tzOffset: bytes(Int16(-420)),
+                id.tzRule: Data("PST8PDT,M3.2.0,M11.1.0".utf8),
+                id.time24h: Data([0]),
                 id.gnssTimeTrust: Data([1]),
             ], at: start.addingTimeInterval(Double(seconds)), fromAir: true)
         }
@@ -56,17 +57,20 @@ struct DeviceManagementSmokeTest {
         // category's oldest date.
         var cached = RemoteCategoryReading()
         cached.absorb([
-            id.tzOffset: bytes(Int16(-420)), id.uptime: bytes(UInt32(600)),
-        ], at: start, fromAir: false, sampleDates: [id.tzOffset: later, id.uptime: start])
+            id.tzRule: Data("PST8PDT,M3.2.0,M11.1.0".utf8), id.uptime: bytes(UInt32(600)),
+        ], at: start, fromAir: false, sampleDates: [id.tzRule: later, id.uptime: start])
         precondition(cached.receivedAt[id.uptime] == start)
-        precondition(cached.receivedAt[id.tzOffset] == later)
+        precondition(cached.receivedAt[id.tzRule] == later)
         precondition(!cached.isFresh)
 
         // Applying settings with a cached time present never sends PROP_TIME.
         let settings = try ulcpDirtyWrites(
-            desired: reading.properties, dirtyPropertyIds: [id.tzOffset, id.gnssTimeTrust]
+            desired: reading.properties,
+            dirtyPropertyIds: [id.tzRule, id.time24h, id.gnssTimeTrust]
         )
-        precondition(Set(settings.map(\.propertyId)) == [id.tzOffset, id.gnssTimeTrust])
+        precondition(
+            Set(settings.map(\.propertyId)) == [id.tzRule, id.time24h, id.gnssTimeTrust]
+        )
         let clock = try ulcpDirtyWrites(desired: reading.properties, dirtyPropertyIds: [id.time])
         precondition(clock.count == 1 && clock[0].propertyId == id.time)
         precondition(clock[0].value == bytes(UInt32(1_800_000_080)))

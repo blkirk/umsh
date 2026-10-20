@@ -2183,7 +2183,8 @@ mod firmware {
             // mirror, so a host write, a boot restore, and a `CMD_RST`
             // all reach the clock and the receiver by the same path—
             // and neither needs anything to remember to push it.
-            umsh_hal::wall_clock::set_tz(snapshot.tz_offset_min);
+            umsh_hal::wall_clock::set_tz_rule(snapshot.tz_rule);
+            umsh_hal::wall_clock::set_hour24(snapshot.time_24h);
             #[cfg(feature = "cap-gnss")]
             umsh_ulcp_runtime::gnss::configure(
                 snapshot.gnss_enabled,
@@ -3957,8 +3958,11 @@ mod firmware {
             // deliberately no fallback here: a placeholder would be an
             // indication of the current time, and a device that does not
             // have one must not give any.
-            clock: umsh_hal::wall_clock::local_hhmm()
-                .map(|(hour, minute)| screen::ClockModel { hour, minute }),
+            clock: umsh_hal::wall_clock::local_hhmm().map(|(hour, minute)| screen::ClockModel {
+                hour,
+                minute,
+                hour24: umsh_hal::wall_clock::hour24(),
+            }),
         }
     }
 

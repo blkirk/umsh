@@ -1714,7 +1714,7 @@ def lock_diagram(x0, y0):
     names = [("Unlocked", "Where you left off"),
              ("Locked, dark", "Panel off"),
              ("Lock screen", "Lit 15 s, then fades"),
-             ("Ready to unlock", "For 800 ms")]
+             ("Ready to unlock", "For 2 s")]
     o = []
     for x, (nm, sub) in zip(xs, names):
         o.append(R(x, y0, bw, bh, "#FFFFFF", rx=16, stroke="#C9CBD1",
@@ -1740,12 +1740,16 @@ def lock_diagram(x0, y0):
                       (ex + 30, bot + 40), c, label, (sx + ex) / 2,
                       bot + depth + 4)
 
-    o += over(0, 1, "Screen timed out, then 1 s\nwithout input; or the "
-              "lock button")
+    o += over(0, 1, "Screen timed out, then 1 s\nwithout input")
     o += over(1, 2, "Any key, a small turn,\nor a message")
     o += over(2, 3, "Turned down five\nsteps, to the mark")
     o += under(2, 1, "Faded out, or\nthe lock button")
     o += under(3, 2, "No press in time")
+    # Unlocked -> Lock screen, over the top of everything.
+    sx, ex = xs[0] + bw / 2, xs[2] + bw / 2
+    o += _arrow(f"M{sx} {top} C{sx} {top-200} {ex} {top-200} {ex} {top}",
+                (ex, top), (ex, top - 40), col, "The lock button",
+                (sx + ex) / 2, top - 162)
     # Ready -> Unlocked, the long way under everything.
     sx, ex = xs[3] + bw / 2, xs[0] + bw / 2
     o += _arrow(f"M{sx} {bot} C{sx} {bot+230} {ex} {bot+230} {ex} {bot}",
@@ -2063,33 +2067,41 @@ def screen_setup_name():
     return o
 
 
-def screen_setup_region():
+def screen_setup_profile():
     o = [R(0, 0, W, H, C["bg"])]
     body = []
     y = TOP
-    for i, r in enumerate(["United States", "Canada", "European Union",
-                           "United Kingdom", "Australia"]):
+    for i, r in enumerate(["UMSH USA/Canada (recommended)",
+                           "MeshCore USA/Canada (recommended)",
+                           "MeshCore Australia", "MeshCore Australia (narrow)",
+                           "MeshCore Australia (mid)"]):
         body += setting_row(0, y, r, None, focused=i == 0)
         y += 36
     o += clip(body, 0, TOP, W, H - TOP)
-    o += screen_header("What region are you in?", back=True)
+    o += screen_header("Radio profile", back=True)
     o += setup_status()
     return o
 
 
 def screen_setup_time_zone():
-    """The region's zones, so the usual answer is a turn or two away."""
+    """The zones, west to east, starting on the one set: UTC until now."""
     o = [R(0, 0, W, H, C["bg"])]
-    zones = [("Los Angeles", "UTC−7"), ("Phoenix", "UTC−7"),
-             ("Denver", "UTC−6"), ("Chicago", "UTC−5"),
-             ("New York", "UTC−4"), ("Anchorage", "UTC−8")]
+    zones = [("UTC−2", ""), ("Azores Time", "UTC"),
+             ("Cape Verde Time", "UTC−1"), ("Greenwich Mean Time", "UTC"),
+             ("Irish Time", "UTC+1")]
     body = []
     y = TOP
     for i, (name, off) in enumerate(zones):
-        body += setting_row(0, y, name, off, focused=i == 0)
+        current = name == "Greenwich Mean Time"
+        body += setting_row(0, y, "", off, focused=current)
+        if current:
+            body.append(P(f"M14 {y+18} L19 {y+23} L27 {y+13}", C["accent"],
+                          sw=2.4))
+        body.append(T(36, y + 25, name, F_BODY, C["text"],
+                      700 if current else 400))
         y += 36
     o += clip(body, 0, TOP, W, H - TOP)
-    o += screen_header("What time zone are you in?", back=True)
+    o += screen_header("Time zone", back=True)
     o += setup_status()
     return o
 
@@ -2309,7 +2321,7 @@ def screen_clock():
     o = [R(0, 0, W, H, C["bg"])]
     rows = [("Set automatically", True, False),
             ("Date and time", "Oct 19, " + TIME_12, False),
-            ("Time zone", "Los Angeles", True),
+            ("Time zone", "Pacific Time", True),
             ("24-hour time", False, False),
             ("Last set from", "GNSS, 4m ago", False)]
     body = []
@@ -2355,7 +2367,7 @@ def screen_set_time():
                            C["text2"], 700, "middle"))
                 x += colon - gap
         x += group_gap - gap
-    o.append(T(W / 2, TOP + 104, "Los Angeles, UTC−7", F_SEC, C["text2"],
+    o.append(T(W / 2, TOP + 104, "Pacific Time, UTC−7", F_SEC, C["text2"],
                400, "middle"))
     o += setting_row(0, H - 44, "Set", None)
     o += screen_header("Date and time")
@@ -2365,13 +2377,13 @@ def screen_set_time():
 
 def screen_time_zone():
     o = [R(0, 0, W, H, C["bg"])]
-    zones = [("Denver", "UTC−6"), ("Honolulu", "UTC−10"),
-             ("Los Angeles", "UTC−7"), ("New York", "UTC−4"),
-             ("Phoenix", "UTC−7")]
+    zones = [("Alaska Time", "UTC−8"), ("Gambier Time", "UTC−9"),
+             ("Pacific Time", "UTC−7"), ("Pitcairn Time", "UTC−8"),
+             ("Arizona", "UTC−7")]
     body = []
     y = TOP
     for name, off in zones:
-        current = name == "Los Angeles"
+        current = name == "Pacific Time"
         body += setting_row(0, y, "", off, focused=current)
         if current:
             body.append(P(f"M14 {y+18} L19 {y+23} L27 {y+13}", C["accent"],
@@ -2813,13 +2825,13 @@ def main(path, native_dir=None):
             ("First run: name", screen_setup_name(),
              "The identity exists before this screen. The name is optional: "
              "Continue with it empty and peers see the bare hint."),
-            ("First run: region", screen_setup_region(),
+            ("First run: radio profile", screen_setup_profile(),
              "Required before the first transmission, since it sets what the "
-             "radio may use. The same list is Device › Radio › Region later."),
+             "radio may use. The same list is Device › Radio later."),
             ("First run: time zone", screen_setup_time_zone(),
              "Asked even with a GNSS fix, which gives the time but not the "
-             "zone. The list starts with the region’s zones; letters search "
-             "them all. Device › Clock › Time zone later."),
+             "zone. The list starts on the zone set, UTC until now; letters "
+             "narrow it. Device › Clock › Time zone later."),
         ]),
         ("Keyboard", [
             ("Start of a sentence", screen_kb_sentence(),
@@ -2872,7 +2884,7 @@ def main(path, native_dir=None):
              "bar. Pressing before the bar is full does nothing."),
             ("Ready to unlock", screen_lock(ready=True),
              "Past the mark the bar turns green and the hint changes. A "
-             "press within 800 ms unlocks, back to where you were, with the "
+             "press within 2 s unlocks, back to where you were, with the "
              "cards’ chats at the top of Chats; otherwise the bar empties "
              "and it starts over."),
             ("Nothing new", screen_lock_quiet(),
@@ -2894,8 +2906,8 @@ def main(path, native_dir=None):
              "pressing one lets turning change it, and digits type it. Set "
              "starts the minute at zero seconds."),
             ("Time zone", screen_time_zone(),
-             "Cities, as on iOS, with today’s offset, daylight saving "
-             "included. Letters filter the list, as on every list."),
+             "Zones by name, west to east, with today’s offset, daylight "
+             "saving included. Letters filter the list, as on every list."),
         ]),
     ]
     by = hy + HW_H + 140
@@ -2923,9 +2935,9 @@ def main(path, native_dir=None):
     o.append(T(margin, by + 38, "The lock button is the one at the bottom "
                "edge, also the bootloader button. A password, later, would "
                "follow the press.", 19, INK2))
-    dg, _, dh = lock_diagram(margin + 20, by + 190)
+    dg, _, dh = lock_diagram(margin + 20, by + 270)
     o += dg
-    by += 190 + dh + 40
+    by += 270 + dh + 40
     height = by
 
 

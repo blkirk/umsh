@@ -10,6 +10,7 @@ use umsh_core::{
 };
 use umsh_crypto::replay::{ReplayVerdict, ReplayWindow};
 use umsh_crypto::{AesProvider, CryptoEngine, PairwiseKeys, Sha256Provider};
+use umsh_hal::tz::Rule;
 use umsh_ulcp::Status;
 use umsh_ulcp::airtime::lora_airtime_ms_with_preamble;
 use umsh_ulcp::alert::AlertState;
@@ -143,8 +144,8 @@ impl AlertConfig {
 
 /// That this board keeps a wall clock (`CAP_TIME`).
 ///
-/// A marker: the capability's whole statement is that `PROP_TIME` and
-/// `PROP_TZ_OFFSET` exist, and it says nothing about where the time comes
+/// A marker: the capability's whole statement is that `PROP_TIME`,
+/// `PROP_TZ_RULE`, and `PROP_TIME_24H` exist, and it says nothing about where the time comes
 /// from or how much of a power cycle it survives. Both of those are
 /// platform business, and neither is anything the session could answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,7 +243,7 @@ pub struct SessionConfig {
     /// capability is advertised and the config carries the deadline.
     pub alert: Option<AlertConfig>,
     /// `None`: the board keeps no wall clock; `CAP_TIME` is absent and
-    /// `PROP_TIME` / `PROP_TZ_OFFSET` are unknown.
+    /// the wall clock's properties are unknown.
     pub time: Option<TimeConfig>,
     /// `None`: no GNSS receiver; `CAP_GNSS` is absent and the positioning
     /// properties are unknown. Meaningful only alongside
@@ -1057,10 +1058,13 @@ struct DeviceDomain {
     /// comes up. On by default: a node that has just rebooted is exactly
     /// the node whose neighbours' cached paths are most likely stale.
     startup_beacon: bool,
-    /// `PROP_TZ_OFFSET`: minutes east of UTC. Configuration rather than
-    /// measurement—where a device is meant to be is known even when the
-    /// time is not—so unlike `PROP_TIME` it always has a value.
-    tz_offset_min: i16,
+    /// `PROP_TZ_RULE`. Configuration rather than measurement—where a
+    /// device is meant to be is known even when the time is not—so
+    /// unlike `PROP_TIME` it always has a value.
+    tz_rule: ZoneRule,
+    /// `PROP_TIME_24H`: whether a clock the device shows writes hours
+    /// from 0 to 23.
+    time_24h: bool,
     /// `PROP_GNSS_ENABLED`: whether the receiver is powered.
     ///
     /// Off by default on most boards. A receiver is the largest
@@ -1158,7 +1162,8 @@ impl DeviceDomain {
             advert_interval_s: DEFAULT_ADVERT_INTERVAL_S,
             beacon_interval_s: DEFAULT_BEACON_INTERVAL_S,
             startup_beacon: true,
-            tz_offset_min: 0,
+            tz_rule: ZoneRule::utc(),
+            time_24h: true,
             gnss_enabled: config.gnss.is_some_and(|gnss| gnss.default_enabled),
             display_motion_wake_enabled: config.display_motion_wake,
             display_brightness: config.display_brightness.unwrap_or(u8::MAX),
@@ -2416,7 +2421,6 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     saved(prop::GNSS_ENABLED, ApplyPhase::Config, false),
     saved(prop::PHY_DUTY_LIMIT, ApplyPhase::Config, false),
     saved(prop::DEV_ADMINS, ApplyPhase::Keys, true),
-    saved(prop::TZ_OFFSET, ApplyPhase::Config, false),
     saved(prop::GNSS_IDENT_UPDATE, ApplyPhase::Config, false),
     saved(prop::GNSS_IDENT_PRECISION, ApplyPhase::Config, false),
     saved(prop::GNSS_TIME_TRUST, ApplyPhase::Config, false),
@@ -2433,6 +2437,8 @@ const SAVED_SCHEMA: &[SavedProperty] = &[
     #[cfg(feature = "wifi")]
     saved(prop::WIFI_NETWORKS, ApplyPhase::Keys, true),
     saved(prop::WIFI_NETWORK, ApplyPhase::Config, false),
+    saved(prop::TZ_RULE, ApplyPhase::Config, false),
+    saved(prop::TIME_24H, ApplyPhase::Config, false),
     saved(prop::IPV4_CONFIG, ApplyPhase::Config, false),
     saved(prop::IPV6_CONFIG, ApplyPhase::Config, false),
     saved(prop::IP_DNS, ApplyPhase::Config, true),
@@ -2575,7 +2581,8 @@ struct SavedState {
     advert_interval_s: u32,
     beacon_interval_s: u32,
     startup_beacon: bool,
-    tz_offset_min: i16,
+    tz_rule: ZoneRule,
+    time_24h: bool,
     gnss_enabled: bool,
     display_motion_wake_enabled: bool,
     display_brightness: u8,
@@ -2629,7 +2636,8 @@ impl SavedState {
             advert_interval_s: device.advert_interval_s,
             beacon_interval_s: device.beacon_interval_s,
             startup_beacon: device.startup_beacon,
-            tz_offset_min: device.tz_offset_min,
+            tz_rule: device.tz_rule.clone(),
+            time_24h: device.time_24h,
             gnss_enabled: device.gnss_enabled,
             display_motion_wake_enabled: device.display_motion_wake_enabled,
             display_brightness: device.display_brightness,
@@ -2687,7 +2695,8 @@ impl SavedState {
             advert_interval_s: DEFAULT_ADVERT_INTERVAL_S,
             beacon_interval_s: DEFAULT_BEACON_INTERVAL_S,
             startup_beacon: true,
-            tz_offset_min: 0,
+            tz_rule: ZoneRule::utc(),
+            time_24h: true,
             // Must track `DeviceDomain::post_reset`: this is the baseline
             // a snapshot's absent options decode against, so a board that
             // boots its receiver on has to see that here too, or a
@@ -2848,7 +2857,8 @@ impl SavedState {
                 }
                 Ok(())
             }
-            prop::TZ_OFFSET => encoder.put(number, &self.tz_offset_min.to_le_bytes()),
+            prop::TZ_RULE => encoder.put(number, self.tz_rule.text()),
+            prop::TIME_24H => encoder.put(number, &[self.time_24h as u8]),
             prop::GNSS_IDENT_UPDATE => encoder.put(number, &[self.gnss_ident_update as u8]),
             prop::GNSS_IDENT_PRECISION => encoder.put(number, &[self.gnss_ident_precision]),
             prop::GNSS_TIME_TRUST => encoder.put(number, &[self.gnss_time_trust as u8]),
@@ -3082,7 +3092,8 @@ impl SavedState {
                     value.try_into().map_err(|_| SnapshotError::InvalidValue)?;
                 self.dev_admins.insert(public_key).map_err(invalid)?;
             }
-            prop::TZ_OFFSET => self.tz_offset_min = validate_tz_offset(value).map_err(invalid)?,
+            prop::TZ_RULE => self.tz_rule = ZoneRule::parse(value).map_err(invalid)?,
+            prop::TIME_24H => self.time_24h = parse_bool(value).map_err(invalid)?,
             prop::GNSS_IDENT_UPDATE => {
                 self.gnss_ident_update = parse_bool(value).map_err(invalid)?
             }
@@ -4026,7 +4037,8 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
                     prop::KEYBOARD_LIGHT => self.device.keyboard_light = saved.keyboard_light,
                     prop::KEYBOARD_AIDS => self.device.keyboard_aids = saved.keyboard_aids,
                     prop::PHY_DUTY_LIMIT => self.config.duty.set_limit(saved.duty_limit),
-                    prop::TZ_OFFSET => self.device.tz_offset_min = saved.tz_offset_min,
+                    prop::TZ_RULE => self.device.tz_rule = saved.tz_rule.clone(),
+                    prop::TIME_24H => self.device.time_24h = saved.time_24h,
                     prop::GNSS_IDENT_UPDATE => {
                         self.device.gnss_ident_update = saved.gnss_ident_update
                     }
@@ -5339,9 +5351,15 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         self.device.startup_beacon
     }
 
-    /// `PROP_TZ_OFFSET`: minutes east of UTC.
-    pub fn tz_offset_min(&self) -> i16 {
-        self.device.tz_offset_min
+    /// `PROP_TZ_RULE`: the local time zone.
+    pub fn tz_rule(&self) -> Rule {
+        self.device.tz_rule.rule
+    }
+
+    /// `PROP_TIME_24H`: whether a clock the device shows writes hours
+    /// from 0 to 23.
+    pub fn time_24h(&self) -> bool {
+        self.device.time_24h
     }
 
     /// Display policy enable; false on unsupported boards.
@@ -7403,8 +7421,13 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             // the platform through the device-domain mirror rather than
             // through an effect of their own, which is what makes a host
             // write, a boot restore, and a `CMD_RST` land identically.
-            prop::TZ_OFFSET if self.config.time.is_some() => {
-                self.device.tz_offset_min = validate_tz_offset(value)?;
+            prop::TZ_RULE if self.config.time.is_some() => {
+                self.device.tz_rule = ZoneRule::parse(value)?;
+                self.bump_dev_domain();
+                Ok(false)
+            }
+            prop::TIME_24H if self.config.time.is_some() => {
+                self.device.time_24h = parse_bool(value)?;
                 self.bump_dev_domain();
                 Ok(false)
             }
@@ -8299,7 +8322,7 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
         if key == prop::BLE_PAIRING_PIN {
             return self.config.ble_pin;
         }
-        if matches!(key, prop::TIME | prop::TZ_OFFSET) {
+        if matches!(key, prop::TIME | prop::TZ_RULE | prop::TIME_24H) {
             return self.config.time.is_some();
         }
         if Counter::from_property(key).is_some() {
@@ -8642,8 +8665,10 @@ impl<A: AesProvider, S: Sha256Provider, const TX: usize> Session<A, S, TX> {
             key if gnss::is_positioning_property(key) && self.config.gnss.is_some() => {
                 return PropValue::Unimplemented;
             }
-            prop::TZ_OFFSET if self.config.time.is_some() => {
-                put(out, &self.device.tz_offset_min.to_le_bytes())
+            prop::TZ_RULE if self.config.time.is_some() => put(out, self.device.tz_rule.text()),
+            prop::TIME_24H if self.config.time.is_some() => {
+                out[0] = self.device.time_24h as u8;
+                1
             }
             prop::DISPLAY_MOTION_WAKE_ENABLED => {
                 if !self.config.display_motion_wake {
@@ -9257,18 +9282,51 @@ fn validate_cr(value: &[u8]) -> Result<u8, Status> {
     Ok(cr)
 }
 
-/// `PROP_TZ_OFFSET`, in minutes east of UTC.
-///
-/// Bounded by the real range of civil offsets—UTC−12:00 through
-/// UTC+14:00—rather than the width of the field. Everything outside it
-/// is a byte-order or unit mistake, and a device that accepted one would
-/// display a confidently wrong local time.
-fn validate_tz_offset(value: &[u8]) -> Result<i16, Status> {
-    let minutes = parse_i16(value)?;
-    if !(-12 * 60..=14 * 60).contains(&minutes) {
-        return Err(Status::INVALID_ARGUMENT);
+/// The longest `PROP_TZ_RULE` kept.
+pub const TZ_RULE_MAX_LEN: usize = 64;
+
+/// `PROP_TZ_RULE`: a POSIX TZ rule as written, and as read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ZoneRule {
+    text: HeaplessVec<u8, TZ_RULE_MAX_LEN>,
+    rule: Rule,
+}
+
+impl ZoneRule {
+    /// `UTC0`.
+    fn utc() -> Self {
+        let mut text = HeaplessVec::new();
+        _ = text.extend_from_slice(b"UTC0");
+        Self {
+            text,
+            rule: Rule::UTC,
+        }
     }
-    Ok(minutes)
+
+    /// Bounded by the real range of civil offsets—UTC−12:00 through
+    /// UTC+14:00—as well as by what parses. Outside that range a rule is a
+    /// mistake, and a device that accepted one would display a
+    /// confidently wrong local time.
+    fn parse(value: &[u8]) -> Result<Self, Status> {
+        let text = HeaplessVec::from_slice(value).map_err(|_| Status::INVALID_ARGUMENT)?;
+        let rule = core::str::from_utf8(value)
+            .ok()
+            .and_then(|text| Rule::parse(text).ok())
+            .ok_or(Status::INVALID_ARGUMENT)?;
+        let civil = -12 * 60..=14 * 60;
+        if !civil.contains(&rule.std_offset_min())
+            || rule
+                .dst_offset_min()
+                .is_some_and(|dst| !civil.contains(&dst))
+        {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        Ok(Self { text, rule })
+    }
+
+    fn text(&self) -> &[u8] {
+        &self.text
+    }
 }
 
 /// `PROP_GNSS_IDENT_PRECISION`, in location bytes.
@@ -10085,7 +10143,8 @@ mod tests {
 
         for key in [
             prop::TIME,
-            prop::TZ_OFFSET,
+            prop::TZ_RULE,
+            prop::TIME_24H,
             prop::GNSS_ENABLED,
             prop::GNSS_LOCATION,
             prop::GNSS_ALTITUDE,
@@ -10847,26 +10906,38 @@ mod tests {
     #[test]
     fn timezone_is_always_known_and_bounded() {
         let mut session = test_session();
-        assert_eq!(get(&mut session, prop::TZ_OFFSET), [0, 0]);
-        assert_eq!(session.tz_offset_min(), 0);
+        assert_eq!(get(&mut session, prop::TZ_RULE), b"UTC0");
+        assert_eq!(session.tz_rule(), Rule::UTC);
 
-        // UTC−08:00.
-        set(&mut session, prop::TZ_OFFSET, &(-480i16).to_le_bytes());
-        assert_eq!(get(&mut session, prop::TZ_OFFSET), (-480i16).to_le_bytes());
-        assert_eq!(session.tz_offset_min(), -480);
+        let pacific = b"PST8PDT,M3.2.0,M11.1.0";
+        set(&mut session, prop::TZ_RULE, pacific);
+        assert_eq!(get(&mut session, prop::TZ_RULE), pacific);
+        assert_eq!(session.tz_rule().std_offset_min(), -480);
 
-        // The extremes of the civil range are accepted; past them is a
-        // unit or byte-order mistake, not a place.
-        for minutes in [-12 * 60i16, 14 * 60] {
-            let (_, effect) = set(&mut session, prop::TZ_OFFSET, &minutes.to_le_bytes());
+        // The extremes of the civil range are accepted; past them, or
+        // what is not a rule at all, is a mistake, not a place.
+        for (rule, std) in [(&b"<-12>12"[..], -12 * 60), (b"<+14>-14", 14 * 60)] {
+            let (_, effect) = set(&mut session, prop::TZ_RULE, rule);
             assert_eq!(effect, None);
-            assert_eq!(session.tz_offset_min(), minutes);
+            assert_eq!(session.tz_rule().std_offset_min(), std);
         }
-        for minutes in [-12 * 60i16 - 1, 14 * 60 + 1] {
-            let (emitted, _) = set(&mut session, prop::TZ_OFFSET, &minutes.to_le_bytes());
+        for rule in [
+            &b"<-1201>12:01"[..],
+            b"<+1401>-14:01",
+            b"<+14>-14<+15>",
+            b"PST8PDT,M3.2.0",
+            b"\xff",
+            &[b'A'; TZ_RULE_MAX_LEN + 1],
+        ] {
+            let (emitted, _) = set(&mut session, prop::TZ_RULE, rule);
             let (_, _, value) = parse_prop_is(&emitted[0]);
             assert_eq!(pui::decode(&value).unwrap().0, Status::INVALID_ARGUMENT.0);
         }
+        assert_eq!(session.tz_rule().std_offset_min(), 14 * 60);
+
+        assert_eq!(get(&mut session, prop::TIME_24H), [1]);
+        set(&mut session, prop::TIME_24H, &[0]);
+        assert!(!session.time_24h());
     }
 
     /// Positioning telemetry is a measurement: every get samples, and the
@@ -15845,7 +15916,8 @@ mod tests {
     fn positioning_settings_survive_a_save_and_the_clock_does_not() {
         let mut session = test_session();
         set(&mut session, prop::GNSS_ENABLED, &[1]);
-        set(&mut session, prop::TZ_OFFSET, &(-300i16).to_le_bytes());
+        set(&mut session, prop::TZ_RULE, b"EST5EDT,M3.2.0,M11.1.0");
+        set(&mut session, prop::TIME_24H, &[0]);
         set(&mut session, prop::GNSS_IDENT_UPDATE, &[1]);
         set(&mut session, prop::GNSS_IDENT_PRECISION, &[6]);
         set(&mut session, prop::GNSS_TIME_TRUST, &[0]);
@@ -15858,7 +15930,8 @@ mod tests {
             Session::new(test_config(), Status::RESET_POWER_ON, test_engine());
         booted.restore_at_boot(&bytes[..len]).unwrap();
         assert!(booted.gnss_enabled());
-        assert_eq!(booted.tz_offset_min(), -300);
+        assert_eq!(booted.tz_rule().std_offset_min(), -300);
+        assert!(!booted.time_24h());
         assert!(booted.gnss_ident_update());
         assert_eq!(booted.gnss_ident_precision(), 6);
         assert!(!booted.gnss_time_trust());
@@ -15879,7 +15952,7 @@ mod tests {
             out.push(bytes.to_vec())
         });
         assert!(booted.gnss_enabled());
-        assert_eq!(booted.tz_offset_min(), -300);
+        assert_eq!(booted.tz_rule().std_offset_min(), -300);
     }
 
     /// Restoring a saved repeater domain onto different hardware must

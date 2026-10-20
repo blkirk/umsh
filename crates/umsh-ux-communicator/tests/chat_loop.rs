@@ -7,14 +7,16 @@ use buoyant::render::AnimatedJoin;
 use buoyant::view::ViewLayout;
 use embedded_graphics::prelude::Size;
 use umsh_ux_communicator::buoyant;
+use umsh_ux_communicator::clock_settings::DateParts;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::{Latch, Modifier, PICKER};
 use umsh_ux_communicator::model::{
-    ChannelAccess, ChannelEntry, ChatKind, Delivery, Direction, Ending, FoundKind, Glance,
-    Node as _, NodeEvent, Notice, Profile, Reaction, Section, Shareable, State, brightness_level,
+    ChannelAccess, ChannelEntry, ChatKind, ClockSource, Delivery, Direction, Ending, FoundKind,
+    Glance, Node as _, NodeEvent, Notice, Profile, Reaction, Rule, Section, Shareable, State,
+    brightness_level,
 };
 use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
-use umsh_ux_communicator::{fixture, theme, ui};
+use umsh_ux_communicator::{fixture, theme, ui, zones};
 
 /// The fixture's chats, in list order.
 const RIDGE: u32 = 1;
@@ -646,14 +648,15 @@ fn a_muted_chat_does_not_call_for_attention() {
 /// Jo Reyes, the chat of the fixture's last arrival.
 const JO: u32 = 5;
 
-fn set_dark<V, F>(app: &mut App<V, State, F>, dark: bool)
+/// Locks the interface, as the lock button does, and lets it settle.
+fn lock<V, F>(app: &mut App<V, State, F>)
 where
     V: ViewLayout<State>,
     V::FocusTree: DefaultFocus,
     V::Renderables: AnimatedJoin,
     F: Fn(&State) -> V,
 {
-    app.state_mut().dark = dark;
+    app.state_mut().lock();
     app.finalize_view();
 }
 
@@ -666,79 +669,149 @@ fn arrived(state: &State) -> Vec<(u32, String)> {
 }
 
 #[test]
-fn a_message_while_dark_wakes_to_the_chats_that_got_messages() {
-    let store = store();
-    let mut app = app!(store);
-    set_dark(&mut app, true);
-    assert!(arrive(&mut app, store, 0));
-    assert!(matches!(app.state().screen(), Screen::Wake { .. }));
-    set_dark(&mut app, false);
-    // More arrive while it shows, and join it rather than a banner.
-    assert!(arrive(&mut app, store, 0));
-    assert!(arrive(&mut app, store, 0));
-    assert_eq!(app.state().banner, None);
-    assert_eq!(
-        arrived(app.state()),
-        [
-            (
-                TRAIL_CREW,
-                "Sam: Will wait 10 min at the saddle, then we head down".to_owned()
-            ),
-            (PAT, "Got the antenna. Bringing two.".to_owned()),
-            (JO, "Are you on the ridge yet?".to_owned()),
-        ]
-    );
-    assert_eq!(focus(app.state()), Some(keys::chat(TRAIL_CREW)));
-    // Press opens the focused chat; Back from it goes to its row.
-    run(&mut app, &[Input::Turn(1), Input::Press]);
-    assert_in_conversation(app.state(), PAT);
-    assert!(app.state().arrived.is_empty());
-    run(&mut app, &[Input::Backspace]);
-    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
-    assert_eq!(focus(app.state()), Some(keys::chat(PAT)));
+fn a_dark_panel_locks_after_a_moment_unless_it_lights_first() {
+    let mut app = app!();
+    app.state_mut().screen_off(10_000);
+    app.state_mut().expire(10_999);
+    assert!(!app.state().lock.locked);
+    // Lit again in time: still unlocked.
+    app.state_mut().screen_on(10_500);
+    app.state_mut().expire(12_000);
+    assert!(!app.state().lock.locked);
+    app.state_mut().screen_off(20_000);
+    assert_eq!(app.state().next_deadline(), Some(21_000));
+    app.state_mut().expire(21_000);
+    assert!(app.state().lock.locked);
 }
 
 #[test]
-fn typing_on_the_wake_screen_starts_a_reply_in_the_focused_chat() {
+fn five_steps_down_and_a_press_unlock_to_where_it_was() {
     let store = store();
     let mut app = app!(store);
-    set_dark(&mut app, true);
-    arrive(&mut app, store, 0);
-    set_dark(&mut app, false);
-    run(&mut app, &typed("Ok"));
-    assert_in_conversation(app.state(), TRAIL_CREW);
-    assert_eq!(draft(app.state(), TRAIL_CREW), "Ok");
-}
-
-#[test]
-fn backspace_on_the_wake_screen_returns_to_where_it_went_dark() {
-    let store = store();
-    let mut app = app!(store);
-    // Reading Ridge Medic when the panel goes dark, and a message there
-    // wakes it: dark, nothing was being read.
+    // Reading Ridge Medic's last message.
     run(&mut app, &[Input::Press, Input::Turn(-1)]);
-    set_dark(&mut app, true);
-    assert!(arrive_in(&mut app, store, RIDGE, "Coffee's on", 0));
-    set_dark(&mut app, false);
-    assert!(matches!(app.state().screen(), Screen::Wake { .. }));
-    assert!(app.state().chats[0].unread);
-    run(&mut app, &[Input::Backspace]);
+    let held = focus(app.state());
+    assert_eq!(held, Some(keys::message(SEE_YOU)));
+    lock(&mut app);
+    assert!(app.state().lock.locked);
+    quick(&mut app, &[Input::Turn(4)]);
+    assert!(!app.state().lock.ready());
+    quick(&mut app, &[Input::Turn(1)]);
+    assert!(app.state().lock.ready());
+    quick(&mut app, &[Input::Press]);
+    assert!(!app.state().lock.locked);
     assert!(matches!(
         app.state().screen(),
         Screen::Conversation { chat: RIDGE, .. }
     ));
-    assert_eq!(focus(app.state()), Some(keys::message(SEE_YOU)));
-    assert!(app.state().arrived.is_empty());
+    assert_eq!(focus(app.state()), held);
 }
 
 #[test]
-fn a_muted_chat_does_not_wake_the_panel() {
+fn a_press_before_the_steps_or_after_the_window_does_nothing() {
+    let mut app = app!();
+    lock(&mut app);
+    quick(&mut app, &[Input::Press, Input::Turn(3), Input::Press]);
+    assert!(app.state().lock.locked);
+    quick(&mut app, &[Input::Turn(2)]);
+    assert!(app.state().lock.ready());
+    // Once the window has passed, the bar starts over.
+    tick(umsh_ux_communicator::lock::UNLOCK_WINDOW_MS);
+    quick(&mut app, &[Input::Press]);
+    assert!(app.state().lock.locked);
+    assert_eq!(app.state().lock.steps, 0);
+    assert!(!app.state().lock.ready());
+}
+
+#[test]
+fn turning_up_takes_steps_back() {
+    let mut app = app!();
+    lock(&mut app);
+    quick(&mut app, &[Input::Turn(5), Input::Turn(-2)]);
+    assert_eq!(app.state().lock.steps, 3);
+    assert!(!app.state().lock.ready());
+    quick(&mut app, &[Input::Turn(-9)]);
+    assert_eq!(app.state().lock.steps, 0);
+}
+
+#[test]
+fn keys_do_nothing_while_locked() {
+    let mut app = app!();
+    // Ridge Medic, its draft being written.
+    run(&mut app, &[Input::Press, Input::Enter]);
+    lock(&mut app);
+    run(&mut app, &typed("hi"));
+    run(&mut app, &[Input::Enter, Input::Backspace, Input::Space]);
+    assert!(app.state().lock.locked);
+    assert_eq!(draft(app.state(), RIDGE), RIDGE_DRAFT);
+}
+
+#[test]
+fn messages_while_locked_are_listed_newest_first_and_call_for_attention() {
     let store = store();
     let mut app = app!(store);
-    set_dark(&mut app, true);
-    assert!(!arrive_in(&mut app, store, 4, "Mill Creek is clear", 0));
-    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    lock(&mut app);
+    assert!(arrive(&mut app, store, 1000));
+    assert!(arrive(&mut app, store, 2000));
+    assert!(arrive(&mut app, store, 3000));
+    assert_eq!(app.state().banner, None);
+    assert_eq!(
+        arrived(app.state()),
+        [
+            (JO, "Are you on the ridge yet?".to_owned()),
+            (PAT, "Got the antenna. Bringing two.".to_owned()),
+            (
+                TRAIL_CREW,
+                "Sam: Will wait 10 min at the saddle, then we head down".to_owned()
+            ),
+        ]
+    );
+    // A muted chat is listed, and calls for nothing.
+    assert!(!arrive_in(&mut app, store, 4, "Mill Creek is clear", 4000));
+    assert_eq!(app.state().arrived[0].chat, 4);
+    // Unlocking lets them go; the chats wait at the top of the list.
+    quick(&mut app, &[Input::Turn(5), Input::Press]);
+    assert!(!app.state().lock.locked);
     assert!(app.state().arrived.is_empty());
+    assert_eq!(app.state().chats[0].id, 4);
+}
+
+#[test]
+fn a_message_just_after_going_dark_locks_at_once() {
+    let store = store();
+    let mut app = app!(store);
+    // Reading Ridge Medic when the panel goes dark: a message there is
+    // not being read.
+    run(&mut app, &[Input::Press]);
+    app.state_mut().screen_off(5000);
+    assert!(arrive_in(&mut app, store, RIDGE, "Coffee's on", 5100));
+    assert!(app.state().lock.locked);
+    assert!(app.state().chats[0].unread);
+    assert_eq!(arrived(app.state()), [(RIDGE, "Coffee's on".to_owned())]);
+}
+
+#[test]
+fn turning_with_alt_held_while_locked_sets_brightness_not_the_bar() {
+    let mut app = app!();
+    let level = |app: &App<_, State, _>| brightness_level(app.state().node.brightness());
+    let before = level(&app);
+    lock(&mut app);
+    quick(
+        &mut app,
+        &[
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: true,
+            },
+            Input::Turn(-2),
+            Input::Modifier {
+                modifier: Modifier::Alt,
+                down: false,
+            },
+        ],
+    );
+    assert_eq!(app.state().lock.steps, 0);
+    assert_eq!(level(&app), before + 2);
 }
 
 #[test]
@@ -1447,7 +1520,7 @@ fn low_battery_while_dark_marks_only_the_strip() {
 }
 
 #[test]
-fn first_run_takes_a_name_then_a_profile_and_ends_on_the_chats() {
+fn first_run_takes_a_name_a_profile_and_a_zone_and_ends_on_the_chats() {
     let mut app = app!();
     app.state_mut().start_setup();
     app.finalize_view();
@@ -1467,9 +1540,21 @@ fn first_run_takes_a_name_then_a_profile_and_ends_on_the_chats() {
     run(&mut app, &[Input::Turn(1), Input::Press]);
     assert_eq!(focus(app.state()), Some(keys::profile(0)));
     run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(app.state().node.radio().profile, Profile::Vetted(1));
+    // The zone, starting on the one set.
+    assert!(app.state().in_setup());
+    let utc = zones::find(&Rule::UTC).unwrap();
+    assert_eq!(focus(app.state()), Some(keys::zone(utc)));
+    run(&mut app, &typed("pac"));
+    let pacific = zones::ZONES
+        .iter()
+        .position(|z| z.name == "Pacific Time")
+        .unwrap();
+    assert_eq!(focus(app.state()), Some(keys::zone(pacific)));
+    run(&mut app, &[Input::Press]);
     assert!(!app.state().in_setup());
     assert!(matches!(app.state().screen(), Screen::Chats { .. }));
-    assert_eq!(app.state().node.radio().profile, Profile::Vetted(1));
+    assert_eq!(app.state().clock.zone.std_offset_min(), -480);
 }
 
 #[test]
@@ -1530,7 +1615,7 @@ fn the_strip_counts_thirds_centered_on_their_levels() {
 fn shut_down_asks_first_and_then_ends_input() {
     let mut app = app!();
     run(&mut app, &[Input::Backspace, Input::Turn(2), Input::Press]);
-    run(&mut app, &[Input::Turn(8)]);
+    run(&mut app, &[Input::Turn(9)]);
     assert_eq!(focus(app.state()), Some(keys::SHUT_DOWN));
     // Cancel is focused, and Backspace cancels too.
     run(&mut app, &[Input::Press]);
@@ -1972,4 +2057,99 @@ fn the_fixture_brings_arrivals_and_identities_on_its_own_clock() {
         shown_member(app.state()).0.sender.name.as_str(),
         "Robin Hale"
     );
+}
+
+/// Device › Clock, from the Chats list.
+fn open_clock<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    run(app, &[Input::Backspace, Input::Turn(2), Input::Press]);
+    run(app, &[Input::Turn(6)]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK));
+    run(app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK_AUTOMATIC));
+}
+
+#[test]
+fn the_clock_is_set_by_hand_a_part_at_a_time() {
+    let mut app = app!();
+    open_clock(&mut app);
+    // Automatic, Date and time is a readout and opens nothing.
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK_TIME));
+    run(&mut app, &[Input::Turn(-1), Input::Press]);
+    assert_eq!(app.state().clock.automatic, Some(false));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(
+        focus(app.state()),
+        Some(keys::time_part(umsh_ux_communicator::nav::Part::Month))
+    );
+    let before = DateParts::at(app.state().local(app.state().wall_time.unwrap()));
+    // Pressed, turning changes the month; pressed again, it moves on.
+    run(
+        &mut app,
+        &[Input::Press, Input::Turn(1), Input::Press, Input::Turn(4)],
+    );
+    run(&mut app, &typed("05"));
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK_TIME));
+    let after = DateParts::at(app.state().local(app.state().wall_time.unwrap()));
+    assert_eq!(after.month, before.month % 12 + 1);
+    assert_eq!(
+        (after.day, after.hour, after.minute),
+        (before.day, before.hour, 5)
+    );
+    assert_eq!(
+        app.state().node.clock_source().map(|(source, _)| source),
+        Some(ClockSource::Manual)
+    );
+}
+
+#[test]
+fn hours_are_written_as_the_clock_is_set_to() {
+    let mut app = app!();
+    open_clock(&mut app);
+    run(&mut app, &[Input::Turn(3), Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK_24H));
+    assert!(!app.state().hour24());
+    let local = app.state().local(app.state().wall_time.unwrap());
+    assert!(local.time(app.state().hour24()).ends_with('M'));
+}
+
+#[test]
+fn letters_narrow_the_time_zones_and_a_press_sets_one() {
+    let mut app = app!();
+    open_clock(&mut app);
+    run(&mut app, &[Input::Turn(2), Input::Press]);
+    // No zone is called that, so the x is refused.
+    run(&mut app, &typed("jx"));
+    let japan = zones::ZONES
+        .iter()
+        .position(|z| z.name == "Japan Time")
+        .unwrap();
+    assert_eq!(focus(app.state()), Some(keys::zone(japan)));
+    // Backspace takes back a letter before it goes back.
+    run(&mut app, &[Input::Backspace]);
+    assert!(matches!(app.state().screen(), Screen::Device { .. }));
+    run(&mut app, &typed("jap"));
+    run(&mut app, &[Input::Press]);
+    assert_eq!(focus(app.state()), Some(keys::CLOCK_ZONE));
+    assert_eq!(app.state().clock.zone, Rule::parse("JST-9").unwrap());
+}
+
+#[test]
+fn a_time_is_written_in_the_offset_its_zone_kept_then() {
+    let app = app!();
+    app.state().node.set_zone("PST8PDT,M3.2.0,M11.1.0");
+    let mut app = app;
+    input::events(&mut app, 0);
+    // 2026-07-01 and 2026-12-01, 20:00 UTC.
+    let summer = app.state().local(1_782_936_000);
+    let winter = app.state().local(1_796_155_200);
+    assert_eq!(summer.time(true).as_str(), "13:00");
+    assert_eq!(winter.time(true).as_str(), "12:00");
 }

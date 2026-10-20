@@ -87,7 +87,7 @@ Code | Name               | Requires           | Grants
 40   | `CAP_REPEATER`     | `CAP_DEV_IDENTITY` | Autonomous repeater forwarding by the device identity: `PROP_MAC_REPEATER_ENABLED`, `PROP_MAC_REPEATER_REGIONS`, `PROP_MAC_REPEATER_DEFAULT_REGION`, `PROP_MAC_REPEATER_MIN_RSSI`, `PROP_MAC_REPEATER_MIN_SNR`
 41   | `CAP_IDENT`        | `CAP_DEV_IDENTITY` | `PROP_IDENT`, `PROP_IDENT_ROLE`, `PROP_IDENT_MOBILE`, `PROP_IDENT_LOCATION`, `PROP_IDENT_ALTITUDE`—serving and configuring the device identity's advertised node identity
 42   | `CAP_ALERT`        | —                  | Some means of making the device physically conspicuous on demand, and `PROP_ALERT`
-44   | `CAP_TIME`         | —                  | A wall clock: `PROP_TIME`, `PROP_TZ_OFFSET`
+44   | `CAP_TIME`         | —                  | A wall clock: `PROP_TIME`, `PROP_TZ_RULE`, `PROP_TIME_24H`
 45   | `CAP_GNSS`         | `CAP_TIME`         | A GNSS receiver: `PROP_GNSS_ENABLED`, `PROP_GNSS_LOCATION`, `PROP_GNSS_ALTITUDE`, `PROP_GNSS_FIX`, `PROP_GNSS_PRECISION`, `PROP_GNSS_SATELLITES`, `PROP_GNSS_IDENT_UPDATE`, `PROP_GNSS_IDENT_PRECISION`, `PROP_GNSS_TIME_TRUST`
 46   | `CAP_ADVERT`       | `CAP_DEV_IDENTITY` | Announcing itself: on a schedule of its own (`PROP_ADVERT_INTERVAL`, `PROP_BEACON_INTERVAL`, `PROP_STARTUP_BEACON`) and on demand (`CMD_ANNOUNCE`)
 47   | `CAP_ILLUMINANCE`  | —                  | An ambient light sensor and `PROP_ILLUMINANCE`
@@ -214,7 +214,7 @@ A single-octet identifier is the scarce resource, so the positioning
 range holds the properties a host reads and the device announces
 continually. The positioning **configuration**—which is written during
 commissioning and rarely again—lives at 4868–4870 in the extended
-device range, alongside the wall clock at 4866–4867.
+device range, alongside the wall clock at 4866 and 4888–4889.
 
 Id | Mnemonic                    | Commands                 | Description
 ---|-----------------------------|--------------------------|-------------
@@ -268,10 +268,11 @@ Id | Mnemonic                    | Commands                 | Description
 4878 | `PROP_KEYBOARD_LIGHT`     | Get, Set, Is             | Whether the keyboard is lit while the screen is
 4879 | `PROP_KEYBOARD_AIDS`      | Get, Set, Is             | Typing aids in effect
 4866 | `PROP_TIME`               | Get, Set, Is             | Wall clock, or empty when unknown
-4867 | `PROP_TZ_OFFSET`          | Get, Set                 | Local time-zone offset from UTC
+4888 | `PROP_TZ_RULE`            | Get, Set, Is             | Local time zone, as a POSIX TZ rule
+4889 | `PROP_TIME_24H`           | Get, Set, Is             | Whether shown clocks use 24-hour time
 4868 | `PROP_GNSS_IDENT_UPDATE`  | Get, Set                 | Whether fixes update the advertised node identity
 4869 | `PROP_GNSS_IDENT_PRECISION` | Get, Set               | Precision the advertised location is clamped to
-4870 | `PROP_GNSS_TIME_TRUST`    | Get, Set                 | Whether receiver-derived time may set the clock
+4870 | `PROP_GNSS_TIME_TRUST`    | Get, Set, Is             | Whether receiver-derived time may set the clock
 4976 | `PROP_MESHCORE_FORWARDING_ENABLED` | Get, Set        | MeshCore forwarding enable
 4977 | `PROP_MESHCORE_REGION_POLICY` | Get, Set             | How MeshCore transport codes gate flood forwarding
 4978 | `PROP_MESHCORE_REGIONS` | Get, Set, Insert, Remove   | MeshCore region names the device forwards scoped floods for
@@ -1873,16 +1874,20 @@ knowing is the one worth announcing; a routine re-synchronization that
 agrees with the current value is not, and a device **SHOULD NOT** publish
 one.
 
-### PROP 4867: `PROP_TZ_OFFSET` {#prop-tz-offset}
+### PROP 4888: `PROP_TZ_RULE` {#prop-tz-rule}
 
 * Type: Single-Value, Read-Write
-* Asynchronous Updates: No
+* Asynchronous Updates: Yes
 * Required: `CAP_TIME`
-* Value Type: `INT16_LE`
-* Post-Reset Value: 0, or restored from saved state
+* Value Type: UTF-8, at most 64 octets
+* Post-Reset Value: `UTC0`, or restored from saved state
 
-The local time-zone offset from UTC, in minutes east of UTC. Negative
-values are west.
+The local time zone, as a POSIX TZ rule (IEEE 1003.1 §8.3, with the
+extensions of RFC 8536 §3.3.1): `PST8PDT,M3.2.0,M11.1.0`,
+`CET-1CEST,M3.5.0,M10.5.0/3`, `<+0530>-5:30`. Local time at an instant is
+UTC plus the offset the rule gives for that instant, so the device keeps
+daylight saving time itself. A zone without daylight saving time is a rule
+without its daylight part.
 
 Unlike [`PROP_TIME`](ulcp-device.md#prop-time) this **always** has a
 value. Where a device is meant to be is configuration and is known from
@@ -1890,15 +1895,34 @@ the moment it is commissioned; what time it is is a measurement and may
 not be. Separating them is what lets a device render a local time the
 instant it acquires a clock, with no second round trip.
 
-A minute offset rather than an hour one, because several real zones are
-not whole hours. Values outside the range of real civil offsets
-(−720 through +840) are rejected with `STATUS_INVALID_ARGUMENT`: outside
-it, a value is a unit or byte-order mistake, and a device that accepted
-one would display a confidently wrong local time.
+A rule describes a zone's current practice, not its history. It is what
+the time zone database records at the end of each zone's TZif file, which
+is how a host derives one from a zone identifier.
 
-Carries an offset and not a zone identifier. Devices do not carry a
-zone database, so daylight-saving transitions are the host's business:
-whatever adjusts the device's clock adjusts its offset.
+A value that is not a rule is rejected with `STATUS_INVALID_ARGUMENT`, as
+is one with an abbreviation longer than eight characters, or with an
+offset that is not a whole number of minutes or lies outside −12:00
+through +14:00. Outside those, a value is a mistake, and a device that
+accepted one would display a confidently wrong local time.
+
+Asynchronous because a device with a screen may offer the zone among its
+own settings (see [Changes Made at the
+Device](ulcp-saved-state.md#changes-made-at-the-device)).
+
+### PROP 4889: `PROP_TIME_24H` {#prop-time-24h}
+
+* Type: Single-Value, Read-Write
+* Asynchronous Updates: Yes
+* Required: `CAP_TIME`
+* Value Type: BOOL
+* Post-Reset Value: 1 (true), or restored from saved state
+
+Whether a clock the device shows writes hours from 0 to 23. Clear, it
+writes them from 1 to 12 with AM or PM. A device that shows no time keeps
+the value and does nothing with it.
+
+Asynchronous for the same reason as
+[`PROP_TZ_RULE`](ulcp-device.md#prop-tz-rule).
 
 ### PROP 4868: `PROP_GNSS_IDENT_UPDATE` {#prop-gnss-ident-update}
 
@@ -1977,7 +2001,7 @@ staged and enabled last.
 ### PROP 4870: `PROP_GNSS_TIME_TRUST` {#prop-gnss-time-trust}
 
 * Type: Single-Value, Read-Write
-* Asynchronous Updates: No
+* Asynchronous Updates: Yes
 * Required: `CAP_GNSS`
 * Value Type: BOOL
 * Post-Reset Value: 1 (true), or restored from saved state
@@ -1998,6 +2022,9 @@ will believe it.
 Position reporting is unaffected. The two are separable, and an operator
 who distrusts the time may still want to know where the device thinks it
 is—including in order to notice that it is wrong.
+
+Asynchronous for the same reason as
+[`PROP_TZ_RULE`](ulcp-device.md#prop-tz-rule).
 
 Every transition to `ALERT_NONE` that the host did not command **MUST**
 be reported with an unsolicited `CMD_PROP_IS`.

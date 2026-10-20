@@ -650,15 +650,18 @@ pub fn meshcore_identity_allowed(dev_key: &[u8; 32]) -> bool {
 
 /// The wall clock of a `CAP_TIME` device. A field is `None` when the
 /// device did not report it (see [`RepeaterPolicy`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceTime {
     /// `PROP_TIME`: Unix seconds, or `Some(None)` when the device does not
     /// know what time it is. Unsigned, so the encoding is wrap-free into
     /// 2106.
     pub epoch: Option<Option<u32>>,
-    /// `PROP_TZ_OFFSET`: minutes east of UTC. Always set—where the device
-    /// is meant to be is known even when the time is not.
-    pub tz_offset_min: Option<i16>,
+    /// `PROP_TZ_RULE`: the zone, as a POSIX TZ rule. Always set—where
+    /// the device is meant to be is known even when the time is not.
+    pub tz_rule: Option<String>,
+    /// `PROP_TIME_24H`: whether a clock the device shows writes hours
+    /// from 0 to 23.
+    pub time_24h: Option<bool>,
 }
 
 /// Everything a `CAP_GNSS` device reports about positioning: the switch,
@@ -2165,7 +2168,7 @@ where
     }
 
     /// Read the device's wall clock and time zone (`PROP_TIME`,
-    /// `PROP_TZ_OFFSET`).
+    /// `PROP_TZ_RULE`, `PROP_TIME_24H`).
     ///
     /// `Ok(None)` means the device does not advertise `CAP_TIME`.
     /// `Ok(Some(time))` with `time.epoch == Some(None)` means it has one
@@ -2173,15 +2176,16 @@ where
     /// a screen must show no clock at all.
     pub async fn time(&mut self) -> Result<Option<DeviceTime>, UlcpError> {
         let Some(answers) = self
-            .read_gated(cap::TIME, &[prop::TIME, prop::TZ_OFFSET])
+            .read_gated(cap::TIME, &[prop::TIME, prop::TZ_RULE, prop::TIME_24H])
             .await?
         else {
             return Ok(None);
         };
-        let [epoch, tz_offset_min] = positions(answers)?;
+        let [epoch, tz_rule, time_24h] = positions(answers)?;
         Ok(Some(DeviceTime {
             epoch: reported(&epoch, |value| decode_epoch(value).ok()),
-            tz_offset_min: reported(&tz_offset_min, |value| decode_tz_offset(value).ok()),
+            tz_rule: reported(&tz_rule, |value| Some(decode_string(value))),
+            time_24h: reported(&time_24h, decode_bool),
         }))
     }
 
@@ -2200,13 +2204,17 @@ where
         decode_epoch(&authoritative)
     }
 
-    /// Set the device's local time-zone offset in minutes east of UTC
-    /// (`PROP_TZ_OFFSET`).
-    pub async fn set_tz_offset(&mut self, minutes: i16) -> Result<i16, UlcpError> {
-        let authoritative = self
-            .set_prop(prop::TZ_OFFSET, &minutes.to_le_bytes())
-            .await?;
-        decode_tz_offset(&authoritative)
+    /// Set the device's time zone, as a POSIX TZ rule (`PROP_TZ_RULE`).
+    pub async fn set_tz_rule(&mut self, rule: &str) -> Result<String, UlcpError> {
+        let authoritative = self.set_prop(prop::TZ_RULE, rule.as_bytes()).await?;
+        Ok(decode_string(&authoritative))
+    }
+
+    /// Set whether a clock the device shows writes hours from 0 to 23
+    /// (`PROP_TIME_24H`).
+    pub async fn set_time_24h(&mut self, on: bool) -> Result<bool, UlcpError> {
+        let authoritative = self.set_prop(prop::TIME_24H, &[u8::from(on)]).await?;
+        decode_bool(&authoritative).ok_or(UlcpError::Protocol("malformed PROP_TIME_24H"))
     }
 
     /// Read everything the device reports about positioning
@@ -4392,14 +4400,6 @@ fn decode_epoch(value: &[u8]) -> Result<Option<u32>, UlcpError> {
         value => decode_u32_prefix(value)
             .map(Some)
             .ok_or(UlcpError::Protocol("malformed PROP_TIME")),
-    }
-}
-
-/// Decode a `PROP_TZ_OFFSET` value: minutes east of UTC, always present.
-fn decode_tz_offset(value: &[u8]) -> Result<i16, UlcpError> {
-    match value {
-        [low, high, ..] => Ok(i16::from_le_bytes([*low, *high])),
-        _ => Err(UlcpError::Protocol("malformed PROP_TZ_OFFSET")),
     }
 }
 

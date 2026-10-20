@@ -17,10 +17,11 @@ use umsh_ux_communicator::buoyant::render_target::{
     EmbeddedGraphicsRenderTarget, RenderTarget as _,
 };
 use umsh_ux_communicator::buoyant::view::View;
-use umsh_ux_communicator::heapless::String;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::{Bluetooth, Gnss, Node as _, State, Wifi, brightness_level};
+use umsh_ux_communicator::model::{
+    Bluetooth, ClockSource, Gnss, Node as _, State, Wifi, brightness_level,
+};
 use umsh_ux_communicator::{theme, ui};
 use umsh_ux_display_tracker::attention::{Attention, AttentionConfig, DisplayKind, Transition};
 use umsh_ux_display_tracker::menu::{KeyModifier, UiInput};
@@ -33,8 +34,6 @@ const REPORT: Duration = Duration::from_secs(1);
 /// often the node asks again while the driver's input is full.
 const PRIME_WAIT: Duration = Duration::from_secs(1);
 const PRIME_RETRY: Duration = Duration::from_millis(20);
-/// When the clock is not set, how often the strip looks again.
-const CLOCK_UNSET_RETRY: Duration = Duration::from_secs(60);
 /// How long Shutting down shows before the panel goes dark.
 const SHUTTING_DOWN: Duration = Duration::from_millis(1500);
 /// The empty battery's blink before the power path opens: how many times,
@@ -71,8 +70,15 @@ impl Clock for Clocks {
         umsh_hal::wall_clock::now()
     }
 
-    fn utc_offset_min(&self) -> i16 {
-        umsh_hal::wall_clock::tz_offset_min()
+    fn source(&self) -> Option<(ClockSource, u64)> {
+        use umsh_hal::wall_clock::TimeSource;
+        let clock = umsh_hal::wall_clock::snapshot();
+        let source = match clock.source()? {
+            TimeSource::Manual => ClockSource::Manual,
+            TimeSource::GnssFix | TimeSource::GnssRtc => ClockSource::Gnss,
+            TimeSource::ExternalRtc => ClockSource::Rtc,
+        };
+        Some((source, clock.set_at()?))
     }
 }
 
@@ -168,10 +174,19 @@ async fn interface(
     );
 
     // When the clock next turns to a new minute, for the strip's time and
-    // the ages counted to it.
+    // the ages counted to it. Setting the clock is waited on apart.
     let mut minute = next_minute();
 
     loop {
+        // A locked screen is lit only to glance at.
+        let config = if app.state().lock.locked {
+            AttentionConfig::LOCKED
+        } else {
+            AttentionConfig::EMISSIVE
+        };
+        if attention.config() != config {
+            attention.set_config(config);
+        }
         SCREEN_FADED.store(attention.is_faded(), Ordering::Release);
         let lit = attention.accepts_redraw();
         let tick = Instant::now() + if animating && lit { FRAME } else { REPORT };
@@ -179,7 +194,7 @@ async fn interface(
             attention.next_deadline(),
             app.state().next_deadline(),
             node.next_deadline(),
-            Some(minute.as_millis()),
+            minute.map(|minute| minute.as_millis()),
         ]
         .into_iter()
         .flatten()
@@ -187,7 +202,11 @@ async fn interface(
         let now = || Instant::now().as_millis();
         let woken = select4(
             UI_INPUT_CH.receive(),
-            UI_WAKE.wait(),
+            select3(
+                UI_WAKE.wait(),
+                pager::input::LOCK_BUTTON.wait(),
+                umsh_hal::wall_clock::changed(),
+            ),
             Timer::at(wake_at),
             select4(
                 BATTERY_UI_CHANGED.wait(),
@@ -220,7 +239,24 @@ async fn interface(
                 }
                 attention.wake(now())
             }
-            Either4::Second(()) => attention.wake(now()),
+            Either4::Second(Either3::First(())) => attention.wake(now()),
+            // The lock button locks a lit screen to the lock screen,
+            // darkens the lock screen, and lights a dark one to it.
+            Either4::Second(Either3::Second(()))
+                if attention.accepts_redraw() && !app.state().lock.locked =>
+            {
+                app.state_mut().lock();
+                attention.wake(now())
+            }
+            Either4::Second(Either3::Second(())) if attention.accepts_redraw() => {
+                attention.sleep(now())
+            }
+            Either4::Second(Either3::Second(())) => attention.wake(now()),
+            // The clock was set, or moved: it is read again below.
+            Either4::Second(Either3::Third(())) => {
+                minute = Some(Instant::now());
+                None
+            }
             Either4::Third(()) => attention.poll(now()),
             // A reading redraws the strip but never lights the panel.
             Either4::Fourth(Either4::First(())) => {
@@ -242,10 +278,8 @@ async fn interface(
         // in as events, taken just below.
         node.pump();
         mark(app.state(), Phase::Pump);
-        if minute <= Instant::now() {
-            let mut state = app.state_mut();
-            state.set_wall_time(umsh_hal::wall_clock::now());
-            state.status.time = clock();
+        if minute.is_some_and(|minute| minute <= Instant::now()) {
+            app.state_mut().set_wall_time(umsh_hal::wall_clock::now());
             minute = next_minute();
         }
         // The links are read on every pass, which is at least once a
@@ -275,7 +309,7 @@ async fn interface(
         match transition {
             Some(Transition::Woke) => {
                 if app.state().dark {
-                    app.state_mut().dark = false;
+                    app.state_mut().screen_on(now());
                 }
                 // A fresh frame goes in before the panel lights, so a stale
                 // one is never seen.
@@ -296,7 +330,7 @@ async fn interface(
                 if display.set_display_on(false).await.is_ok() {
                     pager::input::dark(before);
                 }
-                app.state_mut().dark = true;
+                app.state_mut().screen_off(now());
             }
             None => {}
         }
@@ -327,22 +361,11 @@ async fn prime(node: &Node) {
 fn state(node: &'static Node) -> State {
     let mut state = State::new(node);
     state.status.device_name = node.device_name();
-    state.status.time = clock();
     (state.status.bluetooth, state.status.wifi, state.status.gnss) = links();
     state.set_wall_time(umsh_hal::wall_clock::now());
     state.reload();
     state.focus_list();
     state
-}
-
-/// The strip's time, `HH:MM` in the local zone, or nothing while the clock
-/// is not set.
-fn clock() -> String<8> {
-    let mut time = String::new();
-    if let Some((hours, minutes)) = umsh_hal::wall_clock::local_hhmm() {
-        let _ = core::fmt::write(&mut time, format_args!("{hours:02}:{minutes:02}"));
-    }
-    time
 }
 
 /// Bluetooth, Wi-Fi, and GNSS, as the strip shows them: each only while it
@@ -385,11 +408,10 @@ fn links() -> (Option<Bluetooth>, Option<Wifi>, Option<Gnss>) {
     (bluetooth, wifi, gnss)
 }
 
-/// When the clock next turns to a new minute.
-fn next_minute() -> Instant {
-    Instant::now()
-        + umsh_hal::wall_clock::millis_to_next_minute()
-            .map_or(CLOCK_UNSET_RETRY, |ms| Duration::from_millis(u64::from(ms)))
+/// When the clock next turns to a new minute, while it is known.
+fn next_minute() -> Option<Instant> {
+    umsh_hal::wall_clock::millis_to_next_minute()
+        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)))
 }
 
 /// The charge the board last read, in percent.
@@ -559,7 +581,7 @@ const PHASES: usize = 6;
 #[cfg(feature = "debug-log")]
 const SCREENS: [&str; 15] = [
     "chats", "find", "peers", "device", "conv", "menu", "resend", "details", "member", "peer",
-    "page", "setup", "add", "join", "wake",
+    "page", "setup", "add", "join", "lock",
 ];
 
 /// The screen `state` shows, as an index into [`SCREENS`].
@@ -567,6 +589,9 @@ const SCREENS: [&str; 15] = [
 fn screen(state: &State) -> usize {
     use umsh_ux_communicator::model::Section;
     use umsh_ux_communicator::nav::{Screen, keys};
+    if state.lock.locked {
+        return 14;
+    }
     match state.screen() {
         Screen::Chats { find, focus, .. } => {
             match focus
@@ -594,7 +619,6 @@ fn screen(state: &State) -> usize {
         Screen::Setup { .. } => 11,
         Screen::AddPeer { .. } => 12,
         Screen::Join { .. } => 13,
-        Screen::Wake { .. } => 14,
     }
 }
 

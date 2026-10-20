@@ -67,6 +67,12 @@ pub fn view(state: &State) -> impl View<Rgb565, State> + use<> {
             category("Display", keys::DISPLAY, |_| {}, ""),
             category("Keyboard", keys::KEYBOARD, State::open_keyboard, ""),
             category(
+                "Clock",
+                keys::CLOCK,
+                State::open_clock,
+                super::clock::summary(state),
+            ),
+            category(
                 "Phone link",
                 keys::PHONE_LINK,
                 |_| {},
@@ -141,6 +147,7 @@ pub fn page(state: &State, page: &DevicePage) -> impl View<Rgb565, State> + use<
         DevicePage::Profiles => super::profile::view(state, "Profile"),
         DevicePage::Keyboard { settings } => super::typing::settings(settings),
         DevicePage::TransmitPower { text } => super::typing::transmit_power(text),
+        DevicePage::Clock { page } => super::clock::page(state, page),
     })
 }
 

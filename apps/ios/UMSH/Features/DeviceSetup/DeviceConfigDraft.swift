@@ -64,7 +64,8 @@ final class DeviceConfigDraft {
     var meshCoreEnabled: Bool
     var meshCoreRegionPolicy: UInt8
     var meshCoreRegions: [String]
-    var timeZoneOffsetMinutes: Int16
+    var timeZoneRule: String
+    var time24h: Bool
     var gnssEnabled: Bool
     var gnssIdentUpdate: Bool
     var gnssIdentPrecision: UInt8
@@ -171,11 +172,12 @@ final class DeviceConfigDraft {
         meshCoreEnabled = sync.meshcore?.enabled ?? false
         meshCoreRegionPolicy = sync.meshcore?.regionPolicy ?? 0
         meshCoreRegions = sync.meshcore?.regions ?? []
-        // A device with no zone set is one nobody has told where it is,
-        // and the phone doing the setup is standing next to it. A goal that
-        // assumes the phone's zone overrides this below; a device that already
-        // holds one keeps it.
-        timeZoneOffsetMinutes = sync.tzOffsetMin ?? phoneUTCOffsetMinutes
+        // A device that would not report its zone gets the phone's, since the
+        // phone doing the setup is standing next to it. A goal that assumes
+        // the phone's zone overrides this below; a device that reported one
+        // keeps it.
+        timeZoneRule = sync.tzRule ?? phoneTimeZoneRule
+        time24h = sync.time24h ?? true
         let gnss = sync.gnss
         gnssEnabled = gnss?.enabled ?? false
         gnssIdentUpdate = gnss?.identUpdate ?? false
@@ -235,7 +237,7 @@ final class DeviceConfigDraft {
 
     /// The zone alone. A device that would not report it can still be given a
     /// clock, so only the picker hides—the section stays.
-    var showsTimeZone: Bool { sync.supportsTime && sync.tzOffsetMin != nil }
+    var showsTimeZone: Bool { sync.supportsTime && sync.tzRule != nil }
 
     var showsDutyCycleLimit: Bool {
         sync.supportsDutyCycleLimit && sync.dutyCycleLimit != nil
@@ -373,7 +375,8 @@ final class DeviceConfigDraft {
                     regions: meshCoreRegions
                 )
                 : nil,
-            tzOffsetMin: sync.supportsTime ? timeZoneOffsetMinutes : nil,
+            tzRule: sync.supportsTime ? timeZoneRule : nil,
+            time24h: sync.supportsTime ? time24h : nil,
             gnss: sync.supportsGnss
                 ? UlcpGnssSettingsRecord(
                     enabled: gnssEnabled,
@@ -625,7 +628,10 @@ final class DeviceConfigDraft {
         if let name = reported(requested.meshcore, readback.meshcore, "MeshCore forwarding") {
             return name
         }
-        if let name = reported(requested.tzOffsetMin, readback.tzOffsetMin, "the time zone") {
+        if let name = reported(requested.tzRule, readback.tzRule, "the time zone") {
+            return name
+        }
+        if let name = reported(requested.time24h, readback.time24h, "the clock format") {
             return name
         }
         if let name = reported(requested.gnss, readback.gnss, "the positioning settings") {

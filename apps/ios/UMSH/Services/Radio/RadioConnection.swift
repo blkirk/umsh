@@ -120,7 +120,8 @@ protocol RadioConnection: AnyObject, Sendable {
     /// the matching capability.
     func configurePositioning(
         gnss: UlcpGnssSettingsRecord?,
-        timeZoneOffsetMinutes: Int16?
+        timeZoneRule: String?,
+        time24h: Bool?
     ) async throws
     /// Apply and persist what the radio announces on its own schedule.
     ///

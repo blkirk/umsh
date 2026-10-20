@@ -23,6 +23,8 @@
 //! statics behind the `embassy` feature are the single live instance the
 //! firmware shares.
 
+use crate::tz::Rule;
+
 /// Where a wall-clock reading came from.
 ///
 /// The ordering is not a precedence ranking—see
@@ -107,11 +109,13 @@ pub struct WallClockState {
     /// moment it is stored, and signed because the monotonic timer starts
     /// at zero on a device whose wall clock is in 2026.
     offset_ms: Option<i64>,
-    /// Minutes east of UTC (`PROP_TZ_OFFSET`). Always known, even while
-    /// the time is not—see the module documentation.
-    tz_offset_min: i16,
+    /// The zone (`PROP_TZ_RULE`). Always known, even while the time is
+    /// not—see the module documentation.
+    tz_rule: Rule,
     /// Where the current reading came from, or `None` while unset.
     source: Option<TimeSource>,
+    /// The monotonic reading at which the current one was taken.
+    set_at_ms: u64,
 }
 
 impl Default for WallClockState {
@@ -124,8 +128,9 @@ impl WallClockState {
     /// A device that does not know what time it is, at UTC.
     pub const UNKNOWN: Self = Self {
         offset_ms: None,
-        tz_offset_min: 0,
+        tz_rule: Rule::UTC,
         source: None,
+        set_at_ms: 0,
     };
 
     /// The current time in Unix seconds, or `None` when unknown.
@@ -158,11 +163,9 @@ impl WallClockState {
     ///
     /// A reading for presentation, not an instant: it does not name a
     /// point in time on its own, and nothing should send it anywhere.
-    pub const fn local_now(&self, monotonic_ms: u64) -> Option<u32> {
-        let Some(utc) = self.now(monotonic_ms) else {
-            return None;
-        };
-        let local = utc as i64 + self.tz_offset_min as i64 * 60;
+    pub fn local_now(&self, monotonic_ms: u64) -> Option<u32> {
+        let utc = self.now(monotonic_ms)?;
+        let local = i64::from(utc) + i64::from(self.tz_rule.offset_at(i64::from(utc))) * 60;
         if local < 0 || local > u32::MAX as i64 {
             return None;
         }
@@ -179,16 +182,25 @@ impl WallClockState {
         self.source
     }
 
-    /// Minutes east of UTC.
-    pub const fn tz_offset_min(&self) -> i16 {
-        self.tz_offset_min
+    /// The monotonic reading at which the current one was taken, or `None`
+    /// while unset.
+    pub const fn set_at(&self) -> Option<u64> {
+        match self.source {
+            Some(_) => Some(self.set_at_ms),
+            None => None,
+        }
+    }
+
+    /// The time zone.
+    pub const fn tz_rule(&self) -> Rule {
+        self.tz_rule
     }
 
     /// Set the time zone. Independent of the clock: the zone is known
     /// from commissioning, and changing it never makes the time known or
     /// unknown.
-    pub const fn set_tz(&mut self, minutes: i16) {
-        self.tz_offset_min = minutes;
+    pub const fn set_tz_rule(&mut self, rule: Rule) {
+        self.tz_rule = rule;
     }
 
     /// Return the device to not knowing what time it is.
@@ -237,6 +249,7 @@ impl WallClockState {
         let previous = self.now(monotonic_ms);
         self.offset_ms = Some(epoch as i64 * 1_000 - monotonic_ms as i64);
         self.source = Some(source);
+        self.set_at_ms = monotonic_ms;
         match previous {
             None => Update::Set,
             Some(previous) => {
@@ -258,11 +271,14 @@ impl WallClockState {
 #[cfg(feature = "embassy")]
 mod live {
     use core::cell::Cell;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use embassy_sync::blocking_mutex::CriticalSectionMutex;
+    use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+    use embassy_sync::signal::Signal;
     use embassy_time::Instant;
 
-    use super::{TimeSource, Update, WallClockState};
+    use super::{Rule, TimeSource, Update, WallClockState};
 
     /// The device's one wall clock.
     ///
@@ -272,6 +288,13 @@ mod live {
     /// is, and a value each of them held separately would eventually not.
     static CLOCK: CriticalSectionMutex<Cell<WallClockState>> =
         CriticalSectionMutex::new(Cell::new(WallClockState::UNKNOWN));
+
+    /// Raised when what a shown clock reads changes by more than the
+    /// passing of time: the clock is set, stepped, or cleared, or the zone
+    /// or the way hours are written changes.
+    static CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+    static HOUR24: AtomicBool = AtomicBool::new(true);
 
     fn with<R>(f: impl FnOnce(&mut WallClockState) -> R) -> R {
         CLOCK.lock(|cell| {
@@ -324,21 +347,48 @@ mod live {
         Some(60_000 - (millis % 60_000) as u32)
     }
 
-    /// Minutes east of UTC.
-    pub fn tz_offset_min() -> i16 {
-        CLOCK.lock(|cell| cell.get().tz_offset_min())
+    /// The time zone.
+    pub fn tz_rule() -> Rule {
+        CLOCK.lock(|cell| cell.get().tz_rule())
     }
 
     /// Set the time zone.
-    pub fn set_tz(minutes: i16) {
-        with(|state| state.set_tz(minutes));
+    pub fn set_tz_rule(rule: Rule) {
+        let before = with(|state| core::mem::replace(&mut state.tz_rule, rule));
+        if before != rule {
+            CHANGED.signal(());
+        }
+    }
+
+    /// Whether a shown clock writes hours from 0 to 23
+    /// (`PROP_TIME_24H`).
+    pub fn hour24() -> bool {
+        HOUR24.load(Ordering::Relaxed)
+    }
+
+    /// Set how a shown clock writes hours.
+    pub fn set_hour24(on: bool) {
+        if HOUR24.swap(on, Ordering::Relaxed) != on {
+            CHANGED.signal(());
+        }
+    }
+
+    /// Waits until what a shown clock reads changes by more than the
+    /// passing of time. For the one task that draws the time: a second
+    /// waiter would take the first's wakes.
+    pub async fn changed() {
+        CHANGED.wait().await;
     }
 
     /// Offer a reading, applying the precedence rule. See
     /// [`WallClockState::apply`].
     pub fn apply(epoch: u32, source: TimeSource, trust_receiver: bool) -> Update {
         let monotonic = Instant::now().as_millis();
-        with(|state| state.apply(epoch, monotonic, source, trust_receiver))
+        let update = with(|state| state.apply(epoch, monotonic, source, trust_receiver));
+        if update.is_notable() {
+            CHANGED.signal(());
+        }
+        update
     }
 
     /// Set the clock from a host or an operator.
@@ -353,14 +403,21 @@ mod live {
 
     /// Return the device to not knowing what time it is.
     pub fn clear() {
-        with(WallClockState::clear);
+        let was_set = with(|state| {
+            let was_set = state.is_set();
+            state.clear();
+            was_set
+        });
+        if was_set {
+            CHANGED.signal(());
+        }
     }
 }
 
 #[cfg(feature = "embassy")]
 pub use live::{
-    apply, clear, is_set, local_hhmm, millis_to_next_minute, now, set_manual, set_tz, snapshot,
-    tz_offset_min,
+    apply, changed, clear, hour24, is_set, local_hhmm, millis_to_next_minute, now, set_hour24,
+    set_manual, set_tz_rule, snapshot, tz_rule,
 };
 
 #[cfg(test)]
@@ -380,7 +437,7 @@ mod tests {
         assert_eq!(clock.source(), None);
         // The zone is known from the start, which is the whole reason it
         // is a separate property.
-        assert_eq!(clock.tz_offset_min(), 0);
+        assert_eq!(clock.tz_rule(), Rule::UTC);
     }
 
     #[test]
@@ -390,16 +447,18 @@ mod tests {
         assert_eq!(clock.now(UP), Some(T0));
         assert_eq!(clock.now(UP + 90_000), Some(T0 + 90));
         assert_eq!(clock.source(), Some(TimeSource::Manual));
+        assert_eq!(clock.set_at(), Some(UP));
     }
 
     #[test]
     fn the_zone_shifts_the_reading_without_touching_the_instant() {
         let mut clock = WallClockState::UNKNOWN;
         clock.apply(T0, UP, TimeSource::Manual, true);
-        clock.set_tz(-480);
+        clock.set_tz_rule(Rule::parse("PST8PDT,M3.2.0,M11.1.0").unwrap());
         assert_eq!(clock.now(UP), Some(T0), "the instant is unchanged");
-        assert_eq!(clock.local_now(UP), Some(T0 - 8 * 3_600));
-        clock.set_tz(330);
+        // T0 is in May: daylight time.
+        assert_eq!(clock.local_now(UP), Some(T0 - 7 * 3_600));
+        clock.set_tz_rule(Rule::parse("IST-5:30").unwrap());
         assert_eq!(clock.local_now(UP), Some(T0 + 5 * 3_600 + 1_800));
     }
 
@@ -407,12 +466,13 @@ mod tests {
     fn clearing_forgets_the_time_and_keeps_the_zone() {
         let mut clock = WallClockState::UNKNOWN;
         clock.apply(T0, UP, TimeSource::Manual, true);
-        clock.set_tz(-300);
+        let eastern = Rule::parse("EST5EDT,M3.2.0,M11.1.0").unwrap();
+        clock.set_tz_rule(eastern);
         clock.clear();
         assert!(!clock.is_set());
         assert_eq!(clock.now(UP), None);
         assert_eq!(clock.source(), None);
-        assert_eq!(clock.tz_offset_min(), -300, "where it is has not changed");
+        assert_eq!(clock.tz_rule(), eastern, "where it is has not changed");
     }
 
     #[test]

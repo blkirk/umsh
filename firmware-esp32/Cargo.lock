@@ -3880,6 +3880,7 @@ dependencies = [
  "heapless 0.8.0",
  "umsh-core",
  "umsh-crypto",
+ "umsh-hal",
  "umsh-ulcp",
 ]
 
@@ -3933,6 +3934,7 @@ dependencies = [
  "libm",
  "qrcodegen-no-heap",
  "swash",
+ "umsh-hal",
 ]
 
 [[package]]

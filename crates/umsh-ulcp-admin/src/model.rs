@@ -227,6 +227,7 @@ impl Model {
         let keys: Vec<u32> = COVERED
             .iter()
             .filter(|descriptor| self.supported(descriptor) != Some(false))
+            .filter(|descriptor| descriptor.access != Access::WriteOnly)
             .filter(|descriptor| {
                 descriptor.access != Access::Constant
                     || !matches!(self.freshness(descriptor.key), Freshness::Fresh { .. })
@@ -995,6 +996,45 @@ impl Model {
 
     pub fn set_share_location(&mut self, enabled: bool) -> Result<WriteId, Refusal> {
         self.set(prop::GNSS_IDENT_UPDATE, &[u8::from(enabled)])
+    }
+
+    /// Sets the clock, or with `None` returns the device to not knowing
+    /// what time it is.
+    pub fn set_time(&mut self, time: Option<u32>) -> Result<WriteId, Refusal> {
+        match time {
+            Some(time) => self.set(prop::TIME, &time.to_le_bytes()),
+            None => self.set(prop::TIME, &[]),
+        }
+    }
+
+    /// `PROP_TZ_RULE`: the zone, as a POSIX TZ rule.
+    pub fn tz_rule(&self) -> Option<&str> {
+        match self.value(prop::TZ_RULE)? {
+            Value::Text(rule) => Some(rule),
+            _ => None,
+        }
+    }
+
+    pub fn set_tz_rule(&mut self, rule: &str) -> Result<WriteId, Refusal> {
+        self.set(prop::TZ_RULE, rule.as_bytes())
+    }
+
+    /// `PROP_TIME_24H`.
+    pub fn time_24h(&self) -> Option<bool> {
+        self.bool(prop::TIME_24H)
+    }
+
+    pub fn set_time_24h(&mut self, on: bool) -> Result<WriteId, Refusal> {
+        self.set(prop::TIME_24H, &[u8::from(on)])
+    }
+
+    /// `PROP_GNSS_TIME_TRUST`: whether the receiver sets the clock.
+    pub fn gnss_time_trust(&self) -> Option<bool> {
+        self.bool(prop::GNSS_TIME_TRUST)
+    }
+
+    pub fn set_gnss_time_trust(&mut self, trusted: bool) -> Result<WriteId, Refusal> {
+        self.set(prop::GNSS_TIME_TRUST, &[u8::from(trusted)])
     }
 
     /// `PROP_DISPLAY_BRIGHTNESS`, from 0 (the dimmest that is not off) to
