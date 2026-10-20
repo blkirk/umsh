@@ -1177,6 +1177,17 @@ impl<'a> ReceivedPacketRef<'a> {
         self.from_key
     }
 
+    /// This packet as sent by `key`, for a sender who spoke from an address
+    /// that stands in for it—a session key with forward secrecy, which the
+    /// session's authenticated exchange bound to `key`.
+    pub fn attributed_to(&self, key: PublicKey) -> Self {
+        Self {
+            from_key: Some(key),
+            from_hint: Some(key.hint()),
+            ..self.clone()
+        }
+    }
+
     pub fn from_hint(&self) -> Option<NodeHint> {
         self.from_hint
     }

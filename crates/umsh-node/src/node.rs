@@ -1618,11 +1618,21 @@ impl<M: MacBackend> LocalNode<M> {
         }
     }
 
+    /// Hands `packet` to the receive handlers, naming as its sender the peer
+    /// whose session key with forward secrecy sent it, so that what a peer
+    /// says under a session reaches every handler as theirs.
     pub(crate) fn dispatch_received_packet(&self, packet: &ReceivedPacketRef<'_>) -> bool {
-        let peer = packet.from_key();
         let mut state = self.state.borrow_mut();
+        let peer = packet
+            .from_key()
+            .map(|key| (key, canonical_peer(&state, key)));
+        let attributed = match peer {
+            Some((key, peer)) if peer != key => Some(packet.attributed_to(peer)),
+            _ => None,
+        };
+        let packet = attributed.as_ref().unwrap_or(packet);
 
-        if let Some(peer) = peer.map(|peer| canonical_peer(&state, peer)) {
+        if let Some((_, peer)) = peer {
             if let Some(entry) = state
                 .peer_subscriptions
                 .iter_mut()

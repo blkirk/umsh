@@ -280,3 +280,66 @@ async fn forward_secrecy_is_held_with_a_peer_who_prefers_it() {
         })
         .await;
 }
+
+/// What is said under a session with forward secrecy lands in the same
+/// chat as what was said before it, on both ends: the session's addresses
+/// are its own, but the people in it are not new.
+#[tokio::test(flavor = "current_thread")]
+async fn what_is_said_under_forward_secrecy_lands_in_the_same_chat() {
+    LocalSet::new()
+        .run_until(async {
+            let network = SimulatedNetwork::new();
+            let near = network.add_radio_with_config(255, 20);
+            let far = network.add_radio_with_config(255, 20);
+            network.connect_bidirectional(near.id(), far.id());
+            let alice = board(near, [0x11; 32]).await;
+            let bob = board(far, [0x22; 32]).await;
+
+            phone_inserts(&alice.sim, prop::DEV_PEERS, &bob.key.0);
+            alice.node.pump();
+            let mut peers = Peers::new();
+            alice.node.peers(&mut peers);
+            let peer = peers[0].id;
+            let chat = alice
+                .node
+                .direct_chat(&address(&bob.key), "Bob", &alice.node.avatar())
+                .unwrap();
+            while bob.node.next_event().is_some() {}
+
+            // Says `text` from `from` in `chat` and returns the chat it
+            // arrives in at `to`.
+            let say = async |from: &Board, to: &Board, chat, text| {
+                let secret = from.node.chat(chat).unwrap().forward_secret;
+                let sent = from.node.send(chat, text, None, secret).unwrap();
+                let mut arrived = None;
+                until("the message did not arrive", || {
+                    while let Some(event) = to.node.next_event() {
+                        if let NodeEvent::Arrived { chat, message } = event
+                            && &*to.node.message(chat, message).unwrap().text == text
+                        {
+                            arrived = Some(chat);
+                        }
+                    }
+                    arrived.is_some()
+                        && from.node.message(chat, sent.id).unwrap().delivery == Delivery::Delivered
+                })
+                .await;
+                arrived.unwrap()
+            };
+
+            let bobs_chat = say(&alice, &bob, chat.id, "Leaving now").await;
+
+            alice.node.set_forward_secrecy(peer, true);
+            until_secrecy(&alice, &bob, true).await;
+            until("the chat does not show the session", || {
+                alice.node.chat(chat.id).unwrap().forward_secret
+            })
+            .await;
+            assert_eq!(
+                say(&alice, &bob, chat.id, "Meet at the ridge").await,
+                bobs_chat
+            );
+            assert_eq!(say(&bob, &alice, bobs_chat, "On my way").await, chat.id);
+        })
+        .await;
+}
