@@ -1065,7 +1065,60 @@ impl<S: ChatStore> Chats<S> {
         })
     }
 
-    fn conversation(&self, chat: model::ChatId) -> Option<ConversationKey> {
+    /// The peer at the other end of the direct chat `chat`.
+    pub fn chat_member(
+        &self,
+        chat: model::ChatId,
+        now_ms: u64,
+        wall: Option<u32>,
+    ) -> Option<Member> {
+        let record = self
+            .store
+            .chats()
+            .flatten()
+            .find(|record| record.id.0 == chat)?;
+        let ConversationKey::Direct { peer } = record.conversation else {
+            return None;
+        };
+        let (name, avatar, _) = self.face(&record)?;
+        let kept = self.store.peer(&peer).ok().flatten();
+        let mut hint = String::new();
+        _ = write!(hint, "{}", peer.hint());
+        Some(Member {
+            sender: Sender {
+                name: cut(&name),
+                avatar,
+            },
+            hint,
+            address: Some(address(&peer.0)),
+            heard: self
+                .heard_ago(&peer, kept.as_ref(), now_ms, wall)
+                .map(short_age)
+                .unwrap_or_default(),
+            saved: kept.is_some_and(|kept| kept.saved),
+        })
+    }
+
+    /// Deletes the direct chat `chat` and its messages. The store keeps
+    /// where the conversation stood, so its peer's next message is told
+    /// from what came before and starts a new chat.
+    pub fn delete_chat(&mut self, chat: model::ChatId, events: &mut dyn FnMut(NodeEvent)) {
+        if !matches!(
+            self.conversation(chat),
+            Some(ConversationKey::Direct { .. })
+        ) {
+            return;
+        }
+        if self
+            .store
+            .update_chat(ChatId(chat), ChatChange::Delete)
+            .is_ok()
+        {
+            events(NodeEvent::ChatRemoved(chat));
+        }
+    }
+
+    pub(super) fn conversation(&self, chat: model::ChatId) -> Option<ConversationKey> {
         self.store
             .chats()
             .flatten()

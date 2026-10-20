@@ -1558,13 +1558,13 @@ def screen_secret_sent():
     return o
 
 
-def choice_card(labels, mw, focus=0, ih=34):
+def choice_card(labels, mw, focus=0, ih=34, danger=()):
     """Choices on a card centered over a screen, below the status strip."""
     mh = len(labels) * ih + 10
     mx = (W - mw) / 2
     my = STRIP + (H - STRIP - mh) / 2
     return (menu_card(mx, my, mw, mh)
-            + menu_items(mx, my + 5, mw, labels, focus, ih))
+            + menu_items(mx, my + 5, mw, labels, focus, ih, danger))
 
 
 def screen_resend():
@@ -1579,6 +1579,29 @@ def screen_resend():
     o += composer(placeholder="Message", mode="away")
     o += choice_card(["Try again", "Send without forward secrecy", "Cancel"],
                      360)
+    o += status()
+    return o
+
+
+CHAT_MENU = ["Show peer", "Delete"]
+
+
+def screen_chat_menu():
+    """Holding the wheel on a chat: its menu, under the row."""
+    o = screen_chats(focus=2)[:-len(status())]
+    mw = 200
+    mh = len(CHAT_MENU) * 32 + 10
+    mx, my = W - 8 - mw, STRIP + 3 * ROW - 4
+    o += menu_card(mx, my, mw, mh)
+    o += menu_items(mx, my + 5, mw, CHAT_MENU, 0, danger=("Delete",))
+    o += status()
+    return o
+
+
+def screen_delete_chat():
+    o = screen_chats(focus=2)[:-len(status())]
+    o += choice_card(["Delete chat", "Cancel"], 236, focus=1,
+                     danger=("Delete chat",))
     o += status()
     return o
 
@@ -2908,6 +2931,16 @@ def main(path, native_dir=None):
             ("Time zone", screen_time_zone(),
              "Zones by name, west to east, with today’s offset, daylight "
              "saving included. Letters filter the list, as on every list."),
+        ]),
+        ("Deleting a chat", [
+            ("Chat menu", screen_chat_menu(),
+             "A press opens a chat when the wheel comes back up; holding it "
+             "down opens the chat’s menu instead. A channel’s says Show "
+             "channel."),
+            ("Delete chat", screen_delete_chat(),
+             "Asks to confirm, Cancel focused, as Forget does. The chat and "
+             "its messages go; the peer stays saved, and their next message "
+             "starts a new chat."),
         ]),
     ]
     by = hy + HW_H + 140

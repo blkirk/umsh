@@ -471,6 +471,7 @@ fn translate(input: UiInput) -> Input {
         UiInput::Forward => Input::Turn(1),
         UiInput::Backward => Input::Turn(-1),
         UiInput::Select => Input::Press,
+        UiInput::Released => Input::Release,
         UiInput::Back => Input::Backspace,
         UiInput::Enter => Input::Enter,
         UiInput::Key { plain, alt } => Input::Key { plain, alt },

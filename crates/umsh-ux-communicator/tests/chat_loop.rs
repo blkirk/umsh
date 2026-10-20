@@ -15,7 +15,7 @@ use umsh_ux_communicator::model::{
     Glance, Node as _, NodeEvent, Notice, Profile, Reaction, Rule, Section, Shareable, State,
     brightness_level,
 };
-use umsh_ux_communicator::nav::{DevicePage, Screen, keys};
+use umsh_ux_communicator::nav::{ChatMenu, DevicePage, MemberFrom, Screen, keys};
 use umsh_ux_communicator::{fixture, theme, ui, zones};
 
 /// The fixture's chats, in list order.
@@ -43,7 +43,8 @@ macro_rules! app {
     }};
 }
 
-/// Each input, then what the node says of it, as a board takes them.
+/// Each input, then what the node says of it, as a board takes them. A
+/// press is let go at once, which makes it a click.
 fn run<V, F>(app: &mut App<V, State, F>, inputs: &[Input])
 where
     V: ViewLayout<State>,
@@ -54,9 +55,42 @@ where
     // A second apart: never quick enough to be a double tap.
     for &input in inputs {
         let now = tick(1000);
-        input::apply(app, input, now);
-        input::events(app, now);
+        click(app, input, now);
     }
+}
+
+/// `input` at `now`, then what the node says of it; a press is let go at
+/// once.
+fn click<V, F>(app: &mut App<V, State, F>, input: Input, now: u64)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    input::apply(app, input, now);
+    if input == Input::Press {
+        input::apply(app, Input::Release, now);
+    }
+    input::events(app, now);
+}
+
+/// Holds the wheel down until its hold has had its time, as a board's loop
+/// wakes for it, then lets go.
+fn hold<V, F>(app: &mut App<V, State, F>)
+where
+    V: ViewLayout<State>,
+    V::FocusTree: DefaultFocus,
+    V::Renderables: AnimatedJoin,
+    F: Fn(&State) -> V,
+{
+    input::apply(app, Input::Press, tick(1000));
+    let due = app.state().next_deadline().expect("a hold has a deadline");
+    let now = tick(due.saturating_sub(tick(0)));
+    app.state_mut().expire(now);
+    app.finalize_view();
+    input::apply(app, Input::Release, tick(100));
+    input::events(app, tick(0));
 }
 
 /// Inputs in quick succession, a tenth of a second apart.
@@ -69,8 +103,7 @@ where
 {
     for &input in inputs {
         let now = tick(100);
-        input::apply(app, input, now);
-        input::events(app, now);
+        click(app, input, now);
     }
 }
 
@@ -284,6 +317,116 @@ fn backspace_in_the_history_is_back() {
 const QUESTION: u32 = 0x100;
 const ANSWER: u32 = 0x101;
 const SEE_YOU: u32 = 0x102;
+
+fn chat_menu(state: &State) -> Option<ChatMenu> {
+    match state.screen() {
+        Screen::Chats { menu, .. } => *menu,
+        _ => None,
+    }
+}
+
+#[test]
+fn holding_the_wheel_on_a_chat_opens_its_menu_and_letting_go_does_not_open_it() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2)]);
+    assert_eq!(focus(app.state()), Some(keys::chat(PAT)));
+    hold(&mut app);
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(chat_menu(app.state()), Some(ChatMenu::Open(PAT)));
+    assert_eq!(focus(app.state()), Some(keys::CHAT_SHOW_PEER));
+    // Backspace closes it, back to the row.
+    run(&mut app, &[Input::Backspace]);
+    assert_eq!(chat_menu(app.state()), None);
+    assert_eq!(focus(app.state()), Some(keys::chat(PAT)));
+}
+
+#[test]
+fn a_press_opens_a_chat_when_the_wheel_comes_back_up() {
+    let mut app = app!();
+    input::apply(&mut app, Input::Press, tick(1000));
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    input::apply(&mut app, Input::Release, tick(100));
+    assert_in_conversation(app.state(), RIDGE);
+}
+
+#[test]
+fn turning_while_the_wheel_is_down_lets_go_of_the_press() {
+    let mut app = app!();
+    input::apply(&mut app, Input::Press, tick(1000));
+    input::apply(&mut app, Input::Turn(1), tick(100));
+    input::apply(&mut app, Input::Release, tick(100));
+    assert!(matches!(app.state().screen(), Screen::Chats { .. }));
+    assert_eq!(app.state().next_deadline(), None);
+}
+
+#[test]
+fn show_peer_opens_the_chats_saved_peer() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2)]);
+    hold(&mut app);
+    run(&mut app, &[Input::Press]);
+    assert!(matches!(app.state().screen(), Screen::Peer { .. }));
+    assert_eq!(focus(app.state()), Some(keys::PEER_MESSAGE));
+}
+
+#[test]
+fn show_peer_offers_to_save_a_chats_unsaved_peer() {
+    let mut app = app!();
+    assert_eq!(focus(app.state()), Some(keys::chat(RIDGE)));
+    hold(&mut app);
+    assert_eq!(focus(app.state()), Some(keys::CHAT_SHOW_PEER));
+    run(&mut app, &[Input::Press]);
+    let (member, _) = shown_member(app.state());
+    assert_eq!(member.sender.name.as_str(), "Ridge Medic");
+    assert!(member.address.is_some());
+    assert!(!member.saved);
+    assert_eq!(focus(app.state()), Some(keys::SAVE_PEER));
+    run(&mut app, &[Input::Press]);
+    assert!(shown_member(app.state()).0.saved);
+    assert_eq!(focus(app.state()), Some(keys::MESSAGE_MEMBER));
+    // Message goes back to the chat it came from.
+    run(&mut app, &[Input::Press]);
+    assert_in_conversation(app.state(), RIDGE);
+}
+
+#[test]
+fn deleting_a_chat_asks_first_and_then_removes_it() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(2)]);
+    hold(&mut app);
+    run(&mut app, &[Input::Turn(1), Input::Press]);
+    assert_eq!(chat_menu(app.state()), Some(ChatMenu::ConfirmDelete(PAT)));
+    assert_eq!(focus(app.state()), Some(keys::DELETE_CANCEL));
+    // Cancel keeps it.
+    run(&mut app, &[Input::Press]);
+    assert_eq!(chat_menu(app.state()), None);
+    assert!(app.state().chat(PAT).is_some());
+
+    hold(&mut app);
+    run(
+        &mut app,
+        &[Input::Turn(1), Input::Press, Input::Turn(-1), Input::Press],
+    );
+    assert_eq!(chat_menu(app.state()), None);
+    assert!(app.state().chat(PAT).is_none());
+    // The row that took its place is focused.
+    let next = app.state().chats[2].id;
+    assert_eq!(focus(app.state()), Some(keys::chat(next)));
+}
+
+#[test]
+fn holding_the_wheel_on_a_channel_opens_it_on_letting_go() {
+    let mut app = app!();
+    run(&mut app, &[Input::Turn(1)]);
+    assert!(matches!(
+        app.state().chats[1].kind,
+        ChatKind::Channel { .. }
+    ));
+    let channel = app.state().chats[1].id;
+    hold(&mut app);
+    assert_eq!(chat_menu(app.state()), None);
+    assert!(matches!(app.state().screen(), Screen::Conversation { chat, .. } if *chat == channel));
+}
 
 fn actions(state: &State) -> Option<u32> {
     match state.screen() {
@@ -850,7 +993,9 @@ fn a_member_not_yet_known_offers_to_request_their_identity() {
     let mut app = app!();
     view_member(&mut app, 2);
     let Screen::Member {
-        message, member, ..
+        from: MemberFrom::Message(message),
+        member,
+        ..
     } = app.state().screen()
     else {
         panic!("expected a member, got {:?}", app.state().screen());

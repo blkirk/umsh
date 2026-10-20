@@ -65,7 +65,7 @@ use embedded_graphics_simulator::{OutputSettings, SimulatorDisplay};
 use umsh_pager_peripherals::input::alt_legend;
 use umsh_ux_communicator::input::{self, Input};
 use umsh_ux_communicator::keyboard::Modifier;
-use umsh_ux_communicator::model::{NodeEvent, State};
+use umsh_ux_communicator::model::{HOLD_MS, NodeEvent, State};
 use umsh_ux_communicator::{fixture, theme, ui};
 
 const SIZE: Size = Size::new(theme::WIDTH, theme::HEIGHT);
@@ -257,7 +257,14 @@ fn headless(script: &Path, out: &Path, backend: Backend) -> Result<(), String> {
                     format!("line {}: turn needs a count", number + 1)
                 })?)]
             }
-            "press" => vec![Input::Press],
+            "press" => vec![Input::Press, Input::Release],
+            // Down long enough to open a menu, then up.
+            "hold" => {
+                input::apply(&mut app, Input::Press, clock);
+                clock += HOLD_MS;
+                expire(&mut app, clock);
+                vec![Input::Release]
+            }
             "enter" => vec![Input::Enter],
             "backspace" => vec![Input::Backspace],
             "type" => rest.chars().map(Input::Character).collect(),
@@ -430,7 +437,7 @@ fn window(backend: Backend, mesh: Option<mesh::Mesh>) -> ExitCode {
                 } => match keycode {
                     Keycode::Up => Some(Input::Turn(-1)),
                     Keycode::Down => Some(Input::Turn(1)),
-                    Keycode::Right => Some(Input::Press),
+                    Keycode::Right if !repeat => Some(Input::Press),
                     Keycode::Return => Some(Input::Enter),
                     Keycode::Backspace => Some(Input::Backspace),
                     Keycode::Space => Some(Input::Space),
@@ -460,6 +467,10 @@ fn window(backend: Backend, mesh: Option<mesh::Mesh>) -> ExitCode {
                             }
                         }),
                 },
+                SimulatorEvent::KeyUp {
+                    keycode: Keycode::Right,
+                    ..
+                } => Some(Input::Release),
                 SimulatorEvent::KeyUp { keycode, .. } => {
                     modifier(keycode).map(|modifier| Input::Modifier {
                         modifier,
@@ -469,10 +480,14 @@ fn window(backend: Backend, mesh: Option<mesh::Mesh>) -> ExitCode {
                 SimulatorEvent::MouseWheel { scroll_delta, .. } => {
                     Some(Input::Turn(if scroll_delta.y > 0 { -1 } else { 1 }))
                 }
-                SimulatorEvent::MouseButtonUp {
+                SimulatorEvent::MouseButtonDown {
                     mouse_btn: MouseButton::Left,
                     ..
                 } => Some(Input::Press),
+                SimulatorEvent::MouseButtonUp {
+                    mouse_btn: MouseButton::Left,
+                    ..
+                } => Some(Input::Release),
                 _ => None,
             };
             if let Some(input) = input {

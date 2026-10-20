@@ -49,6 +49,10 @@
 pub enum UiInput {
     Forward,
     Select,
+    /// The select button came back up, after a [`Select`](UiInput::Select)
+    /// that reached the interface. Only a board that tells a hold from a
+    /// click needs it.
+    Released,
     Backward,
     Back,
     Enter,
@@ -701,10 +705,14 @@ impl UiModel {
     ) -> Option<UiEffect> {
         self.notice = None;
         match (self.page, input) {
-            // Nothing here takes text.
+            // Nothing here takes text, or tells a hold from a click.
             (
                 _,
-                UiInput::Enter | UiInput::Key { .. } | UiInput::Space | UiInput::Modifier { .. },
+                UiInput::Released
+                | UiInput::Enter
+                | UiInput::Key { .. }
+                | UiInput::Space
+                | UiInput::Modifier { .. },
             ) => None,
             (Page::WifiNetworks { .. }, UiInput::Back)
             | (Page::WifiNetworks { selected: None }, UiInput::Select) => {

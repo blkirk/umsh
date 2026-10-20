@@ -992,6 +992,17 @@ pub trait Node {
     /// Forgets the saved peer `peer`.
     fn forget_peer(&self, peer: PeerId);
 
+    /// The saved peer at the other end of the direct chat `chat`.
+    fn chat_peer(&self, chat: ChatId) -> Option<PeerId>;
+
+    /// The peer at the other end of the direct chat `chat`, saved or not.
+    fn chat_member(&self, chat: ChatId) -> Option<Member>;
+
+    /// Deletes the direct chat `chat` and its messages. Its peer stays
+    /// saved, and their next message starts a new chat. The chat goes as
+    /// [`NodeEvent::ChatRemoved`].
+    fn delete_chat(&self, chat: ChatId);
+
     /// Keeps `member`, whose identity is known, among my peers, and returns
     /// them as the Peers list shows them. `None` when there is no room.
     fn save_peer(&self, member: &Member) -> Option<PeerSummary>;
@@ -1170,7 +1181,23 @@ pub struct State {
     pub picker: Option<u8>,
     /// A brief card for a setting a key changed.
     pub glance: Option<Glance>,
+    /// The wheel is down, since this press began.
+    pub press: Option<Press>,
 }
+
+/// The wheel held down. What it presses is pressed when it comes back up,
+/// unless holding it opened a menu first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Press {
+    /// When holding it opens the focused chat's menu, on the board's clock;
+    /// `None` once it has, or where nothing would open.
+    pub hold_until: Option<u64>,
+    /// Holding it opened a menu, so letting go presses nothing.
+    pub held: bool,
+}
+
+/// How long the wheel is held to open a menu, in milliseconds.
+pub const HOLD_MS: u64 = 500;
 
 /// A brief card, with no words, for a setting changed from the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1231,6 +1258,7 @@ impl core::fmt::Debug for State {
             .field("keyboard", &self.keyboard)
             .field("picker", &self.picker)
             .field("glance", &self.glance)
+            .field("press", &self.press)
             .finish_non_exhaustive()
     }
 }
@@ -1262,6 +1290,7 @@ impl State {
             keyboard: Keyboard::default(),
             picker: None,
             glance: None,
+            press: None,
         }
     }
 
@@ -1507,6 +1536,11 @@ impl State {
         if self.conversation.as_ref().is_some_and(|c| c.chat == chat) {
             self.leave_chats();
         }
+        if let Some(Screen::Chats { menu, .. }) = self.screens.first_mut()
+            && menu.is_some_and(|m| m.chat() == chat)
+        {
+            *menu = None;
+        }
         // The row that took its place is focused instead.
         let next = self
             .chats
@@ -1751,6 +1785,7 @@ impl State {
             self.banner.map(|b| b.until),
             self.glance.map(Glance::until),
             self.lock.deadline(),
+            self.press.and_then(|p| p.hold_until),
         ]
         .into_iter()
         .flatten()
@@ -1766,6 +1801,13 @@ impl State {
         }
         if self.glance.is_some_and(|g| g.until() <= now) {
             self.glance = None;
+        }
+        if let Some(mut press) = self.press
+            && press.hold_until.is_some_and(|until| until <= now)
+        {
+            press.hold_until = None;
+            press.held = self.hold();
+            self.press = Some(press);
         }
     }
 

@@ -366,6 +366,9 @@ async fn run_button(pin: &mut Input<'static>, boot: bool) {
     let mut press_cycle = PressLatch::default();
     let mut shutdown_at = None;
     let mut silenced = false;
+    // The press going down reached the interface, so its coming up does
+    // too, and only its: a release must never wake the panel.
+    let mut delivered = false;
     let mut debounce_guard = None;
     loop {
         let now = Instant::now();
@@ -389,9 +392,16 @@ async fn run_button(pin: &mut Input<'static>, boot: bool) {
                 }
                 shutdown_at = pressed.then_some(now + Duration::from_secs(4));
             } else if pressed {
-                finish_gesture(UiInput::Select, control(|c| c.policy.press_disposition()));
+                let disposition = control(|c| c.policy.press_disposition());
+                delivered = disposition == Gesture::Navigate && !super::alert::active();
+                finish_gesture(UiInput::Select, disposition);
             } else {
                 control(|c| c.policy.release_press());
+                if core::mem::take(&mut delivered)
+                    && NAVIGATION.try_send(UiInput::Released).is_err()
+                {
+                    INPUT_OVERFLOW.store(true, Ordering::Release);
+                }
             }
         }
         if shutdown_at.is_some_and(|at| now >= at) {

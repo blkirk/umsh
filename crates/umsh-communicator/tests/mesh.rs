@@ -22,7 +22,7 @@ use umsh_core::PublicKey;
 use umsh_sync::AsyncRefCell;
 use umsh_ulcp::ids::prop;
 use umsh_ulcp_simdev::SimulatedDevice;
-use umsh_ux_communicator::model::{ChatKind, Delivery, Node, NodeEvent, Peers};
+use umsh_ux_communicator::model::{ChatKind, Delivery, Messages, Node, NodeEvent, Peers};
 
 mod support;
 
@@ -328,6 +328,16 @@ async fn what_is_said_under_forward_secrecy_lands_in_the_same_chat() {
             };
 
             let bobs_chat = say(&alice, &bob, chat.id, "Leaving now").await;
+            // Alice saved Bob; Bob did not save Alice.
+            assert_eq!(alice.node.chat_peer(chat.id), Some(peer));
+            assert_eq!(bob.node.chat_peer(bobs_chat), None);
+            let alice_to_bob = bob.node.chat_member(bobs_chat).unwrap();
+            assert_eq!(
+                alice_to_bob.address.as_deref(),
+                Some(address(&alice.key).as_str())
+            );
+            assert!(!alice_to_bob.saved);
+            assert!(alice.node.chat_member(chat.id).unwrap().saved);
 
             alice.node.set_forward_secrecy(peer, true);
             until_secrecy(&alice, &bob, true).await;
@@ -340,6 +350,59 @@ async fn what_is_said_under_forward_secrecy_lands_in_the_same_chat() {
                 bobs_chat
             );
             assert_eq!(say(&bob, &alice, bobs_chat, "On my way").await, chat.id);
+        })
+        .await;
+}
+
+/// A deleted chat is gone with its messages, and what its peer says next
+/// starts a new one holding only that.
+#[tokio::test(flavor = "current_thread")]
+async fn a_deleted_chat_starts_over_with_the_next_message() {
+    LocalSet::new()
+        .run_until(async {
+            let network = SimulatedNetwork::new();
+            let near = network.add_radio_with_config(255, 20);
+            let far = network.add_radio_with_config(255, 20);
+            network.connect_bidirectional(near.id(), far.id());
+            let alice = board(near, [0x11; 32]).await;
+            let bob = board(far, [0x22; 32]).await;
+            let chat = alice
+                .node
+                .direct_chat(&address(&bob.key), "Bob", &alice.node.avatar())
+                .unwrap();
+            while bob.node.next_event().is_some() {}
+
+            let say = async |text| {
+                let sent = alice.node.send(chat.id, text, None, false).unwrap();
+                let mut arrived = None;
+                until("the message did not arrive", || {
+                    while let Some(event) = bob.node.next_event() {
+                        if let NodeEvent::Arrived { chat, .. } = event {
+                            arrived = Some(chat);
+                        }
+                    }
+                    arrived.is_some()
+                        && alice.node.message(chat.id, sent.id).unwrap().delivery
+                            == Delivery::Delivered
+                })
+                .await;
+                arrived.unwrap()
+            };
+
+            let first = say("Leaving now").await;
+            bob.node.delete_chat(first);
+            let mut removed = false;
+            while let Some(event) = bob.node.next_event() {
+                removed |= event == NodeEvent::ChatRemoved(first);
+            }
+            assert!(removed);
+            assert!(bob.node.chat(first).is_none());
+
+            let second = say("Meet at the ridge").await;
+            let mut messages = Messages::new();
+            bob.node.load(second, &mut messages);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(&*messages[0].text, "Meet at the ridge");
         })
         .await;
 }

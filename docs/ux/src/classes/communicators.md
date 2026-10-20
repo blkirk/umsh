@@ -35,6 +35,10 @@ Use hardware navigation controls for focus and scrolling; use the keyboard for
 text. Rotary encoders, trackballs, or touch can accelerate navigation but must
 not be the only path when the keyboard contains usable navigation keys.
 
+A press acts when the wheel comes back up. Holding it down instead opens
+what is focused's menu where it has one: a direct chat's offers Show peer
+and Delete, which asks to confirm.
+
 Haptic or key-click feedback should be short, optional, and rate-limited. A
 speaker is for notifications and media-quality tones, not confirmation for
 every keystroke by default.

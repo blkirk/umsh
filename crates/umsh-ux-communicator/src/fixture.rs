@@ -217,6 +217,9 @@ fn mockup_chats(heap: TextHeap) -> [ChatRow; 7] {
     ]
 }
 
+/// Ridge Medic's address. They are not among my peers.
+const RIDGE: &str = "kBkQ7vZr2mXcN4pLwT9sYhGdA3eFuJ6bK1oRiVnE8qWz";
+
 /// The chat that shows what can become of a message on its way: since
 /// yesterday, with Sam.
 const STATES: ChatId = 7;
@@ -1286,6 +1289,9 @@ impl Node for Store {
         {
             return self.chat(chat);
         }
+        if address == RIDGE {
+            return self.chat(1);
+        }
         let mut direct = self.direct.borrow_mut();
         let chat = match direct.iter().position(|a| a == address) {
             Some(index) => FIRST_DIRECT + index as ChatId,
@@ -1401,6 +1407,52 @@ impl Node for Store {
         }
         drop(forgotten);
         self.queue(NodeEvent::PeerRemoved(peer));
+    }
+
+    fn chat_peer(&self, chat: ChatId) -> Option<PeerId> {
+        let peer = (1..)
+            .zip(PEERS.iter())
+            .find(|(_, saved)| saved.chat == Some(chat))?
+            .0;
+        (!self.forgotten.borrow().contains(&peer)).then_some(peer)
+    }
+
+    fn chat_member(&self, chat: ChatId) -> Option<Member> {
+        let summary = self
+            .chat(chat)
+            .filter(|c| matches!(c.kind, ChatKind::Peer { .. }))?;
+        let listed = PEERS.iter().find(|peer| peer.chat == Some(chat));
+        let address: String<44> = match (listed, chat) {
+            (Some(peer), _) => s(peer.address),
+            (None, STATES) => s(member_traits("Sam").3?),
+            (None, 1) => s(RIDGE),
+            (None, _) => self
+                .direct
+                .borrow()
+                .get(chat.checked_sub(FIRST_DIRECT)? as usize)?
+                .clone(),
+        };
+        Some(Member {
+            sender: Sender {
+                name: s(&summary.name),
+                avatar: summary.avatar.clone(),
+            },
+            hint: s(&address[..4]),
+            saved: self.chat_peer(chat).is_some() || self.saved_peer(&address).is_some(),
+            address: Some(address),
+            heard: s(listed.map_or("2m", |peer| peer.heard)),
+        })
+    }
+
+    fn delete_chat(&self, chat: ChatId) {
+        let mut rows = self.rows();
+        let Some(index) = rows.iter().position(|row| row.id == chat) else {
+            return;
+        };
+        rows.remove(index);
+        drop(rows);
+        self.kept.borrow_mut().retain(|(kept, _)| *kept != chat);
+        self.queue(NodeEvent::ChatRemoved(chat));
     }
 
     fn find_heard(&self, query: &str) -> Vec<Heard, MAX_HEARD> {

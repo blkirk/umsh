@@ -8,10 +8,11 @@ use buoyant::view::prelude::*;
 use embedded_graphics::pixelcolor::Rgb565;
 use heapless::{String, Vec};
 
+use super::setting::{card, choice};
 use super::{RAIL, line};
 use crate::avatar::AvatarStyle;
 use crate::model::{Age, ChatSummary, Chats, MAX_CHATS, State, age};
-use crate::nav::keys;
+use crate::nav::{ChatMenu, keys};
 use crate::text::DraftText;
 use crate::{font, icon, theme};
 
@@ -23,6 +24,8 @@ const AVATAR: u32 = 34;
 /// From the list's leading edge to the text.
 const TEXT_X: u32 = 51;
 const LIST_WIDTH: u32 = theme::WIDTH - RAIL;
+/// A chat's menu, and Delete's confirmation.
+const MENU_WIDTH: u32 = 220;
 
 /// Indices `ForEach` can hold without borrowing the state.
 static INDICES: [usize; MAX_CHATS] = {
@@ -35,16 +38,23 @@ static INDICES: [usize; MAX_CHATS] = {
     a
 };
 
-/// The list, with each chat's age counted to `now`. Backspace moves to the
-/// rail, Enter opens the focused chat, as a press does, and a letter starts
-/// Find with it.
-pub fn view(chats: &Chats, now: Option<u32>) -> impl View<Rgb565, State> + use<> {
+/// The list, with each chat's age counted to `now`, and over it `menu`:
+/// a chat's menu or Delete's confirmation. Backspace moves to the rail, Enter opens the
+/// focused chat, as a press does, and a letter starts Find with it.
+pub fn view(
+    chats: &Chats,
+    now: Option<u32>,
+    menu: Option<ChatMenu>,
+) -> impl View<Rgb565, State> + use<> {
     let rows = chats.clone();
     let ids: Vec<u32, MAX_CHATS> = chats.iter().map(|c| c.id).collect();
     let count = rows.len();
+    // The chat a menu is open for stays lit behind it.
+    let held = menu.map(ChatMenu::chat);
     super::list(
         ForEach::<MAX_CHATS>::new_vertical(&INDICES[..count], move |&i| {
-            row(&rows[i], age(rows[i].last_activity, now))
+            let chat = &rows[i];
+            row(chat, age(chat.last_activity, now), held == Some(chat.id))
         })
         .keyed(move |&i| keys::chat(ids[i])),
     )
@@ -68,9 +78,61 @@ pub fn view(chats: &Chats, now: Option<u32>) -> impl View<Rgb565, State> + use<>
         }
         _ => KeyResponse::Ignored,
     })
+    .popover(menu.as_ref(), move |menu| over(*menu))
 }
 
-fn row(chat: &ChatSummary, age: Age) -> impl View<Rgb565, State> + use<> {
+/// A chat's menu, or Delete's confirmation, Cancel focused. Backspace
+/// closes either.
+// Out of line, as `setting::row` is, against the Xtensa back end's failure.
+#[inline(never)]
+fn over(menu: ChatMenu) -> impl View<Rgb565, State> + use<> {
+    let text = |text: &str| String::try_from(text).unwrap_or_default();
+    let (first, second) = match menu {
+        ChatMenu::Open(_) => (
+            Some(choice(
+                text("Show peer"),
+                keys::CHAT_SHOW_PEER,
+                State::show_chat_peer,
+                theme::TEXT,
+                None,
+            )),
+            choice(
+                text("Delete"),
+                keys::CHAT_DELETE,
+                State::ask_delete_chat,
+                theme::RED,
+                None,
+            ),
+        ),
+        ChatMenu::ConfirmDelete(_) => (
+            Some(choice(
+                text("Delete chat"),
+                keys::DELETE_CONFIRM,
+                State::delete_chat,
+                theme::RED,
+                None,
+            )),
+            choice(
+                text("Cancel"),
+                keys::DELETE_CANCEL,
+                State::close_chat_menu,
+                theme::TEXT,
+                None,
+            ),
+        ),
+    };
+    card(
+        VStack::new((first, second)).with_spacing(0),
+        MENU_WIDTH,
+        match menu {
+            ChatMenu::Open(_) => HorizontalAlignment::Trailing,
+            ChatMenu::ConfirmDelete(_) => HorizontalAlignment::Center,
+        },
+        State::close_chat_menu,
+    )
+}
+
+fn row(chat: &ChatSummary, age: Age, held: bool) -> impl View<Rgb565, State> + use<> {
     let id = chat.id;
     let look = Row {
         avatar: chat.avatar.clone(),
@@ -86,7 +148,7 @@ fn row(chat: &ChatSummary, age: Age) -> impl View<Rgb565, State> + use<> {
         move |s: &mut State| s.open_chat(id),
         move |button: ButtonState| {
             let mut look = look.clone();
-            look.focused = button.is_focused();
+            look.focused = held || button.is_focused();
             Lazy::new(look, row_look)
         },
     )

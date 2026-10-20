@@ -22,7 +22,7 @@ use buoyant::render::AnimatedJoin;
 use buoyant::view::{EditBuffer, EditText, ViewLayout};
 
 use crate::keyboard::{Field, Modifier, PICKER, Spaced, starts_sentence};
-use crate::model::State;
+use crate::model::{HOLD_MS, Press, State};
 use crate::nav::keys;
 
 /// One user input.
@@ -30,8 +30,11 @@ use crate::nav::keys;
 pub enum Input {
     /// The wheel turned this many detents: positive is down or forward.
     Turn(i8),
-    /// The wheel was pressed.
+    /// The wheel went down. What it presses is pressed when it comes back
+    /// up, unless holding it opened a menu first.
     Press,
+    /// The wheel came back up.
+    Release,
     Enter,
     Backspace,
     /// A key with legend `plain`, and `alt` under Alt, was pressed.
@@ -100,7 +103,8 @@ where
         }
         Input::Press => state.press_to_unlock(now),
         Input::Modifier { modifier, down } => state.keyboard.modifier(modifier, down, now),
-        Input::Enter
+        Input::Release
+        | Input::Enter
         | Input::Backspace
         | Input::Key { .. }
         | Input::Space
@@ -153,6 +157,8 @@ where
             if app.state_mut().turn_set_time(detents) {
                 return;
             }
+            // Turning while the wheel is down lets go of the press.
+            app.state_mut().press = None;
             for _ in 0..detents.unsigned_abs() {
                 if detents > 0 {
                     app.next();
@@ -163,8 +169,17 @@ where
             }
         }
         Input::Press => {
-            app.state_mut().keyboard.other();
-            app.select();
+            app.state_mut().press = Some(Press {
+                hold_until: Some(now + HOLD_MS),
+                held: false,
+            });
+        }
+        // Only a press this saw go down, which a hold did not take.
+        Input::Release => {
+            if app.state_mut().press.take().is_some_and(|p| !p.held) {
+                app.state_mut().keyboard.other();
+                app.select();
+            }
         }
         Input::Enter => {
             app.state_mut().keyboard.other();
@@ -231,6 +246,7 @@ where
             state.picker = Some((i16::from(at) + i16::from(detents)).clamp(0, last) as u8);
         }
         Input::Press | Input::Enter => {
+            state.press = None;
             state.picker = None;
             state.keyboard.other();
             press(app, Key::Character(PICKER[usize::from(at)]));
@@ -246,7 +262,7 @@ where
         }
         Input::Modifier { modifier, down } => state.keyboard.modifier(modifier, down, now),
         // Filtering by name comes with the full picker.
-        Input::Key { .. } | Input::Character(_) => {}
+        Input::Release | Input::Key { .. } | Input::Character(_) => {}
     }
 }
 

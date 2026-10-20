@@ -1,7 +1,7 @@
-//! The member who sent a channel message. A channel message carries only a
-//! hint of its sender, so until their identity is known the screen offers to
-//! ask the channel for it; once it is, it offers to message them and to save
-//! them as a peer. Backspace goes back.
+//! The member who sent a channel message, or the unsaved peer of a direct
+//! chat. A channel message carries only a hint of its sender, so until their
+//! identity is known the screen offers to ask the channel for it; once it is,
+//! it offers to message them and to save them as a peer. Backspace goes back.
 
 use buoyant::event::{Key, KeyResponse};
 use buoyant::focus::BoundaryBehavior;
@@ -35,12 +35,21 @@ pub(super) enum End {
     Value(&'static str),
 }
 
-/// `member`, heard in the channel named `channel`. `requested` says their
-/// identity has been asked for.
-pub fn view(member: &Member, requested: bool, channel: &str) -> impl View<Rgb565, State> + use<> {
+/// `member`, heard in the channel named `channel`, or the peer of a direct
+/// chat when there is none. `requested` says their identity has been asked
+/// for.
+pub fn view(
+    member: &Member,
+    requested: bool,
+    channel: Option<&str>,
+) -> impl View<Rgb565, State> + use<> {
     let known = member.address.is_some();
     VStack::new((
-        header("Member", None, None),
+        header(
+            if channel.is_some() { "Member" } else { "Peer" },
+            None,
+            None,
+        ),
         head(member, channel),
         (!known).then(|| {
             action(
@@ -87,12 +96,16 @@ pub fn view(member: &Member, requested: bool, channel: &str) -> impl View<Rgb565
 
 /// Their avatar and name, where and when they were last heard, and their
 /// address once it is known.
-fn head(member: &Member, channel: &str) -> impl View<Rgb565, State> + use<> {
+fn head(member: &Member, channel: Option<&str>) -> impl View<Rgb565, State> + use<> {
     let mut heard: String<48> = String::new();
-    _ = core::fmt::write(
-        &mut heard,
-        format_args!("Heard in {channel} \u{B7} {}", member.heard),
-    );
+    _ = match (channel, member.heard.is_empty()) {
+        (Some(channel), _) => core::fmt::write(
+            &mut heard,
+            format_args!("Heard in {channel} \u{B7} {}", member.heard),
+        ),
+        (None, false) => core::fmt::write(&mut heard, format_args!("Heard {} ago", member.heard)),
+        (None, true) => Ok(()),
+    };
     VStack::new((
         detail_head(&member.sender.avatar, &member.sender.name, &heard),
         member.address.as_ref().map(|address| {

@@ -14,7 +14,7 @@ use buoyant::view::scroll_view::ScrollBarVisibility;
 use embedded_graphics::pixelcolor::Rgb565;
 
 use crate::model::{Ending, Overlay, Section, State};
-use crate::nav::{Screen, keys};
+use crate::nav::{MemberFrom, Screen, keys};
 use crate::{font, theme};
 
 mod add_channel;
@@ -121,15 +121,23 @@ fn screens(state: &State) -> impl View<Rgb565, State> + use<> {
                     .map(|time| state.local(time).time(state.hour24())),
             ),
             Screen::Member {
-                member, requested, ..
+                from,
+                member,
+                requested,
+                ..
             } => member::view(
                 member,
                 *requested,
-                state
-                    .conversation
-                    .as_ref()
-                    .and_then(|c| state.chat(c.chat))
-                    .map_or("", |s| &s.name),
+                match from {
+                    MemberFrom::Message(_) => Some(
+                        state
+                            .conversation
+                            .as_ref()
+                            .and_then(|c| state.chat(c.chat))
+                            .map_or("", |s| s.name.as_str()),
+                    ),
+                    MemberFrom::Chat(_) => None,
+                },
             ),
             Screen::Join { invite, name, .. } => join::view(invite, name),
             Screen::AddPeer { text, .. } => add_peer::view(state, text),
@@ -220,6 +228,10 @@ fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
         Screen::Chats { find, .. } => find.as_ref().filter(|_| shown == Section::Chats),
         _ => None,
     };
+    let menu = match state.screen() {
+        Screen::Chats { menu, .. } => *menu,
+        _ => None,
+    };
     let list = match (shown, find) {
         (Section::Chats, Some(_)) => List::Find,
         (Section::Chats, None) => List::Chats,
@@ -229,7 +241,7 @@ fn chats_screen(state: &State) -> impl View<Rgb565, State> + use<> {
     ZStack::new((
         rail::view(shown, state.unread_chats()),
         match_view!(list, {
-            List::Chats => chats::view(&state.chats, state.wall_time),
+            List::Chats => chats::view(&state.chats, state.wall_time, menu),
             List::Find => find.map(|text| find::view(state, text)),
             List::Peers => peers::view(&state.peers),
             List::Device => device::view(state),

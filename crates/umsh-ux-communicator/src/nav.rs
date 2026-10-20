@@ -78,6 +78,12 @@ pub mod keys {
     pub const PEER_IDENTITY: FocusKey = FocusKey(0x0C00_0006);
     pub const FORGET_CONFIRM: FocusKey = FocusKey(0x0C00_0007);
     pub const FORGET_CANCEL: FocusKey = FocusKey(0x0C00_0008);
+    /// A chat's menu, which holding the wheel on its row opens, and
+    /// Delete's confirmation.
+    pub const CHAT_SHOW_PEER: FocusKey = FocusKey(0x1D00_0000);
+    pub const CHAT_DELETE: FocusKey = FocusKey(0x1D00_0001);
+    pub const DELETE_CONFIRM: FocusKey = FocusKey(0x1D00_0002);
+    pub const DELETE_CANCEL: FocusKey = FocusKey(0x1D00_0003);
     /// The Channels screen's Add channel, which heads it; the channels
     /// under it are named as the Chats list names them.
     pub const ADD_CHANNEL: FocusKey = FocusKey(0x1000_0000);
@@ -306,6 +312,33 @@ fn distance(hops: Option<u8>) -> String<12> {
     hops.map(crate::model::hops_text).unwrap_or_default()
 }
 
+/// What lies over the Chats list for one chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatMenu {
+    /// Its menu, which holding the wheel on its row opened.
+    Open(ChatId),
+    /// Its Delete, asking to be confirmed.
+    ConfirmDelete(ChatId),
+}
+
+impl ChatMenu {
+    #[must_use]
+    pub const fn chat(self) -> ChatId {
+        match self {
+            Self::Open(chat) | Self::ConfirmDelete(chat) => chat,
+        }
+    }
+}
+
+/// Where the member screen was opened from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberFrom {
+    /// A message they sent in the conversation's channel.
+    Message(MessageId),
+    /// The direct chat with them.
+    Chat(ChatId),
+}
+
 /// A screen under Device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DevicePage {
@@ -349,6 +382,8 @@ pub enum Screen {
         find: Option<FindText>,
         /// The Device list is asking to confirm Shut down.
         confirm_shut_down: bool,
+        /// A chat's menu is open, or Delete is asking to be confirmed.
+        menu: Option<ChatMenu>,
     },
     Conversation {
         chat: ChatId,
@@ -367,9 +402,10 @@ pub enum Screen {
         details: Details,
         focus: FocusState,
     },
-    /// The member who sent a channel message.
+    /// The member who sent a channel message, or the unsaved peer of a
+    /// direct chat.
     Member {
-        message: MessageId,
+        from: MemberFrom,
         member: Member,
         /// Their identity has been asked for.
         requested: bool,
@@ -410,6 +446,7 @@ impl Screen {
             row: None,
             find: None,
             confirm_shut_down: false,
+            menu: None,
         }
     }
 
@@ -1147,6 +1184,93 @@ impl State {
         self.shutting_down();
     }
 
+    /// The wheel was held down long enough: opens the menu of the direct
+    /// chat focused in the Chats list, with its first choice focused.
+    /// Returns whether a menu opened.
+    pub(crate) fn hold(&mut self) -> bool {
+        let Some(Screen::Chats { focus, menu, .. }) = self.screens.last() else {
+            return false;
+        };
+        if menu.is_some() {
+            return false;
+        }
+        let Some(chat) = focus.current().and_then(keys::chat_of) else {
+            return false;
+        };
+        if !self
+            .chat(chat)
+            .is_some_and(|c| matches!(c.kind, ChatKind::Peer { .. }))
+        {
+            return false;
+        }
+        if let Some(Screen::Chats { focus, menu, .. }) = self.screens.last_mut() {
+            *menu = Some(ChatMenu::Open(chat));
+            focus.request(keys::CHAT_SHOW_PEER);
+        }
+        true
+    }
+
+    /// The chat whose menu or confirmation is open.
+    fn menu_chat(&self) -> Option<ChatId> {
+        match self.screens.last() {
+            Some(Screen::Chats { menu, .. }) => menu.map(ChatMenu::chat),
+            _ => None,
+        }
+    }
+
+    /// Closes the chat's menu, or its confirmation, back to its row.
+    pub fn close_chat_menu(&mut self) {
+        if let Some(Screen::Chats { focus, menu, .. }) = self.screens.last_mut()
+            && let Some(open) = menu.take()
+        {
+            focus.request(keys::chat(open.chat()));
+        }
+    }
+
+    /// Shows the peer of the chat whose menu is open: their page when they
+    /// are saved, else what is known of them, with Save peer.
+    pub fn show_chat_peer(&mut self) {
+        let Some(chat) = self.menu_chat() else {
+            return;
+        };
+        self.close_chat_menu();
+        if let Some(peer) = self.node.chat_peer(chat) {
+            self.open_peer(peer);
+        } else if let Some(member) = self.node.chat_member(chat) {
+            let focus = if member.saved {
+                keys::MESSAGE_MEMBER
+            } else {
+                keys::SAVE_PEER
+            };
+            _ = self.screens.push(Screen::Member {
+                from: MemberFrom::Chat(chat),
+                member,
+                requested: false,
+                focus: FocusState::requesting(focus),
+            });
+        }
+    }
+
+    /// Asks to confirm deleting the chat whose menu is open, Cancel
+    /// focused.
+    pub fn ask_delete_chat(&mut self) {
+        if let Some(Screen::Chats { focus, menu, .. }) = self.screens.last_mut()
+            && let Some(ChatMenu::Open(chat)) = *menu
+        {
+            *menu = Some(ChatMenu::ConfirmDelete(chat));
+            focus.request(keys::DELETE_CANCEL);
+        }
+    }
+
+    /// Deletes the chat, confirmed. Its row goes when the node says it has.
+    pub fn delete_chat(&mut self) {
+        let Some(chat) = self.menu_chat() else {
+            return;
+        };
+        self.close_chat_menu();
+        self.node.delete_chat(chat);
+    }
+
     pub fn open_channels(&mut self) {
         _ = self.screens.push(Screen::Device {
             page: DevicePage::Channels,
@@ -1336,7 +1460,7 @@ impl State {
             keys::MESSAGE_MEMBER
         };
         _ = self.screens.push(Screen::Member {
-            message,
+            from: MemberFrom::Message(message),
             member,
             requested: false,
             focus: FocusState::requesting(focus),
@@ -1347,7 +1471,9 @@ impl State {
     pub fn request_identity(&mut self) {
         let chat = self.conversation.as_ref().map(|c| c.chat);
         let Some(Screen::Member {
-            message, requested, ..
+            from: MemberFrom::Message(message),
+            requested,
+            ..
         }) = self.screens.last_mut()
         else {
             return;
@@ -1371,13 +1497,11 @@ impl State {
     /// Reads the members shown from the node again. Focus on a Request
     /// identity that is no longer offered moves to Message.
     pub(crate) fn refresh_members(&mut self) {
-        let Some(chat) = self.conversation.as_ref().map(|c| c.chat) else {
-            return;
-        };
+        let conversation = self.conversation.as_ref().map(|c| c.chat);
         let node = self.node;
         for screen in &mut self.screens {
             let Screen::Member {
-                message,
+                from,
                 member,
                 focus,
                 ..
@@ -1385,7 +1509,13 @@ impl State {
             else {
                 continue;
             };
-            if let Some(known) = node.member(chat, *message) {
+            let known = match *from {
+                MemberFrom::Message(message) => {
+                    conversation.and_then(|chat| node.member(chat, message))
+                }
+                MemberFrom::Chat(chat) => node.chat_member(chat),
+            };
+            if let Some(known) = known {
                 *member = known;
             }
             let asking = focus.current().or(focus.pending()) == Some(keys::REQUEST_IDENTITY);

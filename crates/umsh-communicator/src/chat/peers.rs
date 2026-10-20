@@ -373,6 +373,15 @@ impl<S: ChatStore> Chats<S> {
         Some(kept.key)
     }
 
+    /// The saved peer at the other end of the direct chat `chat`.
+    pub fn chat_peer(&self, chat: model::ChatId) -> Option<model::PeerId> {
+        let ConversationKey::Direct { peer } = self.conversation(chat)? else {
+            return None;
+        };
+        let kept = self.store.peer(&peer).ok().flatten()?;
+        kept.saved.then_some(kept.id.0)
+    }
+
     /// Keeps whether `peer` prefers forward secrecy.
     pub fn set_forward_secrecy(
         &mut self,

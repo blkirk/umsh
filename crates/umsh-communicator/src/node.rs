@@ -434,6 +434,20 @@ impl<P: LocalPort, S: ChatStore> Node for CommunicatorNode<P, S> {
         }
     }
 
+    fn chat_peer(&self, chat: ChatId) -> Option<PeerId> {
+        self.chats.borrow().chat_peer(chat)
+    }
+
+    fn chat_member(&self, chat: ChatId) -> Option<Member> {
+        self.chats
+            .borrow()
+            .chat_member(chat, self.clock.now_ms(), self.clock.wall())
+    }
+
+    fn delete_chat(&self, chat: ChatId) {
+        self.with_chats(|chats, _, _, events| chats.delete_chat(chat, events));
+    }
+
     fn save_peer(&self, member: &Member) -> Option<PeerSummary> {
         let (key, summary) = self.with_chats(|chats, now_ms, _, events| {
             chats.save_peer(member, now_ms, self.clock.wall(), events)
